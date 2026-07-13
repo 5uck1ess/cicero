@@ -1,5 +1,5 @@
 # Smart-Turn ONNX sidecar.
-onnxruntime>=1.19,<2
+onnxruntime>=1.27.0,<2
 huggingface-hub>=0.27,<2
 transformers>=5.13.1,<6
 fastapi>=0.115,<1
