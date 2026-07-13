@@ -1,0 +1,8 @@
+# Kokoro sidecar. The torch range lets the resolver choose CPU/MPS/CUDA wheels.
+kokoro>=0.9,<1
+torch>=2.2,<3
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+pydantic>=2.13.4,<3
+numpy>=1.26,<3
+soundfile>=0.14.0,<1

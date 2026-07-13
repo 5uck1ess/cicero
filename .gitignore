@@ -1,0 +1,38 @@
+.DS_Store
+node_modules/
+dist/
+.env
+.env.*
+.claude/
+.cursor/
+.venv/
+.venv-pocket
+.venv-kokoro
+.venv-stt
+.venv-ser
+.venv-*
+vendor/*
+!vendor/audio.cpp
+*.log
+helpers/cicero-hotkey
+helpers/cicero-aec-mic
+.devkit/
+
+# STT bench: clips are the user's own audio; results are regenerated.
+bench/stt/clips/*.wav
+bench/stt/clips/*.txt
+bench/stt/candidates.json
+bench/stt/last-results.md
+
+# TTS bench + audiocpp spike artifacts (machine-local / regenerated).
+bench/tts/last-results.md
+servers/*.local.json
+
+# Python bytecode (sidecars run from source)
+__pycache__/
+*.py[co]
+
+# Voice-clone source drops land at repo root before provisioning — personal
+# audio, never shippable (see: voice add moves them to ~/.cicero/voices).
+/*.wav
+/*.mp3

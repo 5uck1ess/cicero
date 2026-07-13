@@ -1,0 +1,4 @@
+# Pinned upstream source snapshots. Keep this small: CI installs these two
+# packages with --no-deps to verify their module layout without model wheels.
+vibevoice @ git+https://github.com/vibevoice-community/VibeVoice.git@07cb79feadd2d3fd7f47530d4c964a12857936a0
+vibevoice-api @ git+https://github.com/vibevoice-community/VibeVoice-API.git@72868f93056179bde83b0c6c3e5fb1d3af36ce0b

@@ -1,0 +1,14 @@
+{
+  "_comment": "Copy to candidates.json and edit. 'provider' = an integrated Cicero backend (its server must be running). 'command' = any CLI model not yet wired in; it must print ONLY the transcript to stdout, with {audio} replaced by the WAV path. Uncomment (remove the leading _) the models you've installed.",
+
+  "candidates": [
+    { "name": "mlx-whisper (current)", "kind": "provider", "backend": "mlx-whisper", "port": 8083 },
+
+    "--- templates below: rename the model CLIs to match your install, then move into the array ---",
+
+    "_kyutai":    { "name": "kyutai-stt-1b (mlx)", "kind": "command", "command": "python -m moshi_mlx.run_stt {audio}" },
+    "_parakeet":  { "name": "parakeet-mlx",        "kind": "command", "command": "parakeet-mlx transcribe {audio} --output-format txt" },
+    "_moonshine": { "name": "moonshine-base",      "kind": "command", "command": "moonshine transcribe --model base {audio}" },
+    "_faster":    { "name": "faster-whisper", "kind": "provider", "backend": "faster-whisper", "port": 8083 }
+  ]
+}

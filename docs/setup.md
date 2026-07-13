@@ -1,0 +1,235 @@
+# Setup
+
+Install [Bun](https://bun.sh) and [uv](https://docs.astral.sh/uv/) first. The
+Cicero CLI runs anywhere Bun runs; full local voice support still depends on
+platform audio tools, provider runtimes, and (for the native hotkey/AEC helpers)
+macOS-specific code. Cicero launches and supervises supported local providers;
+a configured remote provider connects to a server you operate. `cicero doctor`
+checks the effective configuration and prints fixes for missing prerequisites.
+
+Install and authenticate the selected brain before the first start. The full
+`config.yaml.example` expects a `hermes` ACP executable; replace its
+`brain.binary`/`binary_args` with another ACP harness or one of the documented
+CLI/HTTP brains if Hermes is not your driver.
+Doctor can verify a CLI binary is present, but it does not prove that the CLI is
+authenticated or complete a live agent turn. Exercise one real turn before
+treating a deployment as ready.
+
+On a fresh non-macOS install with no config file, an unsupported implicit LLM
+default produces a warning, while unsupported implicit STT or TTS defaults are
+hard failures. Copy and edit `config.yaml.example` before relying on `doctor` as
+a readiness gate.
+
+## Linux (CUDA or CPU) — the reference setup
+
+Install [Ollama](https://ollama.com) before the commands below, or select a
+different explicit `llm` backend in the copied configuration.
+
+```bash
+bun install
+bun link
+sudo apt install tmux openssl ffmpeg alsa-utils # use pulseaudio-utils instead of alsa-utils when the host provides only PulseAudio
+ollama pull qwen3.5:4b
+# Non-headless local mic/system-speech fallback:
+sudo apt install sox speech-dispatcher
+
+# STT — faster-whisper (CTranslate2; CUDA if available, CPU otherwise):
+uv venv .venv-stt --python 3.10
+uv pip install --python .venv-stt -r requirements/faster-whisper.txt
+
+# TTS — pocket-tts (voice cloning, CPU-friendly) + kokoro as the fallback seat:
+uv venv .venv-pocket --python 3.11
+uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
+uv venv .venv-kokoro --python 3.11
+uv pip install --python .venv-kokoro -r requirements/kokoro.txt
+
+# Config, then verify the configured prerequisites:
+mkdir -p ~/.cicero && cp config.yaml.example ~/.cicero/config.yaml   # edit it
+bun run src/index.ts doctor
+```
+
+### Run at boot
+
+Ship it as a systemd user service (no Docker needed; the daemon supervises its own model servers):
+
+Set a stable `web_voice.token` before enabling the service. Systemd retains
+service stdout in the journal, including the one-run token printed when that
+setting is omitted.
+
+```bash
+cp deploy/cicero.service ~/.config/systemd/user/   # edit WorkingDirectory first
+systemctl --user enable --now cicero
+loginctl enable-linger $USER                        # keep it alive when logged out
+```
+
+## macOS 14+ (Apple Silicon)
+
+The current MLX dependency floors require macOS 14 or newer on Apple Silicon.
+
+```bash
+bun install
+brew install sox openssl ffmpeg
+uv venv .venv --python 3.12
+uv pip install --python .venv -r requirements/mlx.txt --prerelease=allow
+
+bun run build:hotkey    # optional — macOS Ctrl+Shift+Space helper
+bun link
+
+bun run src/index.ts doctor
+cicero start --tts
+```
+
+For tab integration, use a terminal with remote control — [Kitty](https://sw.kovidgoyal.net/kitty/), [tmux](https://github.com/tmux/tmux), or [WezTerm](https://wezterm.org/). Cicero auto-detects which one you're in (`terminal: auto`). Set `terminal: none` for headless mode (voice → brain dispatch with no terminal integration). See [terminal adapters](superpowers/terminal-adapters.md).
+
+## Windows (CUDA)
+
+```bash
+# Install Bun
+powershell -c "irm bun.sh/install.ps1 | iex"
+
+# Audio, tmux, and automatic web-voice HTTPS certificate generation
+scoop install sox ffmpeg tmux openssl
+
+# Ollama: download from https://ollama.com/download/windows
+ollama pull qwen3.5:4b
+
+# Python backends (the venv-directory syntax is the same on every OS):
+uv venv .venv-stt --python 3.10
+uv pip install --python .venv-stt -r requirements/faster-whisper.txt
+uv venv .venv-pocket --python 3.11
+uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
+uv venv .venv-kokoro --python 3.11
+uv pip install --python .venv-kokoro -r requirements/kokoro.txt
+
+bun install
+bun link
+# Copy config.yaml.example to ~/.cicero/config.yaml, then: bun run src/index.ts doctor
+# The example uses Ollama qwen3.5:4b, matching the model pulled above.
+```
+
+OpenSSL is needed only to create Cicero's first self-signed web-voice
+certificate. Later starts reuse the atomically published pair. `cicero doctor`
+reports a blocker, with the native install command, when generation is still
+needed and `openssl` is missing from `PATH`.
+
+## Optional VibeVoice, Smart-Turn, and speech-emotion stacks
+
+VibeVoice's published `vibevoice-api==0.0.1` wheel is not standalone: its server
+imports the separate `vibevoice` model package, but the wheel does not declare
+or include it. Cicero therefore pins the upstream
+[`VibeVoice`](https://github.com/vibevoice-community/VibeVoice) and
+[`VibeVoice-API`](https://github.com/vibevoice-community/VibeVoice-API) source
+snapshots in `requirements/vibevoice-sources.txt`, along with the server's
+undeclared direct imports. Keep that stack in its own Python 3.11 environment
+(Git is required so `uv` can fetch the pinned snapshots):
+
+```bash
+uv venv .venv-vibevoice --python 3.11
+uv pip install --python .venv-vibevoice -r requirements/vibevoice.txt
+```
+
+No manual checkout or separately started server is needed: the manifest owns
+the source revisions, and Cicero launches `python -m vibevoice_api.server`.
+The selected model weights download on first launch. See [voice
+cloning](voice-cloning.md) for the backend config and reference-clip workflow.
+
+Smart-Turn has a dedicated, small Python 3.11 environment on every platform.
+This avoids changing the MLX or faster-whisper dependency graph:
+
+```bash
+uv venv .venv-turn --python 3.11
+uv pip install --python .venv-turn -r requirements/turn.txt
+```
+
+Existing installations that previously put Smart-Turn in `.venv-stt` or
+`.venv` continue to launch during migration, in that order, but Cicero logs a
+deprecation warning with the command above. `.venv-turn` is always preferred;
+create it before removing Smart-Turn packages from either shared environment.
+
+Speech-emotion recognition stays isolated because FunASR's PyTorch/ModelScope
+graph can conflict with STT dependencies:
+
+```bash
+uv venv .venv-ser --python 3.11
+uv pip install --python .venv-ser -r requirements/ser.txt --index-strategy unsafe-best-match
+```
+
+The files under [`requirements/`](../requirements/README.md) constrain direct
+dependencies only. Accelerator-specific transitive packages remain resolved
+for the host rather than being presented as one universal lockfile.
+
+## Sidecar quickstart (Claude Code and Codex)
+
+The zero-commitment entry point: Cicero attaches to the coding agent you already use and speaks its responses.
+
+```bash
+bun install
+bun link
+
+# One-time: install one or both native Stop hooks
+cicero hook install claude-code
+cicero hook install codex
+
+# Each session: run the receiver in a separate terminal
+cicero hook
+```
+
+The installers and receiver share an automatically generated bearer credential in `~/.cicero/hook-token`; no token needs to be copied into config. Before changing an existing agent settings file, the installer writes one private timestamped backup; an already-current reinstall is a no-op and does not accumulate backups. Claude Code posts its response directly to the loopback receiver. Codex runs a bounded local bridge; open `/hooks` once after installation and trust that command hook. Native-hook sessions then speak summarized responses through Cicero's TTS. See [`sidecar modes`](superpowers/sidecar-modes.md) for terminal-scrape mode (Gemini / Ollama / any CLI agent without hooks) and config.
+
+**For real summaries** (not raw token blobs), point Cicero at a local LLM — install [Ollama](https://ollama.com) and add to `~/.cicero/config.yaml`:
+
+```yaml
+llm:
+  backend: ollama
+  port: 11434
+  model: qwen3:0.6b
+```
+
+Without an LLM the sidecar still works — it falls back to speaking the last line of the response.
+
+## Remote model servers
+
+Run the heavy models on one machine (e.g. a Windows/Linux GPU box) and drive Cicero from another. Any HTTP backend — `faster-whisper`, `mlx-whisper`, `mlx-audio`, `kokoro`, `vibevoice`, `mlx-lm`, `ollama`, `llama-cpp` — accepts a `host`:
+
+```yaml
+# ~/.cicero/config.yaml on the laptop — point each backend at the GPU box
+stt: { backend: faster-whisper, host: 192.168.1.50, port: 8083, timeout_ms: 90000 }
+tts: { backend: mlx-audio,      host: 192.168.1.50, port: 8082, timeout_ms: 60000 }
+llm: { backend: llama-cpp,      host: 192.168.1.50, port: 8080, timeout_ms: 120000 }   # llama-server (e.g. Gemma GGUF)
+```
+
+The `llama-cpp` backend talks to llama.cpp's `llama-server` over its OpenAI-compatible `/v1/chat/completions` API. Run your own server (`llama-server -m gemma.gguf --port 8080`) and Cicero connects to it; or set `llm: { backend: llama-cpp, model: /path/to/gemma.gguf }` to have Cicero launch one locally. `llama-server` also supports GBNF/json-schema constrained decoding.
+
+When `host` is a non-local address Cicero connects directly and does **not** launch a local server for that backend. Omit `host` (or use `localhost`) to keep the model on the same machine. For Home Assistant voice servers, use the [Wyoming backends](superpowers/wyoming-integration.md) instead.
+
+## CLI reference
+
+```bash
+# Sidecar mode
+cicero hook install claude-code      # install the Stop hook (one-time)
+cicero hook install codex            # install the native Codex Stop hook
+cicero hook                          # run the hook receiver
+cicero scrape <tab>                  # terminal-scrape an agent without hooks
+
+# Daemon mode
+cicero start --tts                   # start the daemon with TTS
+cicero start --no-tts                # without TTS
+cicero start --no-servers            # keyword routing only, no model servers
+cicero stop                          # stop the daemon
+cicero status                        # bounded effective-config/runtime snapshot
+cicero doctor                        # check every configured backend, print fixes
+
+# Utility
+cicero speak "Hello from Cicero"     # speak arbitrary text
+echo "build done" | cicero speak     # pipe-friendly
+cicero notify "PR is up."            # speak through every connected browser
+
+# Voices
+cicero voice add butler ~/ref.wav --provider pocket-tts  # match the configured TTS engine
+cicero voice use butler              # set the active voice
+cicero voice list / inspect / remove
+
+# Override brain at startup
+cicero start --brain qwen
+cicero start --brain-mode subprocess
+```

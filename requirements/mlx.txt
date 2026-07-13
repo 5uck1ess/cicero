@@ -1,0 +1,7 @@
+# macOS 14+ on Apple Silicon: shared STT, TTS, and local-router environment.
+mlx-audio>=0.4.0,<0.5
+mlx-lm>=0.31.3,<0.32
+mlx-whisper>=0.4.0,<0.5
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+python-multipart>=0.0.20,<1

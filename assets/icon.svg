@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" role="img" aria-label="Cicero">
+<title>Cicero</title>
+<g transform="translate(7.48 10.18) scale(0.8727)">
+  <g fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2 25 H6 L8 15.6 L10 34.4 L12 11 L14 39 L16 18 L18 32 L20 25 H24"/><path d="M24 25 H52"/><path d="M32 25 C36 25 36 13.3 40 13.3 H44 C48 13.3 48 25 52 25"/>
+  </g>
+  <circle cx="24" cy="25" r="2.6" fill="currentColor"/>
+  <circle cx="42" cy="13.3" r="2.6" fill="currentColor"/>
+  <circle cx="52" cy="25" r="3.6" fill="#BC8446"/>
+</g>
+</svg>

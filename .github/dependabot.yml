@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  # The sidecar requirement files are individually named (kokoro.txt,
+  # telegram-call.txt, ...); Dependabot's pip fetcher scans the directory's
+  # .txt files by content, but treat coverage as best-effort and keep the
+  # python-portability workflow as the real resolution check.
+  - package-ecosystem: pip
+    directory: /requirements
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

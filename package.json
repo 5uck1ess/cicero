@@ -1,0 +1,42 @@
+{
+  "name": "cicero",
+  "version": "0.1.0",
+  "description": "Local voice in, pull requests out — a self-hosted, full-duplex voice interface for coding agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/5uck1ess/cicero.git"
+  },
+  "module": "src/index.ts",
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "private": true,
+  "bin": {
+    "cicero": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts start",
+    "dev": "bun --watch run src/index.ts start",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "bench:stt": "bun run bench/stt-bench.ts",
+    "build:hotkey": "swiftc -O -o helpers/cicero-hotkey helpers/cicero-hotkey.swift -framework Cocoa",
+    "build:aec": "swiftc -O -swift-version 5 -o helpers/cicero-aec-mic helpers/cicero-aec-mic.swift"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "@types/node": "^26.1.1"
+  },
+  "peerDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@zed-industries/agent-client-protocol": "^0.4.5",
+    "chalk": "^5.6.2",
+    "commander": "^15.0.0",
+    "yaml": "^2.8.3"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.61.1"
+  }
+}

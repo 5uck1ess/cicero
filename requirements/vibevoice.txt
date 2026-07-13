@@ -1,0 +1,14 @@
+# VibeVoice OpenAI-compatible API (Python 3.11, isolated .venv-vibevoice).
+# PyPI's vibevoice-api 0.0.1 wheel omits its `vibevoice` runtime dependency.
+# Pin both upstream source snapshots so a clean install actually imports the
+# managed server and cannot drift when either repository's default branch moves.
+-r vibevoice-sources.txt
+
+# The upstream API relies on these server packages without declaring all of
+# them directly. Keep the launch contract explicit rather than relying on a
+# transitive dependency (such as Gradio) to happen to provide them.
+-r vibevoice-server.txt
+
+# Upstream leaves torch unbounded; this is the release resolved and checked by
+# Cicero's Linux/Windows portability job.
+torch==2.10.0

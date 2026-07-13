@@ -1,0 +1,256 @@
+# Cicero configuration — copy to ~/.cicero/config.yaml and edit.
+#
+#   mkdir -p ~/.cicero && cp config.yaml.example ~/.cicero/config.yaml
+#
+# This example is the flagship shape: a headless box serving the web-voice
+# page, local STT + TTS, and an ACP agent as the brain. Every section has
+# commented alternates. Run `cicero doctor` to check configured prerequisites.
+
+# ---------------------------------------------------------------------------
+# Headless: no local mic/speakers — browsers (and phone calls) are the audio
+# I/O. Delete this line on a desktop to use the local mic instead.
+headless: true
+
+web_voice:
+  enabled: true
+  host: 0.0.0.0                 # bind the LAN; use 127.0.0.1 to keep it local
+  port: 8090
+  # Speech gate (default on): a small local VAD model (Silero v5, ~13MB
+  # fetched on first start, served same-origin — no CDN at runtime) confirms
+  # an energy trigger is actually SPEECH before a hands-free utterance opens
+  # or a barge-in interrupts — keyboard noise stops cutting Cicero off.
+  # speech_gate: false          # energy-only gating (the pre-gate behavior)
+  # REQUIRED for a stable setup: generate your own long random string. This is
+  # commented out so copying the example never installs a public shared secret.
+  # Omit it to get a random token for this run on startup stdout. A service
+  # manager may retain stdout, so configure a stable token before daemonizing:
+  #   openssl rand -hex 16
+  # Paste the command output after the colon and uncomment this setting:
+  # token:
+  # TLS is generated automatically (the first start needs `openssl` on PATH;
+  # `cicero doctor` prints the native install command when it is missing). For
+  # an operator-managed certificate, both paths are required and read-only:
+  # tls: { cert_file: /etc/cicero/cert.pem, key_file: /etc/cicero/key.pem }
+  # `tls: { enabled: false }` explicitly permits plaintext HTTP; never use it
+  # on an untrusted network.
+  # TLDR speech gate is on by default: long replies speak the first N sentences
+  # plus a generic coda; say "details" to hear the rest. Add an optional local
+  # OpenAI-compatible summarizer for a model-written coda. Set enabled: false to
+  # speak every sentence instead.
+  tldr:
+    enabled: true
+    spoken_sentences: 4
+    # summarizer_url: http://127.0.0.1:8080/v1
+    # summarizer_model: your-small-model
+  # Speculative turns (needs turn.enabled below): when the end-of-turn model is
+  # confident you're done mid-pause, transcription and the brain start BEFORE
+  # the final audio arrives — typically 300-600ms off time-to-first-audio.
+  # Never speculates while a spoken confirmation is pending.
+  speculative:
+    enabled: false
+    min_probability: 0.85       # end-of-turn confidence required to jump the gun
+  # Long-turn parking: if a reply's first sentence hasn't arrived in
+  # park_after_s, Cicero says "I'll keep working on it" and releases the audio
+  # floor; the finished reply is spoken later via the notify path. A stateful
+  # brain may keep its session lock until that work finishes.
+  long_turn:
+    enabled: false
+    park_after_s: 20
+    max_background_s: 600
+
+# ---------------------------------------------------------------------------
+# Input-side tone (optional): a small speech-emotion model (emotion2vec+ base,
+# CPU, own venv .venv-ser — see `cicero doctor` for the install command)
+# classifies each utterance's tone alongside STT. A confident non-neutral
+# verdict rides into the brain as a short tag, so lanes hear frustration or
+# excitement, not just words. Neutral turns stay untagged.
+tone:
+  enabled: false
+  port: 8091
+  min_score: 0.5                # ignore verdicts below this confidence
+  grace_ms: 150                 # max wait for the verdict once the transcript is in
+  min_ms: 1500                  # skip utterances shorter than this — SER is confidently wrong on sub-second clips ("yo" → angry)
+  timeout_ms: 5000              # absolute classify deadline, including response body
+
+# ---------------------------------------------------------------------------
+# STT — faster-whisper (CTranslate2, CUDA) is the fastest per-turn engine we
+# measured. Runs from .venv-stt (see README "Linux" setup).
+stt:
+  backend: faster-whisper
+  port: 8083
+  model: large-v3-turbo
+  timeout_ms: 90000             # absolute transcription deadline
+# Optional hot standby. The primary is retried every turn and automatically
+# takes over again after recovery. An honestly empty transcript remains silence;
+# only a diagnosed engine error reaches the fallback, so a second recognizer
+# cannot promote a silence hallucination into a user turn:
+# stt_fallback:
+#   backend: audiocpp
+#   port: 8092
+#   model: qwen3-asr
+#   timeout_ms: 90000
+# Alternates:
+#   stt: { backend: mlx-whisper, port: 8083 }              # macOS / Apple Silicon
+#   stt: { backend: faster-whisper, host: 192.168.1.50, port: 8083 }  # remote GPU box
+
+# ---------------------------------------------------------------------------
+# TTS — pocket-tts (Kyutai) clones any voice from a reference WAV and runs
+# fine on CPU (~0.5s/sentence), so it never competes with your models for
+# VRAM. Provision for this engine with
+# `cicero voice add <name> <clip.wav> --provider pocket-tts`, then `voice use`.
+tts:
+  backend: pocket-tts
+  port: 8095
+  voice: alba                   # built-in preset; `voice use` writes a clone reference
+  timeout_ms: 60000             # absolute synthesis deadline
+# Optional second engine — unknown voices and pocket failures land here:
+tts_fallback:
+  backend: kokoro
+  port: 8082
+  voice: af_heart
+  device: cpu
+  timeout_ms: 60000
+
+# Local conversational router/summarizer. Install Ollama and pull this exact
+# model before the first start (`ollama pull qwen3.5:4b`), or replace this block
+# with a llama-cpp, MLX, remote, or OpenAI-compatible provider.
+llm:
+  backend: ollama
+  port: 11434
+  model: qwen3.5:4b
+  timeout_ms: 120000
+
+# ---------------------------------------------------------------------------
+# Brain — the agent behind the voice. ACP (Agent Client Protocol) is the
+# reference driver: any ACP-speaking harness drops in. Non-ACP options:
+#   brain: { backend: claude-code, mode: subprocess }      # Claude Code CLI; tab-inject needs a supported terminal
+#   brain: { backend: codex }                              # Codex CLI
+#   brain: { backend: ollama, ollama_model: qwen3.5:4b }   # fully local
+#   brain: { backend: openai-compatible, base_url: http://127.0.0.1:8080/v1, model: your-model, timeout_ms: 120000 }
+brain:
+  backend: acp
+  binary: hermes                # install/auth this ACP agent, or replace it; see docs/brains.md
+  binary_args: [-p, voice, acp]
+  # Bounds unread streamed text and one-shot response aggregation. Actively
+  # consumed sendStream output is incremental and has no whole-response buffer.
+  max_queue_bytes: 262144
+  max_response_bytes: 2097152
+  max_pending_turns: 32
+
+  # Optional: "think hard about …" escalates that one turn to a heavier agent.
+  escalate:
+    binary: hermes
+    binary_args: [-p, think, acp]
+
+  # Optional: the office. Each lane is another agent with its own session,
+  # voice, greeting, and spoken persona. "Let me talk to the coder" transfers
+  # the call; "back to Cicero" returns; "roll call" makes everyone check in.
+  lanes:
+    coder:
+      binary: hermes
+      binary_args: [-p, coder, acp]
+      aliases: [the coder, code guy]
+      voice: anna                       # pocket-tts preset; or a provisioned clone
+      greeting: "Coder here. What are we building?"
+      # Optional spoken personality — rides the lane's first turn. Keep it
+      # about delivery, not policy; the agent's own profile governs the work.
+      persona: >-
+        Speak tersely and confidently, like a senior engineer at a whiteboard:
+        short sentences, concrete names, no filler.
+      # Optional fallback ladder — tiers are tried in order each turn, and a
+      # downgrade is announced ("On the backup line."):
+      # fallbacks:
+      #   - backend: codex
+      #   - binary: hermes
+      #     binary_args: [-p, default, acp]
+    qa:
+      binary: bun                       # Claude Code as an ACP lane
+      binary_args: [x, "@zed-industries/claude-code-acp@0.16.2"]
+      unset_env: [CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_CODE_SSE_PORT]
+      aliases: [quality assurance, the reviewer, q a]
+      voice: alba                       # pocket-tts preset
+      greeting: "QA here. What am I checking?"
+
+  # Keep the agent permission boundary on by default. Set true only when this
+  # machine, every voice transport, and every caller are fully trusted.
+  auto_approve_tools: false
+  # Spoken confirmation gate: tool calls matching these patterns are held
+  # until you say "yes" out loud (one approval = one call).
+  confirm_tools:
+    - git push
+    - rm -rf
+    - "sudo "
+    - force
+    - deploy
+  agent_first: true
+  thinking_filler: true         # pre-rendered filler covers agent latency
+
+# ---------------------------------------------------------------------------
+# Computer-use safety. File tools are confined to this root and cap the amount
+# of file content returned to the model. Public/cloud LLMs are refused unless
+# allow_cloud is explicitly enabled; local/private-LAN models need no opt-in.
+compute:
+  root: .                       # resolve relative to the daemon working directory
+  max_read_bytes: 262144        # 256 KiB per read_file observation
+  allow_cloud: false            # true means goals/tool output may leave your LAN
+
+# ---------------------------------------------------------------------------
+# Thinking fillers — the instant acknowledgment spoken while the brain works.
+# Contextual by default (a command hears "On it.", a status ask "Let me
+# check.", a question "Hmm, good question."). Override any bucket to reword:
+# filler_lines:
+#   task: ["Right away, sir.", "Consider it done, sir."]
+#   lookup: ["Checking now, sir."]
+
+# ---------------------------------------------------------------------------
+# Quick intents — your own zero-latency fast-paths: matched before the brain
+# ever sees the turn, spoken instantly, misses fall through to the model.
+# {time} and {date} expand at match time.
+# quick_intents:
+#   - phrases: ["what time is it", "time check"]
+#     reply: "It's {time}."
+#   - pattern: "^ping\\b"
+#     reply: "Pong. All systems up."
+
+# ---------------------------------------------------------------------------
+# Proactive voice-back — anything on the box can make Cicero speak to every
+# connected browser (and Telegram): `cicero notify "CI is green."`
+notify:
+  # Announce the agent's kanban board on its own (finished / blocked / review):
+  kanban:
+    enabled: false
+    interval_seconds: 20
+    # command: [hermes, kanban, list, --json]   # any CLI that prints the board
+    # call_back: false          # ring the phone when nobody was listening (never for blocked tasks)
+    # nudge_after_minutes: 60   # remind (once) about tasks nobody picked up; 0 = off
+  # Mirror notifications to a phone via a Telegram bot (text messages;
+  # set voice_note: true if you'd rather get spoken clips):
+  # telegram:
+  #   token_env: CICERO_TELEGRAM_TOKEN
+  #   chat_id: 123456789
+  #   sender_user_id: 123456789 # required for groups; recommended everywhere
+  #   voice_note: false
+  # Your timezone (IANA name). quiet_hours and briefing.at are read in THIS
+  # zone — without it they use the box clock, and a UTC server will happily
+  # ring you at 4am:
+  # timezone: America/New_York
+  # No pings overnight — notifications queue up for the morning briefing:
+  # quiet_hours: { from: "23:00", to: "08:00" }
+  # Daily digest of the deferred news + board state, texted to the phone;
+  # call: true also rings you and speaks it (needs the Telegram call sidecar):
+  # briefing: { at: "08:00", call: false }
+  # Text short call notes to the phone after a voice session goes quiet
+  # (only for calls longer than min_minutes; default 3):
+  # call_minutes: { min_minutes: 3 }
+  # Scheduled prompts: daily unattended brain turns whose replies arrive as a
+  # Telegram text. Unlike the briefing (which formats data Cicero already has),
+  # the content here is a live brain answer — point `lane` at an employee with
+  # web access and you get real research with links. Quiet hours hold delivery
+  # (not the work); failures wait for the next day's firing.
+  # schedules:
+  #   - name: content ideas
+  #     at: "09:00"          # HH:MM in notify.timezone
+  #     lane: conductor      # optional — a brain.lanes name; omit for the front desk
+  #     prompt: |
+  #       Search the web for what's new in our field today and draft the top 3
+  #       content ideas: title, angle, why now, and source links. Plain text.

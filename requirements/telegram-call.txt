@@ -1,0 +1,8 @@
+# Telegram call bridge (Python 3.11; TgCrypto 1.2.5 publishes CPython 3.11
+# wheels, while newer interpreters require a local native build).
+py-tgcalls>=2.3.3,<3
+pyrogram==2.0.106
+tgcrypto==1.2.5
+websockets>=13,<17
+numpy>=1.26,<3
+PyYAML>=6,<7
