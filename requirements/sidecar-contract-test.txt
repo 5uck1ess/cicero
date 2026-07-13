@@ -1,7 +1,7 @@
 # Lightweight dependencies for model-free ASGI contract tests. Heavy native
 # model modules are stubbed so CI never downloads weights or accelerator wheels.
 fastapi>=0.115,<1
-uvicorn>=0.30,<1
+uvicorn>=0.51.0,<1
 pydantic>=2.13.4,<3
 python-multipart>=0.0.20,<1
 numpy>=1.26,<3
