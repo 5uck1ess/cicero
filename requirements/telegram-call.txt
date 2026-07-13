@@ -4,5 +4,5 @@ py-tgcalls>=2.3.3,<3
 pyrogram==2.0.106
 tgcrypto==1.2.5
 websockets>=13,<17
-numpy>=1.26,<3
+numpy>=2.5.1,<3
 PyYAML>=6,<7
