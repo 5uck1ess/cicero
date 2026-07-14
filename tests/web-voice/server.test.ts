@@ -79,6 +79,7 @@ function start(opts: {
   onStreamTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onStreamTurn"]>;
   onTextTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onTextTurn"]>;
   onNotify?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onNotify"]>;
+  onNotified?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onNotified"]>;
   onSay?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onSay"]>;
   onChat?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onChat"]>;
   onHistory?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onHistory"]>;
@@ -98,6 +99,7 @@ function start(opts: {
     onStreamTurn: opts.onStreamTurn,
     onTextTurn: opts.onTextTurn,
     onNotify: opts.onNotify,
+    onNotified: opts.onNotified,
     onSay: opts.onSay,
     onChat: opts.onChat,
     onHistory: opts.onHistory,
@@ -896,6 +898,89 @@ test("POST /api/notify renders and broadcasts to connected ws clients", async ()
   expect(got.type).toBe("notify");
   expect(got.text).toBe("PR 142 is up.");
   expect(got.audioBase64).toBe(Buffer.from(wav(7)).toString("base64"));
+});
+
+test("onNotified fires when a notification parks (no client connected)", async () => {
+  const seen: Array<{ text: string; delivered: number; parked: boolean }> = [];
+  const base = start({
+    onNotify: async () => wav(5),
+    onNotified: (text, outcome) => seen.push({ text, ...outcome }),
+  });
+  const res = await fetch(base + "/api/notify", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "Fork sync failed, needs a decision." }),
+  });
+  expect(res.status).toBe(200);
+  expect(seen).toEqual([{ text: "Fork sync failed, needs a decision.", delivered: 0, parked: true }]);
+});
+
+test("onNotified fires on broadcast delivery with the client count", async () => {
+  const seen: Array<{ delivered: number; parked: boolean }> = [];
+  const base = start({
+    onStreamTurn: async () => { /* unused */ },
+    onNotify: async () => wav(5),
+    onNotified: (_text, outcome) => seen.push(outcome),
+  });
+  await new Promise<void>((resolve, reject) => {
+    const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN);
+    const timer = setTimeout(() => reject(new Error("notify timeout")), 3000);
+    ws.onopen = async () => {
+      await fetch(base + "/api/notify", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "PR 142 is up." }),
+      });
+    };
+    ws.onmessage = () => { clearTimeout(timer); ws.close(); resolve(); };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error("ws error")); };
+  });
+  expect(seen).toEqual([{ delivered: 1, parked: false }]);
+});
+
+test("onNotified does NOT fire when the daemon defers the notification (quiet hours)", async () => {
+  let called = 0;
+  const base = start({
+    onNotify: async () => null, // daemon signals quiet-hours deferral
+    onNotified: () => { called += 1; },
+  });
+  const res = await fetch(base + "/api/notify", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "late night news" }),
+  });
+  expect(res.status).toBe(200);
+  expect(called).toBe(0);
+});
+
+test("a throwing onNotified hook does not fail the delivery", async () => {
+  const base = start({
+    onNotify: async () => wav(5),
+    onNotified: () => { throw new Error("brain unavailable"); },
+  });
+  const res = await fetch(base + "/api/notify", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "still delivered" }),
+  });
+  expect(res.status).toBe(200);
+  expect(((await res.json()) as { parked: boolean }).parked).toBe(true);
+});
+
+test("an async-rejecting onNotified hook does not fail the delivery", async () => {
+  const base = start({
+    onNotify: async () => wav(5),
+    onNotified: async () => { throw new Error("brain went away mid-hook"); },
+  });
+  const res = await fetch(base + "/api/notify", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "still delivered async" }),
+  });
+  expect(res.status).toBe(200);
+  expect(((await res.json()) as { parked: boolean }).parked).toBe(true);
+  // Let the rejected hook promise settle; an unhandled rejection here fails the run.
+  await new Promise((r) => setTimeout(r, 10));
 });
 
 test("/api/notify without onNotify is a 501; bad bodies are 400s; token required", async () => {
