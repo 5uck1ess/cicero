@@ -95,6 +95,14 @@ export interface WebVoiceServerOptions {
    */
   onNotify?: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal }) => Promise<ArrayBuffer | null>;
   /**
+   * A notification actually went out (broadcast to clients, or parked for the
+   * next one — not deferred by quiet hours). The daemon uses this to hand the
+   * text to the brain as one-shot turn context, so a follow-up that names no
+   * topic ("call me", "what should we do about that?") lands on the right
+   * subject. Fire-and-forget: a throw here must not fail the delivery.
+   */
+  onNotified?: (text: string, outcome: { delivered: number; parked: boolean }) => void | Promise<void>;
+  /**
    * Render text to WAV with NO side effects (no broadcast, no Telegram, no
    * parking) — backs POST /api/say for callers that carry their own audio
    * channel. Deliberately separate from onNotify, which may fan out.
@@ -291,7 +299,7 @@ function requestedId(req: Request, url: URL, header: string, query: string): str
  * because a headless box is driven from another machine's browser.
  */
 export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle | null {
-  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness } = opts;
+  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotified, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness } = opts;
   const scheme: "http" | "https" = tls ? "https" : "http";
   const configuredDrainTimeout = opts.shutdownDrainTimeoutMs;
   const shutdownDrainTimeoutMs = typeof configuredDrainTimeout === "number" && Number.isFinite(configuredDrainTimeout) && configuredDrainTimeout >= 1
@@ -528,10 +536,24 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       parked.push({ text, audioBase64, at: Date.now() });
       if (parked.length > PARK_MAX) parked.shift();
       log("info", `notify: "${text.substring(0, 60)}" — no client connected, parked for the next one`);
+      reportNotified(text, { delivered, parked: true });
       return { delivered, parked: true };
     }
     log("info", `notify: "${text.substring(0, 60)}" → ${delivered} client(s)`);
+    reportNotified(text, { delivered, parked: false });
     return { delivered, parked: false };
+  };
+  const reportNotified = (text: string, outcome: { delivered: number; parked: boolean }) => {
+    if (!onNotified) return;
+    const warn = (error: unknown) =>
+      log("warn", `onNotified hook failed: ${error instanceof Error ? error.message : String(error)}`);
+    // Both a synchronous throw and an async rejection must stay contained —
+    // the notification is already delivered; the hook is fire-and-forget.
+    try {
+      Promise.resolve(onNotified(text, outcome)).catch(warn);
+    } catch (error) {
+      warn(error);
+    }
   };
 
   const notify = async (

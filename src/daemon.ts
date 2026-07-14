@@ -57,6 +57,7 @@ import { makeSpeculator } from "./web-voice/speculative";
 import { MAX_TURN_AUDIO_BYTES } from "./web-voice/protocol";
 import { TurnHistory } from "./web-voice/history";
 import { classifyCallIntent, sendTelegramVoice, sendTelegramText, startTelegramUpdatePoller } from "./notify/telegram";
+import { notificationTurnContext } from "./notify/context";
 import { KanbanWatcher, listViaCli, nudgeLine, spokenLine, taskLinkViaCli, type KanbanTask } from "./notify/kanban-watch";
 import { inQuietHours, composeBriefing, composeBriefingDigest, minutesPrompt, worthMinutes, callMinutesThresholdMs, parseHm, hmOf, dayOf } from "./notify/briefing";
 import { PromptScheduler, scheduleLabel } from "./notify/schedules";
@@ -970,6 +971,10 @@ export class CiceroDaemon {
         // If a Telegram bot is configured, the same clip also goes to the
         // phone as a voice note. The browser does not wait, but daemon shutdown
         // retains the delivery through its background-task drain.
+        // A notification that went out (spoken or parked — not quiet-hours
+        // deferred) becomes one-shot brain context, so "call me" or "what do
+        // we do about that?" right after an announcement lands on-topic.
+        onNotified: (text) => this.brain.injectContext(notificationTurnContext(text, new Date())),
         onNotify: async (text, voice, opts) => {
           try {
             if (opts?.signal?.aborted) return null;
