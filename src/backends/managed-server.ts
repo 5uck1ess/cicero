@@ -131,7 +131,10 @@ async function runSupervisor(
       await finishStderrTail(crashTail);
       stderrTailCaptures.delete(proc);
       if (crashTail.lines.length > 0) {
-        log("error", `${opts.name} crash stderr (last ${Math.min(crashTail.lines.length, 5)} lines):\n  ${crashTail.lines.slice(-5).join("\n  ")}`);
+        // Print the whole retained tail: native aborts (GGML_ASSERT, CUDA
+        // errors) put the reason line well above the backtrace frames, so a
+        // short slice logs only anonymous addresses.
+        log("error", `${opts.name} crash stderr (last ${crashTail.lines.length} lines):\n  ${crashTail.lines.join("\n  ")}`);
       }
     }
 
@@ -181,7 +184,7 @@ async function runSupervisor(
       await finishStderrTail(stderrTail);
       stderrTailCaptures.delete(next);
       if (stderrTail.lines.length > 0) {
-        log("error", `${opts.name} revival stderr (last ${Math.min(stderrTail.lines.length, 5)} lines):\n  ${stderrTail.lines.slice(-5).join("\n  ")}`);
+        log("error", `${opts.name} revival stderr (last ${stderrTail.lines.length} lines):\n  ${stderrTail.lines.join("\n  ")}`);
       }
       code = next.exitCode ?? next.signalCode ?? -1;
       attempt += 1;
@@ -464,7 +467,7 @@ export async function startManagedServer(opts: StartOpts): Promise<ManagedProces
   await finishStderrTail(stderrTail);
   stderrTailCaptures.delete(proc);
   if (stderrTail.lines.length > 0) {
-    log("error", `${name} stderr (last ${Math.min(stderrTail.lines.length, 10)} lines):\n  ${stderrTail.lines.slice(-10).join("\n  ")}`);
+    log("error", `${name} stderr (last ${stderrTail.lines.length} lines):\n  ${stderrTail.lines.join("\n  ")}`);
   }
   return null;
 }
