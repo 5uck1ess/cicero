@@ -181,6 +181,7 @@ a live, interruptible spoken conversation, not transcribed voice messages.
 - [Daemon mode](docs/daemon-mode.md) — local mic, full-duplex, double-clap, computer use
 - [Configuration](docs/configuration.md) — full config reference, default model stacks, quick intents, custom actions
 - [Architecture](docs/architecture.md) — the turn pipeline, components, where your data lives
+- [Full duplex](docs/duplex.md) — why Cicero takes turns: the fused-vs-modular tradeoff, and what would change the call
 - [Security model](docs/security.md) — the threat model, the token, TLS, what egresses and what never does
 - [Evaluation follow-up](docs/evaluation-follow-up-2026-07.md) — delivered fixes, current limits, and intentional architecture boundaries
 
