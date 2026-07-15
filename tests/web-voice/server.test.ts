@@ -79,6 +79,7 @@ function start(opts: {
   onStreamTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onStreamTurn"]>;
   onTextTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onTextTurn"]>;
   onNotify?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onNotify"]>;
+  onNotifyRender?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onNotifyRender"]>;
   onNotified?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onNotified"]>;
   onSay?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onSay"]>;
   onChat?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onChat"]>;
@@ -99,6 +100,7 @@ function start(opts: {
     onStreamTurn: opts.onStreamTurn,
     onTextTurn: opts.onTextTurn,
     onNotify: opts.onNotify,
+    onNotifyRender: opts.onNotifyRender,
     onNotified: opts.onNotified,
     onSay: opts.onSay,
     onChat: opts.onChat,
@@ -1065,6 +1067,170 @@ test("parked notifications are capped at 10, oldest dropped", async () => {
   expect(texts.length).toBe(10);
   expect(texts[0]).toBe("n2");   // n0/n1 fell off the front
   expect(texts[9]).toBe("n11");
+});
+
+test("with a lazy renderer, a no-client notify skips synthesis and renders at flush", async () => {
+  const skipRenders: boolean[] = [];
+  let renders = 0;
+  const base = start({
+    onStreamTurn: async () => { /* unused */ },
+    onNotify: async (_text, _voice, opts) => {
+      skipRenders.push(opts?.skipRender === true);
+      // Honoring skipRender: accepted, mirrored, but no clip synthesized.
+      return opts?.skipRender ? new ArrayBuffer(0) : wav(5);
+    },
+    onNotifyRender: async () => { renders += 1; return wav(9); },
+  });
+  const auth = { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" };
+
+  const res = await fetch(base + "/api/notify", { method: "POST", headers: auth, body: JSON.stringify({ text: "rendered only when heard" }) });
+  expect(await res.json()).toEqual({ delivered: 0, parked: true });
+  expect(skipRenders).toEqual([true]);   // nobody connected -> daemon told to skip
+  expect(renders).toBe(0);               // and nothing was synthesized yet
+
+  const got = await new Promise<{ type: string; text: string; audioBase64: string }>((resolve, reject) => {
+    const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN);
+    const timer = setTimeout(() => reject(new Error("lazy flush timeout")), 3000);
+    ws.onmessage = (e: MessageEvent) => {
+      if (typeof e.data !== "string") return;
+      clearTimeout(timer); ws.close(); resolve(JSON.parse(e.data));
+    };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error("ws error")); };
+  });
+  expect(got.type).toBe("notify");
+  expect(got.text).toBe("rendered only when heard");
+  expect(got.audioBase64.length).toBeGreaterThan(0); // flush synthesized the clip
+  expect(renders).toBe(1);
+});
+
+test("a lazily parked item that fails to render is retried on the next connect", async () => {
+  let renders = 0;
+  const base = start({
+    onStreamTurn: async () => { /* unused */ },
+    onNotify: async (_text, _voice, opts) => (opts?.skipRender ? new ArrayBuffer(0) : wav(5)),
+    onNotifyRender: async () => {
+      renders += 1;
+      if (renders === 1) throw new Error("TTS server mid-revive");
+      return wav(9);
+    },
+  });
+  const auth = { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" };
+  await fetch(base + "/api/notify", { method: "POST", headers: auth, body: JSON.stringify({ text: "survives a render hiccup" }) });
+
+  // First connect: render throws, the item is re-parked, nothing is sent.
+  const first = await new Promise<string | null>((resolve) => {
+    const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN);
+    const timer = setTimeout(() => { ws.close(); resolve(null); }, 500);
+    ws.onmessage = (e: MessageEvent) => { clearTimeout(timer); ws.close(); resolve(typeof e.data === "string" ? e.data : "binary"); };
+  });
+  expect(first).toBeNull();
+  expect(renders).toBe(1);
+
+  // Second connect: render succeeds and the news finally arrives.
+  const got = await new Promise<{ text: string }>((resolve, reject) => {
+    const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN);
+    const timer = setTimeout(() => reject(new Error("retry flush timeout")), 3000);
+    ws.onmessage = (e: MessageEvent) => {
+      if (typeof e.data !== "string") return;
+      clearTimeout(timer); ws.close(); resolve(JSON.parse(e.data));
+    };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error("ws error")); };
+  });
+  expect(got.text).toBe("survives a render hiccup");
+  expect(renders).toBe(2);
+});
+
+test("a daemon that renders despite skipRender parks the audio and flush does not re-render", async () => {
+  // The Telegram voice-note path needs the clip at dispatch time even when the
+  // server says it could skip — that rendered audio must be kept, not redone.
+  let renders = 0;
+  const base = start({
+    onStreamTurn: async () => { /* unused */ },
+    onNotify: async () => wav(7), // ignores skipRender, always renders
+    onNotifyRender: async () => { renders += 1; return wav(9); },
+  });
+  const auth = { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" };
+  await fetch(base + "/api/notify", { method: "POST", headers: auth, body: JSON.stringify({ text: "clip came from dispatch" }) });
+
+  const got = await new Promise<{ audioBase64: string }>((resolve, reject) => {
+    const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN);
+    const timer = setTimeout(() => reject(new Error("flush timeout")), 3000);
+    ws.onmessage = (e: MessageEvent) => {
+      if (typeof e.data !== "string") return;
+      clearTimeout(timer); ws.close(); resolve(JSON.parse(e.data));
+    };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error("ws error")); };
+  });
+  expect(got.audioBase64.length).toBeGreaterThan(0);
+  expect(renders).toBe(0); // parked audio was reused, no lazy render
+});
+
+test("a parked item flushes to exactly one client when several are connected", async () => {
+  let renders = 0;
+  const base = start({
+    onStreamTurn: async () => { /* unused */ },
+    onNotify: async (_text, _voice, opts) => (opts?.skipRender ? new ArrayBuffer(0) : wav(5)),
+    onNotifyRender: async () => { renders += 1; return wav(9); },
+  });
+  const auth = { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" };
+  await fetch(base + "/api/notify", { method: "POST", headers: auth, body: JSON.stringify({ text: "one listener gets the news" }) });
+
+  const listen = () =>
+    new Promise<string[]>((resolve) => {
+      const out: string[] = [];
+      const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN);
+      const timer = setTimeout(() => { ws.close(); resolve(out); }, 800);
+      ws.onmessage = (e: MessageEvent) => { if (typeof e.data === "string") out.push(JSON.parse(e.data).text); };
+      ws.onerror = () => { clearTimeout(timer); resolve(out); };
+    });
+  const [a, b] = await Promise.all([listen(), listen()]);
+  const deliveries = [...a, ...b].filter((t) => t === "one listener gets the news");
+  expect(deliveries.length).toBe(1); // delivered once, not broadcast to every client
+  expect(renders).toBe(1);           // and rendered once
+});
+
+test("stop owns and drains an in-flight parked-notify render instead of finishing under it", async () => {
+  const renderStarted = deferred();
+  const release = deferred<ArrayBuffer>();
+  const base = start({
+    onStreamTurn: async () => { /* unused */ },
+    onNotify: async (_text, _voice, opts) => (opts?.skipRender ? new ArrayBuffer(0) : wav(5)),
+    onNotifyRender: () => { renderStarted.resolve(); return release.promise; },
+  });
+  const activeHandle = handle!;
+  const auth = { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" };
+  await fetch(base + "/api/notify", { method: "POST", headers: auth, body: JSON.stringify({ text: "drained on stop" }) });
+
+  const received: string[] = [];
+  const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN);
+  ws.onmessage = (e: MessageEvent) => { if (typeof e.data === "string") received.push(JSON.parse(e.data).text); };
+  await renderStarted.promise; // the flush owns a synthesis now
+
+  const stopping = activeHandle.stop();
+  let stopSettled = false;
+  void stopping.then(
+    () => { stopSettled = true; },
+    () => { stopSettled = true; },
+  );
+  await Bun.sleep(10);
+  expect(stopSettled).toBe(false); // stop waits for the owned render
+
+  release.resolve(wav(9));
+  await stopping;
+  expect(stopSettled).toBe(true);
+  expect(received).toEqual([]); // shutdown raced the render: re-parked, not published
+});
+
+test("without a lazy renderer the old behavior holds: render at dispatch, park the audio", async () => {
+  const skipRenders: boolean[] = [];
+  const base = start({
+    onStreamTurn: async () => { /* unused */ },
+    onNotify: async (_text, _voice, opts) => { skipRenders.push(opts?.skipRender === true); return wav(5); },
+  });
+  const auth = { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" };
+  const res = await fetch(base + "/api/notify", { method: "POST", headers: auth, body: JSON.stringify({ text: "eager as before" }) });
+  expect(await res.json()).toEqual({ delivered: 0, parked: true });
+  expect(skipRenders).toEqual([false]); // no onNotifyRender wired -> never asked to skip
 });
 
 test("a wrong token is rejected", async () => {
