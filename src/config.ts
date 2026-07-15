@@ -534,7 +534,7 @@ export function loadConfig(flags: CLIFlags = {}, opts: { home?: string } = {}): 
   if (flags.tts !== undefined) config.tts_enabled = flags.tts;
   if (flags.wakeWord !== undefined) config.wake_word_enabled = flags.wakeWord;
   if (flags.brain) {
-    const VALID_BRAINS = ["claude-code", "codex", "gemini", "qwen", "ollama", "acp"] as const;
+    const VALID_BRAINS = ["claude-code", "codex", "gemini", "qwen", "ollama", "acp", "hermes-gateway"] as const;
     if (!(VALID_BRAINS as readonly string[]).includes(flags.brain)) {
       throw new Error(`Invalid --brain value '${flags.brain}'. Valid: ${VALID_BRAINS.join(", ")}`);
     }

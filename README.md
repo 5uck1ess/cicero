@@ -109,10 +109,10 @@ web_voice: { enabled: true, host: 0.0.0.0, port: 8090 } # a fresh token prints a
 stt: { backend: faster-whisper, port: 8083, model: large-v3-turbo }
 tts: { backend: pocket-tts, port: 8095, voice: alba }
 llm: { backend: ollama, port: 11434, model: qwen3.5:4b }
-brain: { backend: claude-code, mode: subprocess } # or acp / codex / gemini / ollama / any OpenAI-compatible URL
+brain: { backend: claude-code, mode: subprocess } # or acp / hermes-gateway / codex / gemini / ollama / any OpenAI-compatible URL
 ```
 
-**4. Pick your brain.** The config above expects the Claude Code CLI — install it and log in before continuing. For Hermes or another ACP harness, set `brain: { backend: acp, binary: …, binary_args: […] }` instead — see [Brains](docs/brains.md).
+**4. Pick your brain.** The config above expects the Claude Code CLI — install it and log in before continuing. For a new Hermes/ACP session, set `brain: { backend: acp, binary: …, binary_args: […] }`; to reuse the exact Hermes agent already open in a TUI or desktop client, use `hermes-gateway` — see [Brains](docs/brains.md).
 
 **5. Check, start, talk:**
 

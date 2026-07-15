@@ -334,6 +334,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       "binary", "binary_args", "ollama_port", "ollama_model",
       "base_url", "model", "api_key", "api_key_env", "max_tokens", "timeout_ms", "turn_timeout_ms",
       "headers", "session_header", "narrate_progress", "unset_env", "agent_first", "thinking_filler",
+      "gateway_url", "gateway_url_env", "session",
     ], issues);
     checkString(config.brain.backend, "brain.backend", issues);
     if (config.brain.mode !== "subprocess" && config.brain.mode !== "tab-inject") {
@@ -379,6 +380,35 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
     checkOptionalInteger(config.brain, "max_tokens", "brain", issues, { min: 1 });
     if (config.brain.headers !== undefined) checkStringRecord(config.brain.headers, "brain.headers", issues);
+    for (const key of ["gateway_url_env", "session"] as const) {
+      if (config.brain[key] !== undefined) checkString(config.brain[key], `brain.${key}`, issues);
+    }
+    if (config.brain.gateway_url !== undefined) {
+      if (typeof config.brain.gateway_url !== "string") {
+        issues.push("brain.gateway_url must be a valid WebSocket URL");
+      } else {
+        try {
+          const url = new URL(config.brain.gateway_url);
+          if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+            issues.push("brain.gateway_url must use ws:// or wss://");
+          }
+          const loopback = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+          if (url.protocol === "ws:" && !loopback.has(url.hostname)) {
+            issues.push("brain.gateway_url must use wss:// outside the local machine");
+          }
+        } catch {
+          issues.push("brain.gateway_url must be a valid WebSocket URL");
+        }
+      }
+    }
+    if (config.brain.backend === "hermes-gateway") {
+      if (config.brain.gateway_url === undefined && config.brain.gateway_url_env === undefined) {
+        issues.push("brain.gateway_url or brain.gateway_url_env is required for hermes-gateway");
+      }
+      if (config.brain.session === undefined) {
+        issues.push("brain.session is required for hermes-gateway");
+      }
+    }
 
     const validateAgent = (value: unknown, path: string, allowMetadata: boolean): void => {
       if (!checkRecord(value, path, issues)) return;

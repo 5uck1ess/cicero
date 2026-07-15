@@ -1,11 +1,12 @@
 # Choosing a brain
 
-Cicero's "brain" is the agent that handles complex requests. Seven integration
+Cicero's "brain" is the agent that handles complex requests. Eight integration
 families are supported, with additional named presets for compatible APIs:
 
 | Backend | What it is | Default binary | Setup |
 |---|---|---|---|
 | `acp` | **Any [ACP](https://agentclientprotocol.com)-speaking agent harness** — the modular slot. Reference driver: [hermes](https://hermes-agent.nousresearch.com); anything that speaks ACP over stdio drops in via `binary` + `binary_args` (verified matrix below) | configurable | e.g. `brain: { backend: acp, binary: hermes, binary_args: [-p, voice, acp] }` |
+| `hermes-gateway` | An **already-live Hermes TUI/desktop session** through Hermes's TUI Gateway JSON-RPC WebSocket. Reuses that exact agent, transcript, tools, skills, profile, and working directory; never creates a session | n/a | set `gateway_url` (or `gateway_url_env`) + `session` |
 | `claude-code` (default) | Claude Code CLI in print mode | `claude` | `npm i -g @anthropic-ai/claude-code` + auth |
 | `codex` | OpenAI Codex CLI | `codex` | Install and authenticate the Codex CLI |
 | `gemini` | Google Gemini CLI | `gemini` | Install Gemini CLI + auth |
@@ -14,6 +15,50 @@ families are supported, with additional named presets for compatible APIs:
 | `openai-compatible` | Any OpenAI chat API — OpenRouter, a local server, or a LAN model server | n/a (in-process via fetch) | set `base_url` + `model` (+ key if the server needs one) |
 
 **Agentic vs answer-only:** the CLI brains (`claude-code`, `codex`, `gemini`, `qwen`) are *agents* — they run commands and edit files. `ollama` and `openai-compatible` *answer with a model* — no tool use. Pick a CLI agent when a turn must take actions; pick a model brain for fast local/cloud answers.
+
+## Attach to the agent already open in Hermes
+
+ACP sessions belong to the ACP server process. Passing a profile to `hermes
+acp` therefore starts a separate agent; it cannot attach Cicero to the session
+already open in the Hermes TUI. Use `hermes-gateway` for that case. It speaks
+Hermes's [TUI Gateway JSON-RPC](https://hermes-agent.nousresearch.com/docs/developer-guide/programmatic-integration#tui-gateway-json-rpc), selects an entry from `session.active_list`, and calls `session.activate` before sending a turn.
+
+Hermes's terminal TUI and Cicero must connect to the same long-lived Hermes
+backend process. Give that local backend a stable process credential, then pass
+the same authenticated WebSocket URL to the TUI and Cicero:
+
+```bash
+export HERMES_DASHBOARD_SESSION_TOKEN="$(openssl rand -hex 32)"
+export HERMES_TUI_GATEWAY_URL="ws://127.0.0.1:9119/api/ws?token=$HERMES_DASHBOARD_SESSION_TOKEN"
+hermes serve --host 127.0.0.1 --port 9119
+
+# In another terminal, using the same environment:
+hermes --tui
+```
+
+After the TUI opens or resumes the desired conversation, configure Cicero with
+its exact title, durable Hermes session key, or gateway-local live ID. Prefer an
+environment variable because the WebSocket URL contains a credential:
+
+```yaml
+brain:
+  backend: hermes-gateway
+  gateway_url_env: HERMES_TUI_GATEWAY_URL
+  session: main
+  auto_approve_tools: false
+  timeout_ms: 600000
+```
+
+The environment variable must also exist in Cicero's service environment.
+Startup fails closed if the named live session is absent or ambiguous, and the
+adapter never falls back to `session.create`. Plain `ws://` is accepted only on
+loopback; use an authenticated `wss://` endpoint for another machine.
+
+Hermes currently routes a live session's streaming events to the client that
+submitted or activated the turn. A Cicero voice turn therefore updates the
+shared agent and durable transcript, while its live token/tool feed is delivered
+to Cicero for speech. Switch away and back in the TUI to redraw from the shared
+history if that terminal was open during the voice turn.
 
 ## Verified ACP harnesses
 

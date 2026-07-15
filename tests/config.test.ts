@@ -51,9 +51,10 @@ describe("Config — default values", () => {
     expect(config.terminal).toBe("auto");
   });
 
-  test("CLI --brain flag accepts qwen and ollama", () => {
+  test("CLI --brain flag accepts qwen, ollama, and hermes-gateway", () => {
     expect(loadConfig({ brain: "qwen" }).brain.backend).toBe("qwen");
     expect(loadConfig({ brain: "ollama" }).brain.backend).toBe("ollama");
+    expect(() => loadConfig({ brain: "hermes-gateway" })).toThrow(/brain\.gateway_url or brain\.gateway_url_env is required/);
   });
 
   test("CLI --brain flag rejects invalid backends", () => {
@@ -465,6 +466,29 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))).toThrow(
       /brain\.max_queue_bytes must be an integer[\s\S]*brain\.max_response_bytes must be an integer[\s\S]*brain\.max_pending_turns must be an integer/,
     );
+  });
+
+  test("requires an explicit live session and gateway endpoint for hermes-gateway", () => {
+    expect(loadYaml("brain:\n  backend: hermes-gateway\n")).toThrow(
+      /brain\.gateway_url or brain\.gateway_url_env is required[\s\S]*brain\.session is required/,
+    );
+  });
+
+  test("accepts a loopback Hermes gateway URL and rejects plaintext remote credentials", () => {
+    expect(loadYaml([
+      "brain:",
+      "  backend: hermes-gateway",
+      "  gateway_url: ws://127.0.0.1:9119/api/ws?token=test",
+      "  session: main",
+      "",
+    ].join("\n"))().brain.backend).toBe("hermes-gateway");
+    expect(loadYaml([
+      "brain:",
+      "  backend: hermes-gateway",
+      "  gateway_url: ws://hermes.example.com/api/ws?token=test",
+      "  session: main",
+      "",
+    ].join("\n"))).toThrow(/brain\.gateway_url must use wss:\/\/ outside the local machine/);
   });
 
   test("rejects a non-string inline provider API key before doctor can inspect it", () => {

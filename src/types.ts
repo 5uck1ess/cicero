@@ -243,7 +243,7 @@ export interface BrainConfig {
   // CLI agents run tools/edit files; "ollama" and "openai-compatible" (plus any
   // OpenAI preset like "openrouter") answer with a model only. `(string & {})`
   // keeps literal autocomplete while allowing preset names.
-  backend: "claude-code" | "codex" | "gemini" | "qwen" | "ollama" | "openai-compatible" | "acp" | (string & {});
+  backend: "claude-code" | "codex" | "gemini" | "qwen" | "ollama" | "openai-compatible" | "acp" | "hermes-gateway" | (string & {});
   mode: "subprocess" | "tab-inject"; // subprocess = claude --print, tab-inject = inject into existing tab
   target_tab?: string; // tab title to inject into (for tab-inject mode)
   auto_approve_tools?: boolean; // tab-inject: true bypasses checks; false uses Claude's auto permission mode
@@ -298,6 +298,12 @@ export interface BrainConfig {
   // Header name under which to send a per-session id (generated once at startup) so a
   // stateful agent keeps memory across turns — Hermes uses "X-Hermes-Session-Id".
   session_header?: string;
+  // Hermes TUI Gateway: attach to an existing live TUI/desktop session instead
+  // of spawning a separate ACP agent. Prefer gateway_url_env when the URL
+  // contains a dashboard token.
+  gateway_url?: string;
+  gateway_url_env?: string;
+  session?: string; // exact live title, durable session key, or gateway-local live id
   // When the brain supports it (e.g. codex, claude-code), speak a running summary
   // of what the agent is doing (commands, steps, final answer), not just the answer.
   narrate_progress?: boolean; // default true

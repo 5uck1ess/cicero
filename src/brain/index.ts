@@ -8,6 +8,7 @@ import { OllamaBrain } from "./ollama";
 import { OpenAiCompatibleBrain } from "./openai-compatible";
 import { TabInjectBrain } from "./tab-inject";
 import { AcpBrain } from "./acp";
+import { HermesGatewayBrain } from "./hermes-gateway";
 import { FallbackBrain } from "./fallback";
 import { RoutingBrain } from "./routing";
 import { SwitchboardBrain, type LaneDef } from "./switchboard";
@@ -86,7 +87,7 @@ export function createBrain(config: RuntimeConfig, terminal?: TerminalAdapter, h
 }
 
 function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: BrainHooks = {}): Brain {
-  const { backend, mode, target_tab, auto_approve_tools, confirm_tools, confirm_retry, max_queue_bytes, max_response_bytes, max_pending_turns, binary, binary_args, ollama_port, ollama_model, base_url, model, api_key, api_key_env, max_tokens, timeout_ms, unset_env, headers, session_header } = config.brain;
+  const { backend, mode, target_tab, auto_approve_tools, confirm_tools, confirm_retry, max_queue_bytes, max_response_bytes, max_pending_turns, binary, binary_args, ollama_port, ollama_model, base_url, model, api_key, api_key_env, max_tokens, timeout_ms, unset_env, headers, session_header, gateway_url, gateway_url_env, session } = config.brain;
   const onConfirmationPending = config.notify?.telegram
     ? async (summary: string, nonce: string): Promise<void> => {
         try {
@@ -207,6 +208,24 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
       return new SwitchboardBrain(front, lanes, summarizerClassifier(config.raw.web_voice?.tldr));
     }
     return front;
+  }
+
+  if (backend === "hermes-gateway") {
+    const url = gateway_url ?? (gateway_url_env ? process.env[gateway_url_env] : undefined);
+    if (!url) {
+      throw new Error(
+        gateway_url_env
+          ? `brain.gateway_url_env points to unset environment variable '${gateway_url_env}'`
+          : "brain.gateway_url or brain.gateway_url_env is required for hermes-gateway",
+      );
+    }
+    return new HermesGatewayBrain({
+      url,
+      session: session ?? "",
+      autoApproveTools: auto_approve_tools,
+      turnTimeoutMs: timeout_ms,
+      maxResponseBytes: max_response_bytes,
+    });
   }
 
   switch (backend) {

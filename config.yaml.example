@@ -127,6 +127,7 @@ llm:
 #   brain: { backend: codex }                              # Codex CLI
 #   brain: { backend: ollama, ollama_model: qwen3.5:4b }   # fully local
 #   brain: { backend: openai-compatible, base_url: http://127.0.0.1:8080/v1, model: your-model, timeout_ms: 120000 }
+#   brain: { backend: hermes-gateway, gateway_url_env: HERMES_TUI_GATEWAY_URL, session: main } # exact live Hermes TUI session
 brain:
   backend: acp
   binary: hermes                # install/auth this ACP agent, or replace it; see docs/brains.md

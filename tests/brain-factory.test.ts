@@ -12,6 +12,7 @@ import { TabInjectBrain } from "../src/brain/tab-inject";
 import { KittyAdapter } from "../src/terminal/kitty";
 import { NullTerminalAdapter } from "../src/terminal/null";
 import { SwitchboardBrain } from "../src/brain/switchboard";
+import { HermesGatewayBrain } from "../src/brain/hermes-gateway";
 
 function cfg(
   backend: CiceroConfig["brain"]["backend"],
@@ -52,6 +53,12 @@ test("factory returns OpenAiCompatibleBrain for openai-compatible (local / Herme
 });
 test("factory returns OpenAiCompatibleBrain for an OpenAI preset (openrouter)", () => {
   expect(createBrain(cfg("openrouter", { model: "z-ai/glm-4.6", api_key: "k" }))).toBeInstanceOf(OpenAiCompatibleBrain);
+});
+test("factory returns HermesGatewayBrain for an existing live Hermes session", () => {
+  expect(createBrain(cfg("hermes-gateway", {
+    gateway_url: "ws://127.0.0.1:9119/api/ws?token=test",
+    session: "main",
+  }))).toBeInstanceOf(HermesGatewayBrain);
 });
 test("factory passes binary_args + unset_env to claude-code", () => {
   const brain = createBrain(cfg("claude-code", { binary_args: ["--dangerously-skip-permissions"], unset_env: ["ANTHROPIC_API_KEY"] }));
