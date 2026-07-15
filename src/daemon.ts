@@ -216,6 +216,18 @@ export class CiceroDaemon {
     await Bun.write(this.overnightPath, "[]");
     return q;
   }
+  /** Synthesize a notification clip: lane-or-raw voice resolution plus the
+   * URL strip (bare links are for the text surfaces — the audio never reads
+   * one out). Shared by the eager (onNotify) and lazy (onNotifyRender)
+   * paths so the two can never drift. */
+  private async renderNotifyClip(text: string, voice: string | undefined): Promise<ArrayBuffer> {
+    // voice = a lane name (its configured voice is used) or a raw voice name
+    // — an employee's news arrives in the employee's voice.
+    const laneVoice = voice ? this.config.brain.lanes?.[voice]?.voice ?? voice : undefined;
+    const spoken = text.replace(/https?:\/\/[^\s<>"')\]]+/g, "").replace(/\s{2,}/g, " ").trim()
+      || "I sent you the link.";
+    return await this.providers.tts.generateAudio(speakable(spoken), laneVoice);
+  }
   private pendingRecovery: { spoken: string[] } | null = null;
   private activeLocalTurn: AbortController | null = null;
   /** Every local mic/dashboard command, including superseded turns winding down. */
@@ -987,14 +999,29 @@ export class CiceroDaemon {
               if (opts?.signal?.aborted) return null;
               return null;
             }
-            // voice = a lane name (its configured voice is used) or a raw voice
-            // name — an employee's news arrives in the employee's voice.
-            const laneVoice = voice ? this.config.brain.lanes?.[voice]?.voice ?? voice : undefined;
-            // Bare URLs are for the text surfaces (Telegram message, voice-page
-            // notice card) — the audio never reads one out.
-            const spoken = text.replace(/https?:\/\/[^\s<>"')\]]+/g, "").replace(/\s{2,}/g, " ").trim()
-              || "I sent you the link.";
-            const audio = await this.providers.tts.generateAudio(speakable(spoken), laneVoice);
+            // skipRender: nobody is connected to hear it, so the clip can be
+            // synthesized at flush time (onNotifyRender) instead of now — a
+            // notification that only ever gets parked must not cost a GPU
+            // synthesis. Only a Telegram voice note still forces the render:
+            // the phone needs the clip immediately.
+            const tgEarly = this.config.notify?.telegram;
+            const mirrors = tgEarly && opts?.telegramMirror !== false;
+            if (opts?.skipRender && !(mirrors && tgEarly.voice_note)) {
+              // Parity with the eager path's post-render abort check: a turn
+              // cancelled mid-dispatch must not mirror or park.
+              if (opts?.signal?.aborted) return null;
+              if (mirrors) {
+                this.runBackground("Telegram notify delivery", async () => {
+                  try {
+                    await sendTelegramText(tgEarly, text);
+                  } catch (error) {
+                    log("warn", `Telegram notify delivery failed: ${error instanceof Error ? error.message : String(error)}`);
+                  }
+                });
+              }
+              return new ArrayBuffer(0);
+            }
+            const audio = await this.renderNotifyClip(text, voice);
             if (opts?.signal?.aborted) return null;
             const tg = this.config.notify?.telegram;
             // telegramMirror: false = the caller delivers its own Telegram
@@ -1012,6 +1039,20 @@ export class CiceroDaemon {
             return audio;
           } catch (error) {
             throw new Error(`web notify failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+          }
+        },
+        // The lazy half of onNotify: pure synthesis for a parked notification
+        // being flushed to a client. No quiet-hours check (the item was
+        // accepted at dispatch), no Telegram mirror (already sent), no
+        // onNotified (context was injected when it parked).
+        onNotifyRender: async (text, voice, opts) => {
+          try {
+            opts?.signal?.throwIfAborted();
+            const audio = await this.renderNotifyClip(text, voice);
+            opts?.signal?.throwIfAborted();
+            return audio;
+          } catch (error) {
+            throw new Error(`parked notify render failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
           }
         },
         // Render-only TTS (the Telegram call greeting, external integrations)

@@ -93,7 +93,16 @@ export interface WebVoiceServerOptions {
    * audioBase64} to every connected voice client — Cicero speaks up unprompted
    * ("PR #142 is up") instead of only answering. Optional.
    */
-  onNotify?: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal }) => Promise<ArrayBuffer | null>;
+  onNotify?: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal; skipRender?: boolean }) => Promise<ArrayBuffer | null>;
+  /**
+   * Render a notification clip with no fan-out — the lazy half of onNotify.
+   * When nobody is connected, dispatchNotify asks onNotify to skip synthesis
+   * (skipRender) and parks the TEXT; this hook renders at flush time, when a
+   * client actually shows up to hear it. A notification that only ever gets
+   * parked and expires must not cost a synthesis. Optional: without it,
+   * onNotify always renders and the park stores audio, as before.
+   */
+  onNotifyRender?: (text: string, voice?: string, opts?: { signal?: AbortSignal }) => Promise<ArrayBuffer>;
   /**
    * A notification actually went out (broadcast to clients, or parked for the
    * next one — not deferred by quiet hours). The daemon uses this to hand the
@@ -299,7 +308,7 @@ function requestedId(req: Request, url: URL, header: string, query: string): str
  * because a headless box is driven from another machine's browser.
  */
 export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle | null {
-  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotified, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness } = opts;
+  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness } = opts;
   const scheme: "http" | "https" = tls ? "https" : "http";
   const configuredDrainTimeout = opts.shutdownDrainTimeoutMs;
   const shutdownDrainTimeoutMs = typeof configuredDrainTimeout === "number" && Number.isFinite(configuredDrainTimeout) && configuredDrainTimeout >= 1
@@ -479,17 +488,98 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   // Notifications that arrived with no client connected are parked and spoken
   // to the next client that connects ("speak when you're back"). Bounded and
   // time-limited: stale news is worse than no news.
-  const parked: Array<{ text: string; audioBase64: string; at: number }> = [];
+  // audioBase64: null marks a lazily-parked item — the clip is synthesized at
+  // flush time via onNotifyRender, so news nobody ever hears (parked clips die
+  // of TTL more often than they get heard) never costs a GPU synthesis.
+  const parked: Array<{ text: string; voice?: string; audioBase64: string | null; at: number }> = [];
   const PARK_MAX = 10;
   const PARK_TTL_MS = 4 * 60 * 60 * 1000;
-  const flushParked = (ws: import("bun").ServerWebSocket<WsData>) => {
-    const now = Date.now();
+  // Ordering note: a live notify dispatched while an old parked item is mid-
+  // render can reach clients first. Arrival order across the park boundary was
+  // never guaranteed (parked news already waited for a connect); each item's
+  // own text carries its context.
+  let flushingParked = false;
+  let flushRequested = false;
+  const drainParkedPass = async (): Promise<void> => {
     while (parked.length) {
+      if (shutdownController.signal.aborted) return;
+      if (clients.size === 0) return;
       const p = parked.shift();
-      if (p && now - p.at <= PARK_TTL_MS) {
-        sendJson(ws, withSession(ws, { type: "notify", text: p.text, audioBase64: p.audioBase64 }));
+      if (!p || Date.now() - p.at > PARK_TTL_MS) continue;
+      let audioBase64 = p.audioBase64;
+      if (audioBase64 === null) {
+        if (!onNotifyRender) continue;
+        try {
+          const rendered = await onNotifyRender(p.text, p.voice, { signal: shutdownController.signal });
+          const audio = snapshotSynthesizedWav(rendered, { maxBytes: MAX_TURN_AUDIO_BYTES, allowEmpty: true }).audio;
+          audioBase64 = audio.byteLength > 0 ? Buffer.from(audio).toString("base64") : "";
+        } catch (error) {
+          // A transient TTS failure must not eat the news: put the item
+          // back and let the next connect retry. TTL still bounds its life.
+          parked.unshift(p);
+          if (!shutdownController.signal.aborted) {
+            log("warn", `parked notify render failed, retrying on next connect: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          return;
+        }
+        if (shutdownController.signal.aborted) {
+          // Shutdown raced the render: keep the item (with its clip) for
+          // the next daemon lifetime rather than publishing into teardown.
+          parked.unshift({ ...p, audioBase64 });
+          return;
+        }
+      }
+      // Deliver to the first live client; a socket that died between connect
+      // and now must not eat the item — or strand it while others listen.
+      let sent = false;
+      for (const ws of clients) {
+        try {
+          sendJson(ws, withSession(ws, { type: "notify", text: p.text, audioBase64 }));
+          sent = true;
+          break;
+        } catch { /* try the next client */ }
+      }
+      if (!sent) {
+        parked.unshift({ ...p, audioBase64 }); // keep the rendered clip
+        return;
       }
     }
+  };
+  const flushParked = async (): Promise<void> => {
+    if (flushingParked) {
+      // A drain is active. Latch the new listener: the running pass may
+      // re-park an item (render failure, dead socket) after this early
+      // return, and without the latch that item would strand until yet
+      // another connect. Each latched request grants at most one re-pass,
+      // so a permanently failing render cannot hot-loop.
+      flushRequested = true;
+      return;
+    }
+    flushingParked = true;
+    try {
+      do {
+        flushRequested = false;
+        await drainParkedPass();
+      } while (flushRequested && parked.length > 0 && clients.size > 0 && !shutdownController.signal.aborted);
+    } finally {
+      flushingParked = false;
+    }
+  };
+  const startParkedFlush = (): void => {
+    // An active drain needs no new task (and holds a background slot that
+    // could read as a full cap) — latch the request so it re-passes.
+    if (flushingParked) {
+      flushRequested = true;
+      return;
+    }
+    // Begin only when stop() can own the flush — an untracked render could
+    // outlive shutdown. The admission check mirrors trackBackground's, so
+    // registration below cannot fail; the microtask defer means no flush
+    // code runs before ownership is registered. When declined (shutting
+    // down or at the background cap) the items stay parked and the next
+    // connect retries.
+    if (!accepting || backgroundTasks.size >= MAX_BACKGROUND_WEB_JOBS) return;
+    trackBackground(Promise.resolve().then(flushParked));
   };
 
   // Render a notification and deliver it: broadcast to every connected client,
@@ -502,6 +592,10 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     if (!onNotify) return null;
     const signal = notifyOpts?.signal ?? shutdownController.signal;
     if (signal.aborted) return null;
+    // With a lazy renderer wired and nobody connected, tell the daemon to skip
+    // the synthesis: quiet hours and the Telegram mirror still apply, but the
+    // clip is rendered only when a client shows up to hear it.
+    const lazy = clients.size === 0 && typeof onNotifyRender === "function";
     // Full text goes down — the daemon strips URLs from the audio only, so
     // the Telegram mirror and the voice-page notice card keep the link.
     let providerAudio: ArrayBuffer | null;
@@ -510,6 +604,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         urgent: notifyOpts?.urgent,
         telegramMirror: notifyOpts?.telegramMirror,
         signal,
+        skipRender: lazy,
       });
     } catch (error) {
       throw new Error(`notification render failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
@@ -524,7 +619,24 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       maxBytes: MAX_TURN_AUDIO_BYTES,
       allowEmpty: true,
     }).audio;
-    const audioBase64 = audio.byteLength > 0 ? Buffer.from(audio).toString("base64") : "";
+    let audioBase64 = audio.byteLength > 0 ? Buffer.from(audio).toString("base64") : "";
+    if (lazy && audioBase64 === "" && clients.size > 0) {
+      // Race: a client connected while the daemon was told to skip the render.
+      // Render inline rather than hand them a silent notice card; on failure,
+      // deliver text-only rather than fail a notification that's already
+      // mirrored to Telegram.
+      try {
+        const rendered = await onNotifyRender!(text, voice, { signal });
+        const a = snapshotSynthesizedWav(rendered, { maxBytes: MAX_TURN_AUDIO_BYTES, allowEmpty: true }).audio;
+        audioBase64 = a.byteLength > 0 ? Buffer.from(a).toString("base64") : "";
+      } catch (error) {
+        // Cancellation is not a TTS failure — an aborted turn must not
+        // publish, not even text-only.
+        if (signal.aborted) return null;
+        log("warn", `late notify render failed, delivering text-only: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (signal.aborted) return null;
+    }
     let delivered = 0;
     for (const ws of clients) {
       try {
@@ -533,7 +645,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       } catch { /* socket closed */ }
     }
     if (delivered === 0) {
-      parked.push({ text, audioBase64, at: Date.now() });
+      // The daemon may render even when told it could skip (a Telegram voice
+      // note needs the clip now) — an audio-bearing park keeps that work.
+      parked.push({ text, voice, audioBase64: lazy && audioBase64 === "" ? null : audioBase64, at: Date.now() });
       if (parked.length > PARK_MAX) parked.shift();
       log("info", `notify: "${text.substring(0, 60)}" — no client connected, parked for the next one`);
       reportNotified(text, { delivered, parked: true });
@@ -1120,11 +1234,13 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               })
               .catch(() => { /* history is best-effort */ })
               .finally(() => {
-                if (accepting && clients.has(ws)) flushParked(ws);
+                if (accepting && clients.has(ws)) {
+                  startParkedFlush();
+                }
                 releaseJob();
               });
           } else {
-            if (accepting) flushParked(ws);
+            if (accepting) startParkedFlush();
           }
         },
         async message(ws, message) {
