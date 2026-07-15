@@ -690,8 +690,9 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       checkClockTime(config.notify.quiet_hours.to, "notify.quiet_hours.to", issues);
     }
     if (isRecord(config.notify.briefing)) {
-      checkKnownKeys(config.notify.briefing, "notify.briefing", ["at", "call"], issues);
+      checkKnownKeys(config.notify.briefing, "notify.briefing", ["at", "call", "catch_up_minutes"], issues);
       checkClockTime(config.notify.briefing.at, "notify.briefing.at", issues);
+      checkOptionalInteger(config.notify.briefing, "catch_up_minutes", "notify.briefing", issues, { min: 0, max: 720 });
     }
     if (config.notify.schedules !== undefined) {
       if (!Array.isArray(config.notify.schedules)) {

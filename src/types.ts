@@ -51,7 +51,7 @@ export interface CiceroConfig {
     }; // phone notifications: text by default, voice notes opt-in
     timezone?: string; // IANA name (America/New_York) — quiet_hours and briefing.at are read in THIS zone; default is the box clock
     quiet_hours?: { from: string; to: string }; // HH:MM in notify.timezone — notifications defer instead of pinging
-    briefing?: { at: string; call?: boolean };  // daily digest of deferred news + board state; call: also ring and speak it
+    briefing?: { at: string; call?: boolean; catch_up_minutes?: number };  // daily digest of deferred news + board state; call: also ring and speak it; catch-up defaults to 180 minutes
     schedules?: Array<{ name?: string; at: string; prompt: string; lane?: string }>; // daily unattended brain turns (research briefs, digests) texted via notify.telegram; lane targets a named brain lane, otherwise the front desk answers; quiet hours hold delivery, not the work
     call_minutes?: boolean | { min_minutes?: number }; // notes texted after a voice session goes quiet; only for calls longer than min_minutes (default 3)
     kanban?: { enabled?: boolean; interval_seconds?: number; command?: string[]; task_command?: string[]; call_back?: boolean; nudge_after_minutes?: number }; // announce task completions; call_back rings the phone when nobody's listening (never for blocked tasks); nudge_after_minutes (default 60, 0 = off) reminds about tasks nobody picked up

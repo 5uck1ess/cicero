@@ -15,6 +15,7 @@ export interface QuietHoursConfig {
 export interface BriefingConfig {
   at: string;      // "HH:MM", box-local time, fires once a day
   call?: boolean;  // also ring the phone and speak it (default: text only)
+  catch_up_minutes?: number; // restart catch-up window (default 180, 0 = exact minute only)
 }
 
 /** "HH:MM" → minutes past midnight. Throws on garbage so config errors surface at startup. */

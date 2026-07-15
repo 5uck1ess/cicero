@@ -169,7 +169,7 @@ export interface WebVoiceHandle {
    * broadcast, park when nobody's connected) — for in-process callers like the
    * kanban watcher. Resolves null when unavailable, saturated, or quiescing.
    */
-  notify: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean }) => Promise<{ delivered: number; parked: boolean } | null>;
+  notify: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal }) => Promise<{ delivered: number; parked: boolean } | null>;
   /** Quiesce ingress, cancel owned work, close sockets, and drain handlers. */
   stop: () => Promise<void>;
 }
@@ -673,7 +673,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   const notify = async (
     text: string,
     voice?: string,
-    notifyOpts?: { urgent?: boolean; telegramMirror?: boolean },
+    notifyOpts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal },
   ): Promise<{ delivered: number; parked: boolean } | null> => {
     const normalizedText = text.trim();
     const normalizedVoice = voice?.trim() || undefined;
@@ -684,7 +684,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     try {
       return await dispatchNotify(normalizedText, normalizedVoice, {
         ...notifyOpts,
-        signal: shutdownController.signal,
+        signal: notifyOpts?.signal
+          ? AbortSignal.any([shutdownController.signal, notifyOpts.signal])
+          : shutdownController.signal,
       });
     } catch (error) {
       if (error instanceof Error) throw error;
