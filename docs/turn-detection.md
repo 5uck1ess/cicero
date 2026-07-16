@@ -17,8 +17,10 @@ this needs a (tiny) model, and why ChatGPT/Gemini use semantic turn detection to
 
 ## Why
 
-Today turn-taking is decided purely by silence: `ConversationalListener` lets the
-recorder auto-stop after `silenceDuration` of quiet. That cuts users off when they
+Without Smart-Turn, turn-taking is decided by quiet alone: the streaming VAD
+(on by default) ends the turn after `vad.hangover_ms` of silence, and with
+`vad.enabled: false` the plain silence gate does the same with `silenceDuration`.
+Either way it's a timer — it cuts users off when they
 pause mid-thought, and waits too long when they're clearly done. **Smart-Turn** is
 a small ONNX classifier that, given the buffered speech, predicts whether the turn
 is *semantically* complete — so we can end snappily when the user is done and keep

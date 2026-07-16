@@ -127,7 +127,7 @@ Use `timeout_s` for a legitimately long-running custom action and
 values are validated at startup and on hot reload; unsafe, non-finite, or
 out-of-range limits are rejected instead of weakening the process boundary.
 
-Built-in actions: focus tab, open project, list tabs.
+Built-in actions: focus tab, list tabs.
 
 ## Validation and startup failures
 
