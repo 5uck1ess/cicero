@@ -17,8 +17,10 @@ this needs a (tiny) model, and why ChatGPT/Gemini use semantic turn detection to
 
 ## Why
 
-Today turn-taking is decided purely by silence: `ConversationalListener` lets the
-recorder auto-stop after `silenceDuration` of quiet. That cuts users off when they
+Without Smart-Turn, turn-taking is decided by quiet alone: the streaming VAD
+(on by default) ends the turn after `vad.hangover_ms` of silence, and with
+`vad.enabled: false` the plain silence gate does the same with `silenceDuration`.
+Either way it's a timer — it cuts users off when they
 pause mid-thought, and waits too long when they're clearly done. **Smart-Turn** is
 a small ONNX classifier that, given the buffered speech, predicts whether the turn
 is *semantically* complete — so we can end snappily when the user is done and keep
@@ -119,9 +121,15 @@ turn:
   timeout_ms: 10000      # absolute /predict deadline, including response body
 ```
 
-**Tuning tip:** turn detection composes with a *shorter* `silence_duration`.
-Lower it (e.g. `"0.5"`) for snappy turn-taking — the grace loop catches the
-mid-thought cutoffs that a short timer would otherwise cause.
+**Tuning tip (local-mic conversational mode):** turn detection composes with a
+*shorter* quiet window. On the local mic's default path that window is the
+streaming VAD's `vad.hangover_ms` — lower it (e.g. `300`) for snappy
+turn-taking; `silence_duration` only governs when `vad.enabled: false`, where
+`"0.5"` is the equivalent move. Either way the grace loop catches the
+mid-thought cutoffs a short window would otherwise cause. These knobs do not
+apply to the browser path: the web-voice page runs its own client-side VAD
+with a fixed hangover, and Smart-Turn rides on top of whatever the client
+sends.
 
 This touches the load-bearing listen loop, so it stays gated behind
 verify-before-stacking — confirm the conversational voice path on hardware first.
