@@ -194,7 +194,11 @@ function prepareKnownSecrets(knownSecrets?: readonly string[], includeJsonEscape
 }
 
 function enterKnownSecretScope(knownSecrets?: readonly string[]): { secrets: readonly string[] } {
-  const scope = { secrets: prepareKnownSecrets(knownSecrets) };
+  // Include the JSON-escaped variants at snapshot time too: source text may
+  // already carry a secret in escaped form, and render() serializes it AGAIN —
+  // a twice-escaped occurrence matches neither raw nor once-escaped at render
+  // time, so the escaped form must be caught before the second serialization.
+  const scope = { secrets: prepareKnownSecrets(knownSecrets, true) };
   activeKnownSecretScopes.push(scope);
   return scope;
 }

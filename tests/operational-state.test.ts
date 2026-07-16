@@ -261,6 +261,30 @@ test("overlapping snapshots with different secrets each redact their own", async
   expect(render(secondState, [secondSecret])).not.toContain("F".repeat(50));
 });
 
+test("a secret already JSON-escaped in source text does not survive the second serialization", async () => {
+  const now = new Date("2026-07-16T13:00:00.000Z");
+  // The secret contains a quote, so text that carries its JSON-escaped form
+  // gets escaped AGAIN by render's serialization — a twice-escaped occurrence
+  // that neither the raw nor once-escaped variant matches at render time.
+  const secret = 'AllLetterPrefix"AllLetterSuffix';
+  const escapedOccurrence = JSON.stringify(secret).slice(1, -1);
+  const state = await snapshot({
+    now: () => now,
+    startedAtMs: null,
+    timezone: "UTC",
+    secrets: [secret],
+    board: () => ({
+      asOfMs: now.getTime(), truncated: false, totalTasks: 1,
+      tasks: [{ id: "secret", title: `rotate ${escapedOccurrence}`, status: "blocked" }],
+    }),
+  });
+
+  const text = render(state, [secret]);
+  expect(text).not.toContain("AllLetterPrefix");
+  expect(text).not.toContain("AllLetterSuffix");
+  expect(text).toContain("rotate <redacted>");
+});
+
 test("known configured secrets are redacted in their JSON-escaped form", async () => {
   const now = new Date("2026-07-16T13:00:00.000Z");
   const secret = 'abcdefgh"ijklmnop';

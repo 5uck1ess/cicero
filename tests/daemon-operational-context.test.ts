@@ -265,6 +265,38 @@ test("daemon operational context redacts lane and lane-fallback env credentials"
   expect(text).toContain("rotate <redacted> and <redacted>");
 });
 
+test("daemon operational context redacts credentials embedded in a configured base URL", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-daemon-operational-url-"));
+  roots.push(root);
+  // Validation permits query-bearing and userinfo-bearing endpoint URLs; those
+  // credential components never pass through the api-key fields.
+  const queryToken = "AllLetterEndpointCredential";
+  const password = "AllLetterUserinfoCredential";
+  const now = Date.now();
+  const config = loadConfig({}, { home: root });
+  config.raw.brain = {
+    backend: "openai-compatible",
+    model: "m",
+    base_url: `https://user:${password}@remote.example/v1?access_token=${queryToken}`,
+  };
+  const daemon = new CiceroDaemon(config) as unknown as OperationalDaemonHarness;
+  daemon.startedAtMs = now;
+  daemon.kanbanWatcher = {
+    snapshot: () => ({
+      asOfMs: now, truncated: false, totalTasks: 1,
+      tasks: [{ id: "secret", title: `rotate ${queryToken} and ${password}`, status: "blocked" }],
+    }),
+  };
+
+  const inventory = daemon.snapshotKnownSecrets();
+  expect(inventory).toContain(queryToken);
+  expect(inventory).toContain(password);
+  const text = await daemon.operationalContext();
+  expect(text).not.toContain(queryToken);
+  expect(text).not.toContain(password);
+  expect(text).toContain("rotate <redacted> and <redacted>");
+});
+
 test("daemon operational context redacts a configured Cookie credential header value", async () => {
   const root = mkdtempSync(join(tmpdir(), "cicero-daemon-operational-cookie-"));
   roots.push(root);

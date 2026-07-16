@@ -407,6 +407,22 @@ export class CiceroDaemon {
       addEnv(resolveOpenAiTarget(target).apiKeyEnv);
     }
 
+    // A configured endpoint URL may embed credentials the api-key fields never
+    // see — userinfo or a signed/query token — and validation permits both.
+    // Inventory each component value (searchParams are already decoded).
+    const addUrlCredentials = (raw: string | undefined) => {
+      if (!raw?.trim()) return;
+      let url: URL;
+      try { url = new URL(raw); } catch { return; }
+      for (const part of [url.username, url.password]) {
+        add(part);
+        try { add(decodeURIComponent(part)); } catch { /* malformed escape — raw form is inventoried above */ }
+      }
+      for (const value of url.searchParams.values()) add(value);
+    };
+    addUrlCredentials(this.config.brain?.base_url);
+    addUrlCredentials(this.config.llmBackend?.baseUrl);
+
     // Lane agents receive their configured env maps verbatim (brain.lanes.*.env
     // and each fallback's env) — an ANTHROPIC_API_KEY placed there reaches the
     // lane process but never the credential fields above. Same safe-fail
