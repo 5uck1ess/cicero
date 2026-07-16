@@ -16,17 +16,20 @@ new channel must not quietly turn shared state into a multi-user contract.
 | **Local mic / speakers** | in + out | inside the daemon | direct audio devices ([daemon mode](daemon-mode.md)) |
 | **Browser / PWA** | in + out | inside the daemon | WebSocket protocol v2 over HTTPS, token-authenticated ([web voice](web-voice.md), `src/web-voice/server.ts`) |
 | **Telegram text bot** | in + out | inside the daemon | Bot API long-polling (`getUpdates`), user-ID allowlist (`src/notify/telegram.ts`, [notifications](notifications.md)) |
-| **Telegram calls** | in + out | **separate Python sidecar** | bridges call audio ↔ the same authenticated web-voice WebSocket the browser uses (`sidecars/telegram-call/`) |
-| **Sidecar mode** (`cicero hook`) | out only | inside the `cicero hook` process | agent hooks / terminal scrape in, `SpeakAdapter` out (`src/sidecar/`) |
+| **Telegram calls** | in + out | **separate Python sidecar** | bridges call audio ↔ the same authenticated web-voice WebSocket endpoint the browser uses, on the v1 framing (`sidecars/telegram-call/`) |
+| **Sidecar mode** (`cicero hook` / `cicero scrape`) | out only | their own processes | Claude Code hooks and terminal scrape are `SpeakAdapter`s; the Codex hook forwards HTTP to `/speak` (`src/sidecar/`) |
 | **Notify targets** | out only | inside the daemon | browser voice-back, Telegram notes/texts, and ringing you via the call sidecar ([notifications](notifications.md)) |
 
 Two facts fall out of the table that matter for extension work:
 
 - **The web-voice WebSocket is the de-facto channel API for audio.** The
   Telegram call sidecar is not a special case in the daemon — it is just
-  another authenticated protocol-v2 client, exactly like the browser page. The
-  daemon neither knows nor cares that a phone call is on the other side. The
-  frame format and identity rules are documented in
+  another authenticated client of the same endpoint. The daemon neither knows
+  nor cares that a phone call is on the other side. One precision: the server
+  speaks two framings — the built-in page requests protocol v2
+  (`/ws?protocol=2`, tagged `CVP2` frames), while the call sidecar connects
+  plain `/ws` and uses the original v1 raw-WAV/untagged-JSON format. A new
+  bridge can use either; both are documented in
   [web voice → transport identity](web-voice.md#transport-identity-and-limits).
 - **Text channels currently live inside the daemon.** Telegram text is wired
   directly into `src/notify/` — there is no channel registry to drop a module
@@ -44,7 +47,8 @@ example, and its responsibilities are the checklist:
 - authenticate to the daemon with the web-voice token; reconnect with bounded
   backoff when the daemon restarts;
 - enforce *its own* caller allowlist before bridging anyone to your agent
-  (the Telegram sidecar refuses to start without one);
+  (the Telegram sidecar refuses to *listen* for incoming calls without one;
+  outgoing-only dialing works without it);
 - resample platform audio to what the protocol expects, run local
   voice-activity detection, and forward barge-in;
 - keep an absolute deadline and size bound on everything it reads from the
@@ -85,11 +89,16 @@ contract in [brains](brains.md).
 Sidecar mode has a real, small seam. An adapter implements
 `{ name, attach(service), detach(), health() }` and receives a `SpeakService`
 whose `speak({ text, agent?, skipSummary? })` does the summarize-and-say work
-(`src/sidecar/types.ts`, registry in `src/sidecar/registry.ts`; Claude Code
-hooks, Codex hooks, and terminal scrape are the shipped adapters). If your
-"channel" only needs Cicero to *speak or forward what an agent said* — a
-status LED, a desktop notifier, another chat surface — this is the cheapest
-correct home, and it doesn't touch the daemon.
+(`src/sidecar/types.ts`). The registry in `src/sidecar/registry.ts` ships
+exactly two adapters — Claude Code hooks (run by `cicero hook`) and terminal
+scrape (run by the separate `cicero scrape` command) — and config validation
+accepts only those names. The Codex integration is *not* a `SpeakAdapter`: its
+hook posts authenticated HTTP to the hook server's `/speak`
+(`src/sidecar/codex-hook.ts`), which is a second honest way in for anything
+that can make a local HTTP call. If your "channel" only needs Cicero to
+*speak or forward what an agent said* — a status LED, a desktop notifier,
+another chat surface — one of these two seams is the cheapest correct home,
+and neither touches the daemon.
 
 ## What this is not
 
