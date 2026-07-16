@@ -30,8 +30,11 @@ need one home:
   allowlist (`CICERO_TG_ALLOWED`). The call listener fails closed without the
   allowlist. Names and details: [notifications](notifications.md) and the
   [call sidecar README](../sidecars/telegram-call/README.md).
-- Nothing else should hold credentials. What must never leak into logs or
-  dashboards is specified in [security](security.md).
+- Those are the credentials *you* place. The runtime creates more of its own —
+  the Telegram userbot session file, the sidecar hook token, agent settings
+  copies — so treat `~/.cicero/` as credential-bearing wholesale. What must
+  never leak into logs or dashboards, and the storage rules, are specified in
+  [security](security.md).
 
 ## 2. The daemon, supervised
 
@@ -47,9 +50,10 @@ journalctl --user -u cicero -f
 ```
 
 The daemon launches and supervises its own model servers, so STT/TTS need no
-units of their own. Note that speech engines it manages may shut down when
-idle — a health probe finding a TTS port closed between conversations is
-normal, not an outage.
+units of their own — they stay running, and the daemon revives one that dies
+unexpectedly. A managed engine's port staying closed is therefore a failure
+or an in-progress recovery, not idleness: check `journalctl --user -u cicero`
+rather than shrugging it off.
 
 ## 3. Phone calls, supervised
 
@@ -104,11 +108,19 @@ Restart **only the daemon** by default. The call sidecar survives daemon
 restarts on its own — it re-dials the daemon socket with backoff, releases a
 bridge on Telegram's hang-up, and reaps one that has gone silent — whereas
 restarting `telegram-call` sends SIGTERM to the listener, which *ends a live
-call*. Restart the sidecar only when its own code, requirements, `.env`, or
-unit file changed, and preferably between calls:
+call*. Deploy sidecar changes separately, preferably between calls, and
+actually apply what changed before restarting — a bare restart keeps stale
+dependencies and stale unit definitions:
 
 ```bash
-systemctl --user restart telegram-call   # sidecar-change deploys only
+# Only when sidecars/telegram-call/ code, requirements, or .env changed:
+uv pip install --python ~/.cicero/tgcalls-venv -r requirements/telegram-call.txt
+systemctl --user restart telegram-call
+
+# Only when a deploy/*.service template changed (either unit):
+cp deploy/cicero.service deploy/telegram-call.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user restart cicero telegram-call
 ```
 
 Re-run the step-5 acceptance tests after any upgrade that touched the voice
