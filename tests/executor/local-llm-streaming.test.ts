@@ -1,7 +1,7 @@
 import { afterEach, expect, jest, test } from "bun:test";
 import { ActionExecutor } from "../../src/executor";
 import type { RuntimeConfig } from "../../src/config";
-import type { RouterResult, TerminalAdapter, Brain, Speaker } from "../../src/types";
+import type { RouterResult, TerminalAdapter, Brain, BrainTurnOptions, Speaker } from "../../src/types";
 import type { ContextStore } from "../../src/brain/context-store";
 import type { LLMProvider, ChatMessage, LLMCompletionOpts } from "../../src/backends/llm/provider";
 
@@ -57,13 +57,16 @@ const route: RouterResult = {
   confidence: 0.9,
 };
 
-test("streaming path sends the full transcript and yields sentences", async () => {
+test("streaming path sends the full transcript and immutable system context", async () => {
   const llm = new StreamingFake(["Yes I can ", "hear you. ", "All good."]);
   const exec = makeExecutor(llm);
 
-  const sentences = await drain(exec.executeLocalLLMStreaming(route, "Can you hear me?"));
+  const sentences = await drain(exec.executeLocalLLMStreaming(route, "Can you hear me?", {
+    systemContext: "turn-operational-state",
+  }));
 
   expect(sentences).toEqual(["Yes I can hear you.", "All good."]);
+  expect(llm.lastMessages[0]?.content).toContain("turn-operational-state");
   const lastUser = llm.lastMessages.filter((m) => m.role === "user").at(-1);
   expect(lastUser?.content).toBe("Can you hear me?"); // full utterance, not "hear me"
 });
@@ -130,20 +133,26 @@ test("stream failure before output falls back to brain streaming with the caller
     })(),
   };
   const controller = new AbortController();
-  let forwardedSignal: AbortSignal | undefined;
+  let forwardedOptions: BrainTurnOptions | undefined;
   const brain: Partial<Brain> = {
     send: () => Promise.resolve("unused"),
     sendStream: (_message, options) => {
-      forwardedSignal = options?.signal;
+      forwardedOptions = options;
       return (async function* () { yield "Fallback answer. Ready."; })();
     },
   };
   const exec = makeExecutor(llm, brain);
 
-  const sentences = await drain(exec.executeLocalLLMStreaming(route, "help me", controller.signal));
+  const sentences = await drain(exec.executeLocalLLMStreaming(route, "help me", {
+    signal: controller.signal,
+    systemContext: "fallback-operational-state",
+  }));
 
   expect(sentences).toEqual(["Fallback answer.", "Ready."]);
-  expect(forwardedSignal).toBe(controller.signal);
+  expect(forwardedOptions).toEqual({
+    signal: controller.signal,
+    systemContext: "fallback-operational-state",
+  });
 });
 
 test("batch failure falls back to brain.send with the caller signal", async () => {
@@ -162,7 +171,7 @@ test("batch failure falls back to brain.send with the caller signal", async () =
   };
   const exec = makeExecutor(llm, brain);
 
-  const sentences = await drain(exec.executeLocalLLMStreaming(route, "help me", controller.signal));
+  const sentences = await drain(exec.executeLocalLLMStreaming(route, "help me", { signal: controller.signal }));
 
   expect(sentences).toEqual(["Batch fallback.", "Complete."]);
   expect(forwardedSignal).toBe(controller.signal);
@@ -341,7 +350,7 @@ test("caller cancellation stops a signal-ignoring stream without fallback", asyn
     },
   });
   const controller = new AbortController();
-  const consuming = drain(exec.executeLocalLLMStreaming(route, "cancel me", controller.signal));
+  const consuming = drain(exec.executeLocalLLMStreaming(route, "cancel me", { signal: controller.signal }));
 
   await started;
   controller.abort("barge-in");
@@ -383,7 +392,7 @@ test("caller cancellation aborts an in-flight local model stream", async () => {
     },
   });
   const controller = new AbortController();
-  const consuming = drain(exec.executeLocalLLMStreaming(route, "cancel me", controller.signal));
+  const consuming = drain(exec.executeLocalLLMStreaming(route, "cancel me", { signal: controller.signal }));
 
   await started;
   controller.abort("barge-in");

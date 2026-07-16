@@ -181,6 +181,11 @@ export class KanbanWatcher {
     now?: () => number;
   }) {}
 
+  /** Whether polling has been started (and not yet stopped). */
+  get polling(): boolean {
+    return this.running;
+  }
+
   start(): void {
     if (this.running) return;
     this.running = true;

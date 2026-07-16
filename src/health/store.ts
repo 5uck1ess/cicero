@@ -35,9 +35,10 @@ export const HEALTH_READ_TAIL_BYTES = 64 * 1024;
 
 /**
  * Absolute cap on bytes a since()-window read may retain. A time-window query
- * grows its read until the window is covered, but never past this — so a
- * pathologically grown log cannot OOM the daemon while still covering any
- * realistic trend window (~4 MiB is tens of thousands of entries).
+ * grows its read toward byte 0, but never past this — so entries older than the
+ * cap from the end of a pathologically grown log may be missed, while the daemon
+ * still covers any realistic trend window without risking an OOM (~4 MiB is
+ * tens of thousands of entries).
  */
 export const HEALTH_SINCE_MAX_BYTES = 4 * 1024 * 1024;
 
@@ -69,20 +70,17 @@ export class HealthStore {
   }
 
   /**
-   * Entries at or after `sinceMs`, oldest first. Reads from the file tail and
-   * grows the read until the window is covered (the oldest entry read predates
-   * `sinceMs`, or the whole file was read), capped at HEALTH_SINCE_MAX_BYTES so a
-   * runaway log can't OOM the daemon. A small window (the 24h summary refresh)
-   * costs one bounded read; a wide trend window reads only as far back as needed.
+   * Entries at or after `sinceMs`, in file order. Reads from the file tail and
+   * grows the read until the whole file is covered, without assuming file order
+   * matches timestamp order. The read remains capped at HEALTH_SINCE_MAX_BYTES,
+   * so entries farther than that cap from the end of a pathologically large log
+   * may be missed, while a runaway log cannot OOM the daemon.
    */
   async since(sinceMs: number, signal?: AbortSignal): Promise<HealthEntry[]> {
     let maxBytes = HEALTH_READ_TAIL_BYTES;
     for (;;) {
       const { entries, reachedStart } = await this.readTail(maxBytes, signal);
-      const oldest = entries[0];
-      const covered = reachedStart
-        || (oldest !== undefined && oldest.t < sinceMs)
-        || maxBytes >= HEALTH_SINCE_MAX_BYTES;
+      const covered = reachedStart || maxBytes >= HEALTH_SINCE_MAX_BYTES;
       if (covered) return entries.filter((e) => e.t >= sinceMs);
       maxBytes = Math.min(maxBytes * 4, HEALTH_SINCE_MAX_BYTES);
     }
@@ -95,9 +93,9 @@ export class HealthStore {
 
   /**
    * Read up to the last `maxBytes` of the record and parse whole lines. When the
-   * read did not reach byte 0 the first line is a fragment of an earlier entry
-   * and is dropped; `reachedStart` reports whether the whole file was covered, so
-   * since() knows when to stop growing. Genuine I/O errors (open/stat/read)
+   * read did not reach byte 0, the preceding byte determines whether the first
+   * line is complete or a fragment; `reachedStart` reports whether the whole file
+   * was covered, so since() knows when to stop growing. Genuine I/O errors (open/stat/read)
    * propagate so a caller can report "unavailable"; an individual malformed or
    * torn line is skipped — expected in an append-only log.
    */
@@ -128,12 +126,18 @@ export class HealthStore {
       signal?.throwIfAborted();
       let text = bytes.subarray(0, bytesRead).toString("utf8");
       if (start > 0) {
-        const firstNewline = text.indexOf("\n");
-        // Not at byte 0: the first line is a fragment of an earlier entry — drop
-        // it. No newline at all means the tail is a fragment of one oversized
-        // line with no complete entry (not an I/O failure), so report none.
-        if (firstNewline < 0) return { entries: [], reachedStart };
-        text = text.slice(firstNewline + 1);
+        const precedingByte = Buffer.allocUnsafe(1);
+        signal?.throwIfAborted();
+        const boundaryRead = await handle.read(precedingByte, 0, 1, start - 1);
+        signal?.throwIfAborted();
+        const startsOnLineBoundary = boundaryRead.bytesRead === 1 && precedingByte[0] === 0x0a;
+        if (!startsOnLineBoundary) {
+          const firstNewline = text.indexOf("\n");
+          // The retained tail starts mid-line, so discard that fragment. No
+          // newline means it contains no complete entry (not an I/O failure).
+          if (firstNewline < 0) return { entries: [], reachedStart };
+          text = text.slice(firstNewline + 1);
+        }
       }
       // An individual malformed line is expected in an append-only log (a torn
       // final line during a concurrent write, or a legacy-schema entry) and must

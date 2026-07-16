@@ -36,6 +36,8 @@ import { ciceroPath } from "./platform/paths";
 import { warmupProvider } from "./backends/tts/warmup";
 import { buildRecoveryContext } from "./speaker/recovery";
 import { createProviders, type BackendProviders } from "./backends/registry";
+import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "./backends/llm/openai";
+import type { LLMProviderConfig } from "./backends/llm/provider";
 import {
   discardResponseBody,
   PROVIDER_TIMEOUT_MS,
@@ -56,7 +58,7 @@ import { captureOperationalContext, DEFAULT_VOICE_CONTROL_STATE, isLocalFastPath
 import { makeSpeculator } from "./web-voice/speculative";
 import { MAX_TURN_AUDIO_BYTES } from "./web-voice/protocol";
 import { TurnHistory } from "./web-voice/history";
-import { classifyCallIntent, sendTelegramVoice, sendTelegramText, startTelegramUpdatePoller } from "./notify/telegram";
+import { classifyCallIntent, sendTelegramVoice, sendTelegramText, startTelegramUpdatePoller, telegramToken } from "./notify/telegram";
 import { notificationTurnContext } from "./notify/context";
 import { KanbanWatcher, listViaCli, nudgeLine, spokenLine, taskLinkViaCli, type KanbanTask } from "./notify/kanban-watch";
 import { inQuietHours, composeBriefing, composeBriefingDigest, minutesPrompt, worthMinutes, callMinutesThresholdMs, dayOf } from "./notify/briefing";
@@ -260,9 +262,6 @@ export class CiceroDaemon {
   private promptScheduler: PromptScheduler | null = null;
   private briefingStatusStore: BriefingStatusStore | null = null;
   private healthStore: HealthStore | null = null;
-  private healthSummary: CachedHealthSummary | null = null;
-  private healthRefreshTimer: ReturnType<typeof setInterval> | undefined;
-  private healthRefreshTask: Promise<void> | null = null;
   /** Set at the exact lifecycle transition that begins accepting turns. */
   private startedAtMs: number | null = null;
   private minutesTimer: ReturnType<typeof setTimeout> | undefined;
@@ -275,47 +274,207 @@ export class CiceroDaemon {
     return this.overnightStore ??= new OvernightStore();
   }
 
-  private refreshHealthSummary(): Promise<void> {
-    if (this.healthRefreshTask) return this.healthRefreshTask;
-    const store = this.healthStore;
-    if (!store) return Promise.resolve();
-    const signal = AbortSignal.any([this.lifecycleAbort.signal, AbortSignal.timeout(5_000)]);
-    const refreshing = store.since(Date.now() - 24 * 60 * 60 * 1_000, signal)
-      .then((entries) => {
-        if (signal.aborted || this.healthStore !== store) return;
-        const summary = briefLine(entries);
-        this.healthSummary = { status: "ok", summary: summary?.slice(0, 500) ?? null, asOfMs: Date.now() };
-      })
-      .catch(() => {
-        if (!this.lifecycleAbort.signal.aborted && this.healthStore === store) {
-          this.healthSummary = { status: "unavailable", asOfMs: Date.now() };
-        }
-      })
-      .finally(() => {
-        if (this.healthRefreshTask === refreshing) this.healthRefreshTask = null;
+  /**
+   * Record a health log through the daemon's own store. The operational snapshot
+   * reads the health record fresh from the store at capture time (see
+   * operationalContext), so no cached summary needs refreshing here — the append
+   * is immediately visible to the next turn on every surface.
+   */
+  private async logHealth(metric: string, words: string[]): Promise<string> {
+    return healthLog(metric, words, this.healthStore ?? undefined);
+  }
+
+  /** Initialize snapshot sources independently of any operator transport. */
+  private initializeOperationalState(): HealthStore {
+    const healthStore = this.healthStore ??= new HealthStore();
+    if (this.config.notify?.briefing?.at) {
+      this.briefingStatusStore ??= new BriefingStatusStore(undefined, this.config.notify?.timezone);
+    } else {
+      this.briefingStatusStore = null;
+    }
+    const kw = this.config.notify?.kanban;
+    if (!this.kanbanWatcher && kw && kw.enabled !== false && kw.command) {
+      const listCommand = kw.command;
+      this.kanbanWatcher = new KanbanWatcher({
+        list: (signal) => listViaCli(listCommand, { signal }),
+        announce: async (t, signal) => {
+          if (!this.webVoice) return;
+          // A lane-owned task announces itself in that employee's voice.
+          const lane = t.assignee && this.config.brain.lanes?.[t.assignee] ? t.assignee : undefined;
+          // Deliverable link (usually the PR) rides along for the screen;
+          // the notify path keeps it out of the spoken audio.
+          const link = kw.task_command ? await taskLinkViaCli(t.id, kw.task_command, { signal }) : null;
+          if (signal.aborted) return;
+          const line = link ? `${spokenLine(t, !!lane)} ${link}` : spokenLine(t, !!lane);
+          const res = await this.webVoice?.notify(line, lane);
+          if (signal.aborted) return;
+          // Callback: nobody was listening (parked) — ring the phone.
+          // The parked clip speaks the news the moment the call connects.
+          // Blocked tasks never auto-ring (the user's call): their text
+          // names the "have <name> call me" dial-back instead.
+          if (res?.parked && kw.call_back && t.status !== "blocked") {
+            await Bun.write(
+              join(homedir(), ".cicero", "telegram-call", "callback.request"),
+              JSON.stringify({ reason: line, at: Date.now() }),
+            );
+            log("info", `kanban watch: callback requested — "${line.slice(0, 60)}"`);
+          }
+        },
+        intervalMs: (kw.interval_seconds ?? 20) * 1000,
+        // Unstarted tasks get one "nobody's picked this up" reminder —
+        // text/voice only, never a ring; quiet hours defer it like any notify.
+        nudge: async (t, waited, nth) => {
+          await this.webVoice?.notify(nudgeLine(t, waited, nth));
+        },
+        nudgeAfterMs: (kw.nudge_after_minutes ?? 60) * 60_000,
       });
-    this.healthRefreshTask = refreshing;
-    return refreshing;
+      // Poll immediately only when no web voice surface will exist (Telegram-only
+      // / host-mic-only), so the board snapshot is still populated there. When web
+      // voice IS enabled, defer start() until this.webVoice is created (see the web
+      // voice block): the watcher advances its delivery state as it polls, so an
+      // announce/nudge consumed while this.webVoice is still null would be lost, not
+      // replayed. start() is idempotent, so the deferred call is safe regardless.
+      if (!this.config.web_voice?.enabled) {
+        this.kanbanWatcher.start();
+        log("ok", `📋 Kanban watch on — polling tasks every ${kw.interval_seconds ?? 20}s`);
+      }
+    }
+    return healthStore;
   }
 
   /**
-   * Record a health log through the daemon's own store and refresh the cached
-   * summary, so the operational snapshot reflects it immediately. Mirrors the
-   * /api/health path — without this a Telegram/shell health log would read stale
-   * on the snapshot for up to the 60s refresh interval.
+   * Start deferred board polling once web voice creation has been ATTEMPTED.
+   *
+   * On web deployments initializeOperationalState constructs the watcher but does
+   * not start it (the watcher advances its delivery state as it polls, so an
+   * announce/nudge consumed before this.webVoice exists would be lost). This runs
+   * after the web voice block regardless of whether the server bound: an enabled
+   * web voice that fails to bind (EADDRINUSE -> webVoice null) still leaves the
+   * host-mic / Telegram surfaces working, and they need the board snapshot. Guarded
+   * on `polling` so the non-web path (already started in init) neither double-starts
+   * nor re-logs; start() is itself idempotent.
    */
-  private async logHealthAndRefresh(metric: string, words: string[]): Promise<string> {
-    const ack = await healthLog(metric, words, this.healthStore ?? undefined);
-    if (this.healthRefreshTask) await this.healthRefreshTask;
-    await this.refreshHealthSummary();
-    return ack;
+  private startBoardPollingIfPending(): void {
+    if (this.kanbanWatcher && !this.kanbanWatcher.polling) {
+      this.kanbanWatcher.start();
+      log("ok", `📋 Kanban watch on — polling tasks every ${this.config.notify?.kanban?.interval_seconds ?? 20}s`);
+    }
+  }
+
+  private snapshotKnownSecrets(): string[] {
+    const secrets = new Set<string>();
+    // Record the trimmed form: consumers authenticate with it (web-voice startup
+    // trims the configured token), so a padded config value would otherwise leave
+    // the live credential unmatched. The trimmed form also substring-matches any
+    // padded occurrence in board text.
+    const add = (value: string | undefined) => {
+      const trimmed = value?.trim();
+      if (trimmed) secrets.add(trimmed);
+    };
+    // Credentials are commonly stored as an env-var NAME (api_key_env / token_env)
+    // rather than inline, so the real secret is resolved from process.env at
+    // runtime. Redact those resolved values too — an env-resolved key named in a
+    // board title would otherwise egress uncredacted (shape rules can't catch an
+    // all-letter key, and snapshotKnownSecrets never saw the literal).
+    const addEnv = (name: string | undefined) => {
+      if (name?.trim()) add(process.env[name]);
+    };
+    // Every configured header is SENT to the remote endpoint, so treat each value as
+    // potentially sensitive — a custom auth header (X-Auth, X-Api-Token, ...) matches
+    // no fixed name pattern. Redacting an occasional non-secret header value that also
+    // appears verbatim in board text is safe-fail, the operator-approved direction.
+    const addHeaderValues = (headers: Record<string, string> | undefined) => {
+      for (const value of Object.values(headers ?? {})) add(value);
+    };
+
+    add(this.config.web_voice?.token);
+    // Mirror telegramToken()'s runtime resolution (explicit token, else token_env,
+    // else the default CICERO_TELEGRAM_TOKEN env var) so the default is redacted too.
+    if (this.config.notify?.telegram) add(telegramToken(this.config.notify.telegram) ?? undefined);
+    add(this.config.brain?.api_key);
+    addEnv(this.config.brain?.api_key_env);
+    addHeaderValues(this.config.brain?.headers);
+    const brain = this.config.brain;
+    if (brain && OPENAI_COMPATIBLE_BACKENDS.includes(brain.backend)) {
+      const target: LLMProviderConfig = {
+        backend: brain.backend,
+        baseUrl: brain.base_url,
+        model: brain.model,
+        apiKey: brain.api_key,
+        apiKeyEnv: brain.api_key_env,
+      };
+      add(target.apiKey);
+      addEnv(resolveOpenAiTarget(target).apiKeyEnv);
+    }
+
+    // A configured endpoint URL may embed credentials the api-key fields never
+    // see — userinfo or a signed/query token — and validation permits both.
+    // Inventory each component value (searchParams are already decoded).
+    const addUrlCredentials = (raw: string | undefined) => {
+      if (!raw?.trim()) return;
+      let url: URL;
+      try { url = new URL(raw); } catch { return; }
+      for (const part of [url.username, url.password]) {
+        add(part);
+        try { add(decodeURIComponent(part)); } catch { /* malformed escape — raw form is inventoried above */ }
+      }
+      for (const value of url.searchParams.values()) add(value);
+    };
+    addUrlCredentials(this.config.brain?.base_url);
+    addUrlCredentials(this.config.llmBackend?.baseUrl);
+
+    // Lane agents receive their configured env maps verbatim (brain.lanes.*.env
+    // and each fallback's env) — an ANTHROPIC_API_KEY placed there reaches the
+    // lane process but never the credential fields above. Same safe-fail
+    // direction as configured headers: redact every value.
+    for (const lane of Object.values(this.config.brain?.lanes ?? {})) {
+      for (const value of Object.values(lane.env ?? {})) add(value);
+      for (const fallback of lane.fallbacks ?? []) {
+        for (const value of Object.values(fallback.env ?? {})) add(value);
+      }
+    }
+
+    const llm = this.config.llmBackend;
+    add(llm?.apiKey);
+    if (llm && OPENAI_COMPATIBLE_BACKENDS.includes(llm.backend ?? "")) {
+      addEnv(resolveOpenAiTarget(llm).apiKeyEnv);
+    }
+    addHeaderValues(llm?.extraHeaders);
+    add(this.config.ttsBackend?.apiKey);
+    add(this.config.ttsFallbackBackend?.apiKey);
+    // ElevenLabs resolves its key from ELEVENLABS_API_KEY when no inline key is
+    // configured (src/backends/tts/elevenlabs.ts) — mirror that resolution so the
+    // live credential is in the set either way.
+    if (this.config.ttsBackend?.backend === "elevenlabs" || this.config.ttsFallbackBackend?.backend === "elevenlabs") {
+      add(process.env.ELEVENLABS_API_KEY);
+    }
+
+    return [...secrets];
   }
 
   private async operationalContext(signal?: AbortSignal): Promise<string | null> {
     signal?.throwIfAborted();
     const briefing = this.config.notify?.briefing;
+    let health: CachedHealthSummary | null = null;
+    const healthStore = this.healthStore;
+    if (healthStore) {
+      try {
+        const entries = await healthStore.since(Date.now() - 24 * 60 * 60 * 1_000, signal);
+        signal?.throwIfAborted();
+        const summary = briefLine(entries);
+        const asOfMs = entries.length === 0
+          ? Date.now()
+          : entries.reduce((newest, entry) => Math.max(newest, entry.t), entries[0]!.t);
+        health = { status: "ok", summary: summary?.slice(0, 500) ?? null, asOfMs };
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        health = { status: "unavailable", asOfMs: Date.now() };
+      }
+    }
+    const secrets = this.snapshotKnownSecrets();
     const state = await snapshotOperationalState({
       startedAtMs: this.startedAtMs,
+      secrets,
       timezone: this.config.notify?.timezone,
       briefing: briefing?.at && this.briefingStatusStore ? {
         at: briefing.at,
@@ -324,7 +483,7 @@ export class CiceroDaemon {
       } : undefined,
       overnightStore: this.getOvernightStore(),
       board: () => this.kanbanWatcher?.snapshot() ?? null,
-      health: () => this.healthSummary,
+      health: () => health,
       prompts: () => {
         if (this.promptScheduler) return this.promptScheduler.snapshot();
         if ((this.config.notify?.schedules?.length ?? 0) > 0) {
@@ -334,7 +493,7 @@ export class CiceroDaemon {
       },
     }, signal);
     signal?.throwIfAborted();
-    return renderOperationalState(state);
+    return renderOperationalState(state, secrets);
   }
   /** Synthesize a notification clip: lane-or-raw voice resolution plus the
    * URL strip (bare links are for the text surfaces — the audio never reads
@@ -505,6 +664,8 @@ export class CiceroDaemon {
     });
     this.speaker = createSpeaker(this.config, this.providers.tts, audioPlayer);
     this.executor = new ActionExecutor(this.config, this.terminal, this.brain, this.speaker, this.contextStore, this.providers.llm);
+    const healthStore = this.initializeOperationalState();
+    this.assertStartupActive();
 
     // AEC audio hub (macOS): routes mic + TTS through the echo-cancelling helper so
     // the mic doesn't hear Cicero's own voice — what lets genuine voice barge-in
@@ -612,18 +773,21 @@ export class CiceroDaemon {
       // summarizer endpoint; a wrong or slow verdict degrades to a chat turn.
       const callClassifier = summarizerClassifier(this.config.web_voice?.tldr);
       this.stopTelegramPoller = startTelegramUpdatePoller(this.config.notify.telegram, this.brain, undefined, undefined, {
-        onHealthLog: (metric, words) => this.logHealthAndRefresh(metric, words),
+        onHealthLog: (metric, words) => this.logHealth(metric, words),
         onCallMe: dialBack,
         onChat: async (text) => {
           if (callClassifier) {
             const intent = await classifyCallIntent(text, callClassifier, Object.keys(this.config.brain.lanes ?? {}));
             if (intent) return dialBack(intent.who);
           }
+          // Own the turn under the daemon lifecycle so a slow brain turn is
+          // cancelled on shutdown instead of running (up to the provider timeout)
+          // and publishing a reply / history append after stop() has returned.
           return runOperatorChatTurn(text, {
             brain: this.brain,
             history: tgHistory,
             operationalContext: (signal) => this.operationalContext(signal),
-          });
+          }, this.lifecycleAbort.signal);
         },
       });
       log("ok", "Telegram text surface ready (chat, log, call me, approvals)");
@@ -995,17 +1159,6 @@ export class CiceroDaemon {
             operationalContext: (signal) => this.operationalContext(signal),
           })
         : undefined;
-      // The health lane's record: written by `cicero health log` (the health
-      // lane's shell) and /api/health (the phone bridge); read here for the
-      // morning briefing's one-liner.
-      const healthStore = this.healthStore = new HealthStore();
-      this.briefingStatusStore = this.config.notify?.briefing?.at
-        ? new BriefingStatusStore()
-        : null;
-      await this.refreshHealthSummary();
-      this.healthRefreshTimer = setInterval(() => {
-        void this.refreshHealthSummary();
-      }, 60_000);
       // Speech gate (Silero VAD): fetch-and-verify the pinned assets in the
       // background; the /vad routes 404 (and the page stays energy-only)
       // until they land. `speech_gate: false` skips the download entirely.
@@ -1033,9 +1186,6 @@ export class CiceroDaemon {
               options?.signal?.throwIfAborted();
               await healthStore.append({ t: Date.now(), source: "api", ...r });
             }
-            options?.signal?.throwIfAborted();
-            if (this.healthRefreshTask) await this.healthRefreshTask;
-            await this.refreshHealthSummary();
             options?.signal?.throwIfAborted();
             return rows.length;
           } catch (error) {
@@ -1232,47 +1382,6 @@ export class CiceroDaemon {
         }
         if (this.webVoice.scheme === "http") {
           log("warn", "web-voice is HTTP — the browser mic only works from localhost. Add a TLS cert for LAN access.");
-        }
-        // Kanban → proactive voice: watch the agent's board and speak up when
-        // a task finishes, blocks, or lands in review.
-        const kw = this.config.notify?.kanban;
-        if (kw && kw.enabled !== false && kw.command) {
-          const webVoice = this.webVoice;
-          const listCommand = kw.command;
-          this.kanbanWatcher = new KanbanWatcher({
-            list: (signal) => listViaCli(listCommand, { signal }),
-            announce: async (t, signal) => {
-              // A lane-owned task announces itself in that employee's voice.
-              const lane = t.assignee && this.config.brain.lanes?.[t.assignee] ? t.assignee : undefined;
-              // Deliverable link (usually the PR) rides along for the screen;
-              // the notify path keeps it out of the spoken audio.
-              const link = kw.task_command ? await taskLinkViaCli(t.id, kw.task_command, { signal }) : null;
-              if (signal.aborted) return;
-              const line = link ? `${spokenLine(t, !!lane)} ${link}` : spokenLine(t, !!lane);
-              const res = await webVoice.notify(line, lane);
-              if (signal.aborted) return;
-              // Callback: nobody was listening (parked) — ring the phone.
-              // The parked clip speaks the news the moment the call connects.
-              // Blocked tasks never auto-ring (the user's call): their text
-              // names the "have <name> call me" dial-back instead.
-              if (res?.parked && kw.call_back && t.status !== "blocked") {
-                await Bun.write(
-                  join(homedir(), ".cicero", "telegram-call", "callback.request"),
-                  JSON.stringify({ reason: line, at: Date.now() }),
-                );
-                log("info", `kanban watch: callback requested — "${line.slice(0, 60)}"`);
-              }
-            },
-            intervalMs: (kw.interval_seconds ?? 20) * 1000,
-            // Unstarted tasks get one "nobody's picked this up" reminder —
-            // text/voice only, never a ring; quiet hours defer it like any notify.
-            nudge: async (t, waited, nth) => {
-              await webVoice.notify(nudgeLine(t, waited, nth));
-            },
-            nudgeAfterMs: (kw.nudge_after_minutes ?? 60) * 60_000,
-          });
-          this.kanbanWatcher.start();
-          log("ok", `📋 Kanban watch on — announcing task completions every ${kw.interval_seconds ?? 20}s`);
         }
         // Morning briefing: durably claim the local day before looking up or
         // delivering anything. A restart can catch up, but never double-send.
@@ -1474,6 +1583,11 @@ export class CiceroDaemon {
     if (!this.config.headless) await this.listener.start();
     this.assertStartupActive();
 
+    // Web voice creation (if any) has been attempted by now — start board polling
+    // even when an enabled web voice failed to bind, so non-web surfaces still see
+    // the board. No-op on non-web (already polling) and when no board is configured.
+    this.startBoardPollingIfPending();
+
     this.lifecycle = "running";
     this.startedAtMs = Date.now();
     this.running = true;
@@ -1649,7 +1763,7 @@ export class CiceroDaemon {
         this.brain.injectContext(recentContext);
       }
 
-      const systemContext = result.category === "brain"
+      const systemContext = result.category === "brain" || result.category === "local-llm"
         ? await captureOperationalContext(
             (captureSignal) => this.operationalContext(captureSignal),
             signal,
@@ -1660,7 +1774,10 @@ export class CiceroDaemon {
       // Step 6: Streaming pipeline for local-llm in conversational mode
       if (result.category === "local-llm" && this.conversational?.isActive() && this.streamingSpeaker) {
         log("speak", `Streaming LLM → TTS pipeline... (+${Date.now() - tStart}ms to first token)`);
-        const sentences = this.executor.executeLocalLLMStreaming(result, text, signal);
+        const sentences = this.executor.executeLocalLLMStreaming(result, text, {
+          signal,
+          systemContext: systemContext ?? undefined,
+        });
         await this.streamingSpeaker.speakStream(sentences);
         this.finalizeStreamingTurn(expanded, result, signal);
         return;
@@ -2324,9 +2441,6 @@ export class CiceroDaemon {
       const briefingStop = this.briefingScheduler?.stop();
       this.promptScheduler?.stop();
       this.promptScheduler = null;
-      if (this.healthRefreshTimer) clearInterval(this.healthRefreshTimer);
-      this.healthRefreshTimer = undefined;
-      await cleanup("health summary refresh", () => this.healthRefreshTask ?? Promise.resolve());
       if (this.minutesTimer) clearTimeout(this.minutesTimer);
       this.minutesTimer = undefined;
       await cleanup("briefing scheduler", () => briefingStop);
@@ -2433,8 +2547,6 @@ export class CiceroDaemon {
         this.briefingStatusStore = null;
         this.promptScheduler = null;
         this.healthStore = null;
-        this.healthSummary = null;
-        this.healthRefreshTask = null;
         this.startedAtMs = null;
         this.minutesTimer = undefined;
         this.actionsReloader = null;

@@ -442,8 +442,11 @@ export class ActionExecutor {
   }
 
   // Build the voice chat prompt: system instruction + recent turns + this query.
-  private buildLocalLLMMessages(query: string): ChatMessage[] {
-    const messages: ChatMessage[] = [{ role: "system", content: VOICE_SYSTEM_PROMPT }];
+  private buildLocalLLMMessages(query: string, systemContext?: string): ChatMessage[] {
+    const systemPrompt = systemContext
+      ? `${VOICE_SYSTEM_PROMPT}\n\n${systemContext}`
+      : VOICE_SYSTEM_PROMPT;
+    const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }];
     for (const turn of this.contextStore.getRecentTurns(5)) {
       messages.push({ role: "user", content: turn.text });
       if (turn.output) {
@@ -469,7 +472,7 @@ export class ActionExecutor {
     try {
       // Route through the configured provider — honors host/port/protocol/auth and
       // the backend's extra (e.g. chat_template_kwargs), so remote/cloud brains work.
-      const raw = await this.llm.chatCompletion(this.buildLocalLLMMessages(query), {
+      const raw = await this.llm.chatCompletion(this.buildLocalLLMMessages(query, options.systemContext), {
         temperature: 0.7,
         max_tokens: this.config.ttsLocalMaxTokens,
         signal: options.signal,
@@ -494,8 +497,9 @@ export class ActionExecutor {
   async *executeLocalLLMStreaming(
     route: RouterResult,
     originalText: string,
-    callerSignal?: AbortSignal,
+    options: BrainTurnOptions = {},
   ): AsyncGenerator<string> {
+    const callerSignal = options.signal;
     if (callerSignal?.aborted) return;
 
     // Use the full utterance, not the router's extracted params.query — the router
@@ -503,7 +507,7 @@ export class ActionExecutor {
     const query = originalText || route.params.query || "";
     log("run", `Local LLM (streaming): "${query}"`);
 
-    const messages = this.buildLocalLLMMessages(query);
+    const messages = this.buildLocalLLMMessages(query, options.systemContext);
     const opts = { temperature: 0.7, max_tokens: this.config.ttsLocalMaxTokens };
 
     if (!this.llm.chatCompletionStream) {
@@ -543,9 +547,9 @@ export class ActionExecutor {
       if (callerSignal?.aborted) return;
       if (batchFailed) {
         log("warn", `Local LLM batch failed, falling back to brain: ${errorMessage(batchFailure)}`);
-        yield* this.streamBrainFallback(query, { signal: callerSignal });
+        yield* this.streamBrainFallback(query, options);
       } else if (!yieldedAnswer) {
-        yield* this.streamBrainFallback(query, { signal: callerSignal });
+        yield* this.streamBrainFallback(query, options);
       }
       return;
     }
@@ -612,13 +616,13 @@ export class ActionExecutor {
     if (callerSignal?.aborted) return;
     if (streamFailed && !yieldedAnswer) {
       log("warn", `Local LLM stream failed before output, falling back to brain: ${errorMessage(streamFailure)}`);
-      yield* this.streamBrainFallback(query, { signal: callerSignal });
+      yield* this.streamBrainFallback(query, options);
     } else if (streamFailed) {
       log("warn", `Local LLM stream stopped after partial output: ${errorMessage(streamFailure)}`);
       yield LOCAL_STREAM_INTERRUPTED_MESSAGE;
     } else if (!yieldedAnswer) {
       log("warn", "Local LLM stream returned no speakable answer; falling back to brain");
-      yield* this.streamBrainFallback(query, { signal: callerSignal });
+      yield* this.streamBrainFallback(query, options);
     }
   }
 
