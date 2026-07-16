@@ -229,6 +229,42 @@ test("daemon operational context redacts the ElevenLabs env-resolved api key", a
   }
 });
 
+test("daemon operational context redacts lane and lane-fallback env credentials", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-daemon-operational-lane-"));
+  roots.push(root);
+  // Lane env maps are handed verbatim to the lane's agent process — a key
+  // configured there never passes through the brain credential fields.
+  const laneKey = "AllLetterLaneCredentialValueOne";
+  const fallbackKey = "AllLetterLaneCredentialValueTwo";
+  const now = Date.now();
+  const config = loadConfig({}, { home: root });
+  config.raw.brain = {
+    backend: "acp",
+    lanes: {
+      coder: {
+        env: { ANTHROPIC_API_KEY: laneKey },
+        fallbacks: [{ backend: "codex", env: { OPENAI_API_KEY: fallbackKey } }],
+      },
+    },
+  };
+  const daemon = new CiceroDaemon(config) as unknown as OperationalDaemonHarness;
+  daemon.startedAtMs = now;
+  daemon.kanbanWatcher = {
+    snapshot: () => ({
+      asOfMs: now, truncated: false, totalTasks: 1,
+      tasks: [{ id: "secret", title: `rotate ${laneKey} and ${fallbackKey}`, status: "blocked" }],
+    }),
+  };
+
+  const inventory = daemon.snapshotKnownSecrets();
+  expect(inventory).toContain(laneKey);
+  expect(inventory).toContain(fallbackKey);
+  const text = await daemon.operationalContext();
+  expect(text).not.toContain(laneKey);
+  expect(text).not.toContain(fallbackKey);
+  expect(text).toContain("rotate <redacted> and <redacted>");
+});
+
 test("daemon operational context redacts a configured Cookie credential header value", async () => {
   const root = mkdtempSync(join(tmpdir(), "cicero-daemon-operational-cookie-"));
   roots.push(root);

@@ -407,6 +407,17 @@ export class CiceroDaemon {
       addEnv(resolveOpenAiTarget(target).apiKeyEnv);
     }
 
+    // Lane agents receive their configured env maps verbatim (brain.lanes.*.env
+    // and each fallback's env) — an ANTHROPIC_API_KEY placed there reaches the
+    // lane process but never the credential fields above. Same safe-fail
+    // direction as configured headers: redact every value.
+    for (const lane of Object.values(this.config.brain?.lanes ?? {})) {
+      for (const value of Object.values(lane.env ?? {})) add(value);
+      for (const fallback of lane.fallbacks ?? []) {
+        for (const value of Object.values(fallback.env ?? {})) add(value);
+      }
+    }
+
     const llm = this.config.llmBackend;
     add(llm?.apiKey);
     if (llm && OPENAI_COMPATIBLE_BACKENDS.includes(llm.backend ?? "")) {
