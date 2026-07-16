@@ -83,8 +83,9 @@ cicero start
 Open `https://<box-ip>:8090/?token=<token>`, accept the self-signed certificate
 once, and click **Start conversation** (the page loads with the conversation
 off; push-to-talk does nothing until you start it and grant the microphone).
-Then hold SPACE (or the orb) and say **“What can you help me with?”** Expect a
-spoken response and the full text in the chat log. Exercise this real turn
+Then hold SPACE (or the orb) and say **“What can you help me with?”** Expect
+the hint line to flash what was heard, then a spoken response (the page keeps
+no chat log — replies are spoken, not displayed). Exercise this real turn
 before treating a deployment as ready. Full page controls, hands-free mode, and
 PWA behavior are in the [web-voice guide](web-voice.md).
 
@@ -92,7 +93,8 @@ PWA behavior are in the [web-voice guide](web-voice.md).
 
 - **The browser warns about the certificate.** Expected: Cicero generates a
   self-signed HTTPS certificate on first start (browsers only expose the
-  microphone over HTTPS). Accept it once per device.
+  microphone over HTTPS or on localhost, and this walkthrough reaches the box
+  from another device). Accept it once per device.
 - **Where's the token?** Printed at startup, once per run. For a stable token
   across restarts, run `openssl rand -hex 16` and paste only its output as
   `token:` inside the `web_voice:` block (e.g.
