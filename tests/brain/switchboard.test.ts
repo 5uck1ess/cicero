@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { SwitchboardBrain, type LaneDef } from "../../src/brain/switchboard";
-import type { Brain } from "../../src/types";
+import type { Brain, BrainTurnOptions } from "../../src/types";
 
 const NONCE_A = "11111111-1111-4111-8111-111111111111";
 const NONCE_B = "22222222-2222-4222-8222-222222222222";
@@ -1700,6 +1700,29 @@ test("sendBackground with a lane cold-starts it, installs the persona once, and 
   await sb.sendBackground("research again", { lane: "coder" });
   expect(calls.filter((c) => c === "coder:start").length).toBe(1);
   expect(injected).toEqual(["Speak as Ada."]);
+});
+
+test("a named-lane background turn delivers systemContext and never rejects a lane-less brain", async () => {
+  // The lane path routes through def.brain.send() directly (never sendUnattended),
+  // so a lane brain WITHOUT sendBackground handles a background turn fine, and the
+  // routing-only `lane` field is a harmless extra property on the send() options.
+  // This pins both: no spurious lane rejection, and the operational snapshot
+  // (systemContext) reaches the employee running the background turn.
+  const calls: string[] = [];
+  let seen: string | undefined = "UNSET";
+  const brain: Brain = {
+    ...fakeBrain("coder", calls),
+    send: async (m: string, options?: BrainTurnOptions) => {
+      calls.push(`coder:send:${m}`);
+      seen = options?.systemContext;
+      return "coder reply";
+    },
+  };
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { coder: { brain } });
+  await sb.start();
+
+  expect(await sb.sendBackground("do it", { lane: "coder", systemContext: "OP-STATE" })).toBe("coder reply");
+  expect(seen).toBe("OP-STATE");
 });
 
 test("sendBackground on an unknown lane is an error, not a silent front-desk answer", async () => {
