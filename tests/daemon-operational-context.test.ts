@@ -254,3 +254,24 @@ test("host mic captures once for each brain path and skips a local fast path", a
   expect(captures).toBe(2);
   expect(sent).toHaveLength(2);
 });
+
+test("a Telegram/shell health log lands in the daemon store and refreshes the cached summary", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-daemon-hlog-"));
+  roots.push(root);
+  const daemon = new CiceroDaemon({} as never) as unknown as OperationalDaemonHarness & {
+    logHealthAndRefresh(metric: string, words: string[]): Promise<string>;
+  };
+  daemon.startedAtMs = Date.now();
+  daemon.healthStore = new HealthStore(join(root, "metrics.jsonl"));
+  // A stale cache from an earlier refresh — the snapshot would report this until
+  // the 60s timer runs, unless the log path refreshes it.
+  daemon.healthSummary = { status: "ok", summary: "STALE — before the log", asOfMs: Date.now() - 120_000 };
+
+  const ack = await daemon.logHealthAndRefresh("weight", ["82.4", "kg"]);
+  expect(ack).toContain("82.4");
+  // The entry went through the daemon's OWN store (not a bypass instance)...
+  expect((await daemon.healthStore!.recent(1))[0]?.value).toBe(82.4);
+  // ...and the cached summary was refreshed from it, no longer stale.
+  expect(daemon.healthSummary?.status).toBe("ok");
+  expect(daemon.healthSummary?.summary).not.toBe("STALE — before the log");
+});

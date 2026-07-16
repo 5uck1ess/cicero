@@ -298,6 +298,19 @@ export class CiceroDaemon {
     return refreshing;
   }
 
+  /**
+   * Record a health log through the daemon's own store and refresh the cached
+   * summary, so the operational snapshot reflects it immediately. Mirrors the
+   * /api/health path — without this a Telegram/shell health log would read stale
+   * on the snapshot for up to the 60s refresh interval.
+   */
+  private async logHealthAndRefresh(metric: string, words: string[]): Promise<string> {
+    const ack = await healthLog(metric, words, this.healthStore ?? undefined);
+    if (this.healthRefreshTask) await this.healthRefreshTask;
+    await this.refreshHealthSummary();
+    return ack;
+  }
+
   private async operationalContext(signal?: AbortSignal): Promise<string | null> {
     signal?.throwIfAborted();
     const briefing = this.config.notify?.briefing;
@@ -599,7 +612,7 @@ export class CiceroDaemon {
       // summarizer endpoint; a wrong or slow verdict degrades to a chat turn.
       const callClassifier = summarizerClassifier(this.config.web_voice?.tldr);
       this.stopTelegramPoller = startTelegramUpdatePoller(this.config.notify.telegram, this.brain, undefined, undefined, {
-        onHealthLog: (metric, words) => healthLog(metric, words),
+        onHealthLog: (metric, words) => this.logHealthAndRefresh(metric, words),
         onCallMe: dialBack,
         onChat: async (text) => {
           if (callClassifier) {
