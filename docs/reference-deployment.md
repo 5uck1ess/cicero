@@ -49,11 +49,12 @@ loginctl enable-linger $USER
 journalctl --user -u cicero -f
 ```
 
-The daemon launches and supervises its own model servers, so STT/TTS need no
-units of their own — they stay running, and the daemon revives one that dies
-unexpectedly. A managed engine's port staying closed is therefore a failure
-or an in-progress recovery, not idleness: check `journalctl --user -u cicero`
-rather than shrugging it off.
+The daemon launches and owns its model servers, so STT/TTS need no units of
+their own — they stay running, and for most bundled engines the daemon also
+revives one that dies unexpectedly (a few backends only report the death). A
+managed engine's port staying closed is therefore a failure or an in-progress
+recovery, not idleness: check `journalctl --user -u cicero` rather than
+shrugging it off.
 
 ## 3. Phone calls, supervised
 
@@ -75,10 +76,12 @@ sidecar reconnects to the daemon by itself when the daemon restarts.
 ## 4. Reaching you: texts, briefings, schedules
 
 All configuration, no new processes — the bot, quiet hours, the morning
-briefing, scheduled prompts, and the *"call me"* intent are `notify:` blocks
-in `config.yaml`, documented in [notifications](notifications.md). For the
-always-on shape you'll typically want at minimum: the Telegram bot (two-way
-text line), quiet hours, and the briefing time.
+briefing, and scheduled prompts are `notify:` blocks in `config.yaml`,
+documented in [notifications](notifications.md). The *"call me"* intent needs
+no config of its own — it's built into the daemon and works once the Telegram
+text line and the call sidecar are up. For the always-on shape you'll
+typically want at minimum: the Telegram bot (two-way text line), quiet hours,
+and the briefing time.
 
 ## 5. Prove it survives a reboot
 
@@ -105,10 +108,9 @@ systemctl --user restart cicero
 ```
 
 Restart **only the daemon** by default. The call sidecar survives daemon
-restarts on its own — it re-dials the daemon socket with backoff, releases a
-bridge on Telegram's hang-up, and reaps one that has gone silent — whereas
-restarting `telegram-call` sends SIGTERM to the listener, which *ends a live
-call*. Deploy sidecar changes separately, preferably between calls, and
+restarts on its own — it re-dials the daemon socket with backoff and releases
+the bridge on Telegram's hang-up — whereas restarting `telegram-call` sends
+SIGTERM to the listener, which *ends a live call*. Deploy sidecar changes separately, preferably between calls, and
 actually apply what changed before restarting — a bare restart keeps stale
 dependencies and stale unit definitions:
 
@@ -117,10 +119,15 @@ dependencies and stale unit definitions:
 uv pip install --python ~/.cicero/tgcalls-venv -r requirements/telegram-call.txt
 systemctl --user restart telegram-call
 
-# Only when a deploy/*.service template changed (either unit):
-cp deploy/cicero.service deploy/telegram-call.service ~/.config/systemd/user/
+# Only when deploy/cicero.service changed:
+cp deploy/cicero.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user restart cicero telegram-call
+systemctl --user restart cicero
+
+# Only when deploy/telegram-call.service changed (between calls):
+cp deploy/telegram-call.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user restart telegram-call
 ```
 
 Re-run the step-5 acceptance tests after any upgrade that touched the voice
