@@ -8,15 +8,18 @@ done by an existing pattern.
 One boundary up front: Cicero is **single-operator by design** (see
 [security](security.md)). Every *network-reachable* channel below
 authenticates the operator (token, allowlist); the purely local ones — the
-mic, terminal scraping — rely on local machine access instead. Either way, a
-new channel must not quietly turn shared state into a multi-user contract.
+mic, terminal scraping — rely on local machine access instead. The single
+escape hatch is deliberate and loud: the call listener will accept any caller
+only when `CICERO_TG_ALLOW_ANY_CALLER=I_UNDERSTAND` is set explicitly. Either
+way, a new channel must not quietly turn shared state into a multi-user
+contract.
 
 ## The map — every current way in and out
 
 | Channel | Direction | Runs where | Transport & auth |
 |---|---|---|---|
 | **Local mic / speakers** | in + out | inside the daemon | direct audio devices ([daemon mode](daemon-mode.md)) |
-| **Browser / PWA** | in + out | inside the daemon | WebSocket protocol v2 over HTTPS, token-authenticated ([web voice](web-voice.md), `src/web-voice/server.ts`) |
+| **Browser / PWA** | in + out | server in the daemon; the page runs in your browser | WebSocket protocol v2, token-authenticated — `wss:` under the default HTTPS setup ([web voice](web-voice.md), `src/web-voice/server.ts`) |
 | **Telegram text bot** | in + out | inside the daemon | Bot API long-polling (`getUpdates`), user-ID allowlist (`src/notify/telegram.ts`, [notifications](notifications.md)) |
 | **Telegram calls** | in + out | **separate Python sidecar** | bridges call audio ↔ the same authenticated web-voice WebSocket endpoint the browser uses, on the v1 framing (`sidecars/telegram-call/`) |
 | **Sidecar mode** (`cicero hook` / `cicero scrape`) | out only | their own processes | agent hooks (Claude Code, Codex) post authenticated HTTP into the `cicero hook` receiver; `cicero scrape` watches a terminal tab (`src/sidecar/`) |
@@ -49,8 +52,9 @@ example, and its responsibilities are the checklist:
 - authenticate to the daemon with the web-voice token; reconnect with bounded
   backoff when the daemon restarts;
 - enforce *its own* caller allowlist before bridging anyone to your agent
-  (the Telegram sidecar refuses to *listen* for incoming calls without one;
-  outgoing-only dialing works without it);
+  (the Telegram sidecar refuses to *listen* for incoming calls without one
+  unless the explicit `CICERO_TG_ALLOW_ANY_CALLER=I_UNDERSTAND` override is
+  set; outgoing-only dialing works without it);
 - resample platform audio to what the protocol expects, run local
   voice-activity detection, and forward barge-in;
 - keep an absolute deadline and size bound on everything it reads from the
