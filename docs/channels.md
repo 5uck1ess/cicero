@@ -6,7 +6,9 @@ one. Read this before wiring up another messenger; most of the work is already
 done by an existing pattern.
 
 One boundary up front: Cicero is **single-operator by design** (see
-[security](security.md)). Every channel below authenticates *the* operator; a
+[security](security.md)). Every *network-reachable* channel below
+authenticates the operator (token, allowlist); the purely local ones — the
+mic, terminal scraping — rely on local machine access instead. Either way, a
 new channel must not quietly turn shared state into a multi-user contract.
 
 ## The map — every current way in and out
@@ -17,7 +19,7 @@ new channel must not quietly turn shared state into a multi-user contract.
 | **Browser / PWA** | in + out | inside the daemon | WebSocket protocol v2 over HTTPS, token-authenticated ([web voice](web-voice.md), `src/web-voice/server.ts`) |
 | **Telegram text bot** | in + out | inside the daemon | Bot API long-polling (`getUpdates`), user-ID allowlist (`src/notify/telegram.ts`, [notifications](notifications.md)) |
 | **Telegram calls** | in + out | **separate Python sidecar** | bridges call audio ↔ the same authenticated web-voice WebSocket endpoint the browser uses, on the v1 framing (`sidecars/telegram-call/`) |
-| **Sidecar mode** (`cicero hook` / `cicero scrape`) | out only | their own processes | Claude Code hooks and terminal scrape are `SpeakAdapter`s; the Codex hook forwards HTTP to `/speak` (`src/sidecar/`) |
+| **Sidecar mode** (`cicero hook` / `cicero scrape`) | out only | their own processes | agent hooks (Claude Code, Codex) post authenticated HTTP into the `cicero hook` receiver; `cicero scrape` watches a terminal tab (`src/sidecar/`) |
 | **Notify targets** | out only | inside the daemon | browser voice-back, Telegram notes/texts, and ringing you via the call sidecar ([notifications](notifications.md)) |
 
 Two facts fall out of the table that matter for extension work:
@@ -86,19 +88,23 @@ contract in [brains](brains.md).
 
 ## Output-only integrations: `SpeakAdapter`
 
-Sidecar mode has a real, small seam. An adapter implements
-`{ name, attach(service), detach(), health() }` and receives a `SpeakService`
-whose `speak({ text, agent?, skipSummary? })` does the summarize-and-say work
-(`src/sidecar/types.ts`). The registry in `src/sidecar/registry.ts` ships
-exactly two adapters — Claude Code hooks (run by `cicero hook`) and terminal
-scrape (run by the separate `cicero scrape` command) — and config validation
-accepts only those names. The Codex integration is *not* a `SpeakAdapter`: its
-hook posts authenticated HTTP to the hook server's `/speak`
-(`src/sidecar/codex-hook.ts`), which is a second honest way in for anything
-that can make a local HTTP call. If your "channel" only needs Cicero to
-*speak or forward what an agent said* — a status LED, a desktop notifier,
-another chat surface — one of these two seams is the cheapest correct home,
-and neither touches the daemon.
+Sidecar mode has a real, small seam — but note its direction: a
+`SpeakAdapter` is an **event source**, not an output sink. It implements
+`{ name, attach(service), detach(), health() }` and *feeds agent output into*
+a fixed `SpeakService` whose `speak({ text, agent?, skipSummary? })` does the
+summarize-and-say work through Cicero's speaker (`src/sidecar/types.ts`). The
+registry in `src/sidecar/registry.ts` ships exactly two adapters, and config
+validation accepts only those names: the claude-code adapter — the
+authenticated HTTP receiver that the `cicero hook` process runs, which Claude
+Code's installed Stop hook posts into — and terminal scrape, run by the
+separate `cicero scrape` command. The Codex integration is *not* a
+`SpeakAdapter`: its hook posts authenticated HTTP to the same receiver's
+`/speak` (`src/sidecar/codex-hook.ts`), which is the honest way in for any
+*other* event source that can make a local HTTP call. So: "make Cicero speak
+when X happens" fits here (post X to `/speak`); "mirror what Cicero says onto
+a status LED or another chat surface" does not — there is no output-sink seam
+today, and pretending otherwise would be exactly the kind of doc this file
+exists to prevent.
 
 ## What this is not
 
