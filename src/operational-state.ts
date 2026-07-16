@@ -8,8 +8,6 @@ export const MAX_OPERATIONAL_CONTEXT_CHARS = 2_048;
 const MAX_ITEMS = 4;
 const MAX_VALUE_CHARS = 180;
 const MAX_DATE_MS = 8.64e15;
-let activeKnownSecrets: readonly string[] = [];
-let inactiveKnownSecrets: readonly string[] = [];
 const activeKnownSecretScopes: Array<{ secrets: readonly string[] }> = [];
 const SNAPSHOT_AUTHORIZATION_SECRET = /(\bauthorization["']?\s*:\s*["']?[a-z][a-z0-9+._-]*\s+)[^\s,;"']+/gi;
 const SNAPSHOT_URL_USERINFO = /(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi;
@@ -196,23 +194,29 @@ function prepareKnownSecrets(knownSecrets?: readonly string[], includeJsonEscape
 }
 
 function enterKnownSecretScope(knownSecrets?: readonly string[]): { secrets: readonly string[] } {
-  if (activeKnownSecretScopes.length === 0) inactiveKnownSecrets = activeKnownSecrets;
   const scope = { secrets: prepareKnownSecrets(knownSecrets) };
   activeKnownSecretScopes.push(scope);
-  activeKnownSecrets = scope.secrets;
   return scope;
 }
 
 function exitKnownSecretScope(scope: { secrets: readonly string[] }): void {
   const index = activeKnownSecretScopes.indexOf(scope);
   if (index !== -1) activeKnownSecretScopes.splice(index, 1);
-  const current = activeKnownSecretScopes.at(-1);
-  if (current) {
-    activeKnownSecrets = current.secrets;
-  } else {
-    activeKnownSecrets = inactiveKnownSecrets;
-    inactiveKnownSecrets = [];
-  }
+}
+
+/**
+ * Union of every live scope's secrets, longest-first. Async captures interleave
+ * (snapshot() awaits its stores mid-scope), so "the most recent scope" is the
+ * wrong answer for a capture parked on an await: it would clip with a sibling's
+ * secret set and truncate its own secret unredacted. Redacting with the union is
+ * at worst a harmless over-redaction across concurrent captures — the safe-fail
+ * direction — and exact for the common case of one capture at a time.
+ */
+function activeKnownSecretUnion(): readonly string[] {
+  if (activeKnownSecretScopes.length === 0) return [];
+  if (activeKnownSecretScopes.length === 1) return activeKnownSecretScopes[0].secrets;
+  return [...new Set(activeKnownSecretScopes.flatMap((scope) => scope.secrets))]
+    .sort((left, right) => right.length - left.length);
 }
 
 function redactPreparedKnownSecrets(value: string, secrets: readonly string[]): string {
@@ -360,7 +364,7 @@ function freshness(nowMs: number, asOfMs: number, staleAfterMs: number): "fresh"
 }
 
 function clip(value: string, max = MAX_VALUE_CHARS): string {
-  const flat = redactSnapshotSecrets(redactPreparedKnownSecrets(value, activeKnownSecrets))
+  const flat = redactSnapshotSecrets(redactPreparedKnownSecrets(value, activeKnownSecretUnion()))
     .replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
 }

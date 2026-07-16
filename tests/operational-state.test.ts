@@ -221,6 +221,46 @@ test("overlapping snapshots with identical secrets keep redaction active until b
   expect(secondState.briefing.today && secondState.briefing.today.contentSummary).toBe("<redacted>");
 });
 
+test("overlapping snapshots with different secrets each redact their own", async () => {
+  const now = new Date("2026-07-16T13:00:00.000Z");
+  const firstSecret = "E".repeat(200);
+  const secondSecret = "F".repeat(200);
+  let releaseFirst!: () => void;
+  let releaseSecond!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const start = (gate: Promise<void>, secret: string) => snapshot({
+    now: () => now,
+    startedAtMs: null,
+    timezone: "UTC",
+    secrets: [secret],
+    briefing: {
+      at: "09:00", catchUpMinutes: 10,
+      store: { readOperational: async () => {
+        await gate;
+        return { status: "ok", value: {
+          day: "2026-07-16", scheduledAt: "09:00", trigger: "scheduled" as const,
+          claimedAt: now.getTime(), phase: "delivered" as const, contentSummary: secret,
+        } };
+      } },
+    },
+  });
+
+  // The first capture resumes while the second is still parked mid-await: its
+  // clip must still redact ITS secret, not whichever capture entered last.
+  const first = start(firstGate, firstSecret);
+  const second = start(secondGate, secondSecret);
+  releaseFirst();
+  const firstState = await first;
+  releaseSecond();
+  const secondState = await second;
+
+  expect(firstState.briefing.today && firstState.briefing.today.contentSummary).toBe("<redacted>");
+  expect(secondState.briefing.today && secondState.briefing.today.contentSummary).toBe("<redacted>");
+  expect(render(firstState, [firstSecret])).not.toContain("E".repeat(50));
+  expect(render(secondState, [secondSecret])).not.toContain("F".repeat(50));
+});
+
 test("known configured secrets are redacted in their JSON-escaped form", async () => {
   const now = new Date("2026-07-16T13:00:00.000Z");
   const secret = 'abcdefgh"ijklmnop';

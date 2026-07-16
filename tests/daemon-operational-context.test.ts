@@ -174,6 +174,61 @@ test("daemon operational context redacts the llm preset's default env api key", 
   }
 });
 
+test("daemon operational context redacts a whitespace-padded web voice token in its live trimmed form", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-daemon-operational-padded-"));
+  roots.push(root);
+  // Startup authenticates with the TRIMMED token, so the trimmed form is the
+  // live credential — a padded config value must not leave it unmatched.
+  const liveToken = "AllLetterPaddedWebVoiceCredential";
+  const now = Date.now();
+  const config = loadConfig({}, { home: root });
+  config.raw.web_voice = { enabled: true, token: `  ${liveToken}  ` };
+  const daemon = new CiceroDaemon(config) as unknown as OperationalDaemonHarness;
+  daemon.startedAtMs = now;
+  daemon.kanbanWatcher = {
+    snapshot: () => ({
+      asOfMs: now, truncated: false, totalTasks: 1,
+      tasks: [{ id: "secret", title: `Rotate leaked web voice token ${liveToken}`, status: "blocked" }],
+    }),
+  };
+
+  expect(daemon.snapshotKnownSecrets()).toContain(liveToken);
+  const text = await daemon.operationalContext();
+  expect(text).not.toContain(liveToken);
+  expect(text).toContain("Rotate leaked web voice token <redacted>");
+});
+
+test("daemon operational context redacts the ElevenLabs env-resolved api key", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-daemon-operational-elevenlabs-"));
+  roots.push(root);
+  // ElevenLabs falls back to ELEVENLABS_API_KEY when no inline key is configured
+  // (src/backends/tts/elevenlabs.ts) — the inventory must mirror that resolution.
+  const key = "AllLetterElevenLabsCredentialValue";
+  const prior = process.env.ELEVENLABS_API_KEY;
+  process.env.ELEVENLABS_API_KEY = key;
+  const now = Date.now();
+  const config = loadConfig({}, { home: root });
+  config.raw.tts = { backend: "elevenlabs" };
+  const daemon = new CiceroDaemon(config) as unknown as OperationalDaemonHarness;
+  daemon.startedAtMs = now;
+  daemon.kanbanWatcher = {
+    snapshot: () => ({
+      asOfMs: now, truncated: false, totalTasks: 1,
+      tasks: [{ id: "secret", title: `rotate ${key}`, status: "blocked" }],
+    }),
+  };
+
+  try {
+    expect(daemon.snapshotKnownSecrets()).toContain(key);
+    const text = await daemon.operationalContext();
+    expect(text).not.toContain(key);
+    expect(text).toContain("rotate <redacted>");
+  } finally {
+    if (prior === undefined) delete process.env.ELEVENLABS_API_KEY;
+    else process.env.ELEVENLABS_API_KEY = prior;
+  }
+});
+
 test("daemon operational context redacts a configured Cookie credential header value", async () => {
   const root = mkdtempSync(join(tmpdir(), "cicero-daemon-operational-cookie-"));
   roots.push(root);

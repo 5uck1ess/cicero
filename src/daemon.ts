@@ -363,8 +363,13 @@ export class CiceroDaemon {
 
   private snapshotKnownSecrets(): string[] {
     const secrets = new Set<string>();
+    // Record the trimmed form: consumers authenticate with it (web-voice startup
+    // trims the configured token), so a padded config value would otherwise leave
+    // the live credential unmatched. The trimmed form also substring-matches any
+    // padded occurrence in board text.
     const add = (value: string | undefined) => {
-      if (value?.trim()) secrets.add(value);
+      const trimmed = value?.trim();
+      if (trimmed) secrets.add(trimmed);
     };
     // Credentials are commonly stored as an env-var NAME (api_key_env / token_env)
     // rather than inline, so the real secret is resolved from process.env at
@@ -410,6 +415,12 @@ export class CiceroDaemon {
     addHeaderValues(llm?.extraHeaders);
     add(this.config.ttsBackend?.apiKey);
     add(this.config.ttsFallbackBackend?.apiKey);
+    // ElevenLabs resolves its key from ELEVENLABS_API_KEY when no inline key is
+    // configured (src/backends/tts/elevenlabs.ts) — mirror that resolution so the
+    // live credential is in the set either way.
+    if (this.config.ttsBackend?.backend === "elevenlabs" || this.config.ttsFallbackBackend?.backend === "elevenlabs") {
+      add(process.env.ELEVENLABS_API_KEY);
+    }
 
     return [...secrets];
   }
