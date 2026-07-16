@@ -27,6 +27,7 @@ import type { TurnDetector } from "./backends/turn/provider";
 import { createSerProvider } from "./backends/ser";
 import type { SerProvider } from "./backends/ser/provider";
 import { toneTag, wavDurationMs, type ToneOptions } from "./web-voice/tone";
+import { callbackConsumerAlive, writeCallbackSpool } from "./telegram-call";
 import { StreamingTTSSpeaker } from "./speaker/streaming-tts";
 import { speakable } from "./speaker/speakable";
 import { canStreamBrain, canNarrateAgent, streamBrainToSpeaker, streamAgentNarration } from "./speaker/brain-stream";
@@ -158,6 +159,7 @@ export async function recordParkedBriefingVoiceOutcome(
   signal: AbortSignal,
   channels: NonNullable<BriefingRunResult["channels"]>,
   writeCallback: () => Promise<unknown>,
+  consumerAlive: () => Promise<boolean> = async () => true,
 ): Promise<void> {
   if (signal.aborted) {
     channels.voice = "aborted";
@@ -165,17 +167,31 @@ export async function recordParkedBriefingVoiceOutcome(
     return;
   }
   try {
-    await writeCallback();
+    const queued = await writeProactiveCallback(async () => {
+      signal.throwIfAborted();
+      return writeCallback();
+    }, consumerAlive);
     if (signal.aborted) {
       channels.voice = "aborted";
       channels.callback = "aborted";
       return;
     }
-    channels.callback = "accepted";
+    channels.callback = queued ? "accepted" : "failed";
   } catch {
     channels.callback = signal.aborted ? "aborted" : "failed";
     if (signal.aborted) channels.voice = "aborted";
   }
+}
+
+/** Proactive callback producers must not create a spool unless a consumer is
+ *  currently alive. Explicit user dial-backs intentionally keep their own
+ *  queue-for-later behavior. */
+export async function writeProactiveCallback(
+  writeCallback: () => Promise<unknown>,
+  consumerAlive: () => Promise<boolean> = callbackConsumerAlive,
+): Promise<boolean> {
+  if (!await consumerAlive()) return false;
+  return await writeCallback() !== false;
 }
 import { createAudioPlayer, createAudioRecorder } from "./platform/audio";
 import { AecAudioHub, aecAvailable } from "./platform/aec-hub";
@@ -313,10 +329,16 @@ export class CiceroDaemon {
           // Blocked tasks never auto-ring (the user's call): their text
           // names the "have <name> call me" dial-back instead.
           if (res?.parked && kw.call_back && t.status !== "blocked") {
-            await Bun.write(
-              join(homedir(), ".cicero", "telegram-call", "callback.request"),
-              JSON.stringify({ reason: line, at: Date.now() }),
-            );
+            const callbackRequest = JSON.stringify({ reason: line, at: Date.now() });
+            const queued = await writeProactiveCallback(async () => {
+              signal.throwIfAborted();
+              return writeCallbackSpool(callbackRequest, signal);
+            });
+            if (signal.aborted) return;
+            if (!queued) {
+              log("info", "kanban watch: callback skipped — no live Telegram call consumer");
+              return;
+            }
             log("info", `kanban watch: callback requested — "${line.slice(0, 60)}"`);
           }
         },
@@ -723,6 +745,7 @@ export class CiceroDaemon {
       // the call connects straight to that employee (voice included) —
       // the same sticky pin as a spoken transfer; "back to you" releases.
       let ack = "Ringing you now.";
+      let lanePickup: string | undefined;
       if (who) {
         // The lane picks up briefed on its parked tasks — "have ada
         // call me" after a blocked announcement is THE conversation about
@@ -748,15 +771,25 @@ export class CiceroDaemon {
             ? `I couldn't get "${who}" on the line. I can put on: ${roster} — or just say "call me".`
             : `I couldn't get "${who}" on the line — say "call me" and I'll ring you myself.`;
         }
+        lanePickup = name;
         ack = `Ringing you now — ${name} will pick up.`;
       }
       signal.throwIfAborted();
-      await Bun.write(
-        join(homedir(), ".cicero", "telegram-call", "callback.request"),
-        JSON.stringify({ reason: "text dial-back", lane: who ?? null, at: Date.now() }),
-      );
-      signal.throwIfAborted();
-      return ack;
+      // Spool unconditionally: an explicit "call me" is never dropped, so it
+      // still rings if the sidecar comes up moments later (one fixed-path
+      // file, overwritten — a consumer-less install never piles them up).
+      const callbackRequest = JSON.stringify({ reason: "text dial-back", lane: who ?? null, at: Date.now() });
+      const published = await writeCallbackSpool(callbackRequest, signal);
+      if (!published) signal.throwIfAborted();
+      // Only promise a ring when a consumer is provably alive. With no call
+      // sidecar running there is nothing to consume the spool, so answer
+      // honestly instead of overpromising "Ringing you now." — the sidecar's
+      // heartbeat stays fresh while it places or defers a ring mid-call. A
+      // sidecar with no configured callback owner advertises no heartbeat.
+      if (await callbackConsumerAlive()) return ack;
+      return lanePickup
+        ? `I've lined up ${lanePickup}, but I don't have a phone line set up right now — the call sidecar isn't running, so I can't ring you. I've queued the request in case it starts.`
+        : "I don't have a phone line set up right now — the call sidecar isn't running, so I can't ring you. I've queued the request in case it starts.";
     };
     this.brain.setCallMeHandler?.(dialBack);
 
@@ -1440,10 +1473,13 @@ export class CiceroDaemon {
                     const accepted = result !== null && (result.delivered > 0 || result.parked);
                     channels.voice = accepted ? "accepted" : "failed";
                     if (result?.parked) {
-                      await recordParkedBriefingVoiceOutcome(signal, channels, () => Bun.write(
-                          join(homedir(), ".cicero", "telegram-call", "callback.request"),
-                          JSON.stringify({ reason: "morning briefing", at: Date.now() }),
-                        ));
+                      const callbackRequest = JSON.stringify({ reason: "morning briefing", at: Date.now() });
+                      await recordParkedBriefingVoiceOutcome(
+                        signal,
+                        channels,
+                        () => writeCallbackSpool(callbackRequest, signal),
+                        callbackConsumerAlive,
+                      );
                     }
                   }).catch(() => { channels.voice = signal.aborted ? "aborted" : "failed"; })
                 : Promise.resolve();

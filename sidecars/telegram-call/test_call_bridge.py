@@ -11,10 +11,16 @@ CI runs these tests with a bare interpreter, so the deps are stubbed the same
 way tests/python/test_sidecar_contracts.py stubs model modules.
 """
 import asyncio
+import io
+import json
+import os
 import sys
+import tempfile
 import time
 import types
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 
 
 def _module(name: str, **attrs: object) -> types.ModuleType:
@@ -374,6 +380,206 @@ class ZombieBridgeReleaseTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(call_agent.discard_releases_bridge(bridge, chat_id=8, answer_in_flight=False))
         await bridge.close()
         self.assertFalse(call_agent.discard_releases_bridge(bridge, chat_id=7, answer_in_flight=False))
+
+
+class ListenerHeartbeatTest(unittest.TestCase):
+    """Heartbeat writes are best-effort and never follow planted links."""
+
+    def test_write_creates_and_refreshes_the_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+            self.assertFalse(hb.exists())
+            generation = call_agent.write_listener_heartbeat(hb)
+            self.assertTrue(hb.exists())
+            self.assertEqual(generation, call_agent.LISTENER_HEARTBEAT_GENERATION)
+            self.assertEqual(hb.read_text(), generation)
+            backdated = hb.stat().st_mtime_ns - 5_000_000_000  # 5s in the past
+            os.utime(hb, ns=(backdated, backdated))
+            call_agent.write_listener_heartbeat(hb)
+            self.assertGreater(hb.stat().st_mtime_ns, backdated)
+            self.assertEqual(hb.read_text(), generation)
+
+    def test_write_creates_the_workdir_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "telegram-call" / "listener.alive"
+            call_agent.write_listener_heartbeat(hb)
+            self.assertTrue(hb.exists())
+
+    def test_write_never_raises_when_the_path_is_unwritable(self) -> None:
+        # A directory planted at the path makes touch() fail; the ring loop
+        # must swallow it, not die.
+        with tempfile.TemporaryDirectory() as d:
+            planted = Path(d) / "listener.alive"
+            planted.mkdir()
+            call_agent.write_listener_heartbeat(planted)  # must not raise
+
+    def test_write_refuses_a_symlink_without_touching_its_target(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "unrelated"
+            target.write_text("leave me alone")
+            old = time.time_ns() - 60_000_000_000
+            os.utime(target, ns=(old, old))
+            planted = Path(d) / "listener.alive"
+            planted.symlink_to(target)
+
+            call_agent.write_listener_heartbeat(planted)
+
+            self.assertTrue(planted.is_symlink())
+            self.assertEqual(target.read_text(), "leave me alone")
+            self.assertEqual(target.stat().st_mtime_ns, old)
+
+    def test_old_generation_cleanup_leaves_new_generation_heartbeat_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+            old_owned = "a" * 32
+            new_owned = "b" * 32
+            call_agent.write_listener_heartbeat(hb, old_owned)
+            call_agent.write_listener_heartbeat(hb, new_owned)
+            fresh_mtime = hb.stat().st_mtime_ns
+
+            call_agent.expire_listener_heartbeat(hb, old_owned)
+
+            self.assertEqual(hb.read_text(), new_owned)
+            self.assertEqual(hb.stat().st_mtime_ns, fresh_mtime)
+
+    def test_owner_cleanup_expires_its_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+            owned = call_agent.write_listener_heartbeat(hb)
+
+            call_agent.expire_listener_heartbeat(hb, owned)
+
+            self.assertEqual(hb.stat().st_mtime_ns, 0)
+
+    def test_cleanup_refuses_a_symlink_without_touching_its_target(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "unrelated"
+            target.write_text(call_agent.LISTENER_HEARTBEAT_GENERATION)
+            old = time.time_ns() - 60_000_000_000
+            os.utime(target, ns=(old, old))
+            planted = Path(d) / "listener.alive"
+            planted.symlink_to(target)
+
+            call_agent.expire_listener_heartbeat(
+                planted, call_agent.LISTENER_HEARTBEAT_GENERATION
+            )
+
+            self.assertTrue(planted.is_symlink())
+            self.assertEqual(target.stat().st_mtime_ns, old)
+
+    def test_empty_callback_owner_guard_raises_without_waiting(self) -> None:
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "without a configured CICERO_TG_ALLOWED owner"):
+            call_agent.callback_owner_target(frozenset())
+        self.assertLess(time.monotonic() - started, 0.1)
+
+
+class CallbackSpoolCompatibilityTest(unittest.TestCase):
+    def test_callback_consumer_ignores_nonce_field(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            spool = Path(d) / "callback.request"
+            spool.write_text(json.dumps({"reason": "call back", "nonce": "unique"}))
+
+            self.assertEqual(call_agent.consume_callback_reason(spool), "call back")
+            self.assertFalse(spool.exists())
+
+
+class ListenerHeartbeatLifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_allowed_configuration_never_starts_poll_or_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+            poll_started = False
+
+            async def callback_poll() -> None:
+                nonlocal poll_started
+                poll_started = True
+
+            await call_agent.own_callback_listener(
+                callback_poll,
+                enabled=False,
+                heartbeat_path=hb,
+                heartbeat_interval_s=0.01,
+            )
+
+            self.assertFalse(poll_started)
+            self.assertFalse(hb.exists())
+
+    async def test_heartbeat_stays_fresh_while_callback_answer_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+            answer_started = asyncio.Event()
+            release_answer = asyncio.Event()
+
+            async def fake_answer() -> None:
+                answer_started.set()
+                await release_answer.wait()
+
+            async def callback_poll() -> None:
+                await fake_answer()
+                await asyncio.Event().wait()
+
+            owner = asyncio.create_task(call_agent.own_callback_listener(
+                callback_poll,
+                enabled=True,
+                heartbeat_path=hb,
+                heartbeat_interval_s=0.01,
+            ))
+            try:
+                await asyncio.wait_for(answer_started.wait(), timeout=1)
+                await eventually(hb.exists, message="heartbeat was not created")
+                backdated = hb.stat().st_mtime_ns - 5_000_000_000
+                os.utime(hb, ns=(backdated, backdated))
+                await eventually(
+                    lambda: hb.stat().st_mtime_ns > backdated,
+                    message="heartbeat went stale while answer was blocked",
+                )
+            finally:
+                release_answer.set()
+                owner.cancel()
+                await asyncio.gather(owner, return_exceptions=True)
+
+    async def test_clean_shutdown_expires_heartbeat_instead_of_removing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+
+            async def callback_poll() -> None:
+                await asyncio.Event().wait()
+
+            owner = asyncio.create_task(call_agent.own_callback_listener(
+                callback_poll,
+                enabled=True,
+                heartbeat_path=hb,
+                heartbeat_interval_s=0.01,
+            ))
+            await eventually(hb.exists, message="heartbeat was not created")
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+
+            self.assertTrue(hb.exists())
+            self.assertEqual(hb.stat().st_mtime_ns, 0)
+
+    async def test_callback_owner_failure_is_redacted_loud_and_fatal(self) -> None:
+        original_token = call_agent.TOKEN
+        secret = "callback-owner-secret"
+        terminated: list[BaseException] = []
+
+        async def broken_owner() -> None:
+            raise RuntimeError(f"poll crashed with {secret}")
+
+        output = io.StringIO()
+        try:
+            call_agent.TOKEN = secret
+            with redirect_stdout(output):
+                owner = asyncio.create_task(broken_owner())
+                call_agent.monitor_callback_owner(owner, terminated.append)
+                await eventually(lambda: len(terminated) == 1, message="owner failure was not fatal")
+        finally:
+            call_agent.TOKEN = original_token
+
+        self.assertIn("FATAL callback listener owner failed", output.getvalue())
+        self.assertIn("<redacted>", output.getvalue())
+        self.assertNotIn(secret, output.getvalue())
+        self.assertIsInstance(terminated[0], RuntimeError)
 
 
 if __name__ == "__main__":
