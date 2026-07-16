@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -160,6 +160,45 @@ test("a quarantined corrupt status keeps reporting unavailable until a valid rec
   const back = await store.readOperational();
   expect(back.status).toBe("ok");
   expect(back.status === "ok" && back.value?.phase).toBe("delivered");
+});
+
+test("a same-day corruption remains unavailable after restart while ordinary absence stays healthy", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-briefing-restart-latch-"));
+  roots.push(root);
+  const corruptFile = join(root, "briefing-status.json");
+  writeFileSync(corruptFile, "{broken", { mode: 0o600 });
+
+  const firstStore = new BriefingStatusStore(corruptFile);
+  expect(await firstStore.readOperational()).toEqual({ status: "unavailable" });
+
+  const restartedStore = new BriefingStatusStore(corruptFile);
+  expect(await restartedStore.readOperational()).toEqual({ status: "unavailable" });
+
+  const neverCorrupted = new BriefingStatusStore(join(root, "never-corrupted.json"));
+  expect(await neverCorrupted.readOperational()).toEqual({ status: "ok", value: null });
+});
+
+test("corruption quarantine survives UTC rollover within the configured local day", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-briefing-timezone-latch-"));
+  roots.push(root);
+  const file = join(root, "briefing-status.json");
+  const timeZone = "America/Los_Angeles";
+  writeFileSync(file, "{broken", { mode: 0o600 });
+
+  try {
+    setSystemTime(new Date("2026-07-16T23:55:00Z"));
+    const firstStore = new BriefingStatusStore(file, timeZone);
+    expect(await firstStore.readOperational()).toEqual({ status: "unavailable" });
+    expect(readdirSync(root)).toContain("briefing-status.json.corrupt-2026-07-16");
+
+    // UTC has rolled to Jul 17, but Los Angeles is still on Jul 16. A restarted
+    // store must find the quarantine artifact using that same configured day.
+    setSystemTime(new Date("2026-07-17T00:05:00Z"));
+    const restartedStore = new BriefingStatusStore(file, timeZone);
+    expect(await restartedStore.readOperational()).toEqual({ status: "unavailable" });
+  } finally {
+    setSystemTime();
+  }
 });
 
 test("a parseable status with a wrong-typed optional field is quarantined and does not wedge delivery", async () => {

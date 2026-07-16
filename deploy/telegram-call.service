@@ -1,0 +1,32 @@
+# Cicero's Telegram call sidecar as a systemd *user* service — the always-on
+# companion to deploy/cicero.service (same install steps, same lingering rule):
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/telegram-call.service ~/.config/systemd/user/
+#   # edit WorkingDirectory below to where you cloned cicero
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now telegram-call
+#   loginctl enable-linger $USER
+#
+#   journalctl --user -u telegram-call -f    # logs
+#
+# Prereqs (see sidecars/telegram-call/README.md): the tgcalls venv provisioned
+# at ~/.cicero/tgcalls-venv, an authenticated userbot session, and a non-empty
+# CICERO_TG_ALLOWED in the repo .env — the listener refuses to start without it.
+# The sidecar reconnects to the daemon on its own, so restarting cicero.service
+# does not require restarting this unit; ordering below is best-effort only.
+
+[Unit]
+Description=Cicero — Telegram call sidecar (listener)
+After=network-online.target cicero.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/LocalDev/cicero
+ExecStart=%h/.cicero/tgcalls-venv/bin/python sidecars/telegram-call/call_agent.py --listen
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

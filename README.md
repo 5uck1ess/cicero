@@ -8,7 +8,43 @@
 
 **Cicero is a self-hosted voice interface for coding agents: you speak, it answers out loud, and your agent does the actual work.** Install it next to the agent you already use — Claude Code, Codex, Gemini, an [ACP](https://agentclientprotocol.com) harness like [hermes](https://hermes-agent.nousresearch.com), or any OpenAI-compatible endpoint — then talk to that agent from any browser on your network — or, with the optional Telegram sidecar, over a real phone call. Say *"fix the failing auth test and open a PR"*; Cicero acknowledges in about a second, the work happens in the background (commands you've gated, like a `git push`, need your spoken yes), and it tells you when the PR is up. With local providers, your audio never leaves your machine.
 
-**Local voice in, pull requests out.** In more detail:
+## What it feels like
+
+```text
+you    › Cicero, what's broken on CI?
+cicero › Two things: lint on the API package, and the Postgres
+         integration test timing out.
+you    › Have the coder fix the lint one and open a PR.
+cicero › On it — filed to the coder. I'll tell you when the PR is up.
+
+         (four minutes later, unprompted)
+
+cicero › The coder just finished "fix the CI lint failure" —
+         the link's on your screen.
+```
+
+That's the shape: you speak, it acknowledges in about a second, the heavy work
+runs outside the voice loop, and it comes back to you when there's news. The
+delegation half needs a brain that can run async workers ([the
+office](docs/office.md)); with a plain CLI brain you still get everything
+conversational — ask, answer, run, interrupt.
+
+## Two ways in
+
+| | You want | Cost | Path |
+|---|---|---|---|
+| 🔊 | **Hear your agent** — the Claude Code / Codex session you already run speaks its replies | ~2 minutes; no models, no config | [Sidecar quickstart](#try-it-in-two-minutes-sidecar-mode) |
+| 🎙️ | **Talk to your agent** — full spoken conversation from any browser on your network | one setup session + a few GB of models | [The full setup](#the-full-setup-web-voice) |
+
+Most of the rest — cloned voices, a team of agents behind one number,
+proactive briefings — layers onto the second path one config block at a time.
+The exception is honest to name: **real phone calls** ride an optional
+Telegram sidecar with a setup of its own (second account, API credentials, a
+login) — see the [call sidecar guide](sidecars/telegram-call/README.md).
+
+## What makes it different
+
+**Local voice in, pull requests out.** In detail:
 
 - **~1 second to first spoken word** (on a local NVIDIA GPU) — local [faster-whisper](https://github.com/SYSTRAN/faster-whisper) speech recognition, sentence-streamed speech synthesis, latency-covering filler clips. Measured end-to-end through a real tool-calling agent, not a parrot.
 - **Any voice, cloned locally** — zero-shot cloning from a single reference WAV, down to **36–46 ms per sentence** ([audio.cpp](https://github.com/0xShug0/audio.cpp) pocket-tts, ggml/CUDA). Hand it a clip; that's Cicero's voice now.
@@ -122,13 +158,13 @@ cicero start
 # → 🎙️  Web voice server on https://0.0.0.0:8090 (token required)
 ```
 
-Open `https://<box-ip>:8090/?token=<token>`, accept the self-signed certificate once, hold SPACE (or the orb), and talk. Full page controls, hands-free mode, and the PWA install are in the [web-voice guide](docs/web-voice.md); macOS / Windows / systemd / remote-GPU setups in [setup](docs/setup.md).
+Open `https://<box-ip>:8090/?token=<token>`, accept the self-signed certificate once, click **Start conversation** (the page loads with it off), then hold SPACE (or the orb) and talk. Full page controls, hands-free mode, and the PWA install are in the [web-voice guide](docs/web-voice.md); macOS / Windows / systemd / remote-GPU setups in [setup](docs/setup.md).
 
 ## When something doesn't work
 
 - **The browser warns about the certificate.** Expected: Cicero generates a self-signed HTTPS certificate on first start (browsers only expose the microphone over HTTPS). Accept it once per device.
 - **Where's the token?** Printed at startup, once per run. For a stable token across restarts, run `openssl rand -hex 16` and paste only its output as `token:` inside the `web_voice:` block (e.g. `web_voice: { enabled: true, host: 0.0.0.0, port: 8090, token: <paste> }`). Configure it before running Cicero under a service manager, because startup stdout may be retained — and never copy an example placeholder as a secret.
-- **I talk and nothing happens.** The default is push-to-talk: hold SPACE or the orb *while* speaking. Then check the browser's microphone permission, then `cicero doctor`.
+- **I talk and nothing happens.** Click **Start conversation** first — push-to-talk is inert until the conversation is on. Then remember to hold SPACE or the orb *while* speaking, then check the browser's microphone permission, then `cicero doctor`.
 - **`doctor` is green but turns fail.** `doctor` verifies configuration and binaries; it does not prove a CLI login or complete a live agent turn. Make sure the brain's own CLI works standalone, then exercise one real turn.
 - Anything else: `cicero doctor` first — it names the missing prerequisite and the command that fixes it.
 
@@ -171,19 +207,12 @@ a live, interruptible spoken conversation, not transcribed voice messages.
 
 ## Docs
 
-- [Setup](docs/setup.md) — Linux / macOS / Windows install, sidecar quickstart, remote model servers, systemd, CLI reference
-- [Web-voice mode](docs/web-voice.md) — the browser/PWA experience: controls, hands-free, barge-in, restart resume
-- [The office](docs/office.md) — lanes, transfers, personas, the operator pattern, an example team topology
-- [Brains](docs/brains.md) — every backend, verified ACP harnesses, the spoken confirmation gate, bring-your-own-harness
-- [Notifications](docs/notifications.md) — proactive voice-back, kanban watch, Telegram notes & calls, quiet hours + briefing
-- [Turn detection](docs/turn-detection.md) — semantic end-of-turn (Smart-Turn): why silence timers cut you off, the model server, tuning
-- [Voice cloning](docs/voice-cloning.md) — the library, engines and latencies, getting a clone to sound right
-- [Daemon mode](docs/daemon-mode.md) — local mic, full-duplex, double-clap, computer use
-- [Configuration](docs/configuration.md) — full config reference, default model stacks, quick intents, custom actions
-- [Architecture](docs/architecture.md) — the turn pipeline, components, where your data lives
-- [Full duplex](docs/duplex.md) — why Cicero takes turns: the fused-vs-modular tradeoff, and what would change the call
-- [Security model](docs/security.md) — the threat model, the token, TLS, what egresses and what never does
-- [Evaluation follow-up](docs/evaluation-follow-up-2026-07.md) — delivered fixes, current limits, and intentional architecture boundaries
+The documentation is organized by what you're trying to do — **[start at the
+docs map](docs/README.md)**: understand it, have your first conversation,
+operate it, extend it. The most-reached-for guides:
+[setup](docs/setup.md) · [brains](docs/brains.md) ·
+[web voice](docs/web-voice.md) · [the office](docs/office.md) ·
+[notifications](docs/notifications.md) · [security](docs/security.md)
 
 ---
 

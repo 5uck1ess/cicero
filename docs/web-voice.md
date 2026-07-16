@@ -4,26 +4,10 @@ The flagship shape: Cicero runs on a headless box (typically a GPU machine) and 
 
 ## Setup
 
-```yaml
-# ~/.cicero/config.yaml on the GPU box
-headless: true            # no local mic/speakers — the browser is the audio I/O
-
-web_voice:
-  enabled: true
-  host: 0.0.0.0           # bind the LAN
-  port: 8090
-  # token omitted: a fresh per-run credential prints to startup stdout
-
-stt: { backend: faster-whisper, port: 8083, model: large-v3-turbo }
-tts: { backend: pocket-tts, port: 8095, voice: alba }   # clones any voice from a WAV; kokoro/audiocpp also work
-llm: { backend: ollama, port: 11434, model: qwen3.5:4b } # install Ollama and pull this model first
-brain: { backend: claude-code, mode: subprocess }       # tab-inject requires kitty/tmux/WezTerm
-```
-
-```bash
-cicero start
-# → 🎙️  Web voice server on https://0.0.0.0:8090 (token required)
-```
+Follow the canonical [first-conversation setup](setup.md#your-first-conversation)
+for prerequisites, installation, minimal configuration, checks, startup, and
+the first spoken test. This guide begins with the web-voice-specific credential
+and connection behavior.
 
 When `web_voice.token` is omitted or blank, the one-run credential is printed
 to startup stdout. It is deliberately excluded from the dashboard, dashboard

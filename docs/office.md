@@ -80,7 +80,7 @@ The operator slot is pluggable — it's just Cicero's brain backend (see [brains
 | **Conductor** | operator on a fast model | converse, decompose, route, summarize | **snappy, reliable tool-caller** |
 | Workers | operator profiles | do the work in an isolated workspace, incl. `gh pr create` | genuinely smart per role; async |
 
-The conductor never writes a line of code — it understands the spoken ask, decomposes it, and routes each task to the profile whose description says it's the right one for the job. Because the workers run *out* of the voice loop, the conversation stays snappy on a fast model while the heavy work runs async. The conductor's only load-bearing skill is **reliable tool-calling** — a much lower bar than agentic coding, which lets a small fast model drive frontier-class outcomes.
+In this topology the conductor writes no code itself — a convention your harness's profile enforces, not something Cicero guarantees — it understands the spoken ask, decomposes it, and routes each task to the profile whose description says it's the right one for the job. Because the workers run *out* of the voice loop, the conversation stays snappy on a fast model while the heavy work runs async. The conductor's only load-bearing skill is **reliable tool-calling** — a much lower bar than agentic coding, which lets a small fast model drive frontier-class outcomes.
 
 **A real turn, end to end:**
 
