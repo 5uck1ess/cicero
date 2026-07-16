@@ -30,8 +30,16 @@ export interface HealthEntry {
   source: "cli" | "api";
 }
 
-/** Maximum file content retained by any health-record read. */
+/** Bytes retained by a "recent" read — the 60s summary refresh and recent(n). */
 export const HEALTH_READ_TAIL_BYTES = 64 * 1024;
+
+/**
+ * Absolute cap on bytes a since()-window read may retain. A time-window query
+ * grows its read until the window is covered, but never past this — so a
+ * pathologically grown log cannot OOM the daemon while still covering any
+ * realistic trend window (~4 MiB is tens of thousands of entries).
+ */
+export const HEALTH_SINCE_MAX_BYTES = 4 * 1024 * 1024;
 
 /** Units assumed when a log omits one — only for metrics where there's one sane answer. */
 export const DEFAULT_UNITS: Record<string, string> = {
@@ -60,31 +68,55 @@ export class HealthStore {
     return this.pending;
   }
 
-  /** Entries from the bounded retained tail at or after `sinceMs`, oldest first. */
+  /**
+   * Entries at or after `sinceMs`, oldest first. Reads from the file tail and
+   * grows the read until the window is covered (the oldest entry read predates
+   * `sinceMs`, or the whole file was read), capped at HEALTH_SINCE_MAX_BYTES so a
+   * runaway log can't OOM the daemon. A small window (the 24h summary refresh)
+   * costs one bounded read; a wide trend window reads only as far back as needed.
+   */
   async since(sinceMs: number, signal?: AbortSignal): Promise<HealthEntry[]> {
-    return (await this.all(signal)).filter((e) => e.t >= sinceMs);
+    let maxBytes = HEALTH_READ_TAIL_BYTES;
+    for (;;) {
+      const { entries, reachedStart } = await this.readTail(maxBytes, signal);
+      const oldest = entries[0];
+      const covered = reachedStart
+        || (oldest !== undefined && oldest.t < sinceMs)
+        || maxBytes >= HEALTH_SINCE_MAX_BYTES;
+      if (covered) return entries.filter((e) => e.t >= sinceMs);
+      maxBytes = Math.min(maxBytes * 4, HEALTH_SINCE_MAX_BYTES);
+    }
   }
 
   /** The most recent `n` entries from the bounded retained tail, oldest first. */
   async recent(n: number, signal?: AbortSignal): Promise<HealthEntry[]> {
-    return (await this.all(signal)).slice(-n);
+    return (await this.readTail(HEALTH_READ_TAIL_BYTES, signal)).entries.slice(-n);
   }
 
-  private async all(signal?: AbortSignal): Promise<HealthEntry[]> {
+  /**
+   * Read up to the last `maxBytes` of the record and parse whole lines. When the
+   * read did not reach byte 0 the first line is a fragment of an earlier entry
+   * and is dropped; `reachedStart` reports whether the whole file was covered, so
+   * since() knows when to stop growing. Genuine I/O errors (open/stat/read)
+   * propagate so a caller can report "unavailable"; an individual malformed or
+   * torn line is skipped — expected in an append-only log.
+   */
+  private async readTail(maxBytes: number, signal?: AbortSignal): Promise<{ entries: HealthEntry[]; reachedStart: boolean }> {
     signal?.throwIfAborted();
     const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
     let handle: Awaited<ReturnType<typeof open>>;
     try {
       handle = await open(this.file, constants.O_RDONLY | noFollow);
     } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { entries: [], reachedStart: true };
       throw error;
     }
     try {
       const info = await handle.stat();
       if (!info.isFile()) throw new Error(`health record path is not a regular file: '${this.file}'`);
-      const length = Math.min(info.size, HEALTH_READ_TAIL_BYTES);
-      if (length === 0) return [];
+      const length = Math.min(info.size, maxBytes);
+      const reachedStart = length >= info.size;
+      if (length === 0) return { entries: [], reachedStart: true };
       const start = info.size - length;
       const bytes = Buffer.allocUnsafe(length);
       let bytesRead = 0;
@@ -97,18 +129,15 @@ export class HealthStore {
       let text = bytes.subarray(0, bytesRead).toString("utf8");
       if (start > 0) {
         const firstNewline = text.indexOf("\n");
-        // The retained tail is a fragment of a single line longer than the bound
-        // (a torn/oversized final entry). The file read fine, so this is not an
-        // I/O failure — there are simply no complete entries in the window. Report
-        // empty rather than throwing (which would flip health to "unavailable").
-        if (firstNewline < 0) return [];
+        // Not at byte 0: the first line is a fragment of an earlier entry — drop
+        // it. No newline at all means the tail is a fragment of one oversized
+        // line with no complete entry (not an I/O failure), so report none.
+        if (firstNewline < 0) return { entries: [], reachedStart };
         text = text.slice(firstNewline + 1);
       }
-      // Genuine I/O failures (open/stat/read above) propagate so the caller can
-      // report the health field as "unavailable" rather than a confident empty.
-      // An individual malformed line, however, is expected in an append-only log
-      // (a torn final line during a concurrent write, or a legacy-schema entry)
-      // and must not poison the whole read — skip it and keep the good entries.
+      // An individual malformed line is expected in an append-only log (a torn
+      // final line during a concurrent write, or a legacy-schema entry) and must
+      // not poison the whole read — skip it and keep the good entries.
       const out: HealthEntry[] = [];
       for (const line of text.split("\n").filter(Boolean)) {
         try {
@@ -116,7 +145,7 @@ export class HealthStore {
           if (typeof e.t === "number" && typeof e.metric === "string") out.push(e);
         } catch { /* skip corrupt line, keep the rest */ }
       }
-      return out;
+      return { entries: out, reachedStart };
     } finally {
       await handle.close();
     }

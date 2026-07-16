@@ -28,21 +28,26 @@ test("store: concurrent appends don't interleave", async () => {
   expect((await store.recent(100)).length).toBe(25);
 });
 
-test("store: reads only a bounded tail of an oversized metrics file", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cicero-health-tail-"));
+test("store: recent(n) reads only a bounded tail, but since() covers the full window", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-health-window-"));
   const file = join(root, "metrics.jsonl");
-  const total = 4_000;
-  const lines = Array.from({ length: total }, (_, index) => JSON.stringify(entry({
-    t: index, metric: "note", note: `${index}:${"x".repeat(80)}`,
-  }))).join("\n") + "\n";
-  expect(Buffer.byteLength(lines)).toBeGreaterThan(HEALTH_READ_TAIL_BYTES * 4);
-  writeFileSync(file, lines);
-
+  // ~400 KB — well past HEALTH_READ_TAIL_BYTES (64 KiB), under HEALTH_SINCE_MAX_BYTES.
+  // Earliest weight 100, a long tail of notes, latest weight 90.
+  const lines: string[] = [JSON.stringify(entry({ t: 1, metric: "weight", value: 100 }))];
+  for (let i = 0; i < 4_000; i++) lines.push(JSON.stringify(entry({ t: 100 + i, metric: "note", note: "x".repeat(80) })));
+  lines.push(JSON.stringify(entry({ t: 1_000_000, metric: "weight", value: 90 })));
+  const body = lines.join("\n") + "\n";
+  expect(Buffer.byteLength(body)).toBeGreaterThan(HEALTH_READ_TAIL_BYTES * 4);
+  writeFileSync(file, body);
   const store = new HealthStore(file);
-  const bounded = await store.since(0);
-  expect(bounded.length).toBeGreaterThan(0);
-  expect(bounded.length).toBeLessThan(total);
-  expect((await store.recent(2)).map((row) => row.t)).toEqual([total - 2, total - 1]);
+
+  // Regression: a time-window read must include the earliest in-window weight
+  // (100), not just the tail — otherwise a weight trend reports change 0, not -10.
+  const weights = (await store.since(0)).filter((e) => e.metric === "weight").map((e) => e.value);
+  expect(weights).toEqual([100, 90]);
+
+  // recent(n) stays bounded to the last tail chunk (it does not scan the file).
+  expect((await store.recent(2)).map((e) => e.t)).toEqual([4_099, 1_000_000]);
 });
 
 test("store: an oversized unterminated final line reads empty instead of throwing", async () => {
