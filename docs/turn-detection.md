@@ -119,9 +119,15 @@ turn:
   timeout_ms: 10000      # absolute /predict deadline, including response body
 ```
 
-**Tuning tip:** turn detection composes with a *shorter* `silence_duration`.
-Lower it (e.g. `"0.5"`) for snappy turn-taking — the grace loop catches the
-mid-thought cutoffs that a short timer would otherwise cause.
+**Tuning tip (local-mic conversational mode):** turn detection composes with a
+*shorter* quiet window. On the local mic's default path that window is the
+streaming VAD's `vad.hangover_ms` — lower it (e.g. `300`) for snappy
+turn-taking; `silence_duration` only governs when `vad.enabled: false`, where
+`"0.5"` is the equivalent move. Either way the grace loop catches the
+mid-thought cutoffs a short window would otherwise cause. These knobs do not
+apply to the browser path: the web-voice page runs its own client-side VAD
+with a fixed hangover, and Smart-Turn rides on top of whatever the client
+sends.
 
 This touches the load-bearing listen loop, so it stays gated behind
 verify-before-stacking — confirm the conversational voice path on hardware first.
