@@ -259,6 +259,8 @@ export class BriefingScheduler {
         ? { phase: "missed", errorKind: "delivery-window-closed" }
         : { phase: "failed", errorKind: "run-failed" };
     }
+    // A stop during complete() may persist today's accurate status a moment late. The store's day
+    // guard confines it to today's claim and prevents resend, so we accept that instead of a second write lock.
     if (this.scope.signal.aborted) return;
     const completed: BriefingRunStatus = normalizeStatus({
       ...claimed,
@@ -314,14 +316,16 @@ function scheduledInstantForToday(now: Date, at: string, timeZone?: string): Dat
   const minuteOfHour = minute % 60;
   if (!timeZone) return new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minuteOfHour);
 
-  const [year, month, date] = dayOf(now, timeZone).split("-").map(Number);
+  const requestedDay = dayOf(now, timeZone);
+  const [year, month, date] = requestedDay.split("-").map(Number);
   const wallTimeAsUtc = Date.UTC(year, month - 1, date, hour, minuteOfHour);
-  let epochMs = wallTimeAsUtc;
-  // Two corrections converge for ordinary and repeated wall times. For a DST
-  // gap they select the earlier valid instant, which keeps missing-minute catch-up deterministic.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    epochMs = wallTimeAsUtc - timeZoneOffsetMs(new Date(epochMs), timeZone);
-  }
+  const firstCandidate = wallTimeAsUtc - timeZoneOffsetMs(new Date(wallTimeAsUtc), timeZone);
+  const correctedCandidate = wallTimeAsUtc - timeZoneOffsetMs(new Date(firstCandidate), timeZone);
+  const correctedInstant = new Date(correctedCandidate);
+  const isGap = firstCandidate !== correctedCandidate
+    && (dayOf(correctedInstant, timeZone) !== requestedDay || parseHm(hmOf(correctedInstant, timeZone)) !== minute);
+  // A nonexistent wall time straddles the DST gap; use its later real candidate so it cannot fire early.
+  const epochMs = isGap ? Math.max(firstCandidate, correctedCandidate) : correctedCandidate;
   return new Date(epochMs);
 }
 

@@ -233,20 +233,31 @@ test("quiet hours extending past the cutoff miss instead of making a late call",
   expect((await h.store.read())?.phase).toBe("missed");
 });
 
-test("spring-forward missing minute catches up and fall-back repeated minute fires once", async () => {
+test("spring-forward gaps resolve later while normal and fall-back times retain catch-up behavior", async () => {
+  let springNow = new Date("2026-03-08T06:45:00Z");
   let springCalls = 0;
   const spring = scheduler({
     at: "02:30",
-    catchUpMinutes: 90,
+    catchUpMinutes: 0,
     timezone: "America/New_York",
-    now: () => new Date("2026-03-08T07:15:00Z"),
+    now: () => springNow,
     run: async () => { springCalls++; return { phase: "delivered" }; },
   });
+  await spring.scheduler.tick();
+  expect(springCalls).toBe(0);
+  expect(await spring.store.read()).toBeNull();
+
+  springNow = new Date("2026-03-08T07:30:00Z");
   await spring.scheduler.tick();
   expect(springCalls).toBe(1);
   expect((await spring.store.read())?.trigger).toBe("catch-up");
 
-  let fallNow = new Date("2026-11-01T05:30:00Z");
+  springNow = new Date("2026-03-09T06:30:00Z");
+  await spring.scheduler.tick();
+  expect(springCalls).toBe(2);
+  expect(await spring.store.read()).toMatchObject({ day: "2026-03-09", trigger: "scheduled" });
+
+  let fallNow = new Date("2026-11-01T05:45:00Z");
   let fallCalls = 0;
   const fall = scheduler({
     at: "01:30",
@@ -255,7 +266,8 @@ test("spring-forward missing minute catches up and fall-back repeated minute fir
     run: async () => { fallCalls++; return { phase: "delivered" }; },
   });
   await fall.scheduler.tick();
-  fallNow = new Date("2026-11-01T06:30:00Z");
+  expect((await fall.store.read())?.trigger).toBe("catch-up");
+  fallNow = new Date("2026-11-01T06:45:00Z");
   await fall.scheduler.tick();
   expect(fallCalls).toBe(1);
 });

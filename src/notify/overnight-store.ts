@@ -86,6 +86,8 @@ export class OvernightStore {
       if (!isItem(entry)) continue;
       items.push({ id: entry.id, queuedAt: entry.queuedAt, text: entry.text.slice(0, MAX_TEXT_CHARS) });
     }
+    // Legacy string[] migration intentionally shares the write-path MAX_ITEMS bound: the old writer
+    // also used slice(-40), so retaining only the newest 40 remains the queue's memory bound.
     return { items: items.slice(-MAX_ITEMS), migrated };
   }
 }
