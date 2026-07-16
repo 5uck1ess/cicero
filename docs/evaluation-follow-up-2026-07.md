@@ -1,5 +1,10 @@
 # Evaluation follow-up — July 2026
 
+> **Dated record (July 2026).** This documents an evaluation cycle and the PRs
+> that closed it — useful as provenance, not as setup or usage guidance. Its
+> claims were checked against the `main` tip at merge time and are not
+> maintained afterwards.
+
 This record closes the code evaluation of Cicero as a reusable voice layer for
 different agent “brains.” It distinguishes defects addressed by the follow-up
 PRs from architectural choices that should not be changed accidentally in an
