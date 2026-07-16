@@ -81,7 +81,9 @@ cicero start
 ### 6. Say this, expect this
 
 Open `https://<box-ip>:8090/?token=<token>`, accept the self-signed certificate
-once, hold SPACE (or the orb), and say **“What can you help me with?”** Expect a
+once, and click **Start conversation** (the page loads with the conversation
+off; push-to-talk does nothing until you start it and grant the microphone).
+Then hold SPACE (or the orb) and say **“What can you help me with?”** Expect a
 spoken response and the full text in the chat log. Exercise this real turn
 before treating a deployment as ready. Full page controls, hands-free mode, and
 PWA behavior are in the [web-voice guide](web-voice.md).
@@ -97,9 +99,11 @@ PWA behavior are in the [web-voice guide](web-voice.md).
   `web_voice: { enabled: true, host: 0.0.0.0, port: 8090, token: <paste> }`).
   Configure it before running Cicero under a service manager, because startup
   stdout may be retained — and never copy an example placeholder as a secret.
-- **I talk and nothing happens.** The default is push-to-talk: hold SPACE or the
-  orb *while* speaking. Then check the browser's microphone permission, then
-  `cicero doctor`.
+- **I talk and nothing happens.** First make sure the conversation is started —
+  the page loads with it off, and push-to-talk is inert until you click
+  **Start conversation**. Then remember the default is push-to-talk: hold SPACE
+  or the orb *while* speaking. Then check the browser's microphone permission,
+  then `cicero doctor`.
 
 ## Platform variants of the first-run sequence
 
