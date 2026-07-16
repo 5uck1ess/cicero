@@ -8,7 +8,41 @@
 
 **Cicero is a self-hosted voice interface for coding agents: you speak, it answers out loud, and your agent does the actual work.** Install it next to the agent you already use — Claude Code, Codex, Gemini, an [ACP](https://agentclientprotocol.com) harness like [hermes](https://hermes-agent.nousresearch.com), or any OpenAI-compatible endpoint — then talk to that agent from any browser on your network — or, with the optional Telegram sidecar, over a real phone call. Say *"fix the failing auth test and open a PR"*; Cicero acknowledges in about a second, the work happens in the background (commands you've gated, like a `git push`, need your spoken yes), and it tells you when the PR is up. With local providers, your audio never leaves your machine.
 
-**Local voice in, pull requests out.** In more detail:
+## What it feels like
+
+```text
+you    › Cicero, what's broken on CI?
+cicero › Two things: lint on the API package, and the Postgres
+         integration test timing out.
+you    › Have the coder fix the lint one and open a PR.
+cicero › On it — filed to the coder. I'll tell you when the PR is up.
+
+         (four minutes later, unprompted)
+
+cicero › That lint fix just landed as PR 214 — one file, +6 −2.
+         Want the diff summary?
+```
+
+That's the shape: you speak, it acknowledges in about a second, the heavy work
+runs outside the voice loop, and it comes back to you when there's news. The
+delegation half needs a brain that can run async workers ([the
+office](docs/office.md)); with a plain CLI brain you still get everything
+conversational — ask, answer, run, interrupt.
+
+## Two ways in
+
+| | You want | Cost | Path |
+|---|---|---|---|
+| 🔊 | **Hear your agent** — the Claude Code / Codex session you already run speaks its replies | ~2 minutes; no models, no config | [Sidecar quickstart](#try-it-in-two-minutes-sidecar-mode) |
+| 🎙️ | **Talk to your agent** — full spoken conversation from any browser on your network, or a phone call | one setup session + a few GB of models | [The full setup](#the-full-setup-web-voice) |
+
+Everything else — cloned voices, phone calls, a team of agents behind one
+number, proactive briefings — layers onto the second path one config block at
+a time.
+
+## What makes it different
+
+**Local voice in, pull requests out.** In detail:
 
 - **~1 second to first spoken word** (on a local NVIDIA GPU) — local [faster-whisper](https://github.com/SYSTRAN/faster-whisper) speech recognition, sentence-streamed speech synthesis, latency-covering filler clips. Measured end-to-end through a real tool-calling agent, not a parrot.
 - **Any voice, cloned locally** — zero-shot cloning from a single reference WAV, down to **36–46 ms per sentence** ([audio.cpp](https://github.com/0xShug0/audio.cpp) pocket-tts, ggml/CUDA). Hand it a clip; that's Cicero's voice now.
@@ -171,19 +205,12 @@ a live, interruptible spoken conversation, not transcribed voice messages.
 
 ## Docs
 
-- [Setup](docs/setup.md) — Linux / macOS / Windows install, sidecar quickstart, remote model servers, systemd, CLI reference
-- [Web-voice mode](docs/web-voice.md) — the browser/PWA experience: controls, hands-free, barge-in, restart resume
-- [The office](docs/office.md) — lanes, transfers, personas, the operator pattern, an example team topology
-- [Brains](docs/brains.md) — every backend, verified ACP harnesses, the spoken confirmation gate, bring-your-own-harness
-- [Notifications](docs/notifications.md) — proactive voice-back, kanban watch, Telegram notes & calls, quiet hours + briefing
-- [Turn detection](docs/turn-detection.md) — semantic end-of-turn (Smart-Turn): why silence timers cut you off, the model server, tuning
-- [Voice cloning](docs/voice-cloning.md) — the library, engines and latencies, getting a clone to sound right
-- [Daemon mode](docs/daemon-mode.md) — local mic, full-duplex, double-clap, computer use
-- [Configuration](docs/configuration.md) — full config reference, default model stacks, quick intents, custom actions
-- [Architecture](docs/architecture.md) — the turn pipeline, components, where your data lives
-- [Full duplex](docs/duplex.md) — why Cicero takes turns: the fused-vs-modular tradeoff, and what would change the call
-- [Security model](docs/security.md) — the threat model, the token, TLS, what egresses and what never does
-- [Evaluation follow-up](docs/evaluation-follow-up-2026-07.md) — delivered fixes, current limits, and intentional architecture boundaries
+The documentation is organized by what you're trying to do — **[start at the
+docs map](docs/README.md)**: understand it, have your first conversation,
+operate it, extend it. The most-reached-for guides:
+[setup](docs/setup.md) · [brains](docs/brains.md) ·
+[web voice](docs/web-voice.md) · [the office](docs/office.md) ·
+[notifications](docs/notifications.md) · [security](docs/security.md)
 
 ---
 
