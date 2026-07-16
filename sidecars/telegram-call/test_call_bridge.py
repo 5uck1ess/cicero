@@ -380,9 +380,7 @@ class ZombieBridgeReleaseTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ListenerHeartbeatTest(unittest.TestCase):
-    """The daemon reads listener.alive's mtime to decide whether to promise a
-    ring; the poll loop must keep the file fresh, and a heartbeat failure must
-    never break that loop."""
+    """Heartbeat writes are best-effort and never follow planted links."""
 
     def test_write_creates_and_refreshes_the_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -408,6 +406,95 @@ class ListenerHeartbeatTest(unittest.TestCase):
             planted = Path(d) / "listener.alive"
             planted.mkdir()
             call_agent.write_listener_heartbeat(planted)  # must not raise
+
+    def test_write_refuses_a_symlink_without_touching_its_target(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "unrelated"
+            target.write_text("leave me alone")
+            old = time.time_ns() - 60_000_000_000
+            os.utime(target, ns=(old, old))
+            planted = Path(d) / "listener.alive"
+            planted.symlink_to(target)
+
+            call_agent.write_listener_heartbeat(planted)
+
+            self.assertTrue(planted.is_symlink())
+            self.assertEqual(target.read_text(), "leave me alone")
+            self.assertEqual(target.stat().st_mtime_ns, old)
+
+
+class ListenerHeartbeatLifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_allowed_configuration_never_starts_poll_or_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+            poll_started = False
+
+            async def callback_poll() -> None:
+                nonlocal poll_started
+                poll_started = True
+
+            await call_agent.own_callback_listener(
+                callback_poll,
+                enabled=False,
+                heartbeat_path=hb,
+                heartbeat_interval_s=0.01,
+            )
+
+            self.assertFalse(poll_started)
+            self.assertFalse(hb.exists())
+
+    async def test_heartbeat_stays_fresh_while_callback_answer_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+            answer_started = asyncio.Event()
+            release_answer = asyncio.Event()
+
+            async def fake_answer() -> None:
+                answer_started.set()
+                await release_answer.wait()
+
+            async def callback_poll() -> None:
+                await fake_answer()
+                await asyncio.Event().wait()
+
+            owner = asyncio.create_task(call_agent.own_callback_listener(
+                callback_poll,
+                enabled=True,
+                heartbeat_path=hb,
+                heartbeat_interval_s=0.01,
+            ))
+            try:
+                await asyncio.wait_for(answer_started.wait(), timeout=1)
+                await eventually(hb.exists, message="heartbeat was not created")
+                backdated = hb.stat().st_mtime_ns - 5_000_000_000
+                os.utime(hb, ns=(backdated, backdated))
+                await eventually(
+                    lambda: hb.stat().st_mtime_ns > backdated,
+                    message="heartbeat went stale while answer was blocked",
+                )
+            finally:
+                release_answer.set()
+                owner.cancel()
+                await asyncio.gather(owner, return_exceptions=True)
+
+    async def test_cancelling_listener_owner_unlinks_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+
+            async def callback_poll() -> None:
+                await asyncio.Event().wait()
+
+            owner = asyncio.create_task(call_agent.own_callback_listener(
+                callback_poll,
+                enabled=True,
+                heartbeat_path=hb,
+                heartbeat_interval_s=0.01,
+            ))
+            await eventually(hb.exists, message="heartbeat was not created")
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+
+            self.assertFalse(hb.exists())
 
 
 if __name__ == "__main__":

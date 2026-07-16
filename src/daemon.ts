@@ -157,6 +157,7 @@ export async function recordParkedBriefingVoiceOutcome(
   signal: AbortSignal,
   channels: NonNullable<BriefingRunResult["channels"]>,
   writeCallback: () => Promise<unknown>,
+  consumerAlive: () => Promise<boolean> = async () => true,
 ): Promise<void> {
   if (signal.aborted) {
     channels.voice = "aborted";
@@ -164,17 +165,32 @@ export async function recordParkedBriefingVoiceOutcome(
     return;
   }
   try {
-    await writeCallback();
+    const queued = await writeProactiveCallback(async () => {
+      signal.throwIfAborted();
+      return writeCallback();
+    }, consumerAlive);
     if (signal.aborted) {
       channels.voice = "aborted";
       channels.callback = "aborted";
       return;
     }
-    channels.callback = "accepted";
+    channels.callback = queued ? "accepted" : "failed";
   } catch {
     channels.callback = signal.aborted ? "aborted" : "failed";
     if (signal.aborted) channels.voice = "aborted";
   }
+}
+
+/** Proactive callback producers must not create a spool unless a consumer is
+ *  currently alive. Explicit user dial-backs intentionally keep their own
+ *  queue-for-later behavior. */
+export async function writeProactiveCallback(
+  writeCallback: () => Promise<unknown>,
+  consumerAlive: () => Promise<boolean> = callbackConsumerAlive,
+): Promise<boolean> {
+  if (!await consumerAlive()) return false;
+  await writeCallback();
+  return true;
 }
 import { createAudioPlayer, createAudioRecorder } from "./platform/audio";
 import { AecAudioHub, aecAvailable } from "./platform/aec-hub";
@@ -604,8 +620,8 @@ export class CiceroDaemon {
       // Only promise a ring when a consumer is provably alive. With no call
       // sidecar running there is nothing to consume the spool, so answer
       // honestly instead of overpromising "Ringing you now." — the sidecar's
-      // heartbeat stays fresh even while it defers (mid-call, empty allowlist),
-      // so a deferring listener still reads as alive here.
+      // heartbeat stays fresh while it places or defers a ring mid-call. A
+      // sidecar with no configured callback owner advertises no heartbeat.
       if (await callbackConsumerAlive()) return ack;
       return lanePickup
         ? `I've lined up ${lanePickup}, but I don't have a phone line set up right now — the call sidecar isn't running, so I can't ring you. I've queued the request in case it starts.`
@@ -1270,10 +1286,17 @@ export class CiceroDaemon {
               // Blocked tasks never auto-ring (the user's call): their text
               // names the "have <name> call me" dial-back instead.
               if (res?.parked && kw.call_back && t.status !== "blocked") {
-                await Bun.write(
-                  CALLBACK_SPOOL_PATH,
-                  JSON.stringify({ reason: line, at: Date.now() }),
-                );
+                const queued = await writeProactiveCallback(async () => {
+                  signal.throwIfAborted();
+                  await Bun.write(
+                    CALLBACK_SPOOL_PATH,
+                    JSON.stringify({ reason: line, at: Date.now() }),
+                  );
+                });
+                if (!queued) {
+                  log("info", "kanban watch: callback skipped — no live Telegram call consumer");
+                  return;
+                }
                 log("info", `kanban watch: callback requested — "${line.slice(0, 60)}"`);
               }
             },
@@ -1348,7 +1371,7 @@ export class CiceroDaemon {
                       await recordParkedBriefingVoiceOutcome(signal, channels, () => Bun.write(
                           CALLBACK_SPOOL_PATH,
                           JSON.stringify({ reason: "morning briefing", at: Date.now() }),
-                        ));
+                        ), callbackConsumerAlive);
                     }
                   }).catch(() => { channels.voice = signal.aborted ? "aborted" : "failed"; })
                 : Promise.resolve();

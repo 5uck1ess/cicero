@@ -38,9 +38,11 @@ import base64
 import json
 import os
 import signal
+import stat
 import sys
 import time
 import urllib.request
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import numpy as np
@@ -89,22 +91,92 @@ API_HASH = os.environ.get("CICERO_TG_API_HASH")
 CICERO_HOME = Path.home() / ".cicero"
 WORKDIR = CICERO_HOME / "telegram-call"
 DEFAULT_WEB_CA = CICERO_HOME / "web-voice" / "cert.pem"
-# Heartbeat the callback poll loop re-touches every tick. Its mtime is the
+# Heartbeat a sibling task re-touches every tick. Its mtime is the
 # daemon's only honest signal that a dial-back CONSUMER is alive: the daemon
 # refuses to promise "Ringing you now." when this is missing or stale. It
-# stays fresh even while we defer a ring (mid-call, empty allowlist) — those
-# branches keep the loop running — so a waiting listener still reads as alive.
+# stays fresh while callback_poll is blocked placing a ring. An empty allowed
+# set cannot consume callbacks, so that startup configuration never owns or
+# advertises this heartbeat.
 LISTENER_HEARTBEAT = WORKDIR / "listener.alive"
 
 
 def write_listener_heartbeat(path: Path = LISTENER_HEARTBEAT) -> None:
     """Refresh the callback-consumer heartbeat the daemon polls. Best-effort:
     a heartbeat failure must never break the ring loop."""
+    fd: int | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch()
+        try:
+            existing = path.lstat()
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and not stat.S_ISREG(existing.st_mode):
+            raise OSError("listener heartbeat path is not a regular file")
+        flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("listener heartbeat path is not a regular file")
+        if os.utime in os.supports_fd:
+            os.utime(fd)
+        else:
+            # Platforms without fd-utime (Windows): the path was validated
+            # regular above, and O_NOFOLLOW is unavailable there anyway.
+            os.utime(path)
     except OSError as exc:
         print(f"[call] listener heartbeat write failed: {redact_secrets(exc, TOKEN, API_HASH)}", flush=True)
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def remove_listener_heartbeat(path: Path = LISTENER_HEARTBEAT) -> None:
+    """Best-effort removal owned by the heartbeat lifecycle task."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"[call] listener heartbeat cleanup failed: {redact_secrets(exc, TOKEN, API_HASH)}", flush=True)
+
+
+async def listener_heartbeat(
+    path: Path = LISTENER_HEARTBEAT,
+    *,
+    interval_s: float = 5.0,
+) -> None:
+    """Advertise the callback consumer independently of callback_poll awaits."""
+    try:
+        while True:
+            write_listener_heartbeat(path)
+            await asyncio.sleep(interval_s)
+    finally:
+        remove_listener_heartbeat(path)
+
+
+async def own_callback_listener(
+    callback_poll: Callable[[], Awaitable[None]],
+    *,
+    enabled: bool,
+    heartbeat_path: Path = LISTENER_HEARTBEAT,
+    heartbeat_interval_s: float = 5.0,
+) -> None:
+    """Give callback polling and its heartbeat one bounded lifecycle owner."""
+    if not enabled:
+        return
+    poll_task = asyncio.create_task(callback_poll())
+    heartbeat_task = asyncio.create_task(
+        listener_heartbeat(heartbeat_path, interval_s=heartbeat_interval_s)
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            (poll_task, heartbeat_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            await task
+    finally:
+        poll_task.cancel()
+        heartbeat_task.cancel()
+        await asyncio.gather(poll_task, heartbeat_task, return_exceptions=True)
+
 
 def runtime_settings() -> tuple[bool, bool, bool, str, Path | None, float, float, float, float, float, float, float, float]:
     allow_plaintext = parse_exact_ack(
@@ -869,13 +941,8 @@ async def run(
         nonlocal bridge
         spool = WORKDIR / "callback.request"
         deferred_note = False
-        write_listener_heartbeat()  # present immediately, before the first 5s tick
         while True:
             await asyncio.sleep(5)
-            # Prove the consumer is alive on every tick — before any deferral
-            # branch below — so the daemon can tell a waiting listener from a
-            # missing one, not just an unconsumed spool file.
-            write_listener_heartbeat()
             # The request is consumed only once we actually ring: a dial-back
             # is an explicit ask and must never be silently lost. While a call
             # is being placed or is live, the request stays spooled and this
@@ -911,10 +978,9 @@ async def run(
             deferred_note = False
             target_id = next(iter(allowed), None)
             if target_id is None:
-                # Checked before consuming so a misconfiguration doesn't eat
-                # the request; it rings once CICERO_TG_ALLOWED is fixed.
-                print("[call] callback requested but CICERO_TG_ALLOWED is empty — leaving it spooled", flush=True)
-                continue
+                # `allowed` is fixed at startup, and an empty set never starts
+                # this poller. Keep the guard fail-closed for direct callers.
+                raise RuntimeError("callback poll started without a configured CICERO_TG_ALLOWED owner")
             try:
                 reason = consume_callback_reason(spool)
             except Exception as exc:
@@ -980,7 +1046,15 @@ async def run(
         await app.get_me()  # verify the stored session without logging account identifiers
         print("[call] Telegram session connected", flush=True)
 
-        callback_task = asyncio.create_task(callback_poll())
+        dialback_enabled = bool(allowed)
+        callback_task = asyncio.create_task(
+            own_callback_listener(callback_poll, enabled=dialback_enabled)
+        )
+        if not dialback_enabled:
+            print(
+                "[call] dial-back disabled — CICERO_TG_ALLOWED was empty at startup; restart after configuring an owner",
+                flush=True,
+            )
 
         if allow_any_caller:
             print(
