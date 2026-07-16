@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HEALTH_READ_TAIL_BYTES, HealthStore, briefLine, trendReport, formatValue, type HealthEntry } from "../../src/health/store";
+import { HEALTH_READ_TAIL_BYTES, HEALTH_SINCE_MAX_BYTES, HealthStore, briefLine, trendReport, formatValue, type HealthEntry } from "../../src/health/store";
 import { parseLogWords, healthLog, healthRecent, healthTrend } from "../../src/cli/health";
 
 const tmpStore = () => new HealthStore(join(mkdtempSync(join(tmpdir(), "cicero-health-")), "metrics.jsonl"));
@@ -48,6 +48,39 @@ test("store: recent(n) reads only a bounded tail, but since() covers the full wi
 
   // recent(n) stays bounded to the last tail chunk (it does not scan the file).
   expect((await store.recent(2)).map((e) => e.t)).toEqual([4_099, 1_000_000]);
+});
+
+test("store: since() finds in-window entries before an out-of-order old tail", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-health-out-of-order-"));
+  const file = join(root, "metrics.jsonl");
+  const now = new Date("2026-07-16T13:00:00.000Z").getTime();
+  const sinceMs = now - 24 * 60 * 60 * 1000;
+  const inWindow = entry({ t: now - 1_000, metric: "weight", value: 80 });
+  const lines = [JSON.stringify(inWindow)];
+  for (let i = 0; i < 1_000; i++) {
+    lines.push(JSON.stringify(entry({ t: sinceMs - 1_000 - i, metric: "note", note: "x".repeat(80) })));
+  }
+  const body = lines.join("\n") + "\n";
+  expect(Buffer.byteLength(body)).toBeGreaterThan(HEALTH_READ_TAIL_BYTES);
+  writeFileSync(file, body);
+
+  expect(await new HealthStore(file).since(sinceMs)).toEqual([inWindow]);
+});
+
+test("store: since() retains an entry when the capped tail begins on a line boundary", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-health-boundary-"));
+  const file = join(root, "metrics.jsonl");
+  const sinceMs = 10_000;
+  const prefix = JSON.stringify(entry({ t: 1, metric: "note", note: "prefix" })) + "\n";
+  const boundaryEntry = entry({ t: sinceMs, metric: "weight", value: 80 });
+  const boundaryLine = JSON.stringify(boundaryEntry) + "\n";
+  const fillerBase = JSON.stringify(entry({ t: 2, metric: "note", note: "" }));
+  const fillerLength = HEALTH_SINCE_MAX_BYTES - Buffer.byteLength(boundaryLine) - Buffer.byteLength(fillerBase) - 1;
+  const retained = boundaryLine + fillerBase.replace('"note":""', `"note":"${"x".repeat(fillerLength)}"`) + "\n";
+  expect(Buffer.byteLength(retained)).toBe(HEALTH_SINCE_MAX_BYTES);
+  writeFileSync(file, prefix + retained);
+
+  expect(await new HealthStore(file).since(sinceMs)).toEqual([boundaryEntry]);
 });
 
 test("store: an oversized unterminated final line reads empty instead of throwing", async () => {

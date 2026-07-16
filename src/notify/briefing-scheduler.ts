@@ -70,14 +70,18 @@ export function briefingStatusFilePath(): string {
 export class BriefingStatusStore {
   private pending: Promise<void> = Promise.resolve();
   private corruptWarningIssued = false;
-  // Day (UTC, matching quarantineCorrupt) on which we last quarantined a corrupt
+  // Day (in the configured briefing timezone, matching quarantineCorrupt) on
+  // which we last quarantined a corrupt
   // record. Quarantine renames the bad file away, so a later same-day read would
   // see an absent file and wrongly report "not run today"; this latch keeps
   // reporting "unavailable" for the rest of that day. Self-expires at day
   // rollover and clears once a valid record is read.
   private corruptedDay: string | null = null;
 
-  constructor(private readonly file: string = briefingStatusFilePath()) {
+  constructor(
+    private readonly file: string = briefingStatusFilePath(),
+    private readonly timeZone?: string,
+  ) {
     ensurePrivateDirectorySync(dirname(file));
     ensurePrivateFileIfExistsSync(file);
   }
@@ -137,8 +141,15 @@ export class BriefingStatusStore {
     }
     if (value === undefined) {
       // Absent file: genuinely not-run, UNLESS we quarantined a corrupt record
-      // earlier today — then we truly don't know, so keep reporting unavailable.
-      if (this.corruptedDay === new Date().toISOString().slice(0, 10)) return { status: "unavailable" };
+      // earlier today — including in a previous process — then we truly don't
+      // know, so keep reporting unavailable.
+      const today = dayOf(new Date(), this.timeZone);
+      if (this.corruptedDay === today) return { status: "unavailable" };
+      try {
+        if (await this.hasCorruptArtifact(today)) return { status: "unavailable" };
+      } catch (error: unknown) {
+        return { status: "unavailable", error };
+      }
       return { status: "ok", value: null };
     }
     try {
@@ -153,8 +164,21 @@ export class BriefingStatusStore {
     }
   }
 
+  private async hasCorruptArtifact(day: string): Promise<boolean> {
+    for (let counter = 0; counter < 100; counter++) {
+      const suffix = counter === 0 ? day : `${day}-${counter}`;
+      try {
+        await lstat(`${this.file}.corrupt-${suffix}`);
+        return true;
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    return false;
+  }
+
   private async quarantineCorrupt(): Promise<void> {
-    const day = new Date().toISOString().slice(0, 10);
+    const day = dayOf(new Date(), this.timeZone);
     this.corruptedDay = day;
     let quarantined = false;
     for (let counter = 0; counter < 100; counter++) {
@@ -331,7 +355,7 @@ interface BriefingWindow {
   scheduledMinute: boolean;
 }
 
-function briefingWindow(now: Date, at: string, catchUpMinutes: number, timeZone?: string): BriefingWindow {
+export function briefingWindow(now: Date, at: string, catchUpMinutes: number, timeZone?: string): BriefingWindow {
   const day = dayOf(now, timeZone);
   const scheduled = scheduledInstantForToday(now, at, timeZone);
   const elapsedMs = now.getTime() - scheduled.getTime();
