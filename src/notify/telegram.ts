@@ -375,6 +375,7 @@ export async function sendTelegramText(
   text: string,
   api = "https://api.telegram.org",
   extra: Record<string, unknown> = {},
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const token = telegramToken(cfg);
   if (!token || !cfg.chat_id) return false;
@@ -384,7 +385,7 @@ export async function sendTelegramText(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: String(cfg.chat_id), text: text.slice(0, 4096), ...extra }),
-      signal: scope.signal,
+      signal: signal ? AbortSignal.any([scope.signal, signal]) : scope.signal,
     });
     if (!res.ok) {
       const body = await readBoundedText(res, TELEGRAM_MAX_ERROR_BYTES);

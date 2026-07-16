@@ -41,6 +41,14 @@ function shellQuote(value: string): string {
 type JsonObject = Record<string, unknown>;
 type CapturedCall = { path: string; body: JsonObject };
 
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    if (condition()) return;
+    await Bun.sleep(1);
+  }
+  throw new Error("condition was not reached");
+}
+
 function jsonObject(value: unknown): JsonObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("expected a JSON object");
@@ -230,6 +238,37 @@ test("sendTelegramText posts a plain message, no ffmpeg involved", async () => {
 test("sendTelegramText without token or chat_id is a quiet no-op", async () => {
   expect(await sendTelegramText({ chat_id: 42 }, "x")).toBe(false);
   expect(await sendTelegramText({ token: "tok" }, "x")).toBe(false);
+});
+
+test("sendTelegramText combines an external abort with its request deadline", async () => {
+  let requestStarted = false;
+  let requestAborted = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (_input, init) => new Promise<Response>((_resolve, reject) => {
+    requestStarted = true;
+    const signal = init?.signal;
+    signal?.addEventListener("abort", () => {
+      requestAborted = true;
+      reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+    }, { once: true });
+  });
+  const controller = new AbortController();
+  try {
+    const sending = sendTelegramText(
+      { token: "tok", chat_id: 42 },
+      "briefing",
+      "http://telegram.test",
+      {},
+      controller.signal,
+    );
+    await waitFor(() => requestStarted);
+    controller.abort(new Error("briefing stopped"));
+    expect(await sending).toBe(false);
+    await waitFor(() => requestAborted);
+    expect(requestAborted).toBe(true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 function confirmationBrain(pending = true, nonce = GATE_A): Brain {

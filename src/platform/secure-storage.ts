@@ -22,7 +22,9 @@ export function ensurePrivateDirectorySync(path: string): void {
 
   // Windows does not implement POSIX ownership bits. The containing directory
   // is still created normally there; ACLs remain under the user's profile.
-  if (process.platform !== "win32") chmodSync(path, PRIVATE_DIRECTORY_MODE);
+  if (process.platform !== "win32" && (info.mode & 0o777) !== PRIVATE_DIRECTORY_MODE) {
+    chmodSync(path, PRIVATE_DIRECTORY_MODE);
+  }
 }
 
 /** Tighten an existing private file without ever following a symlink. */

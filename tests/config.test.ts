@@ -673,15 +673,16 @@ describe("Config — fail-fast validation", () => {
       "notify:",
       "  timezone: Mars/Olympus",
       "  quiet_hours: { from: '25:00', to: noon }",
-      "  briefing: { at: '8am' }",
+      "  briefing: { at: '8am', catch_up_minutes: 721 }",
       "  call_minutes: { min_minutes: -1 }",
       "  kanban:",
       "    interval_seconds: 0",
       "    command: []",
       "",
     ].join("\n"))).toThrow(
-      /notify\.timezone[\s\S]*notify\.quiet_hours\.from[\s\S]*notify\.briefing\.at[\s\S]*notify\.kanban\.interval_seconds[\s\S]*notify\.kanban\.command[\s\S]*notify\.call_minutes\.min_minutes/,
+      /notify\.timezone[\s\S]*notify\.quiet_hours\.from[\s\S]*notify\.briefing\.at[\s\S]*notify\.briefing\.catch_up_minutes[\s\S]*notify\.kanban\.interval_seconds[\s\S]*notify\.kanban\.command[\s\S]*notify\.call_minutes\.min_minutes/,
     );
+    expect(loadYaml("notify:\n  briefing: { at: '08:30', catch_up_minutes: 0 }\n")).not.toThrow();
   });
 
   test("kanban watch has no built-in board CLI — enabling it requires an explicit command", () => {

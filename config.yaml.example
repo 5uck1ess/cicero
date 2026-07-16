@@ -236,9 +236,10 @@ notify:
   # timezone: America/New_York
   # No pings overnight — notifications queue up for the morning briefing:
   # quiet_hours: { from: "23:00", to: "08:00" }
-  # Daily digest of the deferred news + board state, texted to the phone;
+  # Daily digest of the deferred news + board state, texted to the phone.
+  # A restart catches up for 180 minutes by default (0 = exact minute only);
   # call: true also rings you and speaks it (needs the Telegram call sidecar):
-  # briefing: { at: "08:00", call: false }
+  # briefing: { at: "08:00", call: false, catch_up_minutes: 180 }
   # Text short call notes to the phone after a voice session goes quiet
   # (only for calls longer than min_minutes; default 3):
   # call_minutes: { min_minutes: 3 }

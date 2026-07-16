@@ -59,8 +59,14 @@ import { TurnHistory } from "./web-voice/history";
 import { classifyCallIntent, sendTelegramVoice, sendTelegramText, startTelegramUpdatePoller } from "./notify/telegram";
 import { notificationTurnContext } from "./notify/context";
 import { KanbanWatcher, listViaCli, nudgeLine, spokenLine, taskLinkViaCli, type KanbanTask } from "./notify/kanban-watch";
-import { inQuietHours, composeBriefing, composeBriefingDigest, minutesPrompt, worthMinutes, callMinutesThresholdMs, parseHm, hmOf, dayOf } from "./notify/briefing";
+import { inQuietHours, composeBriefing, composeBriefingDigest, minutesPrompt, worthMinutes, callMinutesThresholdMs, dayOf } from "./notify/briefing";
 import { PromptScheduler, scheduleLabel } from "./notify/schedules";
+import {
+  BriefingScheduler,
+  BriefingStatusStore,
+  type BriefingRunResult,
+} from "./notify/briefing-scheduler";
+import { OvernightStore } from "./notify/overnight-store";
 import { sendUnattended } from "./brain/capabilities";
 import { buildResumePrimer, buildRosterNote } from "./web-voice/resume";
 import { HealthStore, briefLine } from "./health/store";
@@ -110,6 +116,30 @@ export function createRecordedWebTurn(
     aborted: () => sink.aborted(),
   };
   return { sink: recordedSink, drain: () => persistence };
+}
+
+export async function recordParkedBriefingVoiceOutcome(
+  signal: AbortSignal,
+  channels: NonNullable<BriefingRunResult["channels"]>,
+  writeCallback: () => Promise<unknown>,
+): Promise<void> {
+  if (signal.aborted) {
+    channels.voice = "aborted";
+    channels.callback = "aborted";
+    return;
+  }
+  try {
+    await writeCallback();
+    if (signal.aborted) {
+      channels.voice = "aborted";
+      channels.callback = "aborted";
+      return;
+    }
+    channels.callback = "accepted";
+  } catch {
+    channels.callback = signal.aborted ? "aborted" : "failed";
+    if (signal.aborted) channels.voice = "aborted";
+  }
 }
 import { createAudioPlayer, createAudioRecorder } from "./platform/audio";
 import { AecAudioHub, aecAvailable } from "./platform/aec-hub";
@@ -192,29 +222,16 @@ export class CiceroDaemon {
   private dashboard: DashboardHandle | null = null;
   private webVoice: WebVoiceHandle | null = null;
   private kanbanWatcher: KanbanWatcher | null = null;
-  private briefingTimer: ReturnType<typeof setInterval> | undefined;
+  private briefingScheduler: Pick<BriefingScheduler, "start" | "stop"> | null = null;
   private promptScheduler: PromptScheduler | null = null;
   private minutesTimer: ReturnType<typeof setTimeout> | undefined;
   private stopTelegramPoller: (() => void) | null = null;
   private pidLease: DaemonPidLease | null = null;
 
   /** Overnight queue for quiet-hours notifications, persisted across restarts. */
-  private overnightPath = join(homedir(), ".cicero", "overnight.json");
-  private async readOvernight(): Promise<string[]> {
-    try {
-      const arr = await Bun.file(this.overnightPath).json() as unknown;
-      return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : [];
-    } catch { return []; }
-  }
-  private async deferOvernight(text: string): Promise<void> {
-    const q = await this.readOvernight();
-    q.push(text);
-    await Bun.write(this.overnightPath, JSON.stringify(q.slice(-40)));
-  }
-  private async takeOvernight(): Promise<string[]> {
-    const q = await this.readOvernight();
-    await Bun.write(this.overnightPath, "[]");
-    return q;
+  private overnightStore: OvernightStore | null = null;
+  private getOvernightStore(): OvernightStore {
+    return this.overnightStore ??= new OvernightStore();
   }
   /** Synthesize a notification clip: lane-or-raw voice resolution plus the
    * URL strip (bare links are for the text surfaces — the audio never reads
@@ -995,7 +1012,7 @@ export class CiceroDaemon {
             // the user is actively talking, quiet hours don't apply to them.
             const qh = this.config.notify?.quiet_hours;
             if (!opts?.urgent && qh && inQuietHours(new Date(), qh, this.config.notify?.timezone)) {
-              await this.deferOvernight(text);
+              await this.getOvernightStore().enqueue(text);
               if (opts?.signal?.aborted) return null;
               return null;
             }
@@ -1143,75 +1160,94 @@ export class CiceroDaemon {
           this.kanbanWatcher.start();
           log("ok", `📋 Kanban watch on — announcing task completions every ${kw.interval_seconds ?? 20}s`);
         }
-        // Morning briefing: once a day at notify.briefing.at, deliver the
-        // deferred overnight news + board state as a text — and, with
-        // call: true, ring the phone and speak it (same spool as callbacks).
+        // Morning briefing: durably claim the local day before looking up or
+        // delivering anything. A restart can catch up, but never double-send.
         const briefing = this.config.notify?.briefing;
         if (briefing?.at) {
-          parseHm(briefing.at); // validate at startup, not at 8am
           const webVoice = this.webVoice;
-          let lastFiredDay = "";
           const tz = this.config.notify?.timezone;
-          if (tz) hmOf(new Date(), tz); // bad IANA names throw here, at startup
-          this.briefingTimer = setInterval(() => {
-            const now = new Date();
-            const day = dayOf(now, tz);
-            if (hmOf(now, tz) !== briefing.at || lastFiredDay === day) return;
-            lastFiredDay = day;
-            void (async () => {
-              const signal = this.lifecycleAbort.signal;
-              if (signal.aborted) return;
+          const statusStore = new BriefingStatusStore();
+          this.briefingScheduler = new BriefingScheduler({
+            at: briefing.at,
+            catchUpMinutes: briefing.catch_up_minutes ?? 180,
+            timezone: tz,
+            quietHours: this.config.notify?.quiet_hours,
+            store: statusStore,
+            run: async (_trigger, signal, beforeDelivery): Promise<BriefingRunResult> => {
+              signal.throwIfAborted();
+              const overnightStore = this.getOvernightStore();
+              const snapshot = await overnightStore.peek();
+              signal.throwIfAborted();
+
               let board: KanbanTask[] | null = null;
-              const boardCommand = this.config.notify?.kanban?.enabled !== false ? this.config.notify?.kanban?.command : undefined;
+              const boardCommand = this.config.notify?.kanban?.enabled !== false
+                ? this.config.notify?.kanban?.command
+                : undefined;
               try {
                 if (boardCommand) board = await listViaCli(boardCommand, { signal });
               } catch {
-                if (signal.aborted) return;
+                signal.throwIfAborted();
                 // Board state is optional in the daily briefing.
               }
-              if (signal.aborted) return;
-              // Do not clear deferred overnight news until the cancellable
-              // external board lookup has completed.
-              const overnight = await this.takeOvernight();
-              if (signal.aborted) return;
-              // The health line: yesterday's logged metrics, silent on empty days.
+              signal.throwIfAborted();
+
               let health: string | null = null;
               try { health = briefLine(await healthStore.since(Date.now() - 24 * 60 * 60 * 1000)); } catch { /* record optional */ }
-              if (signal.aborted) return;
+              signal.throwIfAborted();
+              beforeDelivery();
+
+              const overnight = snapshot.map((item) => item.text);
+              const day = dayOf(new Date(), tz);
               const tg = this.config.notify?.telegram;
-              // Same data, two renderings: the glanceable digest for text, flat
-              // prose for the call (TTS reads dividers/bullets as garbage).
-              // The digest is ALWAYS the text — with call: true, the notify
-              // below suppresses its own Telegram mirror, which used to text
-              // the spoken rendering instead (seen live 2026-07-12: the digest
-              // never reached the phone on call-enabled configs).
-              if (tg) {
-                const text = composeBriefingDigest(overnight, board, health, day);
-                void sendTelegramText(tg, text).catch((error: unknown) => {
-                  if (!signal.aborted) {
-                    log("warn", `morning briefing Telegram send failed: ${error instanceof Error ? error.message : String(error)}`);
-                  }
-                });
+              const channels: NonNullable<BriefingRunResult["channels"]> = {};
+              const telegramDelivery = tg
+                ? sendTelegramText(tg, composeBriefingDigest(overnight, board, health, day), undefined, {}, signal)
+                    .then((accepted) => {
+                      channels.telegram = accepted && !signal.aborted
+                        ? "accepted"
+                        : signal.aborted ? "aborted" : "failed";
+                    })
+                    .catch(() => { channels.telegram = "failed"; })
+                : Promise.resolve();
+              const voiceDelivery = briefing.call
+                ? webVoice.notify(composeBriefing(overnight, board, health), undefined, {
+                    telegramMirror: false,
+                    signal,
+                  }).then(async (result) => {
+                    const accepted = result !== null && (result.delivered > 0 || result.parked);
+                    channels.voice = accepted ? "accepted" : "failed";
+                    if (result?.parked) {
+                      await recordParkedBriefingVoiceOutcome(signal, channels, () => Bun.write(
+                          join(homedir(), ".cicero", "telegram-call", "callback.request"),
+                          JSON.stringify({ reason: "morning briefing", at: Date.now() }),
+                        ));
+                    }
+                  }).catch(() => { channels.voice = signal.aborted ? "aborted" : "failed"; })
+                : Promise.resolve();
+
+              await Promise.all([telegramDelivery, voiceDelivery]);
+              if (signal.aborted && channels.callback === "accepted") {
+                channels.voice = "aborted";
+                channels.callback = "aborted";
               }
-              if (briefing.call) {
-                const text = composeBriefing(overnight, board, health);
-                const res = await webVoice.notify(text, undefined, { telegramMirror: false }).catch(() => null);
-                if (signal.aborted) return;
-                if (res?.parked) {
-                  await Bun.write(
-                    join(homedir(), ".cicero", "telegram-call", "callback.request"),
-                    JSON.stringify({ reason: "morning briefing", at: Date.now() }),
-                  );
-                }
-              }
-              log("ok", `☀️ Morning briefing delivered (${overnight.length} deferred item(s))`);
-            })().catch((error: unknown) => {
-              if (!this.lifecycleAbort.signal.aborted) {
-                log("warn", `morning briefing failed: ${error instanceof Error ? error.message : String(error)}`);
-              }
-            });
-          }, 20_000);
-          log("ok", `☀️ Morning briefing scheduled daily at ${briefing.at}${briefing.call ? " (with a call)" : ""}`);
+              const outcomes = Object.values(channels);
+              const accepted = outcomes.filter((outcome) => outcome === "accepted").length;
+              if (accepted > 0) await overnightStore.ack(snapshot.map((item) => item.id));
+              if (signal.aborted && accepted === 0) signal.throwIfAborted();
+
+              const phase = accepted === 0 ? "failed" : accepted === outcomes.length ? "delivered" : "partial";
+              const result: BriefingRunResult = {
+                phase,
+                channels,
+                deferredCount: snapshot.length,
+                contentSummary: `${snapshot.length} deferred; board ${board ? "included" : "unavailable"}; health ${health ? "included" : "empty"}`,
+                errorKind: phase === "delivered" ? undefined : accepted === 0 ? "delivery-failed" : "channel-failed",
+              };
+              log(phase === "delivered" ? "ok" : "warn", `☀️ Morning briefing ${phase} (${snapshot.length} deferred item(s))`);
+              return result;
+            },
+          });
+          log("ok", `☀️ Morning briefing scheduled daily at ${briefing.at} (catch-up ${briefing.catch_up_minutes ?? 180}m)${briefing.call ? " (with a call)" : ""}`);
         }
         // Scheduled prompts: daily unattended brain turns (research briefs,
         // digests) texted via Telegram. Unlike the briefing, the CONTENT is a
@@ -1326,6 +1362,7 @@ export class CiceroDaemon {
 
     this.lifecycle = "running";
     this.running = true;
+    this.briefingScheduler?.start();
     log("ok", "");
     if (this.config.headless) {
       console.log(`Cicero ready (headless — web voice only; local mic/speaker/clap/hotkey disabled).`);
@@ -1608,7 +1645,7 @@ export class CiceroDaemon {
 
       const qh = this.config.notify?.quiet_hours;
       if (qh && inQuietHours(new Date(), qh, this.config.notify?.timezone)) {
-        await this.deferOvernight(text);
+        await this.getOvernightStore().enqueue(text);
         return;
       }
       const tg = this.config.notify?.telegram;
@@ -2150,12 +2187,15 @@ export class CiceroDaemon {
 
     let shutdownCompleted = false;
     try {
-      if (this.briefingTimer) clearInterval(this.briefingTimer);
-      this.briefingTimer = undefined;
+      // Quiesce every scheduler/timer synchronously, then drain the briefing's
+      // exact owned run before dependencies are released.
+      const briefingStop = this.briefingScheduler?.stop();
       this.promptScheduler?.stop();
       this.promptScheduler = null;
       if (this.minutesTimer) clearTimeout(this.minutesTimer);
       this.minutesTimer = undefined;
+      await cleanup("briefing scheduler", () => briefingStop);
+      this.briefingScheduler = null;
 
       // Stop accepting external work before tearing down any dependency an
       // HTTP/WebSocket/dashboard handler may still be using. Both stop methods
@@ -2254,7 +2294,7 @@ export class CiceroDaemon {
       shutdownCompleted = true;
     } finally {
       if (shutdownCompleted) {
-        this.briefingTimer = undefined;
+        this.briefingScheduler = null;
         this.promptScheduler = null;
         this.minutesTimer = undefined;
         this.actionsReloader = null;

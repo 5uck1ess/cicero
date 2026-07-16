@@ -99,13 +99,16 @@ Four `notify:` options turn the office into something that manages the flow of i
 notify:
   timezone: America/New_York                   # IANA zone — quiet_hours and briefing.at are read in THIS zone
   quiet_hours: { from: "23:00", to: "08:00" }  # no pings overnight — news queues up
-  briefing: { at: "08:00", call: true }        # daily digest: deferred news + board state
+  briefing:                                      # daily digest: deferred news + board state
+    at: "08:00"
+    call: true
+    catch_up_minutes: 180                        # restart catch-up window; 0 = exact-minute only
   call_minutes: { min_minutes: 3 }             # notes texted after calls longer than 3 minutes
 ```
 
 - **Timezone** — set it if the box's clock isn't your local time (a UTC server will otherwise happily ring you at 4am). Bad zone names fail loudly at startup.
 - **Quiet hours** — notifications inside the window don't ping anything; they queue (persisted across restarts) for the briefing.
-- **Morning briefing** — at the set time, the queued news plus the board's blocked/review items arrive as one Telegram text. With `call: true`, Cicero also *rings your phone* and reads it to you.
+- **Morning briefing** — at the set time, the queued news plus the board's blocked/review items arrive as one Telegram text. If Cicero starts late, it catches up within `catch_up_minutes` (default 180); `0` preserves exact-minute-only behavior. A durable daily claim in `~/.cicero/briefing-status.json` prevents restart loops from sending twice. Quiet hours delay the attempt only while the catch-up window remains open. With `call: true`, Cicero also *rings your phone* and reads it to you. Deferred items stay queued unless at least one delivery channel accepts the briefing.
 - **Call minutes** — a couple of minutes after a voice conversation goes quiet, the summarizer writes 2-4 lines of notes (what was asked, decided, done) and texts them to your phone. Like leaving a meeting and finding the minutes in your inbox.
 
 ## Scheduled prompts: daily briefs the brain writes

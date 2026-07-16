@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config";
-import { CiceroDaemon, createRecordedWebTurn } from "../src/daemon";
+import { CiceroDaemon, createRecordedWebTurn, recordParkedBriefingVoiceOutcome } from "../src/daemon";
+import { OvernightStore } from "../src/notify/overnight-store";
 import type { WebReplySink } from "../src/web-voice/turn";
 import type { HistoryTurn } from "../src/web-voice/history";
 
@@ -18,6 +19,39 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 }
 
 describe("CiceroDaemon lifecycle", () => {
+  test("aborting during a parked briefing callback write leaves the overnight snapshot unacked", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cicero-daemon-briefing-callback-abort-"));
+    const store = new OvernightStore(join(root, "overnight.json"), () => 1_700_000_000_000, () => "item-1");
+    await store.enqueue("queued overnight");
+    const snapshot = await store.peek();
+    const controller = new AbortController();
+    const channels = { voice: "accepted" };
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+
+    try {
+      const recording = recordParkedBriefingVoiceOutcome(controller.signal, channels, async () => {
+        markWriteStarted();
+        await writeGate;
+      });
+      await writeStarted;
+      controller.abort(new Error("briefing scheduler stopped"));
+      releaseWrite();
+      await recording;
+
+      const accepted = Object.values(channels).filter((outcome) => outcome === "accepted").length;
+      if (accepted > 0) await store.ack(snapshot.map((item) => item.id));
+
+      expect(channels).toEqual({ voice: "aborted", callback: "aborted" });
+      expect((await store.peek()).map((item) => item.text)).toEqual(["queued overnight"]);
+    } finally {
+      releaseWrite();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a completed WebSocket turn does not drain before history persistence", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -136,67 +170,43 @@ describe("CiceroDaemon lifecycle", () => {
 
   test("a successful stop clears every daemon-owned timer", async () => {
     const home = mkdtempSync(join(tmpdir(), "cicero-daemon-timer-test-"));
-    const pidFile = join(home, "cicero.pid");
-    const config = loadConfig({}, { home });
-    config.raw.headless = true;
-    config.raw.dashboard = { enabled: false };
-    config.raw.tts_enabled = false;
-    config.raw.web_voice = {
-      enabled: true,
-      port: 0,
-      token: "test-token-that-is-long-enough",
-      tls: { enabled: false },
-    };
-    config.raw.notify = { briefing: { at: "00:00" } };
-    config.raw.brain = {
-      ...config.raw.brain,
-      backend: "qwen",
-      mode: "subprocess",
-      binary: process.execPath,
-      binary_args: ["-e", "console.log('ok')"],
-      thinking_filler: false,
-    };
-
-    const daemon = new CiceroDaemon(config, {
-      skipServers: true,
-      pidFile,
-      providerFactory: () => ({
-        stt: {
-          name: "test-stt",
-          transcribe: () => Promise.resolve(null),
-          health: () => Promise.resolve(true),
-        },
-        tts: {
-          name: "test-tts",
-          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
-          health: () => Promise.resolve(true),
-        },
-        llm: {
-          name: "test-llm",
-          chatCompletion: () => Promise.resolve("ok"),
-          health: () => Promise.resolve(true),
-        },
-      }),
-    });
-    const timers = daemon as unknown as {
-      briefingTimer?: ReturnType<typeof setInterval>;
+    const daemon = new CiceroDaemon(loadConfig({}, { home }));
+    let schedulerStarted = false;
+    let schedulerStopStarted = false;
+    let releaseScheduler!: () => void;
+    const schedulerDrain = new Promise<void>((resolve) => { releaseScheduler = resolve; });
+    const state = daemon as unknown as {
+      lifecycle: "idle" | "starting" | "running" | "stopping";
+      running: boolean;
+      briefingScheduler: { start: () => void; stop: () => Promise<void> } | null;
       minutesTimer?: ReturnType<typeof setTimeout>;
     };
+    state.lifecycle = "running";
+    state.running = true;
+    state.briefingScheduler = {
+        start: () => { schedulerStarted = true; },
+        stop: async () => { schedulerStopStarted = true; await schedulerDrain; },
+    };
+    state.briefingScheduler.start();
     let delayedWorkRan = false;
 
     try {
-      await daemon.start();
-      expect(timers.briefingTimer).toBeDefined();
-      timers.minutesTimer = setTimeout(() => { delayedWorkRan = true; }, 20);
+      expect(schedulerStarted).toBe(true);
+      state.minutesTimer = setTimeout(() => { delayedWorkRan = true; }, 20);
 
-      await daemon.stop();
+      let stopped = false;
+      const stopping = daemon.stop().then(() => { stopped = true; });
+      await Bun.sleep(0);
+      expect(schedulerStopStarted).toBe(true);
+      expect(stopped).toBe(false);
+      releaseScheduler();
+      await stopping;
       await daemon.stop();
       await Bun.sleep(40);
 
       expect(delayedWorkRan).toBe(false);
-      expect(timers.briefingTimer).toBeUndefined();
-      expect(timers.minutesTimer).toBeUndefined();
-      expect(existsSync(pidFile)).toBe(false);
+      expect(state.briefingScheduler).toBeNull();
+      expect(state.minutesTimer).toBeUndefined();
     } catch (error) {
       await daemon.stop().catch(() => {});
       throw new Error(`successful lifecycle timer test failed: ${(error as Error).message}`, { cause: error });
