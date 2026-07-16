@@ -27,6 +27,7 @@ import type { TurnDetector } from "./backends/turn/provider";
 import { createSerProvider } from "./backends/ser";
 import type { SerProvider } from "./backends/ser/provider";
 import { toneTag, wavDurationMs, type ToneOptions } from "./web-voice/tone";
+import { CALLBACK_SPOOL_PATH, callbackConsumerAlive } from "./telegram-call";
 import { StreamingTTSSpeaker } from "./speaker/streaming-tts";
 import { speakable } from "./speaker/speakable";
 import { canStreamBrain, canNarrateAgent, streamBrainToSpeaker, streamAgentNarration } from "./speaker/brain-stream";
@@ -562,6 +563,7 @@ export class CiceroDaemon {
       // the call connects straight to that employee (voice included) —
       // the same sticky pin as a spoken transfer; "back to you" releases.
       let ack = "Ringing you now.";
+      let lanePickup: string | undefined;
       if (who) {
         // The lane picks up briefed on its parked tasks — "have ada
         // call me" after a blocked announcement is THE conversation about
@@ -587,15 +589,27 @@ export class CiceroDaemon {
             ? `I couldn't get "${who}" on the line. I can put on: ${roster} — or just say "call me".`
             : `I couldn't get "${who}" on the line — say "call me" and I'll ring you myself.`;
         }
+        lanePickup = name;
         ack = `Ringing you now — ${name} will pick up.`;
       }
       signal.throwIfAborted();
+      // Spool unconditionally: an explicit "call me" is never dropped, so it
+      // still rings if the sidecar comes up moments later (one fixed-path
+      // file, overwritten — a consumer-less install never piles them up).
       await Bun.write(
-        join(homedir(), ".cicero", "telegram-call", "callback.request"),
+        CALLBACK_SPOOL_PATH,
         JSON.stringify({ reason: "text dial-back", lane: who ?? null, at: Date.now() }),
       );
       signal.throwIfAborted();
-      return ack;
+      // Only promise a ring when a consumer is provably alive. With no call
+      // sidecar running there is nothing to consume the spool, so answer
+      // honestly instead of overpromising "Ringing you now." — the sidecar's
+      // heartbeat stays fresh even while it defers (mid-call, empty allowlist),
+      // so a deferring listener still reads as alive here.
+      if (await callbackConsumerAlive()) return ack;
+      return lanePickup
+        ? `I've lined up ${lanePickup}, but I don't have a phone line set up right now — the call sidecar isn't running, so I can't ring you. I've queued the request in case it starts.`
+        : "I don't have a phone line set up right now — the call sidecar isn't running, so I can't ring you. I've queued the request in case it starts.";
     };
     this.brain.setCallMeHandler?.(dialBack);
 
@@ -1257,7 +1271,7 @@ export class CiceroDaemon {
               // names the "have <name> call me" dial-back instead.
               if (res?.parked && kw.call_back && t.status !== "blocked") {
                 await Bun.write(
-                  join(homedir(), ".cicero", "telegram-call", "callback.request"),
+                  CALLBACK_SPOOL_PATH,
                   JSON.stringify({ reason: line, at: Date.now() }),
                 );
                 log("info", `kanban watch: callback requested — "${line.slice(0, 60)}"`);
@@ -1332,7 +1346,7 @@ export class CiceroDaemon {
                     channels.voice = accepted ? "accepted" : "failed";
                     if (result?.parked) {
                       await recordParkedBriefingVoiceOutcome(signal, channels, () => Bun.write(
-                          join(homedir(), ".cicero", "telegram-call", "callback.request"),
+                          CALLBACK_SPOOL_PATH,
                           JSON.stringify({ reason: "morning briefing", at: Date.now() }),
                         ));
                     }

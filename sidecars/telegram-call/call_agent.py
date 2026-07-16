@@ -89,6 +89,22 @@ API_HASH = os.environ.get("CICERO_TG_API_HASH")
 CICERO_HOME = Path.home() / ".cicero"
 WORKDIR = CICERO_HOME / "telegram-call"
 DEFAULT_WEB_CA = CICERO_HOME / "web-voice" / "cert.pem"
+# Heartbeat the callback poll loop re-touches every tick. Its mtime is the
+# daemon's only honest signal that a dial-back CONSUMER is alive: the daemon
+# refuses to promise "Ringing you now." when this is missing or stale. It
+# stays fresh even while we defer a ring (mid-call, empty allowlist) — those
+# branches keep the loop running — so a waiting listener still reads as alive.
+LISTENER_HEARTBEAT = WORKDIR / "listener.alive"
+
+
+def write_listener_heartbeat(path: Path = LISTENER_HEARTBEAT) -> None:
+    """Refresh the callback-consumer heartbeat the daemon polls. Best-effort:
+    a heartbeat failure must never break the ring loop."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    except OSError as exc:
+        print(f"[call] listener heartbeat write failed: {redact_secrets(exc, TOKEN, API_HASH)}", flush=True)
 
 def runtime_settings() -> tuple[bool, bool, bool, str, Path | None, float, float, float, float, float, float, float, float]:
     allow_plaintext = parse_exact_ack(
@@ -853,8 +869,13 @@ async def run(
         nonlocal bridge
         spool = WORKDIR / "callback.request"
         deferred_note = False
+        write_listener_heartbeat()  # present immediately, before the first 5s tick
         while True:
             await asyncio.sleep(5)
+            # Prove the consumer is alive on every tick — before any deferral
+            # branch below — so the daemon can tell a waiting listener from a
+            # missing one, not just an unconsumed spool file.
+            write_listener_heartbeat()
             # The request is consumed only once we actually ring: a dial-back
             # is an explicit ask and must never be silently lost. While a call
             # is being placed or is live, the request stays spooled and this

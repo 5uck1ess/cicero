@@ -11,10 +11,13 @@ CI runs these tests with a bare interpreter, so the deps are stubbed the same
 way tests/python/test_sidecar_contracts.py stubs model modules.
 """
 import asyncio
+import os
 import sys
+import tempfile
 import time
 import types
 import unittest
+from pathlib import Path
 
 
 def _module(name: str, **attrs: object) -> types.ModuleType:
@@ -374,6 +377,37 @@ class ZombieBridgeReleaseTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(call_agent.discard_releases_bridge(bridge, chat_id=8, answer_in_flight=False))
         await bridge.close()
         self.assertFalse(call_agent.discard_releases_bridge(bridge, chat_id=7, answer_in_flight=False))
+
+
+class ListenerHeartbeatTest(unittest.TestCase):
+    """The daemon reads listener.alive's mtime to decide whether to promise a
+    ring; the poll loop must keep the file fresh, and a heartbeat failure must
+    never break that loop."""
+
+    def test_write_creates_and_refreshes_the_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+            self.assertFalse(hb.exists())
+            call_agent.write_listener_heartbeat(hb)
+            self.assertTrue(hb.exists())
+            backdated = hb.stat().st_mtime_ns - 5_000_000_000  # 5s in the past
+            os.utime(hb, ns=(backdated, backdated))
+            call_agent.write_listener_heartbeat(hb)
+            self.assertGreater(hb.stat().st_mtime_ns, backdated)
+
+    def test_write_creates_the_workdir_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "telegram-call" / "listener.alive"
+            call_agent.write_listener_heartbeat(hb)
+            self.assertTrue(hb.exists())
+
+    def test_write_never_raises_when_the_path_is_unwritable(self) -> None:
+        # A directory planted at the path makes touch() fail; the ring loop
+        # must swallow it, not die.
+        with tempfile.TemporaryDirectory() as d:
+            planted = Path(d) / "listener.alive"
+            planted.mkdir()
+            call_agent.write_listener_heartbeat(planted)  # must not raise
 
 
 if __name__ == "__main__":
