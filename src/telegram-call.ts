@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { lstat, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -30,9 +31,10 @@ export const LISTENER_HEARTBEAT_FRESH_MS = 30_000;
 export type CallbackSpoolWriter = (path: string, content: string) => Promise<unknown>;
 
 /** Publish one fixed-path callback request without leaving a turn-aborted
- * request visible after its write finishes. The exact-content check preserves
- * a newer producer's overwrite. A consumer can still claim the file in the
- * microsecond write→compensation gap; that bounded residual is accepted. */
+ * request visible after its write finishes. A per-write nonce makes the exact
+ * content an ownership token, preserving even an identical newer producer's
+ * overwrite. A consumer can still claim the file in the microsecond
+ * write→compensation gap; that bounded residual is accepted. */
 export async function writeCallbackSpool(
   content: string,
   signal: AbortSignal,
@@ -40,10 +42,15 @@ export async function writeCallbackSpool(
   writer: CallbackSpoolWriter = (path, value) => Bun.write(path, value),
 ): Promise<boolean> {
   signal.throwIfAborted();
-  await writer(spoolPath, content);
+  const payload: unknown = JSON.parse(content);
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TypeError("callback spool payload must be a JSON object");
+  }
+  const ownedContent = JSON.stringify({ ...payload, nonce: randomUUID() });
+  await writer(spoolPath, ownedContent);
   if (!signal.aborted) return true;
   try {
-    if (await readFile(spoolPath, "utf8") === content) {
+    if (await readFile(spoolPath, "utf8") === ownedContent) {
       await unlink(spoolPath);
     }
   } catch {

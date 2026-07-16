@@ -37,6 +37,7 @@ import asyncio
 import base64
 import json
 import os
+import secrets
 import signal
 import stat
 import sys
@@ -98,14 +99,18 @@ DEFAULT_WEB_CA = CICERO_HOME / "web-voice" / "cert.pem"
 # set cannot consume callbacks, so that startup configuration never owns or
 # advertises this heartbeat.
 LISTENER_HEARTBEAT = WORKDIR / "listener.alive"
+LISTENER_HEARTBEAT_GENERATION = secrets.token_hex(16)
 
 
-def write_listener_heartbeat(path: Path = LISTENER_HEARTBEAT) -> int | None:
+def write_listener_heartbeat(
+    path: Path = LISTENER_HEARTBEAT,
+    generation: str = LISTENER_HEARTBEAT_GENERATION,
+) -> str | None:
     """Refresh the callback-consumer heartbeat the daemon polls. Best-effort:
-    a heartbeat failure must never break the ring loop. Return the exact mtime
-    this lifecycle generation owns when the refresh succeeds."""
+    a heartbeat failure must never break the ring loop. Return this process's
+    generation token when the refresh succeeds."""
     fd: int | None = None
-    written_mtime_ns: int | None = None
+    written_generation: str | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -118,42 +123,56 @@ def write_listener_heartbeat(path: Path = LISTENER_HEARTBEAT) -> int | None:
         fd = os.open(path, flags, 0o600)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("listener heartbeat path is not a regular file")
-        touch_ns = time.time_ns()
-        if existing is not None and touch_ns == existing.st_mtime_ns:
-            touch_ns += 1  # preserve last-writer identity inside one clock tick
-        if os.utime in os.supports_fd:
-            os.utime(fd, ns=(touch_ns, touch_ns))
-        else:
-            # Platforms without fd-utime (Windows): the path was validated
-            # regular above, and O_NOFOLLOW is unavailable there anyway.
-            os.utime(path, ns=(touch_ns, touch_ns))
-        written_mtime_ns = os.fstat(fd).st_mtime_ns
+        token = generation.encode("ascii")
+        os.ftruncate(fd, 0)
+        written = 0
+        while written < len(token):
+            count = os.write(fd, token[written:])
+            if count == 0:
+                raise OSError("listener heartbeat write made no progress")
+            written += count
+        written_generation = generation
     except OSError as exc:
         print(f"[call] listener heartbeat write failed: {redact_secrets(exc, TOKEN, API_HASH)}", flush=True)
     finally:
         if fd is not None:
             os.close(fd)
-    return written_mtime_ns
+    return written_generation
 
 
 def expire_listener_heartbeat(
     path: Path = LISTENER_HEARTBEAT,
-    owned_mtime_ns: int | None = None,
+    owned_generation: str | None = None,
 ) -> None:
     """Best-effort terminal state for the heartbeat lifecycle task."""
-    if owned_mtime_ns is None:
+    if owned_generation is None:
         return
+    fd: int | None = None
     try:
-        current = path.lstat()
-        if not stat.S_ISREG(current.st_mode) or current.st_mtime_ns != owned_mtime_ns:
+        try:
+            current = path.lstat()
+        except FileNotFoundError:
             return
-        # A replacement generation can touch the file in the microscopic
-        # lstat→utime window. Its next 5s refresh self-heals that accepted race;
-        # the ownership check prevents delayed cleanup from clobbering a touch
-        # that was already visible when cleanup began.
-        os.utime(path, ns=(0, 0), follow_symlinks=False)
-    except OSError as exc:
+        if not stat.S_ISREG(current.st_mode):
+            return
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return
+        token = owned_generation.encode("ascii")
+        if os.read(fd, len(token) + 1) != token:
+            return
+        if os.utime in os.supports_fd:
+            os.utime(fd, ns=(0, 0))
+        else:
+            # Platforms without fd-utime (Windows): the path was validated
+            # regular above, and O_NOFOLLOW is unavailable there anyway.
+            os.utime(path, ns=(0, 0))
+    except (OSError, NotImplementedError) as exc:
         print(f"[call] listener heartbeat cleanup failed: {redact_secrets(exc, TOKEN, API_HASH)}", flush=True)
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 async def listener_heartbeat(
@@ -162,15 +181,15 @@ async def listener_heartbeat(
     interval_s: float = 5.0,
 ) -> None:
     """Advertise the callback consumer independently of callback_poll awaits."""
-    owned_mtime_ns: int | None = None
+    owned_generation: str | None = None
     try:
         while True:
-            written_mtime_ns = write_listener_heartbeat(path)
-            if written_mtime_ns is not None:
-                owned_mtime_ns = written_mtime_ns
+            written_generation = write_listener_heartbeat(path)
+            if written_generation is not None:
+                owned_generation = written_generation
             await asyncio.sleep(interval_s)
     finally:
-        expire_listener_heartbeat(path, owned_mtime_ns)
+        expire_listener_heartbeat(path, owned_generation)
 
 
 async def own_callback_listener(

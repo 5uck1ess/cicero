@@ -124,20 +124,28 @@ test("abort after a matching callback write compensates by unlinking and reports
   expect(existsSync(spool)).toBe(false);
 });
 
-test("abort compensation preserves a newer mismatching callback spool", async () => {
+test("an aborted identical producer preserves the accepted producer's callback spool", async () => {
   const root = mkdtempSync(join(tmpdir(), "cicero-call-spool-race-"));
   roots.push(root);
   const spool = join(root, "callback.request");
-  const content = JSON.stringify({ reason: "old", at: 1 });
-  const newer = JSON.stringify({ reason: "new", at: 2 });
-  const controller = new AbortController();
+  const content = JSON.stringify({ reason: "same", at: 1 });
+  const aborted = new AbortController();
+  const accepted = new AbortController();
+  let abortedContent = "";
+  let acceptedContent = "";
 
-  const published = await writeCallbackSpool(content, controller.signal, spool, async (path, value) => {
+  const published = await writeCallbackSpool(content, aborted.signal, spool, async (path, value) => {
+    abortedContent = value;
     await Bun.write(path, value);
-    controller.abort(new Error("old turn aborted"));
-    await Bun.write(path, newer);
+    aborted.abort(new Error("first producer aborted"));
+    await writeCallbackSpool(content, accepted.signal, spool, async (acceptedPath, acceptedValue) => {
+      acceptedContent = acceptedValue;
+      await Bun.write(acceptedPath, acceptedValue);
+    });
   });
 
   expect(published).toBe(false);
-  expect(readFileSync(spool, "utf8")).toBe(newer);
+  expect(abortedContent).not.toBe(acceptedContent);
+  expect(JSON.parse(abortedContent)).toMatchObject({ reason: "same", at: 1, nonce: expect.any(String) });
+  expect(readFileSync(spool, "utf8")).toBe(acceptedContent);
 });

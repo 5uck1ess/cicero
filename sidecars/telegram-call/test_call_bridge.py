@@ -12,6 +12,7 @@ way tests/python/test_sidecar_contracts.py stubs model modules.
 """
 import asyncio
 import io
+import json
 import os
 import sys
 import tempfile
@@ -388,13 +389,15 @@ class ListenerHeartbeatTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             hb = Path(d) / "listener.alive"
             self.assertFalse(hb.exists())
-            first_mtime = call_agent.write_listener_heartbeat(hb)
+            generation = call_agent.write_listener_heartbeat(hb)
             self.assertTrue(hb.exists())
-            self.assertEqual(first_mtime, hb.stat().st_mtime_ns)
+            self.assertEqual(generation, call_agent.LISTENER_HEARTBEAT_GENERATION)
+            self.assertEqual(hb.read_text(), generation)
             backdated = hb.stat().st_mtime_ns - 5_000_000_000  # 5s in the past
             os.utime(hb, ns=(backdated, backdated))
             call_agent.write_listener_heartbeat(hb)
             self.assertGreater(hb.stat().st_mtime_ns, backdated)
+            self.assertEqual(hb.read_text(), generation)
 
     def test_write_creates_the_workdir_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -428,21 +431,57 @@ class ListenerHeartbeatTest(unittest.TestCase):
     def test_old_generation_cleanup_leaves_new_generation_heartbeat_fresh(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             hb = Path(d) / "listener.alive"
-            old_owned = call_agent.write_listener_heartbeat(hb)
-            self.assertIsNotNone(old_owned)
-            new_owned = call_agent.write_listener_heartbeat(hb)
-            self.assertIsNotNone(new_owned)
-            self.assertNotEqual(old_owned, new_owned)
+            old_owned = "a" * 32
+            new_owned = "b" * 32
+            call_agent.write_listener_heartbeat(hb, old_owned)
+            call_agent.write_listener_heartbeat(hb, new_owned)
+            fresh_mtime = hb.stat().st_mtime_ns
 
             call_agent.expire_listener_heartbeat(hb, old_owned)
 
-            self.assertEqual(hb.stat().st_mtime_ns, new_owned)
+            self.assertEqual(hb.read_text(), new_owned)
+            self.assertEqual(hb.stat().st_mtime_ns, fresh_mtime)
+
+    def test_owner_cleanup_expires_its_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+            owned = call_agent.write_listener_heartbeat(hb)
+
+            call_agent.expire_listener_heartbeat(hb, owned)
+
+            self.assertEqual(hb.stat().st_mtime_ns, 0)
+
+    def test_cleanup_refuses_a_symlink_without_touching_its_target(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "unrelated"
+            target.write_text(call_agent.LISTENER_HEARTBEAT_GENERATION)
+            old = time.time_ns() - 60_000_000_000
+            os.utime(target, ns=(old, old))
+            planted = Path(d) / "listener.alive"
+            planted.symlink_to(target)
+
+            call_agent.expire_listener_heartbeat(
+                planted, call_agent.LISTENER_HEARTBEAT_GENERATION
+            )
+
+            self.assertTrue(planted.is_symlink())
+            self.assertEqual(target.stat().st_mtime_ns, old)
 
     def test_empty_callback_owner_guard_raises_without_waiting(self) -> None:
         started = time.monotonic()
         with self.assertRaisesRegex(RuntimeError, "without a configured CICERO_TG_ALLOWED owner"):
             call_agent.callback_owner_target(frozenset())
         self.assertLess(time.monotonic() - started, 0.1)
+
+
+class CallbackSpoolCompatibilityTest(unittest.TestCase):
+    def test_callback_consumer_ignores_nonce_field(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            spool = Path(d) / "callback.request"
+            spool.write_text(json.dumps({"reason": "call back", "nonce": "unique"}))
+
+            self.assertEqual(call_agent.consume_callback_reason(spool), "call back")
+            self.assertFalse(spool.exists())
 
 
 class ListenerHeartbeatLifecycleTest(unittest.IsolatedAsyncioTestCase):
