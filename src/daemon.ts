@@ -52,7 +52,7 @@ import {
   assertHeadlessWebVoiceStarted,
   resolveWebVoiceToken,
 } from "./web-voice/startup-policy";
-import { DEFAULT_VOICE_CONTROL_STATE, isLocalFastPath, processWebTurn, streamWebTurn, streamWebTextTurn, type VoiceControlState, type WebReplySink } from "./web-voice/turn";
+import { captureOperationalContext, DEFAULT_VOICE_CONTROL_STATE, isLocalFastPath, processWebTurn, streamWebTurn, streamWebTextTurn, type VoiceControlState, type WebReplySink } from "./web-voice/turn";
 import { makeSpeculator } from "./web-voice/speculative";
 import { MAX_TURN_AUDIO_BYTES } from "./web-voice/protocol";
 import { TurnHistory } from "./web-voice/history";
@@ -81,6 +81,35 @@ import { healthLog } from "./cli/health";
 export interface RecordedWebTurn {
   sink: WebReplySink;
   drain: () => Promise<void>;
+}
+
+export interface OperatorChatTurnDeps {
+  brain: Pick<Brain, "send" | "activeLane">;
+  history: Pick<TurnHistory, "append">;
+  operationalContext?: (signal?: AbortSignal) => Promise<string | null>;
+}
+
+/** Shared text-surface turn boundary: capture once, invoke once, then persist. */
+export async function runOperatorChatTurn(
+  text: string,
+  deps: OperatorChatTurnDeps,
+  signal?: AbortSignal,
+): Promise<string> {
+  const systemContext = await captureOperationalContext(deps.operationalContext, signal);
+  signal?.throwIfAborted();
+  const reply = await deps.brain.send(text, {
+    signal,
+    systemContext: systemContext ?? undefined,
+  });
+  signal?.throwIfAborted();
+  await deps.history.append({
+    t: Date.now(),
+    user: text,
+    reply,
+    lane: deps.brain.activeLane?.() ?? undefined,
+  });
+  signal?.throwIfAborted();
+  return reply;
 }
 
 /** Proxy a {@link WebReplySink} and expose the exact persistence drain it owns. */
@@ -577,9 +606,11 @@ export class CiceroDaemon {
             const intent = await classifyCallIntent(text, callClassifier, Object.keys(this.config.brain.lanes ?? {}));
             if (intent) return dialBack(intent.who);
           }
-          const reply = await this.brain.send(text);
-          await tgHistory.append({ t: Date.now(), user: text, reply, lane: this.brain.activeLane?.() ?? undefined });
-          return reply;
+          return runOperatorChatTurn(text, {
+            brain: this.brain,
+            history: tgHistory,
+            operationalContext: (signal) => this.operationalContext(signal),
+          });
         },
       });
       log("ok", "Telegram text surface ready (chat, log, call me, approvals)");
@@ -1157,20 +1188,15 @@ export class CiceroDaemon {
             throw new Error(`web say failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
           }
         },
-        // Deliberately excluded in this PR: /api/chat, Telegram chat, host mic,
-        // warmup, and unattended prompts retain their existing context policy.
+        // Warmup and unattended/scheduled prompts deliberately retain their
+        // existing context policy: operational snapshots are for operator turns.
         onChat: async (text, options) => {
           try {
-            const reply = await this.brain.send(text, { signal: options?.signal });
-            options?.signal?.throwIfAborted();
-            await webHistory.append({
-              t: Date.now(),
-              user: text,
-              reply,
-              lane: this.brain.activeLane?.() ?? undefined,
-            });
-            options?.signal?.throwIfAborted();
-            return reply;
+            return await runOperatorChatTurn(text, {
+              brain: this.brain,
+              history: webHistory,
+              operationalContext: (signal) => this.operationalContext(signal),
+            }, options?.signal);
           } catch (error) {
             throw new Error(`web chat failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
           }
@@ -1610,6 +1636,14 @@ export class CiceroDaemon {
         this.brain.injectContext(recentContext);
       }
 
+      const systemContext = result.category === "brain"
+        ? await captureOperationalContext(
+            (captureSignal) => this.operationalContext(captureSignal),
+            signal,
+          )
+        : null;
+      if (signal.aborted) return;
+
       // Step 6: Streaming pipeline for local-llm in conversational mode
       if (result.category === "local-llm" && this.conversational?.isActive() && this.streamingSpeaker) {
         log("speak", `Streaming LLM → TTS pipeline... (+${Date.now() - tStart}ms to first token)`);
@@ -1639,9 +1673,15 @@ export class CiceroDaemon {
         const filler = (this.config.brain.thinking_filler ?? true) ? this.nextFiller() : undefined;
         log("speak", `Streaming ${narrate ? "agent narration" : "brain"} → TTS pipeline... (+${Date.now() - tStart}ms to first token)`);
         if (narrate) {
-          await streamAgentNarration(this.brain, this.streamingSpeaker, prompt, filler, { signal });
+          await streamAgentNarration(this.brain, this.streamingSpeaker, prompt, filler, {
+            signal,
+            systemContext: systemContext ?? undefined,
+          });
         } else {
-          await streamBrainToSpeaker(this.brain, this.streamingSpeaker, prompt, filler, { signal });
+          await streamBrainToSpeaker(this.brain, this.streamingSpeaker, prompt, filler, {
+            signal,
+            systemContext: systemContext ?? undefined,
+          });
         }
         this.finalizeStreamingTurn(expanded, result, signal);
         return;
@@ -1653,7 +1693,10 @@ export class CiceroDaemon {
       }
 
       // Step 8: Execute via executor
-      const execResult = await this.executor.execute(result, text, { signal });
+      const execResult = await this.executor.execute(result, text, {
+        signal,
+        systemContext: systemContext ?? undefined,
+      });
       if (signal.aborted) return;
 
       // Step 9: Record structured turn

@@ -2,10 +2,14 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CiceroDaemon } from "../src/daemon";
+import { loadConfig } from "../src/config";
+import { CiceroDaemon, runOperatorChatTurn } from "../src/daemon";
+import { ContextStore } from "../src/brain/context-store";
+import { ActionExecutor } from "../src/executor";
 import { HealthStore } from "../src/health/store";
 import { BriefingStatusStore } from "../src/notify/briefing-scheduler";
 import { OvernightStore } from "../src/notify/overnight-store";
+import type { Brain, BrainTurnOptions, RouterResult } from "../src/types";
 import { processWebTurn } from "../src/web-voice/turn";
 
 const roots: string[] = [];
@@ -94,4 +98,159 @@ test("daemon health cache reports unreadable and truly empty stores differently"
   await daemon.refreshHealthSummary();
   expect(daemon.healthSummary).toMatchObject({ status: "ok", summary: null });
   expect(await daemon.operationalContext()).toContain('"summary":"no recent entries"');
+});
+
+test("Telegram text captures operational context once for the recording brain", async () => {
+  const received: Array<BrainTurnOptions | undefined> = [];
+  const history: Array<{ user: string; reply: string; lane?: string }> = [];
+  let captures = 0;
+
+  const reply = await runOperatorChatTurn("what is happening?", {
+    brain: {
+      send: async (_text, options) => {
+        received.push(options);
+        return "Current status.";
+      },
+      activeLane: () => "ops",
+    },
+    history: { append: async (turn) => { history.push(turn); } },
+    operationalContext: async () => {
+      captures += 1;
+      return "telegram-operational-state";
+    },
+  });
+
+  expect(reply).toBe("Current status.");
+  expect(captures).toBe(1);
+  expect(received).toEqual([{
+    signal: undefined,
+    systemContext: "telegram-operational-state",
+  }]);
+  expect(history).toEqual([{
+    t: expect.any(Number),
+    user: "what is happening?",
+    reply: "Current status.",
+    lane: "ops",
+  }]);
+});
+
+test("web /api/chat passes its turn signal and operational context to the recording brain", async () => {
+  const controller = new AbortController();
+  const received: Array<BrainTurnOptions | undefined> = [];
+  let captures = 0;
+
+  await runOperatorChatTurn("give me the status", {
+    brain: {
+      send: async (_text, options) => {
+        received.push(options);
+        return "All systems ready.";
+      },
+    },
+    history: { append: async () => {} },
+    operationalContext: async (signal) => {
+      expect(signal).toBeInstanceOf(AbortSignal);
+      captures += 1;
+      return "web-chat-operational-state";
+    },
+  }, controller.signal);
+
+  expect(captures).toBe(1);
+  expect(received).toEqual([{
+    signal: controller.signal,
+    systemContext: "web-chat-operational-state",
+  }]);
+});
+
+test("host mic captures once for each brain path and skips a local fast path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-host-operational-"));
+  roots.push(root);
+  const config = loadConfig({}, { home: root });
+  config.ttsEnabled = false;
+  config.brain.thinking_filler = false;
+  const daemon = new CiceroDaemon(config);
+  const contextStore = new ContextStore();
+  const sent: Array<{ mode: "send" | "stream"; options?: BrainTurnOptions }> = [];
+  const brain: Brain = {
+    start: async () => {},
+    stop: async () => {},
+    send: async (_text, options) => {
+      sent.push({ mode: "send", options });
+      return "brain reply";
+    },
+    streamProgress: async function* (_text, options) {
+      sent.push({ mode: "stream", options });
+      yield "streamed reply.";
+    },
+    injectContext: () => {},
+    restart: async () => {},
+    health: async () => true,
+  };
+  const executor = new ActionExecutor(
+    config,
+    {} as never,
+    brain,
+    {} as never,
+    contextStore,
+    {} as never,
+  );
+  let route: RouterResult = {
+    intent: "brain_query",
+    category: "brain",
+    params: {},
+    confidence: 1,
+  };
+  let captures = 0;
+  const spoken: string[] = [];
+  const state = daemon as unknown as {
+    router: { classify: () => Promise<RouterResult> };
+    brain: Brain;
+    executor: ActionExecutor;
+    contextStore: ContextStore;
+    conversational: {
+      isActive: () => boolean;
+      playSound: () => void;
+      noteSpoken: (text: string) => void;
+    } | null;
+    streamingSpeaker: {
+      speakStream: (source: AsyncIterable<string>) => Promise<void>;
+      getSnapshot: () => { spoken: string[]; pending: string[] };
+    } | null;
+    operationalContext: (signal?: AbortSignal) => Promise<string | null>;
+    handleCommand: (text: string, signal: AbortSignal) => Promise<void>;
+  };
+  state.router = { classify: async () => ({ ...route }) };
+  state.brain = brain;
+  state.executor = executor;
+  state.contextStore = contextStore;
+  state.conversational = null;
+  state.streamingSpeaker = null;
+  state.operationalContext = async () => `host-operational-state-${++captures}`;
+
+  await state.handleCommand("executor question", new AbortController().signal);
+  expect(sent[0]).toMatchObject({
+    mode: "send",
+    options: { systemContext: "host-operational-state-1" },
+  });
+
+  state.conversational = {
+    isActive: () => true,
+    playSound: () => {},
+    noteSpoken: (text) => { spoken.push(text); },
+  };
+  state.streamingSpeaker = {
+    speakStream: async (source) => {
+      for await (const sentence of source) spoken.push(sentence);
+    },
+    getSnapshot: () => ({ spoken: [...spoken], pending: [] }),
+  };
+  await state.handleCommand("streaming question", new AbortController().signal);
+  expect(sent[1]).toMatchObject({
+    mode: "stream",
+    options: { systemContext: "host-operational-state-2" },
+  });
+
+  route = { intent: "help", category: "local", params: {}, confidence: 1 };
+  await state.handleCommand("help", new AbortController().signal);
+  expect(captures).toBe(2);
+  expect(sent).toHaveLength(2);
 });
