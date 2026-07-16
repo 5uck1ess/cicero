@@ -178,3 +178,18 @@ test("a failed delivery does not poison the scheduler for other schedules", asyn
 test("a malformed schedule time fails at construction, not at fire time", () => {
   expect(() => harness({ schedules: [{ at: "9am", prompt: "p" }] })).toThrow(/expected HH:MM/);
 });
+
+test("snapshot reports next schedule and counts without exposing prompt bodies", () => {
+  const h = harness({
+    schedules: [
+      { name: "morning", at: "09:00", prompt: "SECRET BODY" },
+      { name: "afternoon", at: "14:00", prompt: "ANOTHER BODY", lane: "research" },
+    ],
+  });
+  h.setNow(at(10, 0));
+  const snapshot = h.scheduler.snapshot();
+  expect(snapshot.next).toEqual({ name: "afternoon", at: "14:00", day: "today", lane: "research" });
+  expect(snapshot.heldCount).toBe(0);
+  expect(snapshot.inFlightCount).toBe(0);
+  expect(JSON.stringify(snapshot)).not.toContain("BODY");
+});

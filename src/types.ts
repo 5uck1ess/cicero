@@ -383,6 +383,11 @@ export interface Router {
 export interface BrainTurnOptions {
   /** Cancels this turn only. Adapters should stop their underlying work promptly. */
   signal?: AbortSignal;
+  /**
+   * Immutable host-produced context for this invocation only. Adapters must
+   * forward it unchanged and must never retain it as conversation memory.
+   */
+  systemContext?: string;
 }
 
 export interface BackgroundTurnOptions extends BrainTurnOptions {

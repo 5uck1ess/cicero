@@ -48,7 +48,7 @@ export class OllamaBrain implements Brain {
     try {
       const body = {
         model: this.model,
-        messages: this.turnContext.buildChatMessages(message, this.systemPrompt),
+        messages: this.turnContext.buildChatMessages(message, this.systemPrompt, options?.systemContext),
         stream: false,
       };
 

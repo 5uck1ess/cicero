@@ -34,6 +34,37 @@ test("first poll seeds silently — pre-existing done tasks are old news", async
   expect(lines).toEqual([]);
 });
 
+test("snapshot exposes only the last successful cached board read", async () => {
+  let now = 1_000;
+  let fail = false;
+  const board = [task("t1", "blocked", "x".repeat(500))];
+  const w = new KanbanWatcher({
+    list: async () => { if (fail) throw new Error("board down"); return board; },
+    announce: async () => {}, intervalMs: 60_000, now: () => now,
+  });
+  expect(w.snapshot()).toBeNull();
+  await w.tick();
+  const first = w.snapshot()!;
+  expect(first.asOfMs).toBe(1_000);
+  expect(first.truncated).toBe(false);
+  expect(first.totalTasks).toBe(1);
+  expect(first.tasks[0]!.title.length).toBe(240);
+  (first.tasks[0] as KanbanTask).title = "mutated copy";
+  expect(w.snapshot()!.tasks[0]!.title).not.toBe("mutated copy");
+  now = 2_000;
+  fail = true;
+  await w.tick();
+  expect(w.snapshot()!.asOfMs).toBe(1_000);
+});
+
+test("snapshot marks boards larger than its task cap as truncated", async () => {
+  const board = Array.from({ length: 1_001 }, (_, index) => task(String(index), "todo", `Task ${index}`));
+  const w = watcher(() => board, []);
+  await w.tick();
+  expect(w.snapshot()).toMatchObject({ truncated: true, totalTasks: 1_001 });
+  expect(w.snapshot()!.tasks).toHaveLength(1_000);
+});
+
 test("a transition into done announces once and never re-announces", async () => {
   const lines: string[] = [];
   let status = "running";

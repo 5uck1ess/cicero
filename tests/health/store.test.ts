@@ -1,8 +1,8 @@
 import { test, expect } from "bun:test";
-import { chmodSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HealthStore, briefLine, trendReport, formatValue, type HealthEntry } from "../../src/health/store";
+import { HEALTH_READ_TAIL_BYTES, HealthStore, briefLine, trendReport, formatValue, type HealthEntry } from "../../src/health/store";
 import { parseLogWords, healthLog, healthRecent, healthTrend } from "../../src/cli/health";
 
 const tmpStore = () => new HealthStore(join(mkdtempSync(join(tmpdir(), "cicero-health-")), "metrics.jsonl"));
@@ -26,6 +26,51 @@ test("store: concurrent appends don't interleave", async () => {
   const store = tmpStore();
   await Promise.all(Array.from({ length: 25 }, (_, i) => store.append(entry({ t: i, value: i }))));
   expect((await store.recent(100)).length).toBe(25);
+});
+
+test("store: recent(n) reads only a bounded tail, but since() covers the full window", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-health-window-"));
+  const file = join(root, "metrics.jsonl");
+  // ~400 KB — well past HEALTH_READ_TAIL_BYTES (64 KiB), under HEALTH_SINCE_MAX_BYTES.
+  // Earliest weight 100, a long tail of notes, latest weight 90.
+  const lines: string[] = [JSON.stringify(entry({ t: 1, metric: "weight", value: 100 }))];
+  for (let i = 0; i < 4_000; i++) lines.push(JSON.stringify(entry({ t: 100 + i, metric: "note", note: "x".repeat(80) })));
+  lines.push(JSON.stringify(entry({ t: 1_000_000, metric: "weight", value: 90 })));
+  const body = lines.join("\n") + "\n";
+  expect(Buffer.byteLength(body)).toBeGreaterThan(HEALTH_READ_TAIL_BYTES * 4);
+  writeFileSync(file, body);
+  const store = new HealthStore(file);
+
+  // Regression: a time-window read must include the earliest in-window weight
+  // (100), not just the tail — otherwise a weight trend reports change 0, not -10.
+  const weights = (await store.since(0)).filter((e) => e.metric === "weight").map((e) => e.value);
+  expect(weights).toEqual([100, 90]);
+
+  // recent(n) stays bounded to the last tail chunk (it does not scan the file).
+  expect((await store.recent(2)).map((e) => e.t)).toEqual([4_099, 1_000_000]);
+});
+
+test("store: an oversized unterminated final line reads empty instead of throwing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-health-bigline-"));
+  const file = join(root, "metrics.jsonl");
+  // A valid history followed by a torn/oversized final entry larger than the tail
+  // window and lacking a trailing newline: the retained tail contains no complete
+  // line. That is not an I/O failure, so the read degrades to empty (rendered as
+  // "no recent entries") rather than throwing (which would flip health to
+  // "unavailable"). Only genuine open/read errors surface as unavailable.
+  const good = JSON.stringify(entry({ t: 1, metric: "weight", value: 80 })) + "\n";
+  const giant = `{"t":2,"metric":"note","note":"${"y".repeat(HEALTH_READ_TAIL_BYTES + 4096)}"`; // no newline
+  writeFileSync(file, good + giant);
+  const store = new HealthStore(file);
+  expect(await store.recent(10)).toEqual([]);
+});
+
+test("store: unreadable record paths surface failure instead of valid-empty state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-health-unreadable-"));
+  const file = join(root, "metrics.jsonl");
+  const store = new HealthStore(file);
+  mkdirSync(file);
+  await expect(store.recent(10)).rejects.toThrow();
 });
 
 test.skipIf(process.platform === "win32")("store: directory and data file are private", async () => {

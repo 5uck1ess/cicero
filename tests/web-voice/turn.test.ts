@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { silenceWavLike, SPEAKER_BEAT_MS, processWebTurn, streamWebTurn, streamWebTextTurn, isExpandRequest, isRepeatRequest, isResumeRequest, applyVoiceControl, concatWavs, type WebTurnDeps, type WebStreamDeps, type WebReplySink } from "../../src/web-voice/turn";
+import { OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS, silenceWavLike, SPEAKER_BEAT_MS, processWebTurn, streamWebTurn, streamWebTextTurn, isExpandRequest, isRepeatRequest, isResumeRequest, applyVoiceControl, concatWavs, type WebTurnDeps, type WebStreamDeps, type WebReplySink } from "../../src/web-voice/turn";
 
 async function* tokens(...parts: string[]) { for (const p of parts) yield p; }
 
@@ -102,6 +102,77 @@ test("processWebTurn forwards cancellation to the brain and suppresses late TTS"
   expect(ttsCalls).toBe(0);
 });
 
+test("operational context is captured once immediately before the batch brain invocation", async () => {
+  const calls: string[] = [];
+  let received: string | undefined;
+  const d = deps({ calls });
+  d.operationalContext = async () => { calls.push("snapshot"); return "state-v1"; };
+  d.brain = {
+    send: async (_text, options) => {
+      calls.push("brain");
+      received = options?.systemContext;
+      return "Done.";
+    },
+  };
+  await processWebTurn(new ArrayBuffer(8), d);
+  expect(calls.slice(0, 3)).toEqual(["stt", "snapshot", "brain"]);
+  expect(received).toBe("state-v1");
+});
+
+test("batch local detail fast path does not capture operational context", async () => {
+  let snapshots = 0;
+  let brains = 0;
+  const d = deps({ transcript: "details" });
+  d.tldr = { cap: 1, pending: () => "Stored detail." };
+  d.operationalContext = async () => { snapshots++; return "unused"; };
+  d.brain = { send: async () => { brains++; return "wrong"; } };
+  await processWebTurn(new ArrayBuffer(8), d);
+  expect(snapshots).toBe(0);
+  expect(brains).toBe(0);
+});
+
+test("abort during snapshot capture prevents the batch brain invocation", async () => {
+  const controller = new AbortController();
+  let brains = 0;
+  const d = deps();
+  d.signal = controller.signal;
+  d.operationalContext = async () => {
+    controller.abort(new Error("superseded during snapshot"));
+    return "late state";
+  };
+  d.brain = { send: async () => { brains++; return "late"; } };
+  await expect(processWebTurn(new ArrayBuffer(8), d)).rejects.toThrow("superseded during snapshot");
+  expect(brains).toBe(0);
+});
+
+test("later batch turns see changed operational state", async () => {
+  let version = 1;
+  const seen: Array<string | undefined> = [];
+  const d = deps();
+  d.operationalContext = async () => `state-v${version}`;
+  d.brain = { send: async (_text, options) => { seen.push(options?.systemContext); return "ok"; } };
+  await processWebTurn(new ArrayBuffer(8), d);
+  version = 2;
+  await processWebTurn(new ArrayBuffer(8), d);
+  expect(seen).toEqual(["state-v1", "state-v2"]);
+});
+
+test("a hung operational capture is abandoned at its deadline", async () => {
+  let received: string | undefined = "not called";
+  const d = deps();
+  d.operationalContext = () => new Promise<string | null>(() => {});
+  d.brain = { send: async (_text, options) => {
+    received = options?.systemContext;
+    return "ok";
+  } };
+  const started = Date.now();
+  await processWebTurn(new ArrayBuffer(8), d);
+  const elapsed = Date.now() - started;
+  expect(elapsed).toBeGreaterThanOrEqual(OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS - 100);
+  expect(elapsed).toBeLessThan(OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS + 1_500);
+  expect(received).toBeUndefined();
+});
+
 // --- streamWebTurn (Phase 2: streaming) ---
 
 test("streamWebTurn emits transcript, then a sentence+audio per sentence, then done", async () => {
@@ -112,6 +183,41 @@ test("streamWebTurn emits transcript, then a sentence+audio per sentence, then d
   expect(calls.audio).toBe(2);     // one synth per sentence
   expect(calls.done).toBe(1);
   expect(calls.error).toEqual([]);
+});
+
+test("streaming captures operational context once after fast paths and forwards it", async () => {
+  const events: string[] = [];
+  let received: string | undefined;
+  const d = streamDeps();
+  d.operationalContext = async () => { events.push("snapshot"); return "stream-state"; };
+  d.brain = {
+    send: async () => "",
+    sendStream: (_message, options) => {
+      events.push("brain");
+      received = options?.systemContext;
+      return tokens("Reply.");
+    },
+  };
+  const { sink } = capturingSink();
+  await streamWebTextTurn("question", d, sink);
+  expect(events).toEqual(["snapshot", "brain"]);
+  expect(received).toBe("stream-state");
+});
+
+test("streaming voice controls and repeat skip operational capture", async () => {
+  for (const text of ["louder", "repeat that"]) {
+    let snapshots = 0;
+    let brains = 0;
+    const d = streamDeps();
+    d.voice = { state: { volume: 1, rate: 1 } };
+    d.lastReply = { store: () => {}, pending: () => "Previous reply." };
+    d.operationalContext = async () => { snapshots++; return "unused"; };
+    d.brain = { send: async () => { brains++; return "wrong"; } };
+    const { sink } = capturingSink();
+    await streamWebTextTurn(text, d, sink);
+    expect(snapshots).toBe(0);
+    expect(brains).toBe(0);
+  }
 });
 
 test("streamWebTurn falls back to non-streaming brain.send when sendStream is absent", async () => {

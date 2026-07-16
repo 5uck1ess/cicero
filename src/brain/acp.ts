@@ -823,7 +823,7 @@ export class AcpBrain implements Brain {
         throw new Error("ACP brain stopped while waiting for turn");
       }
       this.noteApprovalIfPending(message);
-      const promptText = this.buildPrompt(message); // once — buildPrompt consumes the context buffer
+      const promptText = this.buildPrompt(message, options.systemContext); // once — consumes one-shot mutable context
       for (let attempt = 0; attempt < 2; attempt++) {
         const conn = runtime.conn;
         const sessionId = runtime.sessionId;
@@ -1419,8 +1419,8 @@ export class AcpBrain implements Brain {
     return env;
   }
 
-  private buildPrompt(message: string): string {
-    return this.turnContext.buildTextPrompt(message, false);
+  private buildPrompt(message: string, systemContext?: string): string {
+    return this.turnContext.buildTextPrompt(message, false, systemContext);
   }
 
   private async withRuntimeTimeout<T>(
