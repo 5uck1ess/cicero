@@ -3,6 +3,7 @@ import { log } from "../logger";
 import type { STTProvider } from "../backends/stt/provider";
 import type { Brain } from "../types";
 import { beginOwnedTone, settleTone, type ToneOptions } from "./tone";
+import { captureOperationalContext } from "./turn";
 import { writeSecureTempAudio } from "../platform/secure-temp-audio";
 
 /**
@@ -53,6 +54,8 @@ export interface SpeculatorDeps {
   tone?: ToneOptions;
   /** Override the unclaimed-speculation timeout (tests only). */
   claimTimeoutMs?: number;
+  /** Per-invocation daemon snapshot, captured once when speculation starts the brain. */
+  operationalContext?: (signal?: AbortSignal) => Promise<string | null>;
 }
 
 /** One in-flight speculative turn, owned by a websocket connection. */
@@ -205,13 +208,26 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
       const tag = await settleTone(tonePending?.result ?? null, deps.tone?.graceMs);
       if (aborted) return;
       const input = tag ? `${text}\n\n${tag}` : text;
+      let systemContext: string | null = null;
+      try {
+        turnAbort.signal.throwIfAborted();
+        systemContext = await captureOperationalContext(deps.operationalContext, turnAbort.signal);
+        turnAbort.signal.throwIfAborted();
+      } catch (error: unknown) {
+        if (turnAbort.signal.aborted || aborted) return;
+        log("warn", `speculative: operational snapshot unavailable (${error instanceof Error ? error.message : String(error)})`);
+      }
+      if (aborted) return;
       const buf = new TokenBuffer();
       buffer = buf;
       pumpSettled = false;
       pumpDone = (async () => {
         let it: AsyncIterator<string> | null = null;
         try {
-          it = deps.brain.sendStream!(input, { signal: turnAbort.signal })[Symbol.asyncIterator]();
+          it = deps.brain.sendStream!(input, {
+            signal: turnAbort.signal,
+            systemContext: systemContext ?? undefined,
+          })[Symbol.asyncIterator]();
           while (!aborted) {
             const next = it.next();
             let result: IteratorResult<string> | null = null;

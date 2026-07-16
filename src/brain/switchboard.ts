@@ -1099,7 +1099,7 @@ export class SwitchboardBrain implements Brain {
   async sendBackground(message: string, options?: BackgroundTurnOptions): Promise<string> {
     if (this.stopping) throw new Error("switchboard is stopping");
     const lane = options?.lane;
-    const turnOptions = options?.signal ? { signal: options.signal } : undefined;
+    const turnOptions = options;
     if (lane === undefined) {
       return this.primary.sendBackground
         ? this.primary.sendBackground(message, turnOptions)

@@ -47,6 +47,7 @@ function deps(overrides: Partial<SpeculatorDeps> & { transcript?: string; tokens
     isLocalFastPath: overrides.isLocalFastPath ?? isLocalFastPath,
     minProbability: overrides.minProbability ?? 0.85,
     claimTimeoutMs: overrides.claimTimeoutMs ?? 5000,
+    operationalContext: overrides.operationalContext,
   };
   return { deps: d, brainCalls, brainFinalized: () => finalized };
 }
@@ -82,6 +83,69 @@ test("happy path: transcribes the tail, starts the brain, and hands over buffere
   const tokens = turn.tokens();
   expect(tokens).not.toBeNull();
   expect(await drain(tokens!)).toBe("Three cards.");
+});
+
+test("speculation captures one immutable snapshot and attaches it to its brain stream", async () => {
+  let captures = 0;
+  const seen: Array<string | undefined> = [];
+  const d = deps({
+    transcript: "where is my brief",
+    operationalContext: async () => `spec-state-${++captures}`,
+    brain: {
+      sendStream: (_message, options) => {
+        seen.push(options?.systemContext);
+        return (async function* () { yield "Delivered."; })();
+      },
+    },
+  }).deps;
+  const turn = makeSpeculator(d)(pcm(800), 16_000, 800, 0.95)!;
+  expect(turn.claim()).toBe(true);
+  await turn.transcript();
+  expect(await drain(turn.tokens()!)).toBe("Delivered.");
+  expect(captures).toBe(1);
+  expect(seen).toEqual(["spec-state-1"]);
+});
+
+test("a hung speculative snapshot is bounded and does not block the brain turn", async () => {
+  const seen: Array<string | undefined> = [];
+  const d = deps({
+    transcript: "where is my brief",
+    // Never resolves: without the bounded capture helper the speculative turn
+    // would await this forever and wedge the serial turn drain. The deadline must
+    // abandon it and start the brain with no operational context.
+    operationalContext: () => new Promise<string>(() => {}),
+    brain: {
+      sendStream: (_message, options) => {
+        seen.push(options?.systemContext);
+        return (async function* () { yield "Delivered."; })();
+      },
+    },
+    claimTimeoutMs: 60_000,
+  }).deps;
+  const turn = makeSpeculator(d)(pcm(800), 16_000, 800, 0.95)!;
+  expect(turn.claim()).toBe(true);
+  await turn.transcript();
+  expect(await drain(turn.tokens()!)).toBe("Delivered.");
+  expect(seen).toEqual([undefined]);
+});
+
+test("abort after speculative snapshot capture prevents a late brain invocation", async () => {
+  let brainCalls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const d = deps({
+    transcript: "slow snapshot",
+    operationalContext: async () => { await gate; return "doomed-state"; },
+    brain: { sendStream: async function* () { brainCalls++; yield "late"; } },
+    claimTimeoutMs: 60_000,
+  }).deps;
+  const turn = makeSpeculator(d)(pcm(800), 16_000, 800, 0.95)!;
+  await Bun.sleep(5);
+  const aborted = turn.abort();
+  release();
+  await aborted;
+  expect(brainCalls).toBe(0);
+  expect(turn.claim()).toBe(false);
 });
 
 test("a synchronous speculative brain failure closes the adopted token stream", async () => {
@@ -414,6 +478,16 @@ test("adoption: the speculative transcript and tokens are used, final STT is ski
   expect(calls.transcript).toEqual(["speculated words"]);
   expect(calls.sentence).toEqual(["Speculative reply."]);
   expect(calls.done).toBe(1);
+});
+
+test("adopted speculation never captures a second operational snapshot", async () => {
+  const sttCalls: string[] = [];
+  let captures = 0;
+  const deps = turnDeps(sttCalls);
+  deps.operationalContext = async () => { captures++; return "new-state"; };
+  const { sink } = capturingSink();
+  await streamWebTurn(wavOf(1000), deps, sink, fakeSpec());
+  expect(captures).toBe(0);
 });
 
 test("coverage mismatch: speculation aborts and the normal pipeline runs", async () => {

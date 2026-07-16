@@ -49,6 +49,14 @@ export interface BriefingScheduleSnapshot {
   status: BriefingRunStatus | null;
 }
 
+export type BriefingOperationalRead =
+  | { status: "ok"; value: BriefingRunStatus | null }
+  | { status: "unavailable" };
+
+type BriefingStoreRead =
+  | { status: "ok"; value: BriefingRunStatus | null }
+  | { status: "unavailable"; error?: unknown };
+
 const TICK_MS = 20_000;
 const MAX_SUMMARY_CHARS = 500;
 const MAX_ERROR_KIND_CHARS = 64;
@@ -62,6 +70,12 @@ export function briefingStatusFilePath(): string {
 export class BriefingStatusStore {
   private pending: Promise<void> = Promise.resolve();
   private corruptWarningIssued = false;
+  // Day (UTC, matching quarantineCorrupt) on which we last quarantined a corrupt
+  // record. Quarantine renames the bad file away, so a later same-day read would
+  // see an absent file and wrongly report "not run today"; this latch keeps
+  // reporting "unavailable" for the rest of that day. Self-expires at day
+  // rollover and clears once a valid record is read.
+  private corruptedDay: string | null = null;
 
   constructor(private readonly file: string = briefingStatusFilePath()) {
     ensurePrivateDirectorySync(dirname(file));
@@ -70,6 +84,14 @@ export class BriefingStatusStore {
 
   read(): Promise<BriefingRunStatus | null> {
     return this.serialize(async () => this.readUnserialized());
+  }
+
+  /** Read for reporting without collapsing corrupt or unreadable state into absence. */
+  readOperational(): Promise<BriefingOperationalRead> {
+    return this.serialize(async () => {
+      const result = await this.readResultUnserialized();
+      return result.status === "ok" ? result : { status: "unavailable" };
+    });
   }
 
   claim(status: BriefingRunStatus): Promise<boolean> {
@@ -96,28 +118,44 @@ export class BriefingStatusStore {
   }
 
   private async readUnserialized(): Promise<BriefingRunStatus | null> {
+    const result = await this.readResultUnserialized();
+    if (result.status === "ok") return result.value;
+    if (result.error !== undefined) throw result.error;
+    return null;
+  }
+
+  private async readResultUnserialized(): Promise<BriefingStoreRead> {
     let value: unknown | undefined;
     try {
       value = await readPrivateJson(this.file);
     } catch (error: unknown) {
-      if (!(error instanceof SyntaxError) && !(error instanceof PrivateJsonTooLargeError)) throw error;
+      if (!(error instanceof SyntaxError) && !(error instanceof PrivateJsonTooLargeError)) {
+        return { status: "unavailable", error };
+      }
       await this.quarantineCorrupt();
-      return null;
+      return { status: "unavailable" };
     }
-    if (value === undefined) return null;
+    if (value === undefined) {
+      // Absent file: genuinely not-run, UNLESS we quarantined a corrupt record
+      // earlier today — then we truly don't know, so keep reporting unavailable.
+      if (this.corruptedDay === new Date().toISOString().slice(0, 10)) return { status: "unavailable" };
+      return { status: "ok", value: null };
+    }
     try {
       if (!isStatus(value)) throw new TypeError("invalid briefing status");
       const normalized = normalizeStatus(value);
       this.corruptWarningIssued = false;
-      return normalized;
+      this.corruptedDay = null;
+      return { status: "ok", value: normalized };
     } catch {
       await this.quarantineCorrupt();
-      return null;
+      return { status: "unavailable" };
     }
   }
 
   private async quarantineCorrupt(): Promise<void> {
     const day = new Date().toISOString().slice(0, 10);
+    this.corruptedDay = day;
     let quarantined = false;
     for (let counter = 0; counter < 100; counter++) {
       const suffix = counter === 0 ? day : `${day}-${counter}`;

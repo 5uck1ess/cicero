@@ -43,7 +43,7 @@ export class ClaudeCodeBrain extends SubprocessCLIBrain {
    */
   async *streamProgress(message: string, options: BrainTurnOptions = {}): AsyncGenerator<string> {
     options.signal?.throwIfAborted();
-    const proc = this.spawnWithArgs(this.streamJsonArgs, message);
+    const proc = this.spawnWithArgs(this.streamJsonArgs, message, options.systemContext);
     const ownedExit = awaitOwnedTurnExit(proc);
     void ownedExit.catch(() => { /* observed by the owned cleanup barrier */ });
     let cancellation: Promise<void> | null = null;

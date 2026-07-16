@@ -135,6 +135,33 @@ test("a corrupt status is quarantined and the next tick can claim and fire", asy
   expect((await store.read())?.phase).toBe("delivered");
 });
 
+test("a quarantined corrupt status keeps reporting unavailable until a valid record replaces it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-briefing-latch-"));
+  roots.push(root);
+  const file = join(root, "briefing-status.json");
+  writeFileSync(file, "{broken", { mode: 0o600 });
+  const store = new BriefingStatusStore(file);
+
+  // First operational read detects corruption and quarantines the file.
+  expect(await store.readOperational()).toEqual({ status: "unavailable" });
+  expect(readdirSync(root).some((name) => name.startsWith("briefing-status.json.corrupt-"))).toBe(true);
+
+  // The file is now absent, but reverting to "not run today" would be a confident
+  // false answer — we quarantined today's record and truly don't know. The latch
+  // keeps it "unavailable" for the rest of the day.
+  expect(await store.readOperational()).toEqual({ status: "unavailable" });
+
+  // A fresh valid claim clears the latch and reports the real state.
+  const claimed = await store.claim({
+    day: "2026-07-16", scheduledAt: "2026-07-16T08:30:00-04:00",
+    trigger: "scheduled", claimedAt: 1, phase: "delivered",
+  });
+  expect(claimed).toBe(true);
+  const back = await store.readOperational();
+  expect(back.status).toBe("ok");
+  expect(back.status === "ok" && back.value?.phase).toBe("delivered");
+});
+
 test("a parseable status with a wrong-typed optional field is quarantined and does not wedge delivery", async () => {
   const root = mkdtempSync(join(tmpdir(), "cicero-briefing-structural-corrupt-"));
   roots.push(root);

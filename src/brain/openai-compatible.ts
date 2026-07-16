@@ -39,7 +39,7 @@ export class OpenAiCompatibleBrain implements Brain {
 
   async send(message: string, options?: BrainTurnOptions): Promise<string> {
     try {
-      const out = await this.provider.chatCompletion(this.buildMessages(message), {
+      const out = await this.provider.chatCompletion(this.buildMessages(message, options?.systemContext), {
         max_tokens: this.maxTokens,
         signal: options?.signal,
       });
@@ -53,7 +53,7 @@ export class OpenAiCompatibleBrain implements Brain {
   async *sendStream(message: string, options?: BrainTurnOptions): AsyncGenerator<string> {
     try {
       let out = "";
-      for await (const chunk of this.provider.chatCompletionStream(this.buildMessages(message), {
+      for await (const chunk of this.provider.chatCompletionStream(this.buildMessages(message, options?.systemContext), {
         max_tokens: this.maxTokens,
         signal: options?.signal,
       })) {
@@ -81,7 +81,7 @@ export class OpenAiCompatibleBrain implements Brain {
   }
 
   /** Prepend any injected context as a system message ahead of the user turn. */
-  private buildMessages(message: string): ChatMessage[] {
-    return this.turnContext.buildChatMessages(message) as ChatMessage[];
+  private buildMessages(message: string, systemContext?: string): ChatMessage[] {
+    return this.turnContext.buildChatMessages(message, undefined, systemContext) as ChatMessage[];
   }
 }

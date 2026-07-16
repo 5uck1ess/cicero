@@ -298,7 +298,7 @@ export class TabInjectBrain implements Brain {
       : this.lifecycleAbort.signal;
     return this.runSerialized(signal, async () => {
       this.throwIfAborted(signal);
-      return await this.sendToTabLocked(message, tabName, signal);
+      return await this.sendToTabLocked(message, tabName, signal, options.systemContext);
     }).catch((err: unknown) => {
       throw err instanceof Error ? err : new Error(String(err));
     });
@@ -308,6 +308,7 @@ export class TabInjectBrain implements Brain {
     message: string,
     tabName: string,
     signal?: AbortSignal,
+    systemContext?: string,
   ): Promise<string> {
     this.assertSessionSafe();
     const tabs = await this.awaitAbortableOperation(
@@ -320,7 +321,7 @@ export class TabInjectBrain implements Brain {
       throw new Error(`Tab not found: "${tabName}". Available: ${tabs.map(t => t.title).join(", ")}`);
     }
 
-    const prompt = this.turnContext.buildTextPrompt(message, false);
+    const prompt = this.turnContext.buildTextPrompt(message, false, systemContext);
 
     this.previousTab = tabs.find(t => t.is_focused) || null;
 
