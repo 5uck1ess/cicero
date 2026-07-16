@@ -113,7 +113,7 @@ Install [Ollama](https://ollama.com) before running these commands:
 
 ```bash
 bun install
-brew install sox openssl ffmpeg
+brew install uv sox openssl ffmpeg
 bun link
 
 uv venv .venv-stt --python 3.10
@@ -131,8 +131,9 @@ For tab integration, use a terminal with remote control — [Kitty](https://sw.k
 # Install Bun
 powershell -c "irm bun.sh/install.ps1 | iex"
 
-# Audio, tmux, and automatic web-voice HTTPS certificate generation
-scoop install sox ffmpeg tmux openssl
+# uv (manages the Python model servers), audio tools, tmux, and automatic
+# web-voice HTTPS certificate generation
+scoop install uv sox ffmpeg tmux openssl
 
 # Ollama: download from https://ollama.com/download/windows
 ollama pull qwen3.5:4b
