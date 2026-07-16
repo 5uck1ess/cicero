@@ -1,7 +1,12 @@
 # Cicero: Project Evolution & Lessons Learned
 
-> A voice-controlled terminal assistant built over 3 days (March 10-12, 2026).
-> 67 commits, 40 files, ~4,750 lines of code, 215 tests.
+> **Historical record — the first three days (March 10–12, 2026).** Every
+> claim, number, and limitation below describes that snapshot, not the current
+> product: "67 commits, 40 files, ~4,750 lines, 215 tests" was true then, and
+> statements like "can't run on Linux/Windows" have long since been overtaken
+> (Linux, Windows, and CUDA/CPU tiers are supported today). Read this for the project's history
+> and decisions; for what Cicero currently is, start at the
+> [README](../README.md) and [setup](setup.md).
 
 ---
 
