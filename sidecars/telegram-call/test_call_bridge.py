@@ -11,12 +11,14 @@ CI runs these tests with a bare interpreter, so the deps are stubbed the same
 way tests/python/test_sidecar_contracts.py stubs model modules.
 """
 import asyncio
+import io
 import os
 import sys
 import tempfile
 import time
 import types
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 
@@ -386,8 +388,9 @@ class ListenerHeartbeatTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             hb = Path(d) / "listener.alive"
             self.assertFalse(hb.exists())
-            call_agent.write_listener_heartbeat(hb)
+            first_mtime = call_agent.write_listener_heartbeat(hb)
             self.assertTrue(hb.exists())
+            self.assertEqual(first_mtime, hb.stat().st_mtime_ns)
             backdated = hb.stat().st_mtime_ns - 5_000_000_000  # 5s in the past
             os.utime(hb, ns=(backdated, backdated))
             call_agent.write_listener_heartbeat(hb)
@@ -421,6 +424,25 @@ class ListenerHeartbeatTest(unittest.TestCase):
             self.assertTrue(planted.is_symlink())
             self.assertEqual(target.read_text(), "leave me alone")
             self.assertEqual(target.stat().st_mtime_ns, old)
+
+    def test_old_generation_cleanup_leaves_new_generation_heartbeat_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            hb = Path(d) / "listener.alive"
+            old_owned = call_agent.write_listener_heartbeat(hb)
+            self.assertIsNotNone(old_owned)
+            new_owned = call_agent.write_listener_heartbeat(hb)
+            self.assertIsNotNone(new_owned)
+            self.assertNotEqual(old_owned, new_owned)
+
+            call_agent.expire_listener_heartbeat(hb, old_owned)
+
+            self.assertEqual(hb.stat().st_mtime_ns, new_owned)
+
+    def test_empty_callback_owner_guard_raises_without_waiting(self) -> None:
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "without a configured CICERO_TG_ALLOWED owner"):
+            call_agent.callback_owner_target(frozenset())
+        self.assertLess(time.monotonic() - started, 0.1)
 
 
 class ListenerHeartbeatLifecycleTest(unittest.IsolatedAsyncioTestCase):
@@ -477,7 +499,7 @@ class ListenerHeartbeatLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 owner.cancel()
                 await asyncio.gather(owner, return_exceptions=True)
 
-    async def test_cancelling_listener_owner_unlinks_heartbeat(self) -> None:
+    async def test_clean_shutdown_expires_heartbeat_instead_of_removing_it(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             hb = Path(d) / "listener.alive"
 
@@ -494,7 +516,31 @@ class ListenerHeartbeatLifecycleTest(unittest.IsolatedAsyncioTestCase):
             owner.cancel()
             await asyncio.gather(owner, return_exceptions=True)
 
-            self.assertFalse(hb.exists())
+            self.assertTrue(hb.exists())
+            self.assertEqual(hb.stat().st_mtime_ns, 0)
+
+    async def test_callback_owner_failure_is_redacted_loud_and_fatal(self) -> None:
+        original_token = call_agent.TOKEN
+        secret = "callback-owner-secret"
+        terminated: list[BaseException] = []
+
+        async def broken_owner() -> None:
+            raise RuntimeError(f"poll crashed with {secret}")
+
+        output = io.StringIO()
+        try:
+            call_agent.TOKEN = secret
+            with redirect_stdout(output):
+                owner = asyncio.create_task(broken_owner())
+                call_agent.monitor_callback_owner(owner, terminated.append)
+                await eventually(lambda: len(terminated) == 1, message="owner failure was not fatal")
+        finally:
+            call_agent.TOKEN = original_token
+
+        self.assertIn("FATAL callback listener owner failed", output.getvalue())
+        self.assertIn("<redacted>", output.getvalue())
+        self.assertNotIn(secret, output.getvalue())
+        self.assertIsInstance(terminated[0], RuntimeError)
 
 
 if __name__ == "__main__":

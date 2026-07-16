@@ -27,7 +27,7 @@ import type { TurnDetector } from "./backends/turn/provider";
 import { createSerProvider } from "./backends/ser";
 import type { SerProvider } from "./backends/ser/provider";
 import { toneTag, wavDurationMs, type ToneOptions } from "./web-voice/tone";
-import { CALLBACK_SPOOL_PATH, callbackConsumerAlive } from "./telegram-call";
+import { callbackConsumerAlive, writeCallbackSpool } from "./telegram-call";
 import { StreamingTTSSpeaker } from "./speaker/streaming-tts";
 import { speakable } from "./speaker/speakable";
 import { canStreamBrain, canNarrateAgent, streamBrainToSpeaker, streamAgentNarration } from "./speaker/brain-stream";
@@ -189,8 +189,7 @@ export async function writeProactiveCallback(
   consumerAlive: () => Promise<boolean> = callbackConsumerAlive,
 ): Promise<boolean> {
   if (!await consumerAlive()) return false;
-  await writeCallback();
-  return true;
+  return await writeCallback() !== false;
 }
 import { createAudioPlayer, createAudioRecorder } from "./platform/audio";
 import { AecAudioHub, aecAvailable } from "./platform/aec-hub";
@@ -612,11 +611,9 @@ export class CiceroDaemon {
       // Spool unconditionally: an explicit "call me" is never dropped, so it
       // still rings if the sidecar comes up moments later (one fixed-path
       // file, overwritten — a consumer-less install never piles them up).
-      await Bun.write(
-        CALLBACK_SPOOL_PATH,
-        JSON.stringify({ reason: "text dial-back", lane: who ?? null, at: Date.now() }),
-      );
-      signal.throwIfAborted();
+      const callbackRequest = JSON.stringify({ reason: "text dial-back", lane: who ?? null, at: Date.now() });
+      const published = await writeCallbackSpool(callbackRequest, signal);
+      if (!published) signal.throwIfAborted();
       // Only promise a ring when a consumer is provably alive. With no call
       // sidecar running there is nothing to consume the spool, so answer
       // honestly instead of overpromising "Ringing you now." — the sidecar's
@@ -1286,13 +1283,12 @@ export class CiceroDaemon {
               // Blocked tasks never auto-ring (the user's call): their text
               // names the "have <name> call me" dial-back instead.
               if (res?.parked && kw.call_back && t.status !== "blocked") {
+                const callbackRequest = JSON.stringify({ reason: line, at: Date.now() });
                 const queued = await writeProactiveCallback(async () => {
                   signal.throwIfAborted();
-                  await Bun.write(
-                    CALLBACK_SPOOL_PATH,
-                    JSON.stringify({ reason: line, at: Date.now() }),
-                  );
+                  return writeCallbackSpool(callbackRequest, signal);
                 });
+                if (signal.aborted) return;
                 if (!queued) {
                   log("info", "kanban watch: callback skipped — no live Telegram call consumer");
                   return;
@@ -1368,10 +1364,13 @@ export class CiceroDaemon {
                     const accepted = result !== null && (result.delivered > 0 || result.parked);
                     channels.voice = accepted ? "accepted" : "failed";
                     if (result?.parked) {
-                      await recordParkedBriefingVoiceOutcome(signal, channels, () => Bun.write(
-                          CALLBACK_SPOOL_PATH,
-                          JSON.stringify({ reason: "morning briefing", at: Date.now() }),
-                        ), callbackConsumerAlive);
+                      const callbackRequest = JSON.stringify({ reason: "morning briefing", at: Date.now() });
+                      await recordParkedBriefingVoiceOutcome(
+                        signal,
+                        channels,
+                        () => writeCallbackSpool(callbackRequest, signal),
+                        callbackConsumerAlive,
+                      );
                     }
                   }).catch(() => { channels.voice = signal.aborted ? "aborted" : "failed"; })
                 : Promise.resolve();

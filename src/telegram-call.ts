@@ -1,4 +1,4 @@
-import { lstat } from "node:fs/promises";
+import { lstat, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -26,6 +26,33 @@ export const TELEGRAM_SESSION_PATH = join(TELEGRAM_CALL_DIR, `${TELEGRAM_SESSION
  *  generous "the listener process is gone" threshold that still tolerates a
  *  slow tick or a brief hiccup without falsely reporting the line down. */
 export const LISTENER_HEARTBEAT_FRESH_MS = 30_000;
+
+export type CallbackSpoolWriter = (path: string, content: string) => Promise<unknown>;
+
+/** Publish one fixed-path callback request without leaving a turn-aborted
+ * request visible after its write finishes. The exact-content check preserves
+ * a newer producer's overwrite. A consumer can still claim the file in the
+ * microsecond write→compensation gap; that bounded residual is accepted. */
+export async function writeCallbackSpool(
+  content: string,
+  signal: AbortSignal,
+  spoolPath: string = CALLBACK_SPOOL_PATH,
+  writer: CallbackSpoolWriter = (path, value) => Bun.write(path, value),
+): Promise<boolean> {
+  signal.throwIfAborted();
+  await writer(spoolPath, content);
+  if (!signal.aborted) return true;
+  try {
+    if (await readFile(spoolPath, "utf8") === content) {
+      await unlink(spoolPath);
+    }
+  } catch {
+    // Best-effort compensation: the consumer may already have claimed it, or
+    // a newer producer may be replacing it. Either state must remain owned by
+    // that actor rather than turning abort cleanup into a second failure.
+  }
+  return false;
+}
 
 /** Three-state compatibility check for the independently deployed sidecar:
  *  a fresh regular heartbeat is alive; a present stale/non-regular heartbeat

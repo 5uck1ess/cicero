@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { recordParkedBriefingVoiceOutcome, writeProactiveCallback } from "../src/daemon";
@@ -9,6 +9,7 @@ import {
   TELEGRAM_CALL_DIR,
   TELEGRAM_SESSION_PATH,
   callbackConsumerAlive,
+  writeCallbackSpool,
 } from "../src/telegram-call";
 
 const roots: string[] = [];
@@ -41,8 +42,8 @@ test("a heartbeat inside the window (a deferring listener) still reads alive", a
   expect(await callbackConsumerAlive(Date.now(), heartbeat(25_000))).toBe(true);
 });
 
-test("a stale heartbeat blocks the legacy session fallback", async () => {
-  const path = heartbeat(60_000);
+test("an expired modern heartbeat after clean shutdown blocks the legacy session fallback", async () => {
+  const path = heartbeat(Date.now());
   writeFileSync(join(dirname(path), "cicero.session"), "legacy session");
   expect(await callbackConsumerAlive(Date.now(), path)).toBe(false);
 });
@@ -99,4 +100,44 @@ test("a parked briefing records failed callback when no consumer is alive", asyn
   );
   expect(channels).toEqual({ voice: "accepted", callback: "failed" });
   expect(writes).toBe(0);
+});
+
+test("abort after a matching callback write compensates by unlinking and reports aborted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-call-spool-abort-"));
+  roots.push(root);
+  const spool = join(root, "callback.request");
+  const content = JSON.stringify({ reason: "matching", at: 1 });
+  const controller = new AbortController();
+  const channels = { voice: "accepted" };
+
+  await recordParkedBriefingVoiceOutcome(
+    controller.signal,
+    channels,
+    () => writeCallbackSpool(content, controller.signal, spool, async (path, value) => {
+      await Bun.write(path, value);
+      controller.abort(new Error("turn aborted after write"));
+    }),
+    async () => true,
+  );
+
+  expect(channels).toEqual({ voice: "aborted", callback: "aborted" });
+  expect(existsSync(spool)).toBe(false);
+});
+
+test("abort compensation preserves a newer mismatching callback spool", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-call-spool-race-"));
+  roots.push(root);
+  const spool = join(root, "callback.request");
+  const content = JSON.stringify({ reason: "old", at: 1 });
+  const newer = JSON.stringify({ reason: "new", at: 2 });
+  const controller = new AbortController();
+
+  const published = await writeCallbackSpool(content, controller.signal, spool, async (path, value) => {
+    await Bun.write(path, value);
+    controller.abort(new Error("old turn aborted"));
+    await Bun.write(path, newer);
+  });
+
+  expect(published).toBe(false);
+  expect(readFileSync(spool, "utf8")).toBe(newer);
 });
