@@ -1,29 +1,191 @@
 # Setup
 
-Install [Bun](https://bun.sh) and [uv](https://docs.astral.sh/uv/) first. The
-Cicero CLI runs anywhere Bun runs; full local voice support still depends on
-platform audio tools, provider runtimes, and (for the native hotkey/AEC helpers)
-macOS-specific code. Cicero launches and supervises supported local providers;
-a configured remote provider connects to a server you operate. `cicero doctor`
-checks the effective configuration and prints fixes for missing prerequisites.
+## Your first conversation
 
-Install and authenticate the selected brain before the first start. The full
-`config.yaml.example` expects a `hermes` ACP executable; replace its
-`brain.binary`/`binary_args` with another ACP harness or one of the documented
-CLI/HTTP brains if Hermes is not your driver.
-Doctor can verify a CLI binary is present, but it does not prove that the CLI is
-authenticated or complete a live agent turn. Exercise one real turn before
-treating a deployment as ready.
+This is the opinionated first-run path: Cicero runs on a Linux box (GPU or not),
+and you talk to it from a browser on your network. Linux is the reference path.
 
-On a fresh non-macOS install with no config file, an unsupported implicit LLM
-default produces a warning, while unsupported implicit STT or TTS defaults are
-hard failures. Copy and edit `config.yaml.example` before relying on `doctor` as
-a readiness gate.
+### 1. Prerequisites
 
-## Linux (CUDA or CPU) — the reference setup
+Install and authenticate the selected brain before the first start. The minimal
+configuration below expects the Claude Code CLI. Cicero ships no brain; see
+[Brains](brains.md) for the other documented brain choices.
+
+Install the prerequisites (skip any you have):
+
+```bash
+curl -fsSL https://bun.sh/install | bash            # Bun
+curl -LsSf https://astral.sh/uv/install.sh | sh     # uv
+sudo apt install ffmpeg openssl                     # Debian/Ubuntu (brew/scoop elsewhere)
+curl -fsSL https://ollama.com/install.sh | sh       # Ollama (other platforms: https://ollama.com/download)
+```
+
+The Cicero CLI runs anywhere Bun runs; full local voice support still depends
+on platform audio tools, provider runtimes, and (for the native hotkey/AEC
+helpers) macOS-specific code. Cicero launches and supervises supported local
+providers; a configured remote provider connects to a server you operate.
+
+### 2. Install Cicero and the speech servers
+
+Clone this repository, `cd` into it, and run everything below from that checkout
+(the daemon launches and supervises the model servers itself):
+
+```bash
+bun install
+bun link                    # expose the `cicero` CLI from this checkout
+
+uv venv .venv-stt --python 3.10
+uv pip install --python .venv-stt -r requirements/faster-whisper.txt
+uv venv .venv-pocket --python 3.11
+uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
+ollama pull qwen3.5:4b
+```
+
+### 3. Create the minimal config
+
+Make `~/.cicero/config.yaml` with exactly this content (don't copy
+`config.yaml.example` for a first run — it documents every option and expects
+backends this quickstart doesn't install):
+
+```yaml
+# ~/.cicero/config.yaml — the minimal web-voice setup
+headless: true
+web_voice: { enabled: true, host: 0.0.0.0, port: 8090 } # a fresh token prints at startup
+stt: { backend: faster-whisper, port: 8083, model: large-v3-turbo }
+tts: { backend: pocket-tts, port: 8095, voice: alba }
+llm: { backend: ollama, port: 11434, model: qwen3.5:4b }
+brain: { backend: claude-code, mode: subprocess } # or acp / codex / gemini / ollama / any OpenAI-compatible URL
+```
+
+For Hermes or another ACP harness, set
+`brain: { backend: acp, binary: …, binary_args: […] }` instead — see
+[Brains](brains.md).
+
+### 4. Check the setup
+
+```bash
+cicero doctor   # checks configured backends and prints fixes
+```
+
+`cicero doctor` checks the effective configuration and prints fixes for missing
+prerequisites. It can verify that a CLI binary is present, but it does not prove
+that the CLI is authenticated or complete a live agent turn.
+
+### 5. Start Cicero
+
+```bash
+cicero start
+# → 🎙️  Web voice server on https://0.0.0.0:8090 (token required)
+```
+
+### 6. Say this, expect this
+
+Open `https://<box-ip>:8090/?token=<token>`, accept the self-signed certificate
+once, and click **Start conversation** (the page loads with the conversation
+off; push-to-talk does nothing until you start it and grant the microphone).
+Then hold SPACE (or the orb) and say **“What can you help me with?”** Expect
+the hint line to flash what was heard, then a spoken response (the page keeps
+no chat log — replies are spoken, not displayed). Exercise this real turn
+before treating a deployment as ready. Full page controls, hands-free mode, and
+PWA behavior are in the [web-voice guide](web-voice.md).
+
+### First-run troubleshooting
+
+- **The browser warns about the certificate.** Expected: Cicero generates a
+  self-signed HTTPS certificate on first start (browsers only expose the
+  microphone over HTTPS or on localhost, and this walkthrough reaches the box
+  from another device). Accept it once per device.
+- **Where's the token?** Printed at startup, once per run. For a stable token
+  across restarts, run `openssl rand -hex 16` and paste only its output as
+  `token:` inside the `web_voice:` block (e.g.
+  `web_voice: { enabled: true, host: 0.0.0.0, port: 8090, token: <paste> }`).
+  Configure it before running Cicero under a service manager, because startup
+  stdout may be retained — and never copy an example placeholder as a secret.
+- **I talk and nothing happens.** First make sure the conversation is started —
+  the page loads with it off, and push-to-talk is inert until you click
+  **Start conversation**. Then remember the default is push-to-talk: hold SPACE
+  or the orb *while* speaking. Then check the browser's microphone permission,
+  then `cicero doctor`.
+
+## Platform variants of the first-run sequence
+
+Use the same minimal config, `cicero doctor`, `cicero start`, browser URL, and
+spoken test above after substituting the platform-specific install steps below.
+
+### macOS 14+ (Apple Silicon)
+
+The current MLX dependency floors require macOS 14 or newer on Apple Silicon.
+Install [Ollama](https://ollama.com) before running these commands:
+
+```bash
+bun install
+brew install uv sox openssl ffmpeg
+bun link
+
+uv venv .venv-stt --python 3.10
+uv pip install --python .venv-stt -r requirements/faster-whisper.txt
+uv venv .venv-pocket --python 3.11
+uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
+ollama pull qwen3.5:4b
+```
+
+For tab integration, use a terminal with remote control — [Kitty](https://sw.kovidgoyal.net/kitty/), [tmux](https://github.com/tmux/tmux), or [WezTerm](https://wezterm.org/). Cicero auto-detects which one you're in (`terminal: auto`). Set `terminal: none` for headless mode (voice → brain dispatch with no terminal integration). See [terminal adapters](superpowers/terminal-adapters.md).
+
+### Windows (CUDA)
+
+```bash
+# Install Bun
+powershell -c "irm bun.sh/install.ps1 | iex"
+
+# uv (manages the Python model servers), audio tools, tmux, and automatic
+# web-voice HTTPS certificate generation
+scoop install uv sox ffmpeg tmux openssl
+
+# Ollama: download from https://ollama.com/download/windows
+ollama pull qwen3.5:4b
+
+# Python backends (the venv-directory syntax is the same on every OS):
+uv venv .venv-stt --python 3.10
+uv pip install --python .venv-stt -r requirements/faster-whisper.txt
+uv venv .venv-pocket --python 3.11
+uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
+uv venv .venv-kokoro --python 3.11
+uv pip install --python .venv-kokoro -r requirements/kokoro.txt
+
+bun install
+bun link
+```
+
+OpenSSL is needed only to create Cicero's first self-signed web-voice
+certificate. Later starts reuse the atomically published pair. `cicero doctor`
+reports a blocker, with the native install command, when generation is still
+needed and `openssl` is missing from `PATH`.
+
+## Optional macOS MLX stack and native helper
+
+The existing MLX and native-hotkey recipe is an alternative to the reference
+speech-server installation above:
+
+```bash
+bun install
+brew install sox openssl ffmpeg
+uv venv .venv --python 3.12
+uv pip install --python .venv -r requirements/mlx.txt --prerelease=allow
+
+bun run build:hotkey    # optional — macOS Ctrl+Shift+Space helper
+bun link
+
+bun run src/index.ts doctor
+cicero start --tts
+```
+
+## Additional Linux installation detail
 
 Install [Ollama](https://ollama.com) before the commands below, or select a
 different explicit `llm` backend in the copied configuration.
+
+The complete Linux package and fallback-seat recipe is retained here for
+operators who need local mic/system speech, terminal integration, or Kokoro:
 
 ```bash
 bun install
@@ -48,7 +210,23 @@ mkdir -p ~/.cicero && cp config.yaml.example ~/.cicero/config.yaml   # edit it
 bun run src/index.ts doctor
 ```
 
-### Run at boot
+The full `config.yaml.example` expects a `hermes` ACP executable; replace its
+`brain.binary`/`binary_args` with another ACP harness or one of the documented
+CLI/HTTP brains if Hermes is not your driver.
+
+On a fresh non-macOS install with no config file, an unsupported implicit LLM
+default produces a warning, while unsupported implicit STT or TTS defaults are
+hard failures. Copy and edit `config.yaml.example` before relying on `doctor` as
+a readiness gate.
+
+For Windows operators using that full example rather than the first-run config:
+
+```bash
+# Copy config.yaml.example to ~/.cicero/config.yaml, then: bun run src/index.ts doctor
+# The example uses Ollama qwen3.5:4b, matching the model pulled above.
+```
+
+## Run at boot
 
 Ship it as a systemd user service (no Docker needed; the daemon supervises its own model servers):
 
@@ -61,56 +239,6 @@ cp deploy/cicero.service ~/.config/systemd/user/   # edit WorkingDirectory first
 systemctl --user enable --now cicero
 loginctl enable-linger $USER                        # keep it alive when logged out
 ```
-
-## macOS 14+ (Apple Silicon)
-
-The current MLX dependency floors require macOS 14 or newer on Apple Silicon.
-
-```bash
-bun install
-brew install sox openssl ffmpeg
-uv venv .venv --python 3.12
-uv pip install --python .venv -r requirements/mlx.txt --prerelease=allow
-
-bun run build:hotkey    # optional — macOS Ctrl+Shift+Space helper
-bun link
-
-bun run src/index.ts doctor
-cicero start --tts
-```
-
-For tab integration, use a terminal with remote control — [Kitty](https://sw.kovidgoyal.net/kitty/), [tmux](https://github.com/tmux/tmux), or [WezTerm](https://wezterm.org/). Cicero auto-detects which one you're in (`terminal: auto`). Set `terminal: none` for headless mode (voice → brain dispatch with no terminal integration). See [terminal adapters](superpowers/terminal-adapters.md).
-
-## Windows (CUDA)
-
-```bash
-# Install Bun
-powershell -c "irm bun.sh/install.ps1 | iex"
-
-# Audio, tmux, and automatic web-voice HTTPS certificate generation
-scoop install sox ffmpeg tmux openssl
-
-# Ollama: download from https://ollama.com/download/windows
-ollama pull qwen3.5:4b
-
-# Python backends (the venv-directory syntax is the same on every OS):
-uv venv .venv-stt --python 3.10
-uv pip install --python .venv-stt -r requirements/faster-whisper.txt
-uv venv .venv-pocket --python 3.11
-uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
-uv venv .venv-kokoro --python 3.11
-uv pip install --python .venv-kokoro -r requirements/kokoro.txt
-
-bun install
-bun link
-# Copy config.yaml.example to ~/.cicero/config.yaml, then: bun run src/index.ts doctor
-# The example uses Ollama qwen3.5:4b, matching the model pulled above.
-```
-
-OpenSSL is needed only to create Cicero's first self-signed web-voice
-certificate. Later starts reuse the atomically published pair. `cicero doctor`
-reports a blocker, with the native install command, when generation is still
-needed and `openssl` is missing from `PATH`.
 
 ## Optional VibeVoice, Smart-Turn, and speech-emotion stacks
 
