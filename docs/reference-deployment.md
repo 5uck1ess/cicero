@@ -97,13 +97,22 @@ check ports, you'll miss an unauthenticated CLI or a dead userbot session.
 cd <your-checkout>
 git pull --ff-only
 bun install
-systemctl --user restart cicero telegram-call
+systemctl --user restart cicero
 ```
 
-Restart the call sidecar whenever you restart the daemon, not only when
-sidecar files changed — a long-lived bridge across a redeployed daemon can
-hold a stale session and fail exactly when someone calls. Re-run the step-5
-acceptance tests after any upgrade that touched the voice path.
+Restart **only the daemon** by default. The call sidecar survives daemon
+restarts on its own — it re-dials the daemon socket with backoff, releases a
+bridge on Telegram's hang-up, and reaps one that has gone silent — whereas
+restarting `telegram-call` sends SIGTERM to the listener, which *ends a live
+call*. Restart the sidecar only when its own code, requirements, `.env`, or
+unit file changed, and preferably between calls:
+
+```bash
+systemctl --user restart telegram-call   # sidecar-change deploys only
+```
+
+Re-run the step-5 acceptance tests after any upgrade that touched the voice
+path.
 
 If you automate this (a cron that fetches, fast-forwards, and restarts), keep
 three properties: fast-forward only on a clean checkout, restart only when
