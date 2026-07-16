@@ -34,11 +34,13 @@ conversational — ask, answer, run, interrupt.
 | | You want | Cost | Path |
 |---|---|---|---|
 | 🔊 | **Hear your agent** — the Claude Code / Codex session you already run speaks its replies | ~2 minutes; no models, no config | [Sidecar quickstart](#try-it-in-two-minutes-sidecar-mode) |
-| 🎙️ | **Talk to your agent** — full spoken conversation from any browser on your network, or a phone call | one setup session + a few GB of models | [The full setup](#the-full-setup-web-voice) |
+| 🎙️ | **Talk to your agent** — full spoken conversation from any browser on your network | one setup session + a few GB of models | [The full setup](#the-full-setup-web-voice) |
 
-Everything else — cloned voices, phone calls, a team of agents behind one
-number, proactive briefings — layers onto the second path one config block at
-a time.
+Most of the rest — cloned voices, a team of agents behind one number,
+proactive briefings — layers onto the second path one config block at a time.
+The exception is honest to name: **real phone calls** ride an optional
+Telegram sidecar with a setup of its own (second account, API credentials, a
+login) — see the [call sidecar guide](sidecars/telegram-call/README.md).
 
 ## What makes it different
 
