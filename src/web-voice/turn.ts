@@ -38,6 +38,8 @@ export interface WebTurnDeps {
   signal?: AbortSignal;
   /** Retains latency-raced work until the transport's shutdown drain. */
   trackBackground?: (task: Promise<void>) => boolean;
+  /** Per-invocation daemon snapshot. Omitted on non-conversational surfaces. */
+  operationalContext?: (signal?: AbortSignal) => Promise<string | null>;
 }
 
 export interface WebTurnResult {
@@ -48,6 +50,7 @@ export interface WebTurnResult {
 }
 
 const EMPTY = new ArrayBuffer(0);
+export const OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS = 750;
 
 function throwIfTurnAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return;
@@ -107,9 +110,11 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
 
     const tag = await settleTone(tonePending?.result ?? null, deps.tone?.graceMs);
     throwIfTurnAborted(deps.signal);
+    const systemContext = await captureOperationalContext(deps.operationalContext, deps.signal);
+    throwIfTurnAborted(deps.signal);
     const reply = (await deps.brain.send(
       tag ? `${transcript}\n\n${tag}` : transcript,
-      { signal: deps.signal },
+      { signal: deps.signal, systemContext: systemContext ?? undefined },
     )).trim();
     throwIfTurnAborted(deps.signal);
     if (!reply) return { transcript, reply: "", audio: EMPTY };
@@ -186,6 +191,8 @@ export interface WebStreamDeps {
   /** Register work intentionally detached after long-turn parking. */
   /** False keeps the parked work foreground-owned when the host is at capacity. */
   trackBackground?: (task: Promise<void>) => boolean;
+  /** Per-invocation daemon snapshot. Captured only when this path starts the brain. */
+  operationalContext?: (signal?: AbortSignal) => Promise<string | null>;
 }
 
 /**
@@ -895,6 +902,13 @@ async function streamReply(
   }
   if (toneTag) brainInput = `${brainInput}\n\n${toneTag}`;
 
+  // Adopted speculation already captured the snapshot attached to its original
+  // brain invocation. Normal turns capture only now, after every local path.
+  const systemContext = pretokens === undefined
+    ? await captureOperationalContext(deps.operationalContext, deps.signal)
+    : null;
+  if (deps.signal?.aborted || sink.aborted()) return;
+
   let fillerTimer: ReturnType<typeof setTimeout> | undefined;
   const cancelFiller = () => {
     if (fillerTimer !== undefined) { clearTimeout(fillerTimer); fillerTimer = undefined; }
@@ -943,7 +957,9 @@ async function streamReply(
         yield t;
       }
     };
-    const turnOptions = turnAbort ? { signal: turnAbort.signal } : undefined;
+    const turnOptions = turnAbort
+      ? { signal: turnAbort.signal, systemContext: systemContext ?? undefined }
+      : undefined;
     const tokens: AsyncIterable<string> = pretokens
       ? timed(pretokens)
       : deps.brain.sendStream
@@ -1080,5 +1096,54 @@ async function streamReply(
   } finally {
     cancelFiller(); // turn over (or failed) — never speak a filler after the fact
     if (!detached) deps.signal?.removeEventListener("abort", abortFromTransport);
+  }
+}
+
+export async function captureOperationalContext(
+  provider: ((signal?: AbortSignal) => Promise<string | null>) | undefined,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  signal?.throwIfAborted();
+  if (!provider) return null;
+  const captureAbort = new AbortController();
+  let timedOut = false;
+  const abortFromTurn = (): void => {
+    if (!captureAbort.signal.aborted) captureAbort.abort(signal?.reason);
+  };
+  if (signal) signal.addEventListener("abort", abortFromTurn, { once: true });
+  if (signal?.aborted) abortFromTurn();
+  const timer = setTimeout(() => {
+    timedOut = true;
+    captureAbort.abort(new Error(`operational snapshot timed out after ${OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS}ms`));
+  }, OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS);
+  let resolveCancelled: ((value: { kind: "cancelled" }) => void) | undefined;
+  const captureCancelled = (): void => resolveCancelled?.({ kind: "cancelled" });
+  try {
+    const captured = Promise.resolve().then(() => provider(captureAbort.signal)).then(
+      (context) => ({ kind: "captured" as const, context }),
+      (error: unknown) => ({ kind: "failed" as const, error }),
+    );
+    const cancelled = new Promise<{ kind: "cancelled" }>((resolve) => {
+      resolveCancelled = resolve;
+      if (captureAbort.signal.aborted) resolve({ kind: "cancelled" });
+      else captureAbort.signal.addEventListener("abort", captureCancelled, { once: true });
+    });
+    const result = await Promise.race([captured, cancelled]);
+    if (result.kind === "cancelled") {
+      if (timedOut) log("warn", `operational snapshot unavailable for this turn: capture exceeded ${OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS}ms`);
+      return null;
+    }
+    if (result.kind === "captured") return result.context;
+    if (signal?.aborted) return null;
+    log("warn", `operational snapshot unavailable for this turn: ${result.error instanceof Error ? result.error.message : String(result.error)}`);
+    return null;
+  } catch (error: unknown) {
+    if (signal?.aborted) return null;
+    log("warn", `operational snapshot unavailable for this turn: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abortFromTurn);
+    captureAbort.signal.removeEventListener("abort", captureCancelled);
   }
 }

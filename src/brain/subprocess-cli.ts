@@ -136,8 +136,8 @@ export class SubprocessCLIBrain implements Brain {
   /** Called after a turn's subprocess exits 0 — hook for session tracking. */
   protected onTurnComplete(): void {}
 
-  private spawnProc(message: string) {
-    const fullMessage = this.buildPrompt(message);
+  private spawnProc(message: string, options: BrainTurnOptions) {
+    const fullMessage = this.buildPrompt(message, options.systemContext);
     const env = this.buildEnv();
     const { binary } = this.config;
     const args = this.argsForTurn();
@@ -165,9 +165,9 @@ export class SubprocessCLIBrain implements Brain {
    * progress narration) instead of the configured `args`. Same env + stdin
    * handling as {@link spawnProc}.
    */
-  protected spawnWithArgs(args: string[], message: string) {
+  protected spawnWithArgs(args: string[], message: string, systemContext?: string) {
     const env = this.buildEnv();
-    return spawnOwnedProcess([this.config.binary, ...args, this.buildPrompt(message)], {
+    return spawnOwnedProcess([this.config.binary, ...args, this.buildPrompt(message, systemContext)], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -178,7 +178,7 @@ export class SubprocessCLIBrain implements Brain {
   async send(message: string, options: BrainTurnOptions = {}): Promise<string> {
     try {
       options.signal?.throwIfAborted();
-      const proc = this.spawnProc(message);
+      const proc = this.spawnProc(message, options);
       let cancellation: Promise<void> | null = null;
       const cancel = () => {
         cancellation ??= terminateTurn(proc);
@@ -233,7 +233,7 @@ export class SubprocessCLIBrain implements Brain {
 
   async *sendStream(message: string, options: BrainTurnOptions = {}): AsyncGenerator<string> {
     options.signal?.throwIfAborted();
-    const proc = this.spawnProc(message);
+    const proc = this.spawnProc(message, options);
     // Keep a bounded head of stdout so a non-zero exit can report the real cause
     // (CLIs like `claude` print "Invalid API key" to stdout, not stderr).
     let head = "";
@@ -291,8 +291,8 @@ export class SubprocessCLIBrain implements Brain {
     return `${this.config.name} exited with ${exitCode}: ${detail}`;
   }
 
-  protected buildPrompt(message: string): string {
-    return this.turnContext.buildTextPrompt(message, this.config.rememberTurns !== false);
+  protected buildPrompt(message: string, systemContext?: string): string {
+    return this.turnContext.buildTextPrompt(message, this.config.rememberTurns !== false, systemContext);
   }
 
   protected rememberTurn(message: string, response: string): void {

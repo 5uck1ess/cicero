@@ -14,7 +14,7 @@ test("SubprocessCLIBrain spawns the configured binary with prompt", async () => 
 
 test("injected context is prepended once and completed turns become bounded history", () => {
   class InspectBrain extends SubprocessCLIBrain {
-    prompt(message: string): string { return this.buildPrompt(message); }
+    prompt(message: string, systemContext?: string): string { return this.buildPrompt(message, systemContext); }
     complete(message: string, response: string): void { this.rememberTurn(message, response); }
   }
   const brain = new SubprocessCLIBrain({ name: "test", binary: "echo", args: [] });
@@ -30,6 +30,11 @@ test("injected context is prepended once and completed turns become bounded hist
   expect(second).not.toContain("[Output] file.txt");
   expect(second).toContain("Conversation so far:");
   expect(second).toContain("The command listed one file.");
+
+  const operational = inspect.prompt("where is my brief?", "briefing: delivered");
+  expect(operational).toContain("Host operational context");
+  expect(operational).toContain("briefing: delivered");
+  expect(operational.indexOf("briefing: delivered")).toBeLessThan(operational.indexOf("Current user request:"));
 });
 
 test("contextBuffer caps at 50 entries", () => {

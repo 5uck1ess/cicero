@@ -5,6 +5,7 @@ const KANBAN_COMMAND_TIMEOUT_MS = 10_000;
 const KANBAN_LIST_STDOUT_LIMIT_BYTES = 1024 * 1024;
 const KANBAN_LINK_STDOUT_LIMIT_BYTES = 256 * 1024;
 const KANBAN_STDERR_LIMIT_BYTES = 64 * 1024;
+export const KANBAN_SNAPSHOT_TASK_LIMIT = 1_000;
 
 export interface KanbanCommandOptions {
   signal?: AbortSignal;
@@ -29,6 +30,13 @@ export interface KanbanTask {
   created_at?: number | null;
   /** Unix seconds; missing/null = nobody has picked the task up yet. */
   started_at?: number | null;
+}
+
+export interface KanbanSnapshot {
+  tasks: readonly KanbanTask[];
+  asOfMs: number;
+  truncated: boolean;
+  totalTasks: number;
 }
 
 export interface KanbanWatchConfig {
@@ -155,6 +163,8 @@ export class KanbanWatcher {
   private scheduledPoll: Promise<void> | undefined;
   private activePoll: Promise<void> | undefined;
   private activeController: AbortController | undefined;
+  /** Last successful bounded board read. Failed polls never replace it. */
+  private lastSnapshot: KanbanSnapshot | null = null;
 
   /** Per unstarted task: reminders already sent and when the next is allowed. */
   private nudged = new Map<string, { count: number; nextAt: number }>();
@@ -208,6 +218,17 @@ export class KanbanWatcher {
     return poll;
   }
 
+  /** Read-only cached state for latency-sensitive voice turns; never polls. */
+  snapshot(): KanbanSnapshot | null {
+    if (!this.lastSnapshot) return null;
+    return {
+      asOfMs: this.lastSnapshot.asOfMs,
+      truncated: this.lastSnapshot.truncated,
+      totalTasks: this.lastSnapshot.totalTasks,
+      tasks: this.lastSnapshot.tasks.map((task) => ({ ...task })),
+    };
+  }
+
   private async runTrackedPoll(controller: AbortController): Promise<void> {
     try {
       await this.poll(controller.signal);
@@ -229,6 +250,12 @@ export class KanbanWatcher {
       return;
     }
     if (signal.aborted) return;
+    this.lastSnapshot = {
+      asOfMs: this.opts.now?.() ?? Date.now(),
+      truncated: tasks.length > KANBAN_SNAPSHOT_TASK_LIMIT,
+      totalTasks: tasks.length,
+      tasks: tasks.slice(0, KANBAN_SNAPSHOT_TASK_LIMIT).map(boundedTask).filter((task): task is KanbanTask => task !== null),
+    };
     for (const t of tasks) {
       if (signal.aborted) return;
       if (!t?.id || typeof t.status !== "string") continue;
@@ -302,4 +329,16 @@ export class KanbanWatcher {
       log("warn", `kanban watch: nudge failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+}
+
+function boundedTask(task: KanbanTask): KanbanTask | null {
+  if (!task || typeof task.id !== "string" || typeof task.status !== "string") return null;
+  return {
+    id: task.id.slice(0, 128),
+    title: typeof task.title === "string" ? task.title.slice(0, 240) : "(untitled)",
+    status: task.status.slice(0, 64),
+    assignee: typeof task.assignee === "string" ? task.assignee.slice(0, 128) : task.assignee ?? null,
+    created_at: typeof task.created_at === "number" && Number.isFinite(task.created_at) ? task.created_at : null,
+    started_at: typeof task.started_at === "number" && Number.isFinite(task.started_at) ? task.started_at : null,
+  };
 }

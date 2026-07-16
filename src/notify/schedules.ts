@@ -76,6 +76,36 @@ export class PromptScheduler {
     this.held = [];
   }
 
+  /** Cached clock/config view only; never runs a prompt or performs delivery. */
+  snapshot(): PromptScheduleSnapshot {
+    const now = this.now();
+    const day = dayOf(now, this.opts.timezone);
+    const minute = parseHm(hmOf(now, this.opts.timezone));
+    const candidates = this.opts.schedules.map((schedule, index) => {
+      const atMinute = parseHm(schedule.at);
+      const firedToday = this.lastFired.get(index) === day;
+      const today = !firedToday && atMinute >= minute;
+      return {
+        index,
+        offset: today ? atMinute - minute : (24 * 60 - minute) + atMinute,
+        day: today ? "today" as const : "tomorrow" as const,
+        schedule,
+      };
+    }).sort((a, b) => a.offset - b.offset || a.index - b.index);
+    const next = candidates[0];
+    return {
+      asOfMs: now.getTime(),
+      heldCount: this.held.length,
+      inFlightCount: this.inFlight.size,
+      next: next ? {
+        name: scheduleLabel(next.schedule, next.index).slice(0, 160),
+        at: next.schedule.at,
+        day: next.day,
+        lane: next.schedule.lane?.slice(0, 128),
+      } : null,
+    };
+  }
+
   /** One clock tick: release quiet-held texts, then fire any schedule whose minute this is. */
   tick(): void {
     const now = this.now();
@@ -145,6 +175,13 @@ export class PromptScheduler {
   private warn(text: string): void {
     log("warn", text);
   }
+}
+
+export interface PromptScheduleSnapshot {
+  asOfMs: number;
+  heldCount: number;
+  inFlightCount: number;
+  next: { name: string; at: string; day: "today" | "tomorrow"; lane?: string } | null;
 }
 
 function message(err: unknown): string {
