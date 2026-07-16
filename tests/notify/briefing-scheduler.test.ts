@@ -260,6 +260,59 @@ test("spring-forward missing minute catches up and fall-back repeated minute fir
   expect(fallCalls).toBe(1);
 });
 
+test("fall-back catch-up uses real elapsed time instead of repeated wall-clock minutes", async () => {
+  let calls = 0;
+  const h = scheduler({
+    at: "00:30",
+    catchUpMinutes: 120,
+    timezone: "America/New_York",
+    now: () => new Date("2026-11-01T07:15:00Z"),
+    run: async () => { calls++; return { phase: "delivered" }; },
+  });
+
+  await h.scheduler.tick();
+
+  expect(calls).toBe(0);
+  expect(await h.store.read()).toMatchObject({ day: "2026-11-01", phase: "missed" });
+});
+
+test("spring-forward catch-up stays open for its real elapsed window", async () => {
+  let calls = 0;
+  const h = scheduler({
+    at: "01:30",
+    catchUpMinutes: 90,
+    timezone: "America/New_York",
+    now: () => new Date("2026-03-08T07:15:00Z"),
+    run: async () => { calls++; return { phase: "delivered" }; },
+  });
+
+  await h.scheduler.tick();
+
+  expect(calls).toBe(1);
+  expect(await h.store.read()).toMatchObject({ day: "2026-03-08", phase: "delivered", trigger: "catch-up" });
+});
+
+test("non-transition catch-up retains the configured elapsed window", async () => {
+  let now = new Date("2026-07-15T14:30:00Z");
+  let calls = 0;
+  const h = scheduler({
+    at: "08:30",
+    catchUpMinutes: 120,
+    timezone: "America/New_York",
+    now: () => now,
+    run: async () => { calls++; return { phase: "delivered" }; },
+  });
+
+  await h.scheduler.tick();
+  expect(calls).toBe(1);
+  expect(await h.store.read()).toMatchObject({ phase: "delivered", trigger: "catch-up" });
+
+  now = new Date("2026-07-16T14:31:00Z");
+  await h.scheduler.tick();
+  expect(calls).toBe(1);
+  expect(await h.store.read()).toMatchObject({ day: "2026-07-16", phase: "missed" });
+});
+
 test("shutdown abort prevents late completion and drains the owned run", async () => {
   let aborted = false;
   let started = false;

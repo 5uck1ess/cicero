@@ -52,6 +52,7 @@ export interface BriefingScheduleSnapshot {
 const TICK_MS = 20_000;
 const MAX_SUMMARY_CHARS = 500;
 const MAX_ERROR_KIND_CHARS = 64;
+const MINUTE_MS = 60_000;
 
 export function briefingStatusFilePath(): string {
   return join(homedir(), ".cicero", "briefing-status.json");
@@ -200,18 +201,15 @@ export class BriefingScheduler {
 
   private async tickOnce(): Promise<void> {
     const now = this.now();
-    const day = dayOf(now, this.opts.timezone);
-    const minute = parseHm(hmOf(now, this.opts.timezone));
-    const scheduled = parseHm(this.opts.at);
-    const cutoff = Math.min(23 * 60 + 59, scheduled + this.opts.catchUpMinutes);
-    if (minute < scheduled) return;
+    const window = briefingWindow(now, this.opts.at, this.opts.catchUpMinutes, this.opts.timezone);
+    if (window.elapsedMs < 0 || !window.sameLocalDay) return;
 
     const current = await this.opts.store.read();
     this.lastStatus = current;
-    if (this.scope.signal.aborted || current?.day === day) return;
+    if (this.scope.signal.aborted || current?.day === window.day) return;
 
-    if (minute > cutoff) {
-      const missed = this.baseStatus(day, "catch-up", now, "missed");
+    if (window.pastCutoff) {
+      const missed = this.baseStatus(window.day, "catch-up", now, "missed");
       missed.completedAt = now.getTime();
       if (await this.opts.store.claim(missed)) this.lastStatus = missed;
       return;
@@ -220,8 +218,8 @@ export class BriefingScheduler {
     // informational gap is accepted because delivery stays blocked and morning times are the supported configuration.
     if (this.opts.quietHours && inQuietHours(now, this.opts.quietHours, this.opts.timezone)) return;
 
-    const trigger: BriefingTrigger = minute === scheduled ? "scheduled" : "catch-up";
-    const claimed = this.baseStatus(day, trigger, now, "claimed");
+    const trigger: BriefingTrigger = window.scheduledMinute ? "scheduled" : "catch-up";
+    const claimed = this.baseStatus(window.day, trigger, now, "claimed");
     if (!await this.opts.store.claim(claimed)) {
       this.lastStatus = await this.opts.store.read();
       return;
@@ -242,12 +240,9 @@ export class BriefingScheduler {
     const beforeDelivery = (): void => {
       signal.throwIfAborted();
       const now = this.now();
-      const minute = parseHm(hmOf(now, this.opts.timezone));
-      const scheduled = parseHm(this.opts.at);
-      const cutoff = Math.min(23 * 60 + 59, scheduled + this.opts.catchUpMinutes);
-      const closed = dayOf(now, this.opts.timezone) !== claimed.day
-        || minute < scheduled
-        || minute > cutoff
+      const window = briefingWindow(now, this.opts.at, this.opts.catchUpMinutes, this.opts.timezone);
+      const closed = window.day !== claimed.day
+        || !window.eligible
         || Boolean(this.opts.quietHours && inQuietHours(now, this.opts.quietHours, this.opts.timezone));
       if (closed) deliveryWindow.abort(new Error("briefing delivery window closed"));
       signal.throwIfAborted();
@@ -285,6 +280,56 @@ export class BriefingScheduler {
   private nowDate(now: (() => Date) | undefined): Date {
     return now ? now() : new Date();
   }
+}
+
+interface BriefingWindow {
+  day: string;
+  elapsedMs: number;
+  eligible: boolean;
+  pastCutoff: boolean;
+  sameLocalDay: boolean;
+  scheduledMinute: boolean;
+}
+
+function briefingWindow(now: Date, at: string, catchUpMinutes: number, timeZone?: string): BriefingWindow {
+  const day = dayOf(now, timeZone);
+  const scheduled = scheduledInstantForToday(now, at, timeZone);
+  const elapsedMs = now.getTime() - scheduled.getTime();
+  const sameLocalDay = dayOf(scheduled, timeZone) === day;
+  const cutoffMs = catchUpMinutes === 0 ? MINUTE_MS : catchUpMinutes * MINUTE_MS;
+  const beforeOrAtCutoff = catchUpMinutes === 0 ? elapsedMs < cutoffMs : elapsedMs <= cutoffMs;
+  return {
+    day,
+    elapsedMs,
+    eligible: sameLocalDay && elapsedMs >= 0 && beforeOrAtCutoff,
+    pastCutoff: sameLocalDay && (catchUpMinutes === 0 ? elapsedMs >= cutoffMs : elapsedMs > cutoffMs),
+    sameLocalDay,
+    scheduledMinute: parseHm(hmOf(now, timeZone)) === parseHm(at),
+  };
+}
+
+function scheduledInstantForToday(now: Date, at: string, timeZone?: string): Date {
+  const minute = parseHm(at);
+  const hour = Math.floor(minute / 60);
+  const minuteOfHour = minute % 60;
+  if (!timeZone) return new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minuteOfHour);
+
+  const [year, month, date] = dayOf(now, timeZone).split("-").map(Number);
+  const wallTimeAsUtc = Date.UTC(year, month - 1, date, hour, minuteOfHour);
+  let epochMs = wallTimeAsUtc;
+  // Two corrections converge for ordinary and repeated wall times. For a DST
+  // gap they select the earlier valid instant, which keeps missing-minute catch-up deterministic.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    epochMs = wallTimeAsUtc - timeZoneOffsetMs(new Date(epochMs), timeZone);
+  }
+  return new Date(epochMs);
+}
+
+function timeZoneOffsetMs(instant: Date, timeZone: string): number {
+  const [year, month, date] = dayOf(instant, timeZone).split("-").map(Number);
+  const minute = parseHm(hmOf(instant, timeZone));
+  const localAsUtc = Date.UTC(year, month - 1, date, Math.floor(minute / 60), minute % 60);
+  return localAsUtc - instant.getTime();
 }
 
 function normalizeStatus(status: BriefingRunStatus): BriefingRunStatus {
