@@ -1,8 +1,8 @@
 import { test, expect } from "bun:test";
-import { chmodSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HealthStore, briefLine, trendReport, formatValue, type HealthEntry } from "../../src/health/store";
+import { HEALTH_READ_TAIL_BYTES, HealthStore, briefLine, trendReport, formatValue, type HealthEntry } from "../../src/health/store";
 import { parseLogWords, healthLog, healthRecent, healthTrend } from "../../src/cli/health";
 
 const tmpStore = () => new HealthStore(join(mkdtempSync(join(tmpdir(), "cicero-health-")), "metrics.jsonl"));
@@ -26,6 +26,46 @@ test("store: concurrent appends don't interleave", async () => {
   const store = tmpStore();
   await Promise.all(Array.from({ length: 25 }, (_, i) => store.append(entry({ t: i, value: i }))));
   expect((await store.recent(100)).length).toBe(25);
+});
+
+test("store: reads only a bounded tail of an oversized metrics file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-health-tail-"));
+  const file = join(root, "metrics.jsonl");
+  const total = 4_000;
+  const lines = Array.from({ length: total }, (_, index) => JSON.stringify(entry({
+    t: index, metric: "note", note: `${index}:${"x".repeat(80)}`,
+  }))).join("\n") + "\n";
+  expect(Buffer.byteLength(lines)).toBeGreaterThan(HEALTH_READ_TAIL_BYTES * 4);
+  writeFileSync(file, lines);
+
+  const store = new HealthStore(file);
+  const bounded = await store.since(0);
+  expect(bounded.length).toBeGreaterThan(0);
+  expect(bounded.length).toBeLessThan(total);
+  expect((await store.recent(2)).map((row) => row.t)).toEqual([total - 2, total - 1]);
+});
+
+test("store: an oversized unterminated final line reads empty instead of throwing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-health-bigline-"));
+  const file = join(root, "metrics.jsonl");
+  // A valid history followed by a torn/oversized final entry larger than the tail
+  // window and lacking a trailing newline: the retained tail contains no complete
+  // line. That is not an I/O failure, so the read degrades to empty (rendered as
+  // "no recent entries") rather than throwing (which would flip health to
+  // "unavailable"). Only genuine open/read errors surface as unavailable.
+  const good = JSON.stringify(entry({ t: 1, metric: "weight", value: 80 })) + "\n";
+  const giant = `{"t":2,"metric":"note","note":"${"y".repeat(HEALTH_READ_TAIL_BYTES + 4096)}"`; // no newline
+  writeFileSync(file, good + giant);
+  const store = new HealthStore(file);
+  expect(await store.recent(10)).toEqual([]);
+});
+
+test("store: unreadable record paths surface failure instead of valid-empty state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-health-unreadable-"));
+  const file = join(root, "metrics.jsonl");
+  const store = new HealthStore(file);
+  mkdirSync(file);
+  await expect(store.recent(10)).rejects.toThrow();
 });
 
 test.skipIf(process.platform === "win32")("store: directory and data file are private", async () => {

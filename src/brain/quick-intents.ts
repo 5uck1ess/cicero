@@ -98,7 +98,7 @@ export class QuickIntentsBrain implements Brain {
 
   get streamProgress(): Brain["streamProgress"] {
     if (!bindBrainCapability(this.inner, "streamProgress")) return undefined;
-    return (message: string): AsyncIterable<string> => this.sendProgress(message);
+    return (message: string, options?: BrainTurnOptions): AsyncIterable<string> => this.sendProgress(message, options);
   }
   get sendToTab(): Brain["sendToTab"] { return bindBrainCapability(this.inner, "sendToTab"); }
   get switchTab(): Brain["switchTab"] { return bindBrainCapability(this.inner, "switchTab"); }
@@ -123,7 +123,7 @@ export class QuickIntentsBrain implements Brain {
     return (this.inner.hasPendingConfirmation?.() ?? false) || (this.inner.pendingConfirmations?.().length ?? 0) > 0;
   }
 
-  private async *sendProgress(message: string): AsyncIterable<string> {
+  private async *sendProgress(message: string, options?: BrainTurnOptions): AsyncIterable<string> {
     try {
       const hit = this.match(message);
       this.hit = hit !== null;
@@ -133,11 +133,11 @@ export class QuickIntentsBrain implements Brain {
       }
       const progress = bindBrainCapability(this.inner, "streamProgress");
       if (progress) {
-        yield* progress(message);
+        yield* progress(message, options);
       } else if (this.inner.sendStream) {
-        yield* this.inner.sendStream(message);
+        yield* this.inner.sendStream(message, options);
       } else {
-        yield await this.inner.send(message);
+        yield await this.inner.send(message, options);
       }
     } catch (error) {
       throw error;

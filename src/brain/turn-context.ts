@@ -4,6 +4,10 @@ const MAX_PENDING_ENTRIES = 50;
 const MAX_PENDING_CHARS = 24_000;
 const MAX_HISTORY_TURNS = 12;
 const MAX_HISTORY_CHARS = 32_000;
+export const MAX_SYSTEM_CONTEXT_CHARS = 2_048;
+
+const SYSTEM_CONTEXT_LABEL =
+  "Host operational context for this invocation only (not conversation memory):";
 
 function tail(value: string, max: number): string {
   return value.length <= max ? value : `[earlier content truncated]\n${value.slice(-max)}`;
@@ -53,7 +57,7 @@ export class BrainTurnContext {
     while (chars() > MAX_HISTORY_CHARS && this.history.length > 1) this.history.shift();
   }
 
-  buildTextPrompt(message: string, includeHistory: boolean): string {
+  buildTextPrompt(message: string, includeHistory: boolean, systemContext?: string): string {
     const sections: string[] = [];
     if (includeHistory && this.history.length > 0) {
       sections.push(
@@ -64,14 +68,18 @@ export class BrainTurnContext {
     }
     const pending = this.takePending();
     if (pending) sections.push(`Context for this turn:\n${pending}`);
+    const operational = boundedSystemContext(systemContext);
+    if (operational) sections.push(`${SYSTEM_CONTEXT_LABEL}\n${operational}`);
     if (sections.length === 0) return message;
     sections.push(`Current user request:\n${message}`);
     return sections.join("\n\n");
   }
 
-  buildChatMessages(message: string, systemPrompt?: string): BrainChatMessage[] {
+  buildChatMessages(message: string, systemPrompt?: string, systemContext?: string): BrainChatMessage[] {
     const messages: BrainChatMessage[] = [];
     if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+    const operational = boundedSystemContext(systemContext);
+    if (operational) messages.push({ role: "system", content: `${SYSTEM_CONTEXT_LABEL}\n${operational}` });
     const pending = this.takePending();
     if (pending) messages.push({ role: "system", content: `Context for this turn:\n${pending}` });
     for (const turn of this.history) {
@@ -81,4 +89,11 @@ export class BrainTurnContext {
     messages.push({ role: "user", content: message });
     return messages;
   }
+}
+
+function boundedSystemContext(value?: string): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (trimmed.length <= MAX_SYSTEM_CONTEXT_CHARS) return trimmed;
+  return `${trimmed.slice(0, MAX_SYSTEM_CONTEXT_CHARS - 22)}\n[context truncated]`;
 }

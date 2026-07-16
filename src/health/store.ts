@@ -1,5 +1,5 @@
-import { appendFile, readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { constants } from "node:fs";
+import { appendFile, open } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -30,6 +30,9 @@ export interface HealthEntry {
   source: "cli" | "api";
 }
 
+/** Maximum file content retained by any health-record read. */
+export const HEALTH_READ_TAIL_BYTES = 64 * 1024;
+
 /** Units assumed when a log omits one — only for metrics where there's one sane answer. */
 export const DEFAULT_UNITS: Record<string, string> = {
   weight: "kg",
@@ -57,29 +60,65 @@ export class HealthStore {
     return this.pending;
   }
 
-  /** All entries at or after `sinceMs`, oldest first. */
-  async since(sinceMs: number): Promise<HealthEntry[]> {
-    return (await this.all()).filter((e) => e.t >= sinceMs);
+  /** Entries from the bounded retained tail at or after `sinceMs`, oldest first. */
+  async since(sinceMs: number, signal?: AbortSignal): Promise<HealthEntry[]> {
+    return (await this.all(signal)).filter((e) => e.t >= sinceMs);
   }
 
-  /** The most recent `n` entries, oldest first. */
-  async recent(n: number): Promise<HealthEntry[]> {
-    return (await this.all()).slice(-n);
+  /** The most recent `n` entries from the bounded retained tail, oldest first. */
+  async recent(n: number, signal?: AbortSignal): Promise<HealthEntry[]> {
+    return (await this.all(signal)).slice(-n);
   }
 
-  private async all(): Promise<HealthEntry[]> {
+  private async all(signal?: AbortSignal): Promise<HealthEntry[]> {
+    signal?.throwIfAborted();
+    const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+    let handle: Awaited<ReturnType<typeof open>>;
     try {
-      if (!existsSync(this.file)) return [];
+      handle = await open(this.file, constants.O_RDONLY | noFollow);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new Error(`health record path is not a regular file: '${this.file}'`);
+      const length = Math.min(info.size, HEALTH_READ_TAIL_BYTES);
+      if (length === 0) return [];
+      const start = info.size - length;
+      const bytes = Buffer.allocUnsafe(length);
+      let bytesRead = 0;
+      while (bytesRead < length) {
+        const read = await handle.read(bytes, bytesRead, length - bytesRead, start + bytesRead);
+        if (read.bytesRead === 0) break;
+        bytesRead += read.bytesRead;
+      }
+      signal?.throwIfAborted();
+      let text = bytes.subarray(0, bytesRead).toString("utf8");
+      if (start > 0) {
+        const firstNewline = text.indexOf("\n");
+        // The retained tail is a fragment of a single line longer than the bound
+        // (a torn/oversized final entry). The file read fine, so this is not an
+        // I/O failure — there are simply no complete entries in the window. Report
+        // empty rather than throwing (which would flip health to "unavailable").
+        if (firstNewline < 0) return [];
+        text = text.slice(firstNewline + 1);
+      }
+      // Genuine I/O failures (open/stat/read above) propagate so the caller can
+      // report the health field as "unavailable" rather than a confident empty.
+      // An individual malformed line, however, is expected in an append-only log
+      // (a torn final line during a concurrent write, or a legacy-schema entry)
+      // and must not poison the whole read — skip it and keep the good entries.
       const out: HealthEntry[] = [];
-      for (const line of (await readFile(this.file, "utf8")).split("\n").filter(Boolean)) {
+      for (const line of text.split("\n").filter(Boolean)) {
         try {
           const e = JSON.parse(line) as HealthEntry;
           if (typeof e.t === "number" && typeof e.metric === "string") out.push(e);
-        } catch { /* skip corrupt line */ }
+        } catch { /* skip corrupt line, keep the rest */ }
       }
       return out;
-    } catch {
-      return [];
+    } finally {
+      await handle.close();
     }
   }
 }

@@ -123,7 +123,7 @@ export class CodexBrain extends SubprocessCLIBrain {
     narrateProgress: boolean,
   ): AsyncGenerator<string> {
     options.signal?.throwIfAborted();
-    const proc = this.spawnWithArgs(this.jsonArgsForTurn(), message);
+    const proc = this.spawnWithArgs(this.jsonArgsForTurn(), message, options.systemContext);
     const ownedExit = awaitOwnedTurnExit(proc);
     void ownedExit.catch(() => { /* observed by the owned cleanup barrier */ });
     let cancellation: Promise<void> | null = null;

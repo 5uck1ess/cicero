@@ -49,5 +49,5 @@ export function sendUnattended(
   if (options?.lane !== undefined) {
     return Promise.reject(new Error(`this brain has no lanes — cannot run a background turn on lane "${options.lane}"`));
   }
-  return brain.send(message, options?.signal ? { signal: options.signal } : undefined);
+  return brain.send(message, options);
 }

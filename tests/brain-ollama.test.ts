@@ -23,6 +23,18 @@ test("OllamaBrain posts to /api/chat with model", async () => {
   expect(out).toBe("hi from ollama");
 });
 
+test("OllamaBrain sends per-invocation systemContext as a system message", async () => {
+  let body: { messages: Array<{ role: string; content: string }> } | null = null;
+  globalThis.fetch = mock(async (_url: string, init: { body: string }) => {
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({ message: { content: "ok" } }));
+  }) as unknown as typeof fetch;
+  const brain = new OllamaBrain({ systemPrompt: "base" });
+  await brain.send("where is it", { systemContext: "briefing delivered" });
+  expect(body!.messages.slice(0, 2).map((m) => m.role)).toEqual(["system", "system"]);
+  expect(body!.messages[1]!.content).toContain("briefing delivered");
+});
+
 test("OllamaBrain composes per-turn cancellation with its provider deadline", async () => {
   let capturedSignal: AbortSignal | null = null;
   globalThis.fetch = mock(async (_url: string, init?: RequestInit) => {

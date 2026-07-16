@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { FallbackBrain } from "../../src/brain/fallback";
 import type { Brain } from "../../src/types";
+import { SwitchboardBrain } from "../../src/brain/switchboard";
 
 function fake(over: Partial<Brain> & { name?: string } = {}): Brain & { calls: string[] } {
   const calls: string[] = [];
@@ -86,4 +87,23 @@ test("context injected before a tier starts is replayed when it does", async () 
   expect(backup.calls).toContain("ctx:remember me");
   await fb.send("next");
   expect(backup.calls.filter((call) => call === "ctx:remember me")).toHaveLength(1);
+});
+
+test("systemContext survives fallback and switchboard wrappers unchanged", async () => {
+  const seen: Array<string | undefined> = [];
+  const leaf = fake({
+    send: async (_message, options) => {
+      seen.push(options?.systemContext);
+      return "leaf";
+    },
+  });
+  const switchboard = new SwitchboardBrain(leaf, {});
+  const wrapped = new FallbackBrain([switchboard], "front");
+  await wrapped.start();
+  try {
+    expect(await wrapped.send("question", { systemContext: "snapshot-immutable" })).toBe("leaf");
+    expect(seen).toEqual(["snapshot-immutable"]);
+  } finally {
+    await wrapped.stop();
+  }
 });

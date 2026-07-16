@@ -70,6 +70,11 @@ import { OvernightStore } from "./notify/overnight-store";
 import { sendUnattended } from "./brain/capabilities";
 import { buildResumePrimer, buildRosterNote } from "./web-voice/resume";
 import { HealthStore, briefLine } from "./health/store";
+import {
+  render as renderOperationalState,
+  snapshot as snapshotOperationalState,
+  type CachedHealthSummary,
+} from "./operational-state";
 import { ActionConfigReloader } from "./actions-reload";
 import { healthLog } from "./cli/health";
 
@@ -224,6 +229,13 @@ export class CiceroDaemon {
   private kanbanWatcher: KanbanWatcher | null = null;
   private briefingScheduler: Pick<BriefingScheduler, "start" | "stop"> | null = null;
   private promptScheduler: PromptScheduler | null = null;
+  private briefingStatusStore: BriefingStatusStore | null = null;
+  private healthStore: HealthStore | null = null;
+  private healthSummary: CachedHealthSummary | null = null;
+  private healthRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  private healthRefreshTask: Promise<void> | null = null;
+  /** Set at the exact lifecycle transition that begins accepting turns. */
+  private startedAtMs: number | null = null;
   private minutesTimer: ReturnType<typeof setTimeout> | undefined;
   private stopTelegramPoller: (() => void) | null = null;
   private pidLease: DaemonPidLease | null = null;
@@ -232,6 +244,55 @@ export class CiceroDaemon {
   private overnightStore: OvernightStore | null = null;
   private getOvernightStore(): OvernightStore {
     return this.overnightStore ??= new OvernightStore();
+  }
+
+  private refreshHealthSummary(): Promise<void> {
+    if (this.healthRefreshTask) return this.healthRefreshTask;
+    const store = this.healthStore;
+    if (!store) return Promise.resolve();
+    const signal = AbortSignal.any([this.lifecycleAbort.signal, AbortSignal.timeout(5_000)]);
+    const refreshing = store.since(Date.now() - 24 * 60 * 60 * 1_000, signal)
+      .then((entries) => {
+        if (signal.aborted || this.healthStore !== store) return;
+        const summary = briefLine(entries);
+        this.healthSummary = { status: "ok", summary: summary?.slice(0, 500) ?? null, asOfMs: Date.now() };
+      })
+      .catch(() => {
+        if (!this.lifecycleAbort.signal.aborted && this.healthStore === store) {
+          this.healthSummary = { status: "unavailable", asOfMs: Date.now() };
+        }
+      })
+      .finally(() => {
+        if (this.healthRefreshTask === refreshing) this.healthRefreshTask = null;
+      });
+    this.healthRefreshTask = refreshing;
+    return refreshing;
+  }
+
+  private async operationalContext(signal?: AbortSignal): Promise<string | null> {
+    signal?.throwIfAborted();
+    const briefing = this.config.notify?.briefing;
+    const state = await snapshotOperationalState({
+      startedAtMs: this.startedAtMs,
+      timezone: this.config.notify?.timezone,
+      briefing: briefing?.at && this.briefingStatusStore ? {
+        at: briefing.at,
+        catchUpMinutes: briefing.catch_up_minutes ?? 180,
+        store: this.briefingStatusStore,
+      } : undefined,
+      overnightStore: this.getOvernightStore(),
+      board: () => this.kanbanWatcher?.snapshot() ?? null,
+      health: () => this.healthSummary,
+      prompts: () => {
+        if (this.promptScheduler) return this.promptScheduler.snapshot();
+        if ((this.config.notify?.schedules?.length ?? 0) > 0) {
+          throw new Error("configured prompt scheduler unavailable");
+        }
+        return null;
+      },
+    }, signal);
+    signal?.throwIfAborted();
+    return renderOperationalState(state);
   }
   /** Synthesize a notification clip: lane-or-raw voice resolution plus the
    * URL strip (bare links are for the text surfaces — the audio never reads
@@ -887,12 +948,20 @@ export class CiceroDaemon {
             isLocalFastPath,
             minProbability: specCfg.min_probability ?? 0.85,
             tone,
+            operationalContext: (signal) => this.operationalContext(signal),
           })
         : undefined;
       // The health lane's record: written by `cicero health log` (the health
       // lane's shell) and /api/health (the phone bridge); read here for the
       // morning briefing's one-liner.
-      const healthStore = new HealthStore();
+      const healthStore = this.healthStore = new HealthStore();
+      this.briefingStatusStore = this.config.notify?.briefing?.at
+        ? new BriefingStatusStore()
+        : null;
+      await this.refreshHealthSummary();
+      this.healthRefreshTimer = setInterval(() => {
+        void this.refreshHealthSummary();
+      }, 60_000);
       // Speech gate (Silero VAD): fetch-and-verify the pinned assets in the
       // background; the /vad routes 404 (and the page stays energy-only)
       // until they land. `speech_gate: false` skips the download entirely.
@@ -921,6 +990,9 @@ export class CiceroDaemon {
               await healthStore.append({ t: Date.now(), source: "api", ...r });
             }
             options?.signal?.throwIfAborted();
+            if (this.healthRefreshTask) await this.healthRefreshTask;
+            await this.refreshHealthSummary();
+            options?.signal?.throwIfAborted();
             return rows.length;
           } catch (error) {
             throw new Error(`health ingest failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
@@ -939,6 +1011,7 @@ export class CiceroDaemon {
           maxAudioBytes: MAX_TURN_AUDIO_BYTES,
           signal: options?.signal,
           trackBackground: options?.trackBackground,
+          operationalContext: (signal) => this.operationalContext(signal),
         }),
         // Semantic end-of-turn probes (see probe.ts): the client asks mid-pause
         // whether the speaker sounds done. this.turnDetector is read lazily —
@@ -967,7 +1040,7 @@ export class CiceroDaemon {
         // than a beat of silence).
         onStreamTurn: async (wav, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), tone, signal: options?.signal, trackBackground: options?.trackBackground };
+            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), tone, signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTurn(wav, deps, sink, options.spec);
               return;
@@ -983,7 +1056,7 @@ export class CiceroDaemon {
         // Typed input (the text box next to the mic): same pipeline minus STT.
         onTextTurn: async (text, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), signal: options?.signal, trackBackground: options?.trackBackground };
+            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTextTurn(text, deps, sink);
               return;
@@ -1084,6 +1157,8 @@ export class CiceroDaemon {
             throw new Error(`web say failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
           }
         },
+        // Deliberately excluded in this PR: /api/chat, Telegram chat, host mic,
+        // warmup, and unattended prompts retain their existing context policy.
         onChat: async (text, options) => {
           try {
             const reply = await this.brain.send(text, { signal: options?.signal });
@@ -1166,7 +1241,7 @@ export class CiceroDaemon {
         if (briefing?.at) {
           const webVoice = this.webVoice;
           const tz = this.config.notify?.timezone;
-          const statusStore = new BriefingStatusStore();
+          const statusStore = this.briefingStatusStore!;
           this.briefingScheduler = new BriefingScheduler({
             at: briefing.at,
             catchUpMinutes: briefing.catch_up_minutes ?? 180,
@@ -1361,6 +1436,7 @@ export class CiceroDaemon {
     this.assertStartupActive();
 
     this.lifecycle = "running";
+    this.startedAtMs = Date.now();
     this.running = true;
     this.briefingScheduler?.start();
     log("ok", "");
@@ -2192,6 +2268,9 @@ export class CiceroDaemon {
       const briefingStop = this.briefingScheduler?.stop();
       this.promptScheduler?.stop();
       this.promptScheduler = null;
+      if (this.healthRefreshTimer) clearInterval(this.healthRefreshTimer);
+      this.healthRefreshTimer = undefined;
+      await cleanup("health summary refresh", () => this.healthRefreshTask ?? Promise.resolve());
       if (this.minutesTimer) clearTimeout(this.minutesTimer);
       this.minutesTimer = undefined;
       await cleanup("briefing scheduler", () => briefingStop);
@@ -2295,7 +2374,12 @@ export class CiceroDaemon {
     } finally {
       if (shutdownCompleted) {
         this.briefingScheduler = null;
+        this.briefingStatusStore = null;
         this.promptScheduler = null;
+        this.healthStore = null;
+        this.healthSummary = null;
+        this.healthRefreshTask = null;
+        this.startedAtMs = null;
         this.minutesTimer = undefined;
         this.actionsReloader = null;
         this.backgroundTasks.clear();
