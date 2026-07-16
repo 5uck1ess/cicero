@@ -19,8 +19,8 @@ cicero › On it — filed to the coder. I'll tell you when the PR is up.
 
          (four minutes later, unprompted)
 
-cicero › That lint fix just landed as PR 214 — one file, +6 −2.
-         Want the diff summary?
+cicero › The coder just finished "fix the CI lint failure" —
+         the link's on your screen.
 ```
 
 That's the shape: you speak, it acknowledges in about a second, the heavy work
@@ -158,13 +158,13 @@ cicero start
 # → 🎙️  Web voice server on https://0.0.0.0:8090 (token required)
 ```
 
-Open `https://<box-ip>:8090/?token=<token>`, accept the self-signed certificate once, hold SPACE (or the orb), and talk. Full page controls, hands-free mode, and the PWA install are in the [web-voice guide](docs/web-voice.md); macOS / Windows / systemd / remote-GPU setups in [setup](docs/setup.md).
+Open `https://<box-ip>:8090/?token=<token>`, accept the self-signed certificate once, click **Start conversation** (the page loads with it off), then hold SPACE (or the orb) and talk. Full page controls, hands-free mode, and the PWA install are in the [web-voice guide](docs/web-voice.md); macOS / Windows / systemd / remote-GPU setups in [setup](docs/setup.md).
 
 ## When something doesn't work
 
 - **The browser warns about the certificate.** Expected: Cicero generates a self-signed HTTPS certificate on first start (browsers only expose the microphone over HTTPS). Accept it once per device.
 - **Where's the token?** Printed at startup, once per run. For a stable token across restarts, run `openssl rand -hex 16` and paste only its output as `token:` inside the `web_voice:` block (e.g. `web_voice: { enabled: true, host: 0.0.0.0, port: 8090, token: <paste> }`). Configure it before running Cicero under a service manager, because startup stdout may be retained — and never copy an example placeholder as a secret.
-- **I talk and nothing happens.** The default is push-to-talk: hold SPACE or the orb *while* speaking. Then check the browser's microphone permission, then `cicero doctor`.
+- **I talk and nothing happens.** Click **Start conversation** first — push-to-talk is inert until the conversation is on. Then remember to hold SPACE or the orb *while* speaking, then check the browser's microphone permission, then `cicero doctor`.
 - **`doctor` is green but turns fail.** `doctor` verifies configuration and binaries; it does not prove a CLI login or complete a live agent turn. Make sure the brain's own CLI works standalone, then exercise one real turn.
 - Anything else: `cicero doctor` first — it names the missing prerequisite and the command that fixes it.
 
