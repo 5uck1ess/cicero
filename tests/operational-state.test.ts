@@ -285,6 +285,29 @@ test("a secret already JSON-escaped in source text does not survive the second s
   expect(text).toContain("rotate <redacted>");
 });
 
+test("a reversibly multi-escaped secret does not reach the rendered output", async () => {
+  const now = new Date("2026-07-16T13:00:00.000Z");
+  const secret = 'AllLetterPrefix"AllLetterSuffix';
+  const once = JSON.stringify(secret).slice(1, -1);
+  const twice = JSON.stringify(once).slice(1, -1);
+  const thrice = JSON.stringify(twice).slice(1, -1);
+  for (const occurrence of [twice, thrice]) {
+    const state = await snapshot({
+      now: () => now,
+      startedAtMs: null,
+      timezone: "UTC",
+      secrets: [secret],
+      board: () => ({
+        asOfMs: now.getTime(), truncated: false, totalTasks: 1,
+        tasks: [{ id: "secret", title: `rotate ${occurrence}`, status: "blocked" }],
+      }),
+    });
+    const text = render(state, [secret]);
+    expect(text).not.toContain("AllLetterPrefix");
+    expect(text).not.toContain("AllLetterSuffix");
+  }
+});
+
 test("known configured secrets are redacted in their JSON-escaped form", async () => {
   const now = new Date("2026-07-16T13:00:00.000Z");
   const secret = 'abcdefgh"ijklmnop';

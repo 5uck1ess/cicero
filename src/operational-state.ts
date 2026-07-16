@@ -181,6 +181,26 @@ function redactKnownSecrets(value: string, knownSecrets?: readonly string[]): st
   return redactPreparedKnownSecrets(value, secrets);
 }
 
+/** Source text may carry a secret escaped N times, and render() serializes it
+ * once more — every reversibly escaped occurrence up to this depth must match.
+ * The ladder only grows for secrets containing JSON-escapable characters
+ * (quotes, backslashes, control chars); for all others it terminates at depth
+ * 0 because escaping is the identity. Depth 5 is far past any realistic
+ * embedding; deeper stacks stop being mechanically recoverable text. */
+const MAX_JSON_ESCAPE_DEPTH = 5;
+
+function jsonEscapeLadder(secret: string): string[] {
+  const variants = [secret];
+  let current = secret;
+  for (let depth = 0; depth < MAX_JSON_ESCAPE_DEPTH; depth++) {
+    const escaped = JSON.stringify(current).slice(1, -1);
+    if (escaped === current) break; // nothing escapable — the ladder is flat
+    variants.push(escaped);
+    current = escaped;
+  }
+  return variants;
+}
+
 function prepareKnownSecrets(knownSecrets?: readonly string[], includeJsonEscaped = false): string[] {
   if (!knownSecrets?.length) return [];
   // A configured credential is a secret at ANY realistic length, so the floor only
@@ -189,7 +209,7 @@ function prepareKnownSecrets(knownSecrets?: readonly string[], includeJsonEscape
   // issues sub-4-char credentials), and redacting it would corrupt the snapshot.
   return [...new Set(knownSecrets
     .filter((secret) => secret.trim().length >= 4)
-    .flatMap((secret) => includeJsonEscaped ? [secret, JSON.stringify(secret).slice(1, -1)] : [secret]))]
+    .flatMap((secret) => includeJsonEscaped ? jsonEscapeLadder(secret) : [secret]))]
     .sort((left, right) => right.length - left.length);
 }
 
