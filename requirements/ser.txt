@@ -1,7 +1,7 @@
 # emotion2vec/FunASR sidecar. TorchAudio's native extension must match the
 # exact PyTorch release; 2.10.0/2.10.0 is the tested ABI-compatible pair.
 funasr>=1.2,<2
-torch==2.10.0
+torch==2.13.0
 torchaudio==2.10.0
 fastapi>=0.115,<1
 uvicorn>=0.51.0,<1
