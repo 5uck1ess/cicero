@@ -3,7 +3,7 @@
 ## Three shapes
 
 - **Web-voice mode** — a headless GPU box serves a token-gated HTTPS voice page; you talk to it from any browser on the network (or over your VPN). Push-to-talk or hands-free VAD, streaming replies, barge-in, and an audio-reactive orb. This is the flagship experience. [Guide.](web-voice.md)
-- **Sidecar mode** — Cicero attaches to whatever coding agent you're already using, summarizes its responses, and speaks them. Hands-free output for Claude Code, Codex, Gemini, Ollama, anything in a terminal. [Guide.](superpowers/sidecar-modes.md)
+- **Sidecar mode** — Cicero attaches to whatever coding agent you're already using, summarizes its responses, and speaks them. Hands-free output for Claude Code, Codex, Gemini, Ollama, anything in a terminal. [Guide.](https://github.com/5uck1ess/cicero/blob/main/docs/superpowers/sidecar-modes.md)
 - **Daemon mode (local mic)** — the same voice loop with a local mic/speaker on the box itself: mic in → STT → intent classification → brain dispatch → streaming TTS. [Guide.](daemon-mode.md)
 
 All modes share the same summarization + TTS core.
@@ -51,7 +51,7 @@ Key properties:
 - **Brain** — a pluggable agent slot; one front desk plus optional lanes, each any ACP harness / CLI agent / model endpoint ([brains](brains.md))
 - **Speaker** — streaming sentence-by-sentence TTS playback with barge-in; per-lane voices; sanitizer in front
 - **Notify** — proactive voice-back: HTTP endpoint, kanban watch, Telegram notes/calls, quiet hours + briefing ([notifications](notifications.md))
-- **Terminal Adapter** — Kitty, tmux, or WezTerm remote control for tab management, auto-detected; `none` for headless ([terminal adapters](superpowers/terminal-adapters.md))
+- **Terminal Adapter** — Kitty, tmux, or WezTerm remote control for tab management, auto-detected; `none` for headless ([terminal adapters](https://github.com/5uck1ess/cicero/blob/main/docs/superpowers/terminal-adapters.md))
 
 ## Where your data lives
 

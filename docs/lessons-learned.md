@@ -6,7 +6,7 @@
 > statements like "can't run on Linux/Windows" have long since been overtaken
 > (Linux, Windows, and CUDA/CPU tiers are supported today). Read this for the project's history
 > and decisions; for what Cicero currently is, start at the
-> [README](../README.md) and [setup](setup.md).
+> [README](/) and [setup](setup.md).
 
 ---
 
