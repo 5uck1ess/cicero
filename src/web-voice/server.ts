@@ -1,4 +1,6 @@
 import { log } from "../logger";
+import { isConfirmationNonce } from "../brain/approval";
+import type { Brain } from "../types";
 import { presentedToken, tokenMatches } from "../http-auth";
 import { PAGE } from "./page";
 import { MANIFEST, ICON_SVG } from "./pwa";
@@ -28,6 +30,7 @@ import {
   MAX_HEALTH_JSON_BYTES,
   MAX_NOTIFY_TEXT_CHARS,
   MAX_CHAT_TEXT_CHARS,
+  MAX_CONFIRM_SUMMARY_CHARS,
   MAX_HEALTH_ROWS,
   decodeTurnAudioFrame,
   encodeTurnAudioFrame,
@@ -131,6 +134,12 @@ export interface WebVoiceServerOptions {
    */
   onHistory?: (options?: { signal?: AbortSignal }) => Promise<Array<{ t: number; user: string; reply: string }>>;
   /**
+   * The brain-owned confirmation gate. The server reads this capability for
+   * late joins and routes exact nonce decisions back through it; it never
+   * retains a parallel pending-confirmation store.
+   */
+  confirmations?: Pick<Brain, "hasPendingConfirmation" | "pendingConfirmations" | "resolvePendingConfirmation">;
+  /**
    * Health-record ingest (the phone bridge's door): rows are appended to
    * the health record. Returns how many were logged. Absent = 501.
    */
@@ -170,6 +179,8 @@ export interface WebVoiceHandle {
    * kanban watcher. Resolves null when unavailable, saturated, or quiescing.
    */
   notify: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal }) => Promise<{ delivered: number; parked: boolean } | null>;
+  /** Broadcast a newly pending brain-owned confirmation to live clients. */
+  confirmPending: (summary: string, nonce: string) => number;
   /** Quiesce ingress, cancel owned work, close sockets, and drain handlers. */
   stop: () => Promise<void>;
 }
@@ -308,7 +319,7 @@ function requestedId(req: Request, url: URL, header: string, query: string): str
  * because a headless box is driven from another machine's browser.
  */
 export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle | null {
-  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness } = opts;
+  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness, confirmations } = opts;
   const scheme: "http" | "https" = tls ? "https" : "http";
   const configuredDrainTimeout = opts.shutdownDrainTimeoutMs;
   const shutdownDrainTimeoutMs = typeof configuredDrainTimeout === "number" && Number.isFinite(configuredDrainTimeout) && configuredDrainTimeout >= 1
@@ -319,6 +330,67 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   let stopPromise: Promise<void> | null = null;
   // Live voice clients — notify broadcasts go to every open socket.
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
+  const debugConfirmation = (reason: string, nonce?: string, approved?: boolean): void => {
+    // The project logger intentionally has no debug level. Keep rejected
+    // controls out of the operator event stream while retaining a debug trace.
+    console.debug(
+      `web-voice confirmation ${reason}`
+      + (nonce ? ` nonce=${nonce}` : "")
+      + (approved === undefined ? "" : ` approved=${approved}`),
+    );
+  };
+  const boundedConfirmation = (nonce: string, summary: string): { type: "confirm_request"; nonce: string; summary: string } | null => {
+    if (!isConfirmationNonce(nonce) || typeof summary !== "string") return null;
+    return { type: "confirm_request", nonce, summary: summary.slice(0, MAX_CONFIRM_SUMMARY_CHARS) };
+  };
+  const pendingConfirmation = (nonce: string): { nonce: string; summary: string } | null => {
+    if (!confirmations?.pendingConfirmations || !isConfirmationNonce(nonce)) return null;
+    try {
+      const matches = confirmations.pendingConfirmations().filter((item) => item.nonce === nonce);
+      return matches.length === 1 ? matches[0]! : null;
+    } catch {
+      debugConfirmation("pending lookup failed", nonce);
+      return null;
+    }
+  };
+  const confirmPending = (summary: string, nonce: string): number => {
+    if (!accepting) return 0;
+    const pending = pendingConfirmation(nonce);
+    if (!pending) return 0;
+    // The callback and capability normally carry the same title. If they ever
+    // diverge, prefer the current brain snapshot over potentially stale text.
+    const request = boundedConfirmation(nonce, summary === pending.summary ? summary : pending.summary);
+    if (!request) return 0;
+    let delivered = 0;
+    for (const ws of clients) {
+      try {
+        ws.send(JSON.stringify(withSession(ws, request)));
+        delivered += 1;
+      } catch { /* socket closed */ }
+    }
+    return delivered;
+  };
+  const sendPendingConfirmations = (ws: import("bun").ServerWebSocket<WsData>): void => {
+    if (!confirmations?.pendingConfirmations) return;
+    let pending: readonly { nonce: string; summary: string }[];
+    try {
+      pending = confirmations.pendingConfirmations();
+    } catch {
+      debugConfirmation("late-join lookup failed");
+      return;
+    }
+    for (const item of pending) {
+      // Re-read at the point of send: pendingConfirmations() also expires ACP
+      // gates, so a stale item from the first snapshot is skipped.
+      const current = pendingConfirmation(item.nonce);
+      if (!current) continue;
+      const request = boundedConfirmation(current.nonce, current.summary);
+      if (request) sendJson(ws, withSession(ws, request));
+    }
+  };
+  const broadcastConfirmationResolved = (nonce: string): void => {
+    for (const client of clients) sendJson(client, withSession(client, { type: "confirm_resolved", nonce }));
+  };
   const liveSpecs = new Set<SpeculativeTurn>();
   const specAbortTasks = new Map<SpeculativeTurn, Promise<void>>();
   const uncertainSpecs = new Set<SpeculativeTurn>();
@@ -1221,6 +1293,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // Tell the client whether mid-pause turn probes are worth sending —
           // without a detector they'd be dead weight on every pause.
           if (onTurnProbe) sendJson(ws, withSession(ws, { type: "probe_on" }));
+          // The brain is the authoritative pending store. A reconnect drains a
+          // fresh snapshot so resolved or expired confirmations never reappear.
+          sendPendingConfirmations(ws);
           // History first, then any parked notifications — so missed news
           // reads (and speaks) after the old chat log, in arrival order.
           if (onHistory && acquireJob()) {
@@ -1259,12 +1334,58 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               protocolError(ws, "control frame too large");
               return;
             }
-            let msg: { type?: string; text?: string; sessionId?: unknown; turnId?: unknown };
+            let msg: {
+              type?: string;
+              text?: string;
+              sessionId?: unknown;
+              turnId?: unknown;
+              nonce?: unknown;
+              approved?: unknown;
+            };
             try {
               msg = JSON.parse(message) as typeof msg;
             } catch {
               if (ws.data.protocol === 2) protocolError(ws, "malformed control frame");
               // Protocol v1 historically ignored malformed controls.
+              return;
+            }
+            if (msg.type === "confirm") {
+              const replyNonce = typeof msg.nonce === "string"
+                ? msg.nonce.slice(0, 128)
+                : "";
+              const approved = typeof msg.approved === "boolean" ? msg.approved : null;
+              const malformed =
+                !isConfirmationNonce(replyNonce)
+                || approved === null
+                || (ws.data.protocol === 2 && msg.sessionId !== ws.data.sessionId);
+              if (malformed || !confirmations?.resolvePendingConfirmation) {
+                debugConfirmation(
+                  malformed ? "malformed control rejected" : "capability unavailable",
+                  replyNonce || undefined,
+                  approved ?? undefined,
+                );
+                sendJson(ws, withSession(ws, { type: "confirm_result", nonce: replyNonce, ok: false }));
+                return;
+              }
+              let resolved = false;
+              try {
+                resolved = confirmations.resolvePendingConfirmation(approved!, replyNonce);
+              } catch {
+                debugConfirmation("resolution threw", replyNonce, approved!);
+              }
+              if (!resolved) {
+                debugConfirmation("resolution rejected", replyNonce, approved!);
+                sendJson(ws, withSession(ws, { type: "confirm_result", nonce: replyNonce, ok: false }));
+                return;
+              }
+              sendJson(ws, withSession(ws, {
+                type: "confirm_result",
+                nonce: replyNonce,
+                ok: true,
+                approved,
+              }));
+              log("info", `web-voice confirmation resolved nonce=${replyNonce} approved=${approved}`);
+              broadcastConfirmationResolved(replyNonce);
               return;
             }
             if (ws.data.protocol === 2 && msg.sessionId !== ws.data.sessionId) {
@@ -1514,6 +1635,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       port: server.port ?? port,
       clientCount: () => clients.size,
       notify,
+      confirmPending,
       stop,
     };
   } catch (err: unknown) {

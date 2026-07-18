@@ -26,6 +26,8 @@ import {
 
 export interface BrainHooks {
   onNudgeReply?: (text: string) => void;
+  /** Transport fan-out for an exact brain-owned confirmation capability. */
+  onConfirmationPending?: (summary: string, nonce: string) => void | Promise<void>;
   /** Daemon runtime only: install the backend-independent spoken dial-back control. */
   dialBackControl?: boolean;
 }
@@ -87,13 +89,22 @@ export function createBrain(config: RuntimeConfig, terminal?: TerminalAdapter, h
 
 function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: BrainHooks = {}): Brain {
   const { backend, mode, target_tab, auto_approve_tools, confirm_tools, confirm_retry, max_queue_bytes, max_response_bytes, max_pending_turns, binary, binary_args, ollama_port, ollama_model, base_url, model, api_key, api_key_env, max_tokens, timeout_ms, unset_env, headers, session_header } = config.brain;
-  const onConfirmationPending = config.notify?.telegram
+  const telegram = config.notify?.telegram;
+  const onConfirmationPending = telegram || hooks.onConfirmationPending
     ? async (summary: string, nonce: string): Promise<void> => {
+        if (hooks.onConfirmationPending) {
+          try {
+            await hooks.onConfirmationPending(summary, nonce);
+          } catch (err: unknown) {
+            log("warn", `approval prompt hook delivery failed for nonce=${nonce}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        if (!telegram) return;
         try {
-          const sent = await sendTelegramConfirmation(config.notify!.telegram!, `Allow ${summary}?`, nonce);
-          if (!sent) log("warn", `approval prompt was not delivered for: ${summary}`);
+          const sent = await sendTelegramConfirmation(telegram, `Allow ${summary}?`, nonce);
+          if (!sent) log("warn", `Telegram approval prompt was not delivered for nonce=${nonce}`);
         } catch (err: unknown) {
-          log("warn", `approval prompt delivery failed: ${err instanceof Error ? err.message : String(err)}`);
+          log("warn", `Telegram approval prompt delivery failed for nonce=${nonce}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     : undefined;
