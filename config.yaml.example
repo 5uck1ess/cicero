@@ -33,6 +33,11 @@ web_voice:
   # tls: { cert_file: /etc/cicero/cert.pem, key_file: /etc/cicero/key.pem }
   # `tls: { enabled: false }` explicitly permits plaintext HTTP; never use it
   # on an untrusted network.
+  # Optional daemon-owned public tunnel. `auto` prefers tailscale, then
+  # cloudflared, and startup errors if neither binary is installed. An explicit
+  # provider never falls back to the other one. Tunnel startup failures after
+  # launch leave this local/LAN web-voice listener running.
+  # tunnel: { provider: auto } # auto | tailscale | cloudflared
   # TLDR speech gate is on by default: long replies speak the first N sentences
   # plus a generic coda; say "details" to hear the rest. Add an optional local
   # OpenAI-compatible summarizer for a model-written coda. Set enabled: false to
