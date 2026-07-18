@@ -16,6 +16,18 @@ manager can retain stdout. Configure a stable token before daemonizing Cicero.
 For one stable credential across restarts, run `openssl rand -hex 16` and paste
 only its output as `web_voice.token`; placeholder text is rejected.
 
+For the fast path, start the daemon and run `cicero pair`. It creates a stable
+token when the configured value is missing or invalid, prints a pairing URL,
+and renders that same URL as a terminal QR code. Restart the daemon and re-run
+the command if it reports that it wrote a new token. The default QR contains a
+live credential; `cicero pair --no-token-in-qr` omits it and prints the token
+separately for manual entry. If tunneling is not configured, `pair` prints the
+exact `tunnel: { provider: auto }` line to add under `web_voice` without editing
+it. A live tunnel URL is preferred over the LAN address. Cloudflared
+quick-tunnel URLs change each daemon run, so re-run `pair` after a restart;
+Tailscale hostnames are stable. The manual URL/certificate flow below still
+works unchanged.
+
 Open `https://<box-ip>:8090/?token=<token>` in a browser. TLS is on by
 default (a self-signed cert is generated under `~/.cicero/web-voice/` — accept
 it once per device; the browser mic requires a secure context). Automatic

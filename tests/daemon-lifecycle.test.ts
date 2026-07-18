@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config";
@@ -7,6 +7,7 @@ import { CiceroDaemon, createRecordedWebTurn, recordParkedBriefingVoiceOutcome }
 import { OvernightStore } from "../src/notify/overnight-store";
 import type { WebReplySink } from "../src/web-voice/turn";
 import type { HistoryTurn } from "../src/web-voice/history";
+import { readPairingState } from "../src/web-voice/pairing-state";
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -790,6 +791,7 @@ describe("CiceroDaemon lifecycle", () => {
   test("required primaries can start while later STT and TTS warmup failures remain optional", async () => {
     const home = mkdtempSync(join(tmpdir(), "cicero-daemon-optional-warmup-test-"));
     const pidFile = join(home, "cicero.pid");
+    const pairingFile = join(home, "web-voice", "pairing.json");
     const config = loadConfig({}, { home });
     config.raw.headless = true;
     config.raw.dashboard = { enabled: false };
@@ -812,6 +814,13 @@ describe("CiceroDaemon lifecycle", () => {
     const warmups: string[] = [];
     const daemon = new CiceroDaemon(config, {
       pidFile,
+      webVoiceServerStarter: () => ({
+        scheme: "http",
+        port: 18_443,
+        clientCount: () => 0,
+        notify: () => Promise.resolve(null),
+        stop: () => Promise.resolve(),
+      }),
       providerFactory: () => ({
         stt: {
           name: "company-stt-plugin",
@@ -850,8 +859,16 @@ describe("CiceroDaemon lifecycle", () => {
       await Bun.sleep(20);
       expect(new Set(warmups)).toEqual(new Set(["stt", "tts"]));
       expect(existsSync(pidFile)).toBe(true);
+      expect(readPairingState(pairingFile)).toMatchObject({
+        scheme: "http",
+        tunnelProvider: null,
+        tunnelUrl: null,
+        pid: process.pid,
+      });
+      expect(readFileSync(pairingFile, "utf8")).not.toContain("test-token-that-is-long-enough");
       await daemon.stop();
       expect(existsSync(pidFile)).toBe(false);
+      expect(existsSync(pairingFile)).toBe(false);
     } catch (error) {
       await daemon.stop().catch(() => {});
       throw new Error(`optional warmup test failed: ${(error as Error).message}`, { cause: error });

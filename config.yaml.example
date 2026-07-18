@@ -25,7 +25,9 @@ web_voice:
   # Omit it to get a random token for this run on startup stdout. A service
   # manager may retain stdout, so configure a stable token before daemonizing:
   #   openssl rand -hex 16
-  # Paste the command output after the colon and uncomment this setting:
+  # `cicero pair` can generate and save this stable token, then print the phone
+  # URL + QR. Restart the daemon once if pair creates/replaces the token.
+  # Paste manual command output after the colon and uncomment this setting:
   # token:
   # TLS is generated automatically (the first start needs `openssl` on PATH;
   # `cicero doctor` prints the native install command when it is missing). For

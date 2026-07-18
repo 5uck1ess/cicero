@@ -130,6 +130,21 @@ export function opensslInstallHint(platform: string = process.platform): string 
   return "sudo apt install openssl   # Debian/Ubuntu; use your distro package manager elsewhere";
 }
 
+/** Native install guidance for daemon-owned web-voice tunnel providers. */
+export function tunnelInstallHint(
+  provider: "tailscale" | "cloudflared",
+  platform: string = process.platform,
+): string {
+  if (provider === "tailscale") {
+    if (platform === "win32") return "winget install Tailscale.Tailscale";
+    if (platform === "darwin") return "brew install --cask tailscale";
+    return "install Tailscale: https://tailscale.com/download/linux";
+  }
+  if (platform === "win32") return "winget install Cloudflare.cloudflared";
+  if (platform === "darwin") return "brew install cloudflared";
+  return "install cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/";
+}
+
 /** Engine backend → the dedicated venv python it launches from (see src/backends). */
 const VENV_BY_BACKEND: Record<string, string> = {
   "faster-whisper": ".venv-stt",
@@ -884,6 +899,34 @@ export async function collectChecks(
       checks.push({ name: "web_voice token", level: "fail", detail: "token is a placeholder or too short — this string is the only thing between the internet and your agent", hint: WEB_VOICE_TOKEN_GENERATION_HINT });
     } else {
       checks.push({ name: "web_voice token", level: "ok", detail: `set (${wv.token.length} chars)` });
+    }
+    if (wv.tunnel) {
+      const configured = wv.tunnel.provider;
+      if (configured === "auto") {
+        const tailscale = which("tailscale");
+        const cloudflared = which("cloudflared");
+        const found = tailscale
+          ? { binary: "tailscale", path: tailscale }
+          : cloudflared
+            ? { binary: "cloudflared", path: cloudflared }
+            : null;
+        checks.push(found
+          ? { name: "web_voice tunnel", level: "ok", detail: `auto selects '${found.binary}' at ${found.path}` }
+          : {
+            name: "web_voice tunnel",
+            level: "fail",
+            detail: "provider auto found neither 'tailscale' nor 'cloudflared' on PATH",
+            hint: `${tunnelInstallHint("tailscale", options.platform)}; or ${tunnelInstallHint("cloudflared", options.platform)}`,
+          });
+      } else {
+        checkBinary(
+          "web_voice tunnel",
+          configured,
+          checks,
+          which,
+          tunnelInstallHint(configured, options.platform),
+        );
+      }
     }
     const tls = wv.tls;
     if (tls?.enabled === false) {

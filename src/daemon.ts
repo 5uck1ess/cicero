@@ -59,6 +59,12 @@ import {
   assertHeadlessWebVoiceStarted,
   resolveWebVoiceToken,
 } from "./web-voice/startup-policy";
+import {
+  bestEffortLanIPv4,
+  removePairingState,
+  webVoicePairingStatePath,
+  writePairingState,
+} from "./web-voice/pairing-state";
 import { captureOperationalContext, DEFAULT_VOICE_CONTROL_STATE, isLocalFastPath, processWebTurn, streamWebTurn, streamWebTextTurn, type VoiceControlState, type WebReplySink } from "./web-voice/turn";
 import { makeSpeculator } from "./web-voice/speculative";
 import { MAX_TURN_AUDIO_BYTES } from "./web-voice/protocol";
@@ -224,8 +230,12 @@ export interface DaemonOptions {
   serProviderFactory?: typeof createSerProvider;
   /** Optional TLS setup injection for lifecycle tests/embedders. */
   tlsEnsurer?: typeof ensureTls;
+  /** Optional web listener injection for lifecycle tests/embedders. */
+  webVoiceServerStarter?: typeof startWebVoiceServer;
   /** Override the process marker location for embedding/tests. */
   pidFile?: string;
+  /** Override the credential-free phone-pairing publication for embedding/tests. */
+  pairingStateFile?: string;
   /** Bound cancelled local-command drain before returning a retryable failure. */
   shutdownDrainTimeoutMs?: number;
   /** Override the bounded brain startup retry policy for tests/embedders. */
@@ -279,6 +289,7 @@ export class CiceroDaemon {
   private webVoice: WebVoiceHandle | null = null;
   private webVoiceTunnelOwner: Pick<WebVoiceTunnelHandle, "stop"> | null = null;
   private webVoiceTunnel: WebVoiceTunnelHandle | null = null;
+  private webVoicePairingStartedAt: string | null = null;
   private kanbanWatcher: KanbanWatcher | null = null;
   private briefingScheduler: Pick<BriefingScheduler, "start" | "stop"> | null = null;
   private promptScheduler: PromptScheduler | null = null;
@@ -544,6 +555,39 @@ export class CiceroDaemon {
   constructor(config: RuntimeConfig, options: DaemonOptions = {}) {
     this.config = config;
     this.options = options;
+  }
+
+  private pairingStateFile(): string {
+    return this.options.pairingStateFile
+      ?? (this.options.pidFile
+        ? join(dirname(this.options.pidFile), "web-voice", "pairing.json")
+        : webVoicePairingStatePath());
+  }
+
+  private publishWebVoicePairingState(): void {
+    if (!this.webVoice || !this.webVoicePairingStartedAt) return;
+    try {
+      writePairingState({
+        scheme: this.webVoice.scheme,
+        port: this.webVoice.port,
+        lanHost: bestEffortLanIPv4(),
+        tunnelProvider: this.webVoiceTunnel?.provider ?? null,
+        tunnelUrl: this.webVoiceTunnel?.publicUrl ?? null,
+        startedAt: this.webVoicePairingStartedAt,
+        pid: process.pid,
+      }, this.pairingStateFile());
+    } catch (error: unknown) {
+      log("warn", `web-voice pairing state could not be published: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private removeWebVoicePairingState(): void {
+    if (!this.webVoicePairingStartedAt) return;
+    try {
+      removePairingState(this.pairingStateFile(), process.pid);
+    } catch (error: unknown) {
+      log("warn", `web-voice pairing state could not be removed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   async start(): Promise<void> {
@@ -1209,7 +1253,7 @@ export class CiceroDaemon {
           else log("warn", `speech gate degraded to energy-only — ${r.failures.join("; ")} (retries next start)`);
         });
       }
-      this.webVoice = startWebVoiceServer({
+      this.webVoice = (this.options.webVoiceServerStarter ?? startWebVoiceServer)({
         host: webHost,
         port: webPort,
         token,
@@ -1407,6 +1451,8 @@ export class CiceroDaemon {
       });
       assertHeadlessWebVoiceStarted(this.config.headless, this.webVoice !== null, webHost, webPort);
       if (this.webVoice) {
+        this.webVoicePairingStartedAt = new Date().toISOString();
+        this.publishWebVoicePairingState();
         if (wv.tunnel) {
           this.webVoiceTunnel = await startWebVoiceTunnel({
             config: wv.tunnel,
@@ -1417,6 +1463,7 @@ export class CiceroDaemon {
             onOwned: (owner) => { this.webVoiceTunnelOwner = owner; },
           });
           this.assertStartupActive();
+          if (this.webVoiceTunnel) this.publishWebVoicePairingState();
         }
         if (tokenIsEphemeral) {
           // This intentionally bypasses log()/dashBus: startup stdout receives
@@ -2415,6 +2462,7 @@ export class CiceroDaemon {
     // could enter while shutdown was waiting for a cancelled startup or voice
     // input handoff.
     const ingressStop = this.stopExternalIngress();
+    this.removeWebVoicePairingState();
     // stopAfterStartup may first await a cancelled startup. Observe an early
     // drain rejection now; the exact promise is still awaited and reported
     // below, so this only prevents an unhandled-rejection window.
@@ -2516,6 +2564,7 @@ export class CiceroDaemon {
       // Stop accepting external work before tearing down any dependency an
       // HTTP/WebSocket/dashboard handler may still be using. Both stop methods
       // quiesce synchronously, then resolve only after their owned jobs drain.
+      this.removeWebVoicePairingState();
       await (initialIngressStop ?? this.stopExternalIngress());
       await cleanup("startup background tasks", () => this.drainBackgroundTasks());
       await cleanup("actions reloader", () => this.actionsReloader?.stop());
@@ -2626,6 +2675,7 @@ export class CiceroDaemon {
         this.webVoiceTunnelOwner = null;
         this.webVoiceTunnel = null;
         this.webVoice = null;
+        this.webVoicePairingStartedAt = null;
         this.voiceDesiredActive = false;
         this.voiceTransition = Promise.resolve();
         this.voiceInputHandoff = Promise.resolve();

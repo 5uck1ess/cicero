@@ -29,6 +29,7 @@ import type {
   TerminalCommandOptions,
 } from "../terminal/command";
 import { runBoundedCommand } from "../process/bounded-command";
+import { readPairingState, type PairingState } from "../web-voice/pairing-state";
 
 const DEFAULT_STATUS_TIMEOUT_MS = 2_000;
 const STATUS_STDOUT_LIMIT_BYTES = 64 * 1024;
@@ -65,6 +66,8 @@ export interface StatusDependencies {
     config: RuntimeConfig,
     execute: TerminalCommandExecutor,
   ) => TerminalAdapter;
+  pairingStateFile?: string;
+  readPairingState?: (path: string) => PairingState | null;
 }
 
 interface EndpointPlan {
@@ -701,6 +704,22 @@ export async function collectStatus(
   const pidFile = dependencies.pidFile ?? ciceroPath("cicero.pid");
   const hotkeyPath = dependencies.hotkeyPath
     ?? resolve(import.meta.dir, "../../helpers/cicero-hotkey");
+  const pairingStateFile = dependencies.pairingStateFile
+    ?? ciceroPath("web-voice", "pairing.json");
+  let pairing: StatusLine | null = null;
+  try {
+    const state = (dependencies.readPairingState ?? readPairingState)(pairingStateFile);
+    if (state) {
+      pairing = {
+        name: "Phone pairing",
+        level: state.tunnelUrl ? "ok" : "info",
+        detail: `${state.tunnelProvider ?? "no"} tunnel · URL ${state.tunnelUrl ? "published" : "not published"}`,
+      };
+    }
+  } catch {
+    // Pairing publication is best-effort; status remains useful if it is stale,
+    // malformed, or temporarily being atomically replaced.
+  }
 
   const daemon = checkDaemon(inspect, pidFile, timeoutMs);
   const stt = probePlan("STT", sttPlan(config.sttBackend), probe, timeoutMs);
@@ -744,6 +763,7 @@ export async function collectStatus(
 
   return [
     daemonLineResult,
+    ...(pairing ? [pairing] : []),
     sttLine,
     ...(sttFallbackLine ? [sttFallbackLine] : []),
     ttsLine,
