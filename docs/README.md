@@ -33,6 +33,7 @@ are provenance, not guidance.
 | [Notifications](notifications.md) | Cicero speaking up on its own: Telegram, briefings, schedules, quiet hours |
 | [Telegram calls](../sidecars/telegram-call/README.md) | The phone-call sidecar: talk to your agent from anywhere |
 | [Security](security.md) | Threat model, authentication, egress rules — read before exposing anything beyond localhost |
+| [What leaves the box](data-flows.md) | The complete data-flow map: what stays local, what's opt-in, and what Cicero never does |
 
 ## Extend it
 
