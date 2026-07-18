@@ -19,3 +19,10 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # torch and torchaudio are a tested lockstep pair (ser.txt pins both);
+    # bumping one without the other is unresolvable, so group the family
+    # into a single PR.
+    groups:
+      torch:
+        patterns:
+          - "torch*"
