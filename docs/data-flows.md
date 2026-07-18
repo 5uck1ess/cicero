@@ -1,11 +1,14 @@
 # What leaves the box
 
 Cicero's voice pipeline runs on your hardware. In the default local
-configuration, your microphone audio, transcripts, and the conversation
-itself are processed entirely on your machine — speech-to-text,
-text-to-speech, turn detection, and emotion analysis are local Python
-sidecars bound to `127.0.0.1`, and the default brain backends are local
-subprocesses. There is no Cicero cloud: **no configuration of Cicero ever
+configuration, your microphone audio and transcripts are processed
+entirely on your machine — speech-to-text, text-to-speech, turn
+detection, and emotion analysis are local Python sidecars bound to
+`127.0.0.1`. Whether the *conversation* stays local depends on one thing:
+the brain you plug in. A cloud-backed agent CLI (Claude Code, Codex)
+sends the conversation to its own vendor on its own account, exactly as
+it would in a terminal; a local model keeps everything on the box. Either
+way, there is no Cicero cloud: **no configuration of Cicero ever
 contacts a project-owned server, and there is no telemetry, analytics,
 crash reporting, or update checking anywhere in the codebase.** You can
 verify that claim with a grep; this page exists so you don't have to.
@@ -28,23 +31,24 @@ HTTP client that talks to them defaults to `localhost`
 (`src/backends/net.ts`). Audio bytes and transcripts never touch a network
 interface in this configuration.
 
-**One honest caveat about brains:** Cicero sends the brain nothing beyond
-your transcribed words, over stdio, on your machine. But the coding agent
-you plug in is its own program with its own vendor relationship — Claude
-Code talks to Anthropic, Codex talks to OpenAI, on their own accounts,
-exactly as they would in a terminal. Cicero adds no data to that exchange;
-it also can't subtract from it. A fully local brain (llama.cpp, Ollama, an
-ACP agent running a local model) keeps even the conversation on the box.
+**About brains, spelled out:** Cicero hands the brain nothing beyond your
+transcribed words, over stdio, on your machine. What the brain does next
+is its own vendor relationship — Claude Code talks to Anthropic, Codex
+talks to OpenAI, on their own accounts. Cicero adds no data to that
+exchange; it also can't subtract from it. A fully local brain (llama.cpp,
+Ollama, an ACP agent running a local model) keeps even the conversation
+on the box.
 
 ## Your LAN: the web-voice surface
 
 The web-voice server binds `0.0.0.0` by default so a headless box is
 reachable from a phone browser on your network. That means mic audio and
 transcripts traverse your LAN when you use it — gated by a mandatory bearer
-token on every request, and by TLS that Cicero generates on first start
-(it refuses to serve the authenticated API over plaintext HTTP on a
-non-loopback bind). Set `web_voice.host: 127.0.0.1` to keep it off the
-network entirely. Details in [security](security.md).
+token on every request, and by TLS that Cicero generates on first start:
+it refuses to serve the authenticated API over plaintext HTTP on a
+non-loopback bind unless you explicitly opt out with
+`web_voice.tls.enabled: false`. Set `web_voice.host: 127.0.0.1` to keep it
+off the network entirely. Details in [security](security.md).
 
 ## First-run downloads
 
@@ -68,6 +72,8 @@ Each row is off by default and activates only when you set the named key.
 | `stt.host` / `tts.host` / `turn.host` / `ser.host` | Raw audio (STT/turn/SER), reply text (TTS) | The host you name, **plain HTTP** |
 | `llm.host` (llama.cpp / Ollama / MLX on another box) | Full prompt and completion text | The host you name, **plain HTTP** |
 | `llm.backend` cloud preset (`openai`, `openrouter`, `groq`, `together`, `deepseek`, and others) | Full prompt text + your API key | That vendor's API |
+| `brain.backend: openai-compatible` + `brain.base_url` | The full conversation | The endpoint you name |
+| `web_voice.tldr.summarizer_url` | Conversation-derived text for spoken summaries | The endpoint you name |
 | `tts.backend: elevenlabs` | Reply text; voice provisioning uploads your reference WAV once | `api.elevenlabs.io` |
 | ACP brain with remote args (e.g. `ssh box agent acp`) | The conversation, over your ssh session | Your remote box |
 | `compute.allow_cloud: true` (computer use) | Goals, selected file contents, command output | The cloud LLM you configured |
