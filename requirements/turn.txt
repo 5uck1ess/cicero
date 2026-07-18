@@ -5,4 +5,4 @@ transformers>=5.13.1,<6
 fastapi>=0.115,<1
 uvicorn>=0.51.0,<1
 numpy>=1.26,<3
-scipy>=1.11,<2
+scipy>=1.18.0,<2
