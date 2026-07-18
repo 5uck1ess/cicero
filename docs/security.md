@@ -14,6 +14,9 @@ authentication story: there are no accounts, no rate limits, no audit trail
 beyond the daemon log. Keep the port on the LAN/VPN, keep the token secret,
 and none of the rest of this page bites.
 
+For the complementary question — what data goes where, per surface and
+config key — see [What leaves the box](data-flows.md).
+
 ## The pieces
 
 - **Bearer token** — every `/api/*` route, `/ws`, and the normal voice-page URL
