@@ -19,6 +19,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # The manifests use floor+cap ranges (>=X,<MAJOR) precisely so fresh
+    # installs pick up new releases without a manifest edit. Raising a floor
+    # the range already satisfies changes nothing for real installs, and can
+    # even break a documented support target (scipy>=1.18 dropped Python
+    # 3.11 — closed PR #29). Only PR when the range genuinely excludes the
+    # newest release; security updates are unaffected by this setting.
+    versioning-strategy: increase-if-necessary
     # torch and torchaudio are a tested lockstep pair (ser.txt pins both);
     # bumping one without the other is unresolvable, so group the family
     # into a single PR.
