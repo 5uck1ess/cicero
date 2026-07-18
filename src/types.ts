@@ -74,6 +74,9 @@ export interface WebVoiceConfig {
   // cert is generated under ~/.cicero/web-voice/ via openssl. An exposed listener fails
   // closed if generation fails; tls.enabled:false is the explicit plaintext opt-in.
   tls?: { cert_file?: string; key_file?: string; enabled?: boolean };
+  // Optional daemon-owned public reachability process. `auto` prefers
+  // tailscale, then cloudflared; absence of the block leaves tunneling off.
+  tunnel?: WebVoiceTunnelConfig;
   // After a daemon restart, prime the fresh agent session with a recap of the
   // last N conversation turns (rides the warmup ping). 0 disables. Default 10.
   resume_turns?: number;
@@ -117,6 +120,10 @@ export interface WebVoiceConfig {
     max_background_s?: number; // give up on the detached brain after this (default 600)
     line?: string;             // override the spoken hand-back
   };
+}
+
+export interface WebVoiceTunnelConfig {
+  provider: "auto" | "tailscale" | "cloudflared";
 }
 
 // Streaming voice-activity detection for end-of-turn. Replaces the legacy sox

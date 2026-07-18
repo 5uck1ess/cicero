@@ -554,7 +554,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
   }
   if (isRecord(config.web_voice)) {
     checkKnownKeys(config.web_voice, "web_voice", [
-      "enabled", "host", "port", "token", "tls", "resume_turns", "speech_gate", "tldr", "speculative", "long_turn",
+      "enabled", "host", "port", "token", "tls", "tunnel", "resume_turns", "speech_gate", "tldr", "speculative", "long_turn",
     ], issues);
   }
   if (isRecord(config.turn)) {
@@ -589,10 +589,10 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
         issues.push(`web_voice.token ${problem}; ${WEB_VOICE_TOKEN_GENERATION_HINT}`);
       }
     }
-    for (const name of ["tls", "tldr", "speculative", "long_turn"] as const) {
+    for (const name of ["tls", "tunnel", "tldr", "speculative", "long_turn"] as const) {
       const section = config.web_voice[name];
       if (section === undefined || !checkRecord(section, `web_voice.${name}`, issues)) continue;
-      checkOptionalBoolean(section, "enabled", `web_voice.${name}`, issues);
+      if (name !== "tunnel") checkOptionalBoolean(section, "enabled", `web_voice.${name}`, issues);
     }
     if (isRecord(config.web_voice.tls)) {
       checkKnownKeys(config.web_voice.tls, "web_voice.tls", [
@@ -602,6 +602,13 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       checkOptionalString(config.web_voice.tls, "key_file", "web_voice.tls", issues);
       if ((config.web_voice.tls.cert_file === undefined) !== (config.web_voice.tls.key_file === undefined)) {
         issues.push("web_voice.tls.cert_file and web_voice.tls.key_file must be configured together");
+      }
+    }
+    if (isRecord(config.web_voice.tunnel)) {
+      checkKnownKeys(config.web_voice.tunnel, "web_voice.tunnel", ["provider"], issues);
+      const provider = config.web_voice.tunnel.provider;
+      if (provider !== "auto" && provider !== "tailscale" && provider !== "cloudflared") {
+        issues.push("web_voice.tunnel.provider must be one of: auto, tailscale, cloudflared");
       }
     }
     if (isRecord(config.web_voice.tldr)) {

@@ -48,6 +48,10 @@ import {
 import { startDashboard, type DashboardHandle, type VoiceControlAction } from "./dashboard/server";
 import { dashBus } from "./dashboard/bus";
 import { startWebVoiceServer, type WebVoiceHandle } from "./web-voice/server";
+import {
+  startWebVoiceTunnel,
+  type WebVoiceTunnelHandle,
+} from "./web-voice/tunnel";
 import { ensureVadAssets } from "./web-voice/vad-assets";
 import { assertWebTlsPolicy, ensureTls } from "./web-voice/tls";
 import {
@@ -273,6 +277,8 @@ export class CiceroDaemon {
   private voiceInputHandoff: Promise<void> = Promise.resolve();
   private dashboard: DashboardHandle | null = null;
   private webVoice: WebVoiceHandle | null = null;
+  private webVoiceTunnelOwner: Pick<WebVoiceTunnelHandle, "stop"> | null = null;
+  private webVoiceTunnel: WebVoiceTunnelHandle | null = null;
   private kanbanWatcher: KanbanWatcher | null = null;
   private briefingScheduler: Pick<BriefingScheduler, "start" | "stop"> | null = null;
   private promptScheduler: PromptScheduler | null = null;
@@ -1401,6 +1407,17 @@ export class CiceroDaemon {
       });
       assertHeadlessWebVoiceStarted(this.config.headless, this.webVoice !== null, webHost, webPort);
       if (this.webVoice) {
+        if (wv.tunnel) {
+          this.webVoiceTunnel = await startWebVoiceTunnel({
+            config: wv.tunnel,
+            localScheme: this.webVoice.scheme,
+            localHost: webHost,
+            localPort: this.webVoice.port,
+            signal: this.lifecycleAbort.signal,
+            onOwned: (owner) => { this.webVoiceTunnelOwner = owner; },
+          });
+          this.assertStartupActive();
+        }
         if (tokenIsEphemeral) {
           // This intentionally bypasses log()/dashBus: startup stdout receives
           // the one-run credential, but the browser dashboard must never receive
@@ -1409,9 +1426,17 @@ export class CiceroDaemon {
           console.log(
             `Voice client (ephemeral token): ${this.webVoice.scheme}://<this-box-ip>:${this.webVoice.port}/?token=${token}`,
           );
+          if (this.webVoiceTunnel) {
+            console.log(
+              `Voice client via ${this.webVoiceTunnel.provider} (ephemeral token): ${this.webVoiceTunnel.publicUrl}/?token=${token}`,
+            );
+          }
           console.log("Set web_voice.token in ~/.cicero/config.yaml for a stable credential.");
         } else {
           log("ok", `🎙️  Voice client: ${this.webVoice.scheme}://<this-box-ip>:${this.webVoice.port}/?token=<redacted>`);
+          if (this.webVoiceTunnel) {
+            log("ok", `🎙️  Voice client via ${this.webVoiceTunnel.provider}: ${this.webVoiceTunnel.publicUrl}/?token=<redacted>`);
+          }
         }
         if (this.webVoice.scheme === "http") {
           log("warn", "web-voice is HTTP — the browser mic only works from localhost. Add a TLS cert for LAN access.");
@@ -1632,7 +1657,12 @@ export class CiceroDaemon {
     if (this.config.headless) {
       console.log(`Cicero ready (headless — web voice only; local mic/speaker/clap/hotkey disabled).`);
       console.log(`Brain: ${brainLabel} | TTS: ${this.config.ttsEnabled ? "on" : "off"}`);
-      if (this.webVoice) console.log(`Talk to it: ${this.webVoice.scheme}://<this-box-ip>:${this.webVoice.port}/?token=<token>`);
+      if (this.webVoice) {
+        console.log(`Talk to it: ${this.webVoice.scheme}://<this-box-ip>:${this.webVoice.port}/?token=<token>`);
+        if (this.webVoiceTunnel) {
+          console.log(`Talk to it via ${this.webVoiceTunnel.provider}: ${this.webVoiceTunnel.publicUrl}/?token=<token>`);
+        }
+      }
       else log("warn", "web_voice is disabled — nothing can reach Cicero. Set web_voice.enabled: true.");
     } else {
       console.log(`Cicero ready. Listening for commands.`);
@@ -2432,6 +2462,7 @@ export class CiceroDaemon {
     };
     return Promise.allSettled([
       invoke(this.dashboard),
+      invoke(this.webVoiceTunnelOwner),
       invoke(this.webVoice),
     ]).then((outcomes) => {
       const failures = outcomes.flatMap((outcome) =>
@@ -2592,6 +2623,8 @@ export class CiceroDaemon {
         this.startupPolicies = {};
         this.serProvider = null;
         this.dashboard = null;
+        this.webVoiceTunnelOwner = null;
+        this.webVoiceTunnel = null;
         this.webVoice = null;
         this.voiceDesiredActive = false;
         this.voiceTransition = Promise.resolve();
