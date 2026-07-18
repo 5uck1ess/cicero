@@ -10,6 +10,7 @@ import {
   telegramToken,
   wavToOggOpus,
 } from "../../src/notify/telegram";
+import { TELEGRAM_TEXT_MAX_CHARS } from "../../src/notify/briefing";
 import type { Brain } from "../../src/types";
 
 const hasFfmpeg = Bun.which("ffmpeg") !== null;
@@ -238,6 +239,31 @@ test("sendTelegramText posts a plain message, no ffmpeg involved", async () => {
 test("sendTelegramText without token or chat_id is a quiet no-op", async () => {
   expect(await sendTelegramText({ chat_id: 42 }, "x")).toBe(false);
   expect(await sendTelegramText({ token: "tok" }, "x")).toBe(false);
+});
+
+test("sendTelegramText warns with lengths, not content, when its transport guard truncates", async () => {
+  const secretMarker = "DO-NOT-LOG-THIS-MESSAGE-CONTENT";
+  const text = `${secretMarker}${"x".repeat(TELEGRAM_TEXT_MAX_CHARS)}`;
+  const output: string[] = [];
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  let sentText = "";
+  globalThis.fetch = async (_input, init) => {
+    sentText = String(jsonObject(JSON.parse(String(init?.body))).text);
+    return Response.json({ ok: true });
+  };
+  console.log = (...values: unknown[]): void => { output.push(values.map(String).join(" ")); };
+  try {
+    expect(await sendTelegramText({ token: "tok", chat_id: 42 }, text, "http://telegram.test")).toBe(true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+  }
+  const logs = output.join("\n");
+  const warning = output.find((line) => line.includes("transport guard truncated")) ?? "";
+  expect(sentText).toHaveLength(TELEGRAM_TEXT_MAX_CHARS);
+  expect(logs).toContain(`from ${text.length} to ${TELEGRAM_TEXT_MAX_CHARS} characters`);
+  expect(warning).not.toContain(secretMarker);
 });
 
 test("sendTelegramText combines an external abort with its request deadline", async () => {

@@ -4,6 +4,7 @@ export { classifyCallIntent } from "../call-intent";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { log } from "../logger";
+import { TELEGRAM_TEXT_MAX_CHARS } from "./briefing";
 import { confirmationDecision, isConfirmationNonce } from "../brain/approval";
 import type { Brain } from "../types";
 import { snapshotSynthesizedWav } from "../platform/wav";
@@ -379,12 +380,19 @@ export async function sendTelegramText(
 ): Promise<boolean> {
   const token = telegramToken(cfg);
   if (!token || !cfg.chat_id) return false;
+  const guardedText = text.slice(0, TELEGRAM_TEXT_MAX_CHARS);
+  if (guardedText.length < text.length) {
+    log(
+      "warn",
+      `telegram text transport guard truncated a message from ${text.length} to ${guardedText.length} characters`,
+    );
+  }
   const scope = boundedRequestScope(TELEGRAM_HTTP_TIMEOUT_MS);
   try {
     const res = await fetch(botUrl(api, token, "sendMessage"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: String(cfg.chat_id), text: text.slice(0, 4096), ...extra }),
+      body: JSON.stringify({ chat_id: String(cfg.chat_id), text: guardedText, ...extra }),
       signal: signal ? AbortSignal.any([scope.signal, signal]) : scope.signal,
     });
     if (!res.ok) {

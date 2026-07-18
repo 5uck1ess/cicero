@@ -1,5 +1,17 @@
 import { test, expect } from "bun:test";
-import { parseHm, inQuietHours, hmOf, dayOf, composeBriefing, composeBriefingDigest, minutesPrompt, worthMinutes, callMinutesThresholdMs } from "../../src/notify/briefing";
+import {
+  TELEGRAM_TEXT_MAX_CHARS,
+  callMinutesThresholdMs,
+  chunkBriefingDigest,
+  composeBriefing,
+  composeBriefingDigest,
+  dayOf,
+  hmOf,
+  inQuietHours,
+  minutesPrompt,
+  parseHm,
+  worthMinutes,
+} from "../../src/notify/briefing";
 
 const at = (h: number, m: number) => new Date(2026, 6, 7, h, m);
 
@@ -101,6 +113,68 @@ test("digest briefing: health-only mornings intentionally omit the quiet framing
   expect(composeBriefing([], [], "Health log: weight 82.4 kg.")).toContain(
     "All quiet overnight, and the board is clean.",
   );
+});
+
+test("digest chunking: empty, one-chunk, and exact-cap inputs", () => {
+  expect(chunkBriefingDigest("")).toEqual([]);
+  expect(chunkBriefingDigest("☀️ Morning briefing\n\nAll quiet overnight.")).toEqual([
+    "☀️ Morning briefing\n\nAll quiet overnight.",
+  ]);
+  const exact = "x".repeat(TELEGRAM_TEXT_MAX_CHARS);
+  expect(chunkBriefingDigest(exact)).toEqual([exact]);
+});
+
+test("digest chunking prefers section boundaries before line boundaries", () => {
+  const firstSection = `━━━━━ while you were away ━━━━━\n• ${"A".repeat(2_000)}`;
+  const secondSection = `━━━━━ needs your input ━━━━━\n• ${"B".repeat(2_000)}`;
+  const digest = `☀️ Morning briefing — 2026-07-18\n\n${firstSection}\n\n${secondSection}`;
+
+  const chunks = chunkBriefingDigest(digest);
+
+  expect(chunks).toHaveLength(2);
+  expect(chunks[0]).toBe(`☀️ Morning briefing — 2026-07-18\n\n${firstSection}`);
+  expect(chunks[1]).toBe(`☀️ Morning briefing (2/2)\n\n${secondSection}`);
+  expect(chunks.every((chunk) => chunk.length <= TELEGRAM_TEXT_MAX_CHARS)).toBe(true);
+});
+
+test("digest chunking splits an oversized section on item lines", () => {
+  const items = Array.from({ length: 6 }, (_, index) => `• item-${index + 1} ${String(index + 1).repeat(850)}`);
+  const digest = `☀️ Morning briefing\n\n━━━━━ while you were away ━━━━━\n${items.join("\n")}`;
+
+  const chunks = chunkBriefingDigest(digest);
+
+  expect(chunks.length).toBeGreaterThan(1);
+  expect(chunks.slice(1).every((chunk, index) => chunk.startsWith(`☀️ Morning briefing (${index + 2}/${chunks.length})\n\n`))).toBe(true);
+  for (const item of items) expect(chunks.some((chunk) => chunk.includes(item))).toBe(true);
+  expect(chunks.every((chunk) => chunk.length <= TELEGRAM_TEXT_MAX_CHARS)).toBe(true);
+});
+
+test("digest chunking hard-splits an oversized single line with an ellipsis", () => {
+  const digest = `☀️ Morning briefing\n\n${"Z".repeat(TELEGRAM_TEXT_MAX_CHARS * 2)}`;
+
+  const chunks = chunkBriefingDigest(digest);
+
+  expect(chunks.length).toBeGreaterThan(2);
+  expect(chunks[0].endsWith("…")).toBe(true);
+  expect(chunks.slice(1, -1).every((chunk) => chunk.endsWith("…"))).toBe(true);
+  expect(chunks.every((chunk) => chunk.length <= TELEGRAM_TEXT_MAX_CHARS)).toBe(true);
+});
+
+test("18 realistic overnight items survive a multi-chunk digest verbatim", () => {
+  const items = Array.from({ length: 18 }, (_, index) => (
+    `GitHub PR #${1_200 + index} announced: ${["parser", "scheduler", "dashboard", "voice transport"][index % 4]} ` +
+    `work is ready for review after the overnight CI matrix completed successfully; ` +
+    `the change includes focused regressions, operator notes, and a safe rollback path. ` +
+    `Reviewers can inspect the bounded failure handling, cancellation ownership, and release checklist (${index + 1}/18).`
+  ));
+  const digest = composeBriefingDigest(items, [], null, "2026-07-18");
+
+  const chunks = chunkBriefingDigest(digest);
+  const delivered = chunks.join("\n");
+
+  expect(chunks.length).toBeGreaterThan(1);
+  expect(chunks.every((chunk) => chunk.length <= TELEGRAM_TEXT_MAX_CHARS)).toBe(true);
+  for (const item of items) expect(delivered).toContain(item);
 });
 
 test("minutes need a call longer than the duration gate", () => {
