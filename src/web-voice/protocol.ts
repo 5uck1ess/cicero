@@ -11,6 +11,8 @@ export const MAX_CHAT_JSON_BYTES = 64 * 1024;
 export const MAX_HEALTH_JSON_BYTES = 256 * 1024;
 export const MAX_NOTIFY_TEXT_CHARS = 4_096;
 export const MAX_CHAT_TEXT_CHARS = 16_384;
+/** Tool summaries are untrusted brain/provider text displayed in approval cards. */
+export const MAX_CONFIRM_SUMMARY_CHARS = 2_000;
 export const MAX_HEALTH_ROWS = 100;
 
 /**

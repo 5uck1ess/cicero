@@ -71,7 +71,7 @@ platform's terms allow a userbot/bridge at all.
 A new text ingress (WhatsApp/Signal messages) means code in the daemon
 following the Telegram bot's shape: bounded polling or webhook ingress, an
 operator allowlist, notify integration for the outbound half, plus the parts
-[AGENTS.md](../AGENTS.md) requires of every adapter — config schema, `doctor`
+[AGENTS.md](https://github.com/5uck1ess/cicero/blob/main/AGENTS.md) requires of every adapter — config schema, `doctor`
 and `status` coverage, example config, docs, and an explicit error (never a
 silent fallback) for unsupported settings. It's a contribution to Cicero, not
 a plugin. If you want this, open an issue first — the second text channel is
@@ -118,5 +118,5 @@ documented adapter surfaces — a brain via ACP / OpenAI-compatible / CLI
 adapters ([brains](brains.md)), speech providers via the backend registry
 ([configuration](configuration.md)), an audio channel via the web-voice
 protocol, and output sidecars via `SpeakAdapter`. Anything deeper is a normal
-code contribution, with the reliability rules in [AGENTS.md](../AGENTS.md)
+code contribution, with the reliability rules in [AGENTS.md](https://github.com/5uck1ess/cicero/blob/main/AGENTS.md)
 applying in full.

@@ -150,7 +150,7 @@ uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
 ollama pull qwen3.5:4b
 ```
 
-For tab integration, use a terminal with remote control — [Kitty](https://sw.kovidgoyal.net/kitty/), [tmux](https://github.com/tmux/tmux), or [WezTerm](https://wezterm.org/). Cicero auto-detects which one you're in (`terminal: auto`). Set `terminal: none` for headless mode (voice → brain dispatch with no terminal integration). See [terminal adapters](superpowers/terminal-adapters.md).
+For tab integration, use a terminal with remote control — [Kitty](https://sw.kovidgoyal.net/kitty/), [tmux](https://github.com/tmux/tmux), or [WezTerm](https://wezterm.org/). Cicero auto-detects which one you're in (`terminal: auto`). Set `terminal: none` for headless mode (voice → brain dispatch with no terminal integration). See [terminal adapters](https://github.com/5uck1ess/cicero/blob/main/docs/superpowers/terminal-adapters.md).
 
 ### Windows (CUDA)
 
@@ -303,7 +303,7 @@ uv venv .venv-ser --python 3.11
 uv pip install --python .venv-ser -r requirements/ser.txt --index-strategy unsafe-best-match
 ```
 
-The files under [`requirements/`](../requirements/README.md) constrain direct
+The files under [`requirements/`](https://github.com/5uck1ess/cicero/blob/main/requirements/README.md) constrain direct
 dependencies only. Accelerator-specific transitive packages remain resolved
 for the host rather than being presented as one universal lockfile.
 
@@ -323,7 +323,7 @@ cicero hook install codex
 cicero hook
 ```
 
-The installers and receiver share an automatically generated bearer credential in `~/.cicero/hook-token`; no token needs to be copied into config. Before changing an existing agent settings file, the installer writes one private timestamped backup; an already-current reinstall is a no-op and does not accumulate backups. Claude Code posts its response directly to the loopback receiver. Codex runs a bounded local bridge; open `/hooks` once after installation and trust that command hook. Native-hook sessions then speak summarized responses through Cicero's TTS. See [`sidecar modes`](superpowers/sidecar-modes.md) for terminal-scrape mode (Gemini / Ollama / any CLI agent without hooks) and config.
+The installers and receiver share an automatically generated bearer credential in `~/.cicero/hook-token`; no token needs to be copied into config. Before changing an existing agent settings file, the installer writes one private timestamped backup; an already-current reinstall is a no-op and does not accumulate backups. Claude Code posts its response directly to the loopback receiver. Codex runs a bounded local bridge; open `/hooks` once after installation and trust that command hook. Native-hook sessions then speak summarized responses through Cicero's TTS. See [`sidecar modes`](https://github.com/5uck1ess/cicero/blob/main/docs/superpowers/sidecar-modes.md) for terminal-scrape mode (Gemini / Ollama / any CLI agent without hooks) and config.
 
 **For real summaries** (not raw token blobs), point Cicero at a local LLM — install [Ollama](https://ollama.com) and add to `~/.cicero/config.yaml`:
 
@@ -349,7 +349,7 @@ llm: { backend: llama-cpp,      host: 192.168.1.50, port: 8080, timeout_ms: 1200
 
 The `llama-cpp` backend talks to llama.cpp's `llama-server` over its OpenAI-compatible `/v1/chat/completions` API. Run your own server (`llama-server -m gemma.gguf --port 8080`) and Cicero connects to it; or set `llm: { backend: llama-cpp, model: /path/to/gemma.gguf }` to have Cicero launch one locally. `llama-server` also supports GBNF/json-schema constrained decoding.
 
-When `host` is a non-local address Cicero connects directly and does **not** launch a local server for that backend. Omit `host` (or use `localhost`) to keep the model on the same machine. For Home Assistant voice servers, use the [Wyoming backends](superpowers/wyoming-integration.md) instead.
+When `host` is a non-local address Cicero connects directly and does **not** launch a local server for that backend. Omit `host` (or use `localhost`) to keep the model on the same machine. For Home Assistant voice servers, use the [Wyoming backends](https://github.com/5uck1ess/cicero/blob/main/docs/superpowers/wyoming-integration.md) instead.
 
 ## CLI reference
 

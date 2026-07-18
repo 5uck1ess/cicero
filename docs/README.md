@@ -8,7 +8,7 @@ are provenance, not guidance.
 
 | Read | For |
 |---|---|
-| [Project README](../README.md) | What Cicero is, what it feels like, and what you need |
+| [Project README](/) | What Cicero is, what it feels like, and what you need |
 | [Architecture](architecture.md) | The three runtime shapes and how a spoken turn flows through them |
 | [Why not full-duplex](duplex.md) | The core design decision: honest turn-taking with fast barge-in |
 | [The office](office.md) | Lanes: several agents with their own voices behind one call |
@@ -19,7 +19,7 @@ are provenance, not guidance.
 |---|---|
 | [Setup](setup.md) | The canonical install path — prerequisites to first spoken reply, per platform |
 | [Choosing a brain](brains.md) | Which agent to plug in (Claude Code, Codex, Gemini, ACP, any OpenAI-compatible endpoint) and how |
-| [Configuration](configuration.md) | Deployment tiers, the config schema, quick intents, custom voice actions — with [`config.yaml.example`](../config.yaml.example) as the annotated reference |
+| [Configuration](configuration.md) | Deployment tiers, the config schema, quick intents, custom voice actions — with [`config.yaml.example`](https://github.com/5uck1ess/cicero/blob/main/config.yaml.example) as the annotated reference |
 
 ## Operate it
 
@@ -31,7 +31,7 @@ are provenance, not guidance.
 | [Turn detection](turn-detection.md) | Semantic end-of-turn (Smart-Turn): what it fixes and how to enable it |
 | [Voice cloning](voice-cloning.md) | Giving Cicero (or a lane) any voice from one reference clip |
 | [Notifications](notifications.md) | Cicero speaking up on its own: Telegram, briefings, schedules, quiet hours |
-| [Telegram calls](../sidecars/telegram-call/README.md) | The phone-call sidecar: talk to your agent from anywhere |
+| [Telegram calls](https://github.com/5uck1ess/cicero/blob/main/sidecars/telegram-call/README.md) | The phone-call sidecar: talk to your agent from anywhere |
 | [Security](security.md) | Threat model, authentication, egress rules — read before exposing anything beyond localhost |
 | [What leaves the box](data-flows.md) | The complete data-flow map: what stays local, what's opt-in, and what Cicero never does |
 
@@ -41,7 +41,7 @@ are provenance, not guidance.
 |---|---|
 | [Choosing a brain → custom drivers](brains.md) | The three tiers of adding an agent, from zero-code to a small adapter |
 | [Configuration → quick intents](configuration.md#quick-intents--your-own-zero-latency-phrases) | Your own zero-latency phrases and voice actions, pure YAML |
-| [Python model servers](../requirements/README.md) | How the speech sidecars are provisioned |
+| [Python model servers](https://github.com/5uck1ess/cicero/blob/main/requirements/README.md) | How the speech sidecars are provisioned |
 
 ## History (dated records)
 

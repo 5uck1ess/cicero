@@ -103,7 +103,7 @@ each one sends:
   notes to `api.telegram.org` via your bot token; replies come back over
   the same Bot API. Off until a token and chat id are configured.
 - **Live calls** (the optional [telegram-call
-  sidecar](../sidecars/telegram-call/README.md)): both directions of call
+  sidecar](https://github.com/5uck1ess/cicero/blob/main/sidecars/telegram-call/README.md)): both directions of call
   audio through Telegram's MTProto/WebRTC infrastructure, on a userbot
   session you provision. STT/TTS computation stays local; the sidecar talks
   to the daemon only over loopback. A separate service, off unless you

@@ -732,6 +732,9 @@ export class CiceroDaemon {
     this.router = createRouter(this.config, this.providers.llm);
     this.brain = createBrain(this.config, this.terminal, {
       onNudgeReply: (text) => { void this.deliverProactiveReply(text); },
+      onConfirmationPending: (summary, nonce) => {
+        this.webVoice?.confirmPending(summary, nonce);
+      },
       dialBackControl: true,
     });
     this.speaker = createSpeaker(this.config, this.providers.tts, audioPlayer);
@@ -1262,6 +1265,7 @@ export class CiceroDaemon {
         readiness: () => this.running
           ? { ready: true }
           : { ready: false, reason: "daemon startup or shutdown in progress" },
+        confirmations: this.brain,
         onHealth: async (rows, options) => {
           try {
             options?.signal?.throwIfAborted();

@@ -1,6 +1,6 @@
 # Configuration
 
-Config lives at `~/.cicero/config.yaml`. CLI flags override config file values. Start from [`config.yaml.example`](../config.yaml.example) — it documents every block — and run `cicero doctor` after editing to verify the whole chain.
+Config lives at `~/.cicero/config.yaml`. CLI flags override config file values. Start from [`config.yaml.example`](https://github.com/5uck1ess/cicero/blob/main/config.yaml.example) — it documents every block — and run `cicero doctor` after editing to verify the whole chain.
 
 ## Deployment tier (one line, everything else inferred)
 
