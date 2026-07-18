@@ -59,13 +59,14 @@ off the network entirely. Details in [security](security.md).
 
 ## First-run downloads
 
-Two things are fetched from third-party hosts once, then cached and served
-locally forever:
+Two categories of assets are fetched from third-party hosts once, then
+cached and served locally forever:
 
-- **Model weights** from Hugging Face on first model load — Whisper
-  (CTranslate2), Kokoro, Smart-Turn. This is an unauthenticated download;
-  no audio or conversation data is sent. Pre-seed the Hugging Face cache to
-  run air-gapped.
+- **Model weights** from Hugging Face, on first load of whichever local
+  backends you enable — Whisper (CTranslate2), Kokoro, Smart-Turn, the
+  emotion2vec tone model, and likewise for other local model backends.
+  These are unauthenticated downloads; no audio or conversation data is
+  sent. Pre-seed the Hugging Face cache to run air-gapped.
 - **Browser VAD assets** (Silero VAD + onnxruntime-web) from the jsDelivr
   CDN into `~/.cicero/web-voice/vad/`, pinned by version, size, and sha256,
   then served same-origin — the voice page never touches a CDN at runtime.
