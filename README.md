@@ -6,6 +6,10 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://5uck1ess.github.io/cicero/"><b>📖 Documentation</b></a>
+</p>
+
 **Cicero is a self-hosted voice interface for coding agents: you speak, it answers out loud, and your agent does the actual work.** Install it next to the agent you already use — Claude Code, Codex, Gemini, an [ACP](https://agentclientprotocol.com) harness like [hermes](https://hermes-agent.nousresearch.com), or any OpenAI-compatible endpoint — then talk to that agent from any browser on your network — or, with the optional Telegram sidecar, over a real phone call. Say *"fix the failing auth test and open a PR"*; Cicero acknowledges in about a second, the work happens in the background (commands you've gated, like a `git push`, need your spoken yes), and it tells you when the PR is up. With local providers, your audio never leaves your machine.
 
 ## What it feels like
@@ -207,12 +211,20 @@ a live, interruptible spoken conversation, not transcribed voice messages.
 
 ## Docs
 
-The documentation is organized by what you're trying to do — **[start at the
-docs map](docs/README.md)**: understand it, have your first conversation,
-operate it, extend it. The most-reached-for guides:
-[setup](docs/setup.md) · [brains](docs/brains.md) ·
-[web voice](docs/web-voice.md) · [the office](docs/office.md) ·
-[notifications](docs/notifications.md) · [security](docs/security.md)
+The full documentation site is at
+**[5uck1ess.github.io/cicero](https://5uck1ess.github.io/cicero/)**, organized
+by what you're trying to do — **[start at the docs
+map](https://5uck1ess.github.io/cicero/documentation)**: understand it, have
+your first conversation, operate it, extend it. The most-reached-for guides:
+[setup](https://5uck1ess.github.io/cicero/setup) ·
+[brains](https://5uck1ess.github.io/cicero/brains) ·
+[web voice](https://5uck1ess.github.io/cicero/web-voice) ·
+[the office](https://5uck1ess.github.io/cicero/office) ·
+[notifications](https://5uck1ess.github.io/cicero/notifications) ·
+[security](https://5uck1ess.github.io/cicero/security)
+
+The same pages are browsable as markdown in-repo under
+[`docs/`](docs/README.md).
 
 ---
 
