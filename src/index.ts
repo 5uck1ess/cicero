@@ -201,6 +201,20 @@ program
     }
   });
 
+program
+  .command("pair")
+  .description("Pair a phone with web voice using a stable token and terminal QR code")
+  .option("--no-token-in-qr", "Omit the credential from the QR and print it separately")
+  .action(async (opts: { tokenInQr: boolean }) => {
+    try {
+      const { runPair } = await import("./cli/pair");
+      await runPair({ tokenInQr: opts.tokenInQr });
+    } catch (error: unknown) {
+      console.error(`Could not pair phone: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
+  });
+
 // The health lane's record: log by voice (through the health lane, which runs
 // these), read trends, feed the morning briefing. Plain-text output on
 // purpose — it's consumed by an agent and often spoken.

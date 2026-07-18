@@ -78,7 +78,28 @@ cicero start
 # → 🎙️  Web voice server on https://0.0.0.0:8090 (token required)
 ```
 
-### 6. Say this, expect this
+### 6. Pair your phone
+
+With the daemon running, use the fast path:
+
+```bash
+cicero pair
+```
+
+The command ensures `web_voice.token` is a stable random credential, prints the
+phone URL, and renders the same URL as a terminal QR code. If it creates or
+replaces the token, restart the daemon once and re-run `cicero pair`. The QR
+contains the live credential; use `cicero pair --no-token-in-qr` to scan only
+the address and type the separately printed token on the phone.
+
+When no `web_voice.tunnel` block is configured, `pair` prints the exact
+one-line block to add but does not make that second config change. With a
+daemon-owned tunnel, the published tunnel URL wins over the LAN URL.
+Cloudflared quick-tunnel URLs change on every daemon run, so re-run `pair` after
+each restart; Tailscale hostnames are stable. The manual URL and certificate
+flow below remains available.
+
+### 7. Say this, expect this
 
 Open `https://<box-ip>:8090/?token=<token>`, accept the self-signed certificate
 once, and click **Start conversation** (the page loads with the conversation
@@ -346,6 +367,8 @@ cicero start --no-servers            # keyword routing only, no model servers
 cicero stop                          # stop the daemon
 cicero status                        # bounded effective-config/runtime snapshot
 cicero doctor                        # check every configured backend, print fixes
+cicero pair                          # print the phone URL and credential-bearing QR
+cicero pair --no-token-in-qr         # scan the URL, then type the token separately
 
 # Utility
 cicero speak "Hello from Cicero"     # speak arbitrary text

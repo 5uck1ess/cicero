@@ -31,6 +31,49 @@ function healthyTerminal(titles: string[]): TerminalAdapter {
 }
 
 describe("configured CLI status", () => {
+  test("renders published pairing state without ever surfacing a credential", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.headless = true;
+      raw.brain = { backend: "acp", mode: "subprocess", binary: "hermes" };
+    });
+    const lines = await collectStatus(config, {
+      inspectDaemon: () => Promise.resolve({ kind: "absent" }),
+      probe: () => Promise.resolve(true),
+      which: () => "/mock/binary",
+      readPairingState: () => ({
+        scheme: "https",
+        port: 8090,
+        lanHost: "192.168.1.20",
+        tunnelProvider: "cloudflared",
+        tunnelUrl: "https://random.trycloudflare.com",
+        startedAt: "2026-07-18T12:00:00.000Z",
+        pid: 55,
+      }),
+    });
+    const output = renderStatus(lines);
+    expect(lines.find((line) => line.name === "Phone pairing")).toEqual({
+      name: "Phone pairing",
+      level: "ok",
+      detail: "cloudflared tunnel · URL published",
+    });
+    expect(output).not.toContain("token");
+    expect(output).not.toContain("random.trycloudflare.com");
+  });
+
+  test("omits phone pairing status when no live state is published", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.headless = true;
+      raw.brain = { backend: "acp", mode: "subprocess", binary: "hermes" };
+    });
+    const lines = await collectStatus(config, {
+      inspectDaemon: () => Promise.resolve({ kind: "absent" }),
+      probe: () => Promise.resolve(true),
+      which: () => "/mock/binary",
+      readPairingState: () => null,
+    });
+    expect(lines.some((line) => line.name === "Phone pairing")).toBe(false);
+  });
+
   test("reports resolved remote backends and skips irrelevant terminal and hotkey checks", async () => {
     const config = runtimeConfig((raw) => {
       raw.headless = true;

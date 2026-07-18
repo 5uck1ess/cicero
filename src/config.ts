@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { randomUUID } from "node:crypto";
 import { join, dirname } from "path";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parse as parseYaml, parseDocument as parseYamlDocument, stringify as stringifyYaml } from "yaml";
 import type { CiceroConfig, ActionConfig, SidecarConfig } from "./types";
 import type { STTProviderConfig } from "./backends/stt/provider";
 import type { TTSProviderConfig } from "./backends/tts/provider";
@@ -20,6 +20,7 @@ import {
   ensurePrivateFileSync,
 } from "./platform/secure-storage";
 import { voiceProviderContractForBackend } from "./voice/provider-contract";
+import { webVoiceTokenProblem } from "./web-voice/startup-policy";
 
 const CONFIG_FILE = "config.yaml";
 const ACTIONS_FILE = "actions.yaml";
@@ -488,7 +489,10 @@ export class RuntimeConfig {
  * than at module load — lets tests point at a config-free directory to exercise
  * built-in defaults without depending on the developer's real ~/.cicero.
  */
-export function loadConfig(flags: CLIFlags = {}, opts: { home?: string } = {}): RuntimeConfig {
+export function loadConfig(
+  flags: CLIFlags = {},
+  opts: { home?: string; allowInvalidWebVoiceToken?: boolean } = {},
+): RuntimeConfig {
   const home = opts.home ?? ciceroHome();
   ensurePrivateDirectorySync(home);
   const configPath = join(home, CONFIG_FILE);
@@ -547,7 +551,16 @@ export function loadConfig(flags: CLIFlags = {}, opts: { home?: string } = {}): 
   // --agent-first/--no-agent-first routes all conversation to the brain, for A/B.
   if (flags.agentFirst !== undefined) config.brain.agent_first = flags.agentFirst;
 
-  validateRuntimeConfig(config, configPath);
+  const configuredToken = config.web_voice?.token;
+  const ignoreTokenProblem = opts.allowInvalidWebVoiceToken === true
+    && configuredToken !== undefined
+    && webVoiceTokenProblem(configuredToken) !== null;
+  if (ignoreTokenProblem) delete config.web_voice!.token;
+  try {
+    validateRuntimeConfig(config, configPath);
+  } finally {
+    if (ignoreTokenProblem) config.web_voice!.token = configuredToken;
+  }
   return new RuntimeConfig(config);
 }
 
@@ -622,6 +635,75 @@ export function updateConfigFields(
   const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
   try {
     writeFileSync(tmp, stringifyYaml(merged), { flag: "wx", mode: PRIVATE_FILE_MODE });
+    ensurePrivateFileSync(tmp);
+    renameSync(tmp, configPath);
+    ensurePrivateFileSync(configPath);
+  } catch (error: unknown) {
+    try { unlinkSync(tmp); } catch { /* absent after rename, or best-effort cleanup */ }
+    throw error;
+  }
+}
+
+/**
+ * Persist only `web_voice.token` without reserializing the rest of config.yaml.
+ * The common block-style form is edited line-by-line so comments and layout are
+ * byte-for-byte preserved; unusual YAML shapes fall back to yaml's comment-aware
+ * document editor. The final write uses the same private atomic path as other
+ * config mutations.
+ */
+export function setWebVoiceToken(
+  token: string,
+  configPath: string = join(ciceroHome(), CONFIG_FILE),
+): void {
+  const problem = webVoiceTokenProblem(token);
+  if (problem) throw new Error(`web_voice.token ${problem}`);
+  ensurePrivateDirectorySync(dirname(configPath));
+  const original = ensurePrivateFileIfExistsSync(configPath)
+    ? readFileSync(configPath, "utf8")
+    : "";
+  let updated: string;
+  const lines = original.split("\n");
+  const webVoiceLine = lines.findIndex((line) => /^web_voice\s*:\s*(?:#.*)?\r?$/.test(line));
+  if (webVoiceLine >= 0) {
+    let blockEnd = lines.length;
+    for (let index = webVoiceLine + 1; index < lines.length; index += 1) {
+      const line = lines[index]!;
+      if (line.trim() === "" || /^\s+#/.test(line)) continue;
+      if (!/^\s/.test(line)) {
+        blockEnd = index;
+        break;
+      }
+    }
+    const tokenLine = lines.findIndex((line, index) => (
+      index > webVoiceLine
+      && index < blockEnd
+      && /^\s+token\s*:/.test(line)
+    ));
+    if (tokenLine >= 0) {
+      const match = lines[tokenLine]!.match(/^(\s+token\s*:\s*)([^#\r]*?)(\s+#.*)?(\r?)$/);
+      if (!match) throw new Error(`Refusing to update ${configPath}: web_voice.token uses an unsupported YAML form`);
+      lines[tokenLine] = `${match[1]}${JSON.stringify(token)}${match[3] ?? ""}${match[4] ?? ""}`;
+    } else {
+      const indentation = lines
+        .slice(webVoiceLine + 1, blockEnd)
+        .map((line) => line.match(/^(\s+)\S/))
+        .find((match) => match)?.[1] ?? "  ";
+      const carriageReturn = lines[webVoiceLine]!.endsWith("\r") ? "\r" : "";
+      lines.splice(webVoiceLine + 1, 0, `${indentation}token: ${JSON.stringify(token)}${carriageReturn}`);
+    }
+    updated = lines.join("\n");
+  } else {
+    const document = parseYamlDocument(original || "{}\n");
+    if (document.errors.length > 0) {
+      throw new Error(`Refusing to update ${configPath}: the existing file is not valid YAML`);
+    }
+    document.setIn(["web_voice", "token"], token);
+    updated = String(document);
+  }
+
+  const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(tmp, updated, { flag: "wx", mode: PRIVATE_FILE_MODE });
     ensurePrivateFileSync(tmp);
     renameSync(tmp, configPath);
     ensurePrivateFileSync(configPath);

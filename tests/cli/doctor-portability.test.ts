@@ -196,6 +196,41 @@ describe("doctor setup hints", () => {
     }
   });
 
+  test("checks configured tunnel providers through the injected binary resolver", async () => {
+    globalThis.fetch = (async () => new Response("down", { status: 503 })) as typeof fetch;
+    const base = {
+      ...structuredClone(DEFAULT_CONFIG),
+      headless: true,
+      brain: { backend: "ollama" as const },
+      web_voice: {
+        enabled: true,
+        token: "doctor-test-token-long-enough",
+        tls: { enabled: false },
+        tunnel: { provider: "auto" as const },
+      },
+    };
+    const requested: string[] = [];
+    const found = await collectChecks(new RuntimeConfig(base), {
+      platform: "linux",
+      which: (binary) => {
+        requested.push(binary);
+        return binary === "cloudflared" ? "/usr/bin/cloudflared" : null;
+      },
+    });
+    expect(requested).toContain("tailscale");
+    expect(requested).toContain("cloudflared");
+    expect(found.find((check) => check.name === "web_voice tunnel")?.level).toBe("ok");
+
+    const missing = await collectChecks(new RuntimeConfig({
+      ...base,
+      web_voice: { ...base.web_voice, tunnel: { provider: "tailscale" } },
+    }), { platform: "win32", which: () => null });
+    expect(missing.find((check) => check.name === "web_voice tunnel")).toMatchObject({
+      level: "fail",
+      hint: "winget install Tailscale.Tailscale",
+    });
+  });
+
   test("requires ffmpeg when the configured TTS graph supports voice provisioning", async () => {
     try {
       globalThis.fetch = (async () => new Response("down", { status: 503 })) as typeof fetch;
