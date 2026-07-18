@@ -28,8 +28,9 @@ the complete map.
 
 The daemon spawns the model sidecars itself and pins them to loopback; the
 HTTP client that talks to them defaults to `localhost`
-(`src/backends/net.ts`). Audio bytes and transcripts never touch a network
-interface in this configuration.
+(`src/backends/net.ts`). Audio bytes never touch a network interface in
+this configuration, and transcripts leave it only as conversation input to
+the brain you chose — which is the next paragraph.
 
 **About brains, spelled out:** Cicero hands the brain nothing beyond your
 transcribed words, over stdio, on your machine. What the brain does next
@@ -104,7 +105,9 @@ each one sends:
 - No telemetry, analytics, usage statistics, or crash reporting.
 - No update checks, version pings, or launch beacons.
 - No accounts, and no Cicero-owned backend to have an account on.
-- No egress that isn't attributable to a config key you set, listed above.
+- No egress beyond what this page lists: every off-box path is either a
+  one-time first-run asset download, the brain's own vendor traffic, or
+  attributable to a config key you set.
 
 If you find a network touchpoint this page doesn't account for, that's a
 bug — [report it](security.md#reporting).
