@@ -2,5 +2,5 @@
 # declared by the upstream package. CI installs this file for its import smoke.
 fastapi>=0.115,<1
 uvicorn>=0.51.0,<1
-prometheus-client>=0.20,<1
+prometheus-client>=0.25.0,<1
 pyyaml>=6.0.3,<7
