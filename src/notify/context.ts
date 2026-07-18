@@ -14,3 +14,18 @@ export function notificationTurnContext(text: string, at: Date): string {
     "If the user follows up without naming a topic, assume they mean the most recent notification."
   );
 }
+
+/** BrainTurnContext's per-entry bound; keep briefing wrappers within it. */
+export const MAX_TURN_CONTEXT_ENTRY_CHARS = 8_000;
+
+/** One-shot brain context for a delivered morning briefing. */
+export function briefingTurnContext(text: string, at: Date): string {
+  const prefix = `[Morning briefing delivered at ${at.toISOString()}] `;
+  const suffix = "\nIf the user follows up without naming a topic, assume they mean the most recent morning briefing.";
+  const full = `${prefix}${text}${suffix}`;
+  if (full.length <= MAX_TURN_CONTEXT_ENTRY_CHARS) return full;
+
+  const marker = "[earlier briefing content truncated for brain context]\n";
+  const available = MAX_TURN_CONTEXT_ENTRY_CHARS - prefix.length - marker.length - suffix.length;
+  return `${prefix}${marker}${text.slice(-Math.max(0, available))}${suffix}`;
+}

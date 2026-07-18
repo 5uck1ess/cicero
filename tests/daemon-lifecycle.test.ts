@@ -3,7 +3,14 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config";
-import { CiceroDaemon, createRecordedWebTurn, recordParkedBriefingVoiceOutcome } from "../src/daemon";
+import {
+  CiceroDaemon,
+  createRecordedWebTurn,
+  deliverBriefingTelegramChunks,
+  injectDeliveredBriefingContext,
+  recordParkedBriefingVoiceOutcome,
+} from "../src/daemon";
+import { TELEGRAM_TEXT_MAX_CHARS } from "../src/notify/briefing";
 import { OvernightStore } from "../src/notify/overnight-store";
 import type { WebReplySink } from "../src/web-voice/turn";
 import type { HistoryTurn } from "../src/web-voice/history";
@@ -19,6 +26,42 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 }
 
 describe("CiceroDaemon lifecycle", () => {
+  test("briefing Telegram delivery accepts only after every chunk is accepted", async () => {
+    const digest = `☀️ Morning briefing\n\n${"item line\n".repeat(1_000)}`;
+    const sent: string[] = [];
+    const outcome = await deliverBriefingTelegramChunks(digest, async (chunk) => {
+      sent.push(chunk);
+      return true;
+    });
+
+    expect(outcome).toBe("accepted");
+    expect(sent.length).toBeGreaterThan(1);
+    expect(sent.every((chunk) => chunk.length <= TELEGRAM_TEXT_MAX_CHARS)).toBe(true);
+  });
+
+  test("briefing Telegram delivery stops on a partial chunk failure and reports failed", async () => {
+    const digest = `☀️ Morning briefing\n\n${"item line\n".repeat(1_500)}`;
+    let attempts = 0;
+    const outcome = await deliverBriefingTelegramChunks(digest, async () => {
+      attempts++;
+      return attempts !== 2;
+    });
+
+    expect(outcome).toBe("failed");
+    expect(attempts).toBe(2);
+  });
+
+  test("briefing context is injected after accepted delivery, but not failed delivery", () => {
+    const contexts: string[] = [];
+    const at = new Date("2026-07-18T12:30:00.000Z");
+    injectDeliveredBriefingContext((context) => contexts.push(context), "☀️ Morning briefing\n\n• PR ready", true, at);
+    injectDeliveredBriefingContext((context) => contexts.push(context), "failed digest", false, at);
+
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]).toContain("PR ready");
+    expect(contexts[0]).toContain("Morning briefing delivered at 2026-07-18T12:30:00.000Z");
+  });
+
   test("aborting during a parked briefing callback write leaves the overnight snapshot unacked", async () => {
     const root = mkdtempSync(join(tmpdir(), "cicero-daemon-briefing-callback-abort-"));
     const store = new OvernightStore(join(root, "overnight.json"), () => 1_700_000_000_000, () => "item-1");

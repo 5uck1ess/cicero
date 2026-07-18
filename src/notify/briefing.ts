@@ -1,5 +1,10 @@
 import type { KanbanTask } from "./kanban-watch";
 
+/** Telegram's maximum plain-text sendMessage payload, measured like String.slice(). */
+export const TELEGRAM_TEXT_MAX_CHARS = 4_096;
+
+const BRIEFING_CONTINUATION_HEADER = "☀️ Morning briefing";
+
 /**
  * The chief-of-staff pair: quiet hours park notifications overnight instead of
  * pinging, and the morning briefing delivers them in one digest — "while you
@@ -121,6 +126,99 @@ export function composeBriefingDigest(
     return `${header}\n\n${quiet}`;
   }
   return `${header}\n\n${sections.join("\n\n")}`;
+}
+
+/**
+ * Split a composed digest into Telegram-safe messages. Whole sections are kept
+ * together when possible; only an oversized section falls back to line/item
+ * boundaries, and only a single over-limit line is hard-split.
+ */
+export function chunkBriefingDigest(digest: string): string[] {
+  if (!digest) return [];
+  if (digest.length <= TELEGRAM_TEXT_MAX_CHARS) return [digest];
+
+  // Continuation-header length depends on the final denominator. Starting at
+  // two and repacking converges monotonically whenever another digit is needed.
+  let total = 2;
+  for (;;) {
+    const chunks = packBriefingChunks(digest, total);
+    if (chunks.length === total) return chunks;
+    total = chunks.length;
+  }
+}
+
+function packBriefingChunks(digest: string, total: number): string[] {
+  const blocks = digest.split("\n\n");
+  const chunks: string[] = [];
+  let content = "";
+
+  const prefix = (index: number): string => index === 0
+    ? ""
+    : `${BRIEFING_CONTINUATION_HEADER} (${index + 1}/${total})\n\n`;
+  const contentLimit = (): number => TELEGRAM_TEXT_MAX_CHARS - prefix(chunks.length).length;
+  const flush = (): void => {
+    if (!content) return;
+    chunks.push(`${prefix(chunks.length)}${content}`);
+    content = "";
+  };
+
+  const appendHardSplitLine = (line: string, initialSeparator: string): void => {
+    let remaining = line;
+    let separator = initialSeparator;
+    while (remaining.length > 0) {
+      const available = contentLimit() - content.length - separator.length;
+      if (remaining.length <= available) {
+        content += separator + remaining;
+        return;
+      }
+      if (available <= 1) {
+        flush();
+        separator = "";
+        continue;
+      }
+      // The ellipsis makes the otherwise destructive hard split visible.
+      content += separator + remaining.slice(0, available - 1) + "…";
+      remaining = remaining.slice(available - 1);
+      flush();
+      separator = "";
+    }
+  };
+
+  blocks.forEach((block, blockIndex) => {
+    const separator = content ? "\n\n" : "";
+    if (content.length + separator.length + block.length <= contentLimit()) {
+      content += separator + block;
+      return;
+    }
+
+    // Prefer a clean section boundary. The first digest header stays attached
+    // to at least part of an oversized first section instead of standing alone.
+    const currentIsOnlyDigestHeader = blockIndex === 1 && chunks.length === 0;
+    if (content && !currentIsOnlyDigestHeader) flush();
+
+    const freshSeparator = content ? "\n\n" : "";
+    if (content.length + freshSeparator.length + block.length <= contentLimit()) {
+      content += freshSeparator + block;
+      return;
+    }
+
+    const lines = block.split("\n");
+    lines.forEach((line, lineIndex) => {
+      const lineSeparator = content
+        ? (lineIndex === 0 ? "\n\n" : "\n")
+        : "";
+      if (content.length + lineSeparator.length + line.length <= contentLimit()) {
+        content += lineSeparator + line;
+        return;
+      }
+      const keepDigestHeader = blockIndex === 1 && lineIndex === 0 && chunks.length === 0;
+      if (content && !keepDigestHeader) flush();
+      appendHardSplitLine(line, keepDigestHeader ? lineSeparator : "");
+    });
+  });
+
+  flush();
+  return chunks;
 }
 
 /** Prompt for the call-minutes summarizer — turns a transcript into short notes. */

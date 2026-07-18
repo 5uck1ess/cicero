@@ -60,9 +60,9 @@ import { makeSpeculator } from "./web-voice/speculative";
 import { MAX_TURN_AUDIO_BYTES } from "./web-voice/protocol";
 import { TurnHistory } from "./web-voice/history";
 import { classifyCallIntent, sendTelegramVoice, sendTelegramText, startTelegramUpdatePoller, telegramToken } from "./notify/telegram";
-import { notificationTurnContext } from "./notify/context";
+import { briefingTurnContext, notificationTurnContext } from "./notify/context";
 import { KanbanWatcher, listViaCli, nudgeLine, spokenLine, taskLinkViaCli, type KanbanTask } from "./notify/kanban-watch";
-import { inQuietHours, composeBriefing, composeBriefingDigest, minutesPrompt, worthMinutes, callMinutesThresholdMs, dayOf } from "./notify/briefing";
+import { inQuietHours, composeBriefing, composeBriefingDigest, chunkBriefingDigest, minutesPrompt, worthMinutes, callMinutesThresholdMs, dayOf } from "./notify/briefing";
 import { PromptScheduler, scheduleLabel } from "./notify/schedules";
 import {
   BriefingScheduler,
@@ -84,6 +84,35 @@ import { healthLog } from "./cli/health";
 export interface RecordedWebTurn {
   sink: WebReplySink;
   drain: () => Promise<void>;
+}
+
+export type BriefingTelegramDeliveryOutcome = "accepted" | "failed" | "aborted";
+
+/** Send every digest chunk in order and expose one scheduler-facing outcome. */
+export async function deliverBriefingTelegramChunks(
+  digest: string,
+  send: (chunk: string) => Promise<boolean>,
+  signal?: AbortSignal,
+): Promise<BriefingTelegramDeliveryOutcome> {
+  for (const chunk of chunkBriefingDigest(digest)) {
+    if (signal?.aborted) return "aborted";
+    try {
+      if (!await send(chunk)) return signal?.aborted ? "aborted" : "failed";
+    } catch {
+      return signal?.aborted ? "aborted" : "failed";
+    }
+  }
+  return signal?.aborted ? "aborted" : "accepted";
+}
+
+/** Mirror a delivered briefing into the brain's one-shot turn context. */
+export function injectDeliveredBriefingContext(
+  injectContext: (context: string) => void,
+  digest: string,
+  delivered: boolean,
+  at: Date,
+): void {
+  if (delivered) injectContext(briefingTurnContext(digest, at));
 }
 
 export interface OperatorChatTurnDeps {
@@ -1454,15 +1483,16 @@ export class CiceroDaemon {
 
               const overnight = snapshot.map((item) => item.text);
               const day = dayOf(new Date(), tz);
+              const digest = composeBriefingDigest(overnight, board, health, day);
               const tg = this.config.notify?.telegram;
               const channels: NonNullable<BriefingRunResult["channels"]> = {};
               const telegramDelivery = tg
-                ? sendTelegramText(tg, composeBriefingDigest(overnight, board, health, day), undefined, {}, signal)
-                    .then((accepted) => {
-                      channels.telegram = accepted && !signal.aborted
-                        ? "accepted"
-                        : signal.aborted ? "aborted" : "failed";
-                    })
+                ? deliverBriefingTelegramChunks(
+                    digest,
+                    (chunk) => sendTelegramText(tg, chunk, undefined, {}, signal),
+                    signal,
+                  )
+                    .then((outcome) => { channels.telegram = outcome; })
                     .catch(() => { channels.telegram = "failed"; })
                 : Promise.resolve();
               const voiceDelivery = briefing.call
@@ -1491,7 +1521,15 @@ export class CiceroDaemon {
               }
               const outcomes = Object.values(channels);
               const accepted = outcomes.filter((outcome) => outcome === "accepted").length;
-              if (accepted > 0) await overnightStore.ack(snapshot.map((item) => item.id));
+              if (accepted > 0) {
+                injectDeliveredBriefingContext(
+                  (context) => this.brain.injectContext(context),
+                  digest,
+                  true,
+                  new Date(),
+                );
+                await overnightStore.ack(snapshot.map((item) => item.id));
+              }
               if (signal.aborted && accepted === 0) signal.throwIfAborted();
 
               const phase = accepted === 0 ? "failed" : accepted === outcomes.length ? "delivered" : "partial";
