@@ -33,11 +33,14 @@ this configuration, and transcripts leave it only as conversation input to
 the brain you chose — which is the next paragraph.
 
 **About brains, spelled out:** in an ordinary voice turn, Cicero hands the
-brain your transcribed words and the session's own context (conversation
-history, delivered notification text) — over stdio, on your machine, and
-nothing gathered from elsewhere on the box. Computer use widens that to
-tool output only under the opt-in in the table below. What the brain does
-with its input is its own vendor relationship — Claude Code talks to Anthropic, Codex
+brain your transcribed words plus context assembled from Cicero's own
+state — conversation history, delivered notification text, an operational
+snapshot (health records, queued notifications, board and schedule state),
+and, when the tone sidecar is enabled, a voice-emotion tag. All of that is
+Cicero-owned session state; nothing is scraped from elsewhere on the box.
+Computer use widens the brain's input to tool output only under the
+opt-in in the table below. What the brain does with its input is its own
+vendor relationship — Claude Code talks to Anthropic, Codex
 talks to OpenAI, on their own accounts. Cicero adds no data to that
 exchange; it also can't subtract from it. A fully local brain (llama.cpp,
 Ollama, an ACP agent running a local model) keeps even the conversation
