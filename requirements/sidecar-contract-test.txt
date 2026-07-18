@@ -3,6 +3,6 @@
 fastapi>=0.115,<1
 uvicorn>=0.51.0,<1
 pydantic>=2.13.4,<3
-python-multipart>=0.0.20,<1
+python-multipart>=0.0.32,<1
 numpy>=1.26,<3
 soundfile>=0.14.0,<1

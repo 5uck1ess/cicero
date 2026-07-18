@@ -4,4 +4,4 @@ mlx-lm>=0.31.3,<0.32
 mlx-whisper>=0.4.0,<0.5
 fastapi>=0.115,<1
 uvicorn>=0.51.0,<1
-python-multipart>=0.0.20,<1
+python-multipart>=0.0.32,<1

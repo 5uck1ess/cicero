@@ -2,6 +2,6 @@
 faster-whisper>=1.1,<2
 fastapi>=0.115,<1
 uvicorn>=0.51.0,<1
-python-multipart>=0.0.20,<1
+python-multipart>=0.0.32,<1
 numpy>=1.26,<3
 soundfile>=0.14.0,<1
