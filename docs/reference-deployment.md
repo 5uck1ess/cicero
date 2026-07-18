@@ -9,7 +9,7 @@ upgrades.
 
 It **composes** the feature guides rather than repeating them: behavior and
 tuning live in [web voice](web-voice.md), [notifications](notifications.md),
-[the call sidecar](../sidecars/telegram-call/README.md), and
+[the call sidecar](https://github.com/5uck1ess/cicero/blob/main/sidecars/telegram-call/README.md), and
 [security](security.md). Everything here is generic — swap paths for your own.
 
 **Before you start:** run the first-conversation path by hand once, end to
@@ -29,7 +29,7 @@ need one home:
   and, if you deploy calls, the userbot API credentials and the caller
   allowlist (`CICERO_TG_ALLOWED`). The call listener fails closed without the
   allowlist. Names and details: [notifications](notifications.md) and the
-  [call sidecar README](../sidecars/telegram-call/README.md).
+  [call sidecar README](https://github.com/5uck1ess/cicero/blob/main/sidecars/telegram-call/README.md).
 - Those are the credentials *you* place. The runtime creates more of its own —
   the Telegram userbot session file, the sidecar hook token, agent settings
   copies — so treat `~/.cicero/` as credential-bearing wholesale. What must
@@ -70,7 +70,7 @@ systemctl --user enable --now telegram-call
 ```
 
 Provision the sidecar (venv, userbot session, allowlist) per its
-[README](../sidecars/telegram-call/README.md) *before* enabling the unit. The
+[README](https://github.com/5uck1ess/cicero/blob/main/sidecars/telegram-call/README.md) *before* enabling the unit. The
 sidecar reconnects to the daemon by itself when the daemon restarts.
 
 ## 4. Reaching you: texts, briefings, schedules

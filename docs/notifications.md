@@ -89,7 +89,7 @@ details are in the setup guide.
 
 No extra pipeline — which means the whole office works on a call too: say *"let me talk to the coder"* mid-call and the transfer happens with the voice change, same as in the browser.
 
-Full setup guide (second account, API credentials, login, account hardening, phone migrations): [`sidecars/telegram-call/README.md`](../sidecars/telegram-call/README.md).
+Full setup guide (second account, API credentials, login, account hardening, phone migrations): [`sidecars/telegram-call/README.md`](https://github.com/5uck1ess/cicero/blob/main/sidecars/telegram-call/README.md).
 
 ## The chief of staff: quiet hours, morning briefing, call minutes
 
