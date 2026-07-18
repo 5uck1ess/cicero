@@ -7,6 +7,7 @@ import {
   MAX_TURN_AUDIO_MS,
   MAX_NOTIFY_JSON_BYTES,
   MAX_CHAT_TEXT_CHARS,
+  MAX_CONFIRM_SUMMARY_CHARS,
   MAX_HEALTH_ROWS,
   MAX_CONCURRENT_WEB_JOBS,
   MAX_WEB_VOICE_CLIENTS,
@@ -88,6 +89,7 @@ function start(opts: {
   onTurnProbe?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onTurnProbe"]>;
   onSpeculate?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onSpeculate"]>;
   readiness?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["readiness"]>;
+  confirmations?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["confirmations"]>;
   shutdownDrainTimeoutMs?: number;
   vadDir?: string;
 } = {}): string {
@@ -109,6 +111,7 @@ function start(opts: {
     onTurnProbe: opts.onTurnProbe,
     onSpeculate: opts.onSpeculate,
     readiness: opts.readiness,
+    confirmations: opts.confirmations,
     shutdownDrainTimeoutMs: opts.shutdownDrainTimeoutMs,
     vadDir: opts.vadDir,
   });
@@ -140,6 +143,180 @@ function connect(base: string): Promise<WebSocket> {
     ws.onerror = () => { clearTimeout(timer); reject(new Error("socket open failed")); };
   });
 }
+
+function nextJson(
+  ws: WebSocket,
+  predicate: (message: Record<string, unknown>) => boolean = () => true,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const onMessage = (event: MessageEvent): void => {
+      if (typeof event.data !== "string") return;
+      const message = JSON.parse(event.data) as Record<string, unknown>;
+      if (!predicate(message)) return;
+      clearTimeout(timer);
+      ws.removeEventListener("message", onMessage);
+      resolve(message);
+    };
+    const timer = setTimeout(() => {
+      ws.removeEventListener("message", onMessage);
+      reject(new Error("websocket JSON timeout"));
+    }, 3_000);
+    ws.addEventListener("message", onMessage);
+  });
+}
+
+test("web confirmations: pending prompts broadcast with bounded summaries", async () => {
+  const nonce = "11111111-1111-4111-8111-111111111111";
+  const summary = "x".repeat(MAX_CONFIRM_SUMMARY_CHARS + 500);
+  const pending = [{ nonce, summary }];
+  const base = start({
+    confirmations: {
+      pendingConfirmations: () => pending,
+      resolvePendingConfirmation: () => false,
+    },
+  });
+  const ws = await connect(base);
+  try {
+    const request = nextJson(ws, (message) => message.type === "confirm_request");
+    expect(handle?.confirmPending(summary, nonce)).toBe(1);
+    expect(await request).toEqual({
+      type: "confirm_request",
+      nonce,
+      summary: summary.slice(0, MAX_CONFIRM_SUMMARY_CHARS),
+    });
+  } finally {
+    ws.close();
+  }
+});
+
+test("web confirmations: late join drains only confirmations still pending", async () => {
+  const expiredNonce = "22222222-2222-4222-8222-222222222222";
+  const liveNonce = "33333333-3333-4333-8333-333333333333";
+  let pending = [{ nonce: expiredNonce, summary: "expired" }];
+  pending = pending.filter((item) => item.nonce !== expiredNonce);
+  pending.push({ nonce: liveNonce, summary: "delete the live branch" });
+  const base = start({
+    confirmations: {
+      pendingConfirmations: () => pending,
+      resolvePendingConfirmation: () => false,
+    },
+  });
+  const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN);
+  try {
+    expect(await nextJson(ws, (message) => message.type === "confirm_request")).toEqual({
+      type: "confirm_request",
+      nonce: liveNonce,
+      summary: "delete the live branch",
+    });
+  } finally {
+    ws.close();
+  }
+});
+
+for (const approved of [true, false]) {
+  test(`web confirmations: confirm frame resolves ${approved ? "approve" : "deny"} and clears every client`, async () => {
+    const nonce = approved
+      ? "44444444-4444-4444-8444-444444444444"
+      : "55555555-5555-4555-8555-555555555555";
+    let pending = [{ nonce, summary: "guarded operation" }];
+    const resolutions: Array<{ approved: boolean; nonce: string }> = [];
+    const base = start({
+      confirmations: {
+        pendingConfirmations: () => pending,
+        resolvePendingConfirmation: (decision, suppliedNonce) => {
+          resolutions.push({ approved: decision, nonce: suppliedNonce });
+          if (suppliedNonce !== nonce || pending.length === 0) return false;
+          pending = [];
+          return true;
+        },
+      },
+    });
+    const first = await connectV2(base);
+    const second = await connectV2(base);
+    try {
+      const result = nextJson(first.ws, (message) => message.type === "confirm_result");
+      const firstCleared = nextJson(first.ws, (message) => message.type === "confirm_resolved");
+      const secondCleared = nextJson(second.ws, (message) => message.type === "confirm_resolved");
+      first.ws.send(JSON.stringify({ type: "confirm", sessionId: first.sessionId, nonce, approved }));
+      expect(await result).toEqual({
+        type: "confirm_result",
+        nonce,
+        ok: true,
+        approved,
+        sessionId: first.sessionId,
+        turnId: null,
+      });
+      expect(await Promise.all([firstCleared, secondCleared])).toEqual([
+        { type: "confirm_resolved", nonce, sessionId: first.sessionId, turnId: null },
+        { type: "confirm_resolved", nonce, sessionId: second.sessionId, turnId: null },
+      ]);
+      expect(resolutions).toEqual([{ approved, nonce }]);
+    } finally {
+      first.ws.close();
+      second.ws.close();
+    }
+  });
+}
+
+test("web confirmations: unknown nonce fails closed without throwing", async () => {
+  const liveNonce = "66666666-6666-4666-8666-666666666666";
+  const unknownNonce = "77777777-7777-4777-8777-777777777777";
+  const calls: string[] = [];
+  const base = start({
+    confirmations: {
+      pendingConfirmations: () => [{ nonce: liveNonce, summary: "guarded operation" }],
+      resolvePendingConfirmation: (_approved, nonce) => {
+        calls.push(nonce);
+        return false;
+      },
+    },
+  });
+  const ws = await connect(base);
+  try {
+    const result = nextJson(ws, (message) => message.type === "confirm_result");
+    ws.send(JSON.stringify({ type: "confirm", nonce: unknownNonce, approved: true }));
+    expect(await result).toEqual({ type: "confirm_result", nonce: unknownNonce, ok: false });
+    expect(calls).toEqual([unknownNonce]);
+  } finally {
+    ws.close();
+  }
+});
+
+test("web confirmations: malformed frames are rejected without invoking the brain", async () => {
+  const nonce = "88888888-8888-4888-8888-888888888888";
+  let calls = 0;
+  const base = start({
+    confirmations: {
+      pendingConfirmations: () => [{ nonce, summary: "guarded operation" }],
+      resolvePendingConfirmation: () => {
+        calls += 1;
+        return true;
+      },
+    },
+  });
+  const ws = await connect(base);
+  try {
+    const malformed = nextJson(ws, (message) => message.type === "confirm_result");
+    ws.send(JSON.stringify({ type: "confirm", nonce, approved: "yes" }));
+    expect(await malformed).toEqual({ type: "confirm_result", nonce, ok: false });
+    expect(calls).toBe(0);
+  } finally {
+    ws.close();
+  }
+});
+
+test("web confirmations: missing capability replies ok false", async () => {
+  const nonce = "99999999-9999-4999-8999-999999999999";
+  const base = start();
+  const ws = await connect(base);
+  try {
+    const unavailable = nextJson(ws, (message) => message.type === "confirm_result");
+    ws.send(JSON.stringify({ type: "confirm", nonce, approved: false }));
+    expect(await unavailable).toEqual({ type: "confirm_result", nonce, ok: false });
+  } finally {
+    ws.close();
+  }
+});
 
 test("/health needs no token", async () => {
   const base = start();
@@ -178,7 +355,11 @@ test("the page is served with a valid ?token", async () => {
   const base = start();
   const res = await fetch(base + "/?token=" + TOKEN);
   expect(res.status).toBe(200);
-  expect(await res.text()).toContain("Start conversation");
+  const page = await res.text();
+  expect(page).toContain("Start conversation");
+  expect(page).toContain('type: "confirm"');
+  expect(page).toContain('decisionButton("Approve", true');
+  expect(page).toContain('decisionButton("Deny", false');
   expect(res.headers.get("cache-control")).toBe("no-store");
   expect(res.headers.get("referrer-policy")).toBe("no-referrer");
   expect(res.headers.get("x-frame-options")).toBe("DENY");

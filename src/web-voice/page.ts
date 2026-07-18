@@ -66,6 +66,14 @@ export const PAGE = `<!doctype html>
   #notice.show { display:flex; }
   #notice a { color:#7dd3fc; font-weight:600; word-break:break-all; }
   #notice button { flex:none; background:none; border:0; color:#4b5f70; font-size:16px; cursor:pointer; padding:0 2px; line-height:1; }
+  #confirmations { display:flex; flex-direction:column; gap:8px; width:min(86vw,560px); max-height:30vh; overflow:auto; }
+  .confirm-card { display:flex; flex-direction:column; gap:10px; background:#0e2230; border:1px solid #1f4a5e; border-radius:10px; padding:12px; font-size:13px; color:#a5c8dc; line-height:1.45; }
+  .confirm-summary { white-space:pre-wrap; overflow-wrap:anywhere; }
+  .confirm-actions { display:flex; justify-content:flex-end; gap:8px; }
+  .confirm-actions button { border-radius:8px; padding:7px 12px; font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; }
+  .confirm-actions button:disabled { cursor:default; opacity:.5; }
+  .confirm-deny { border:1px solid #6e3030; background:#2b1518; color:#ffb4ae; }
+  .confirm-approve { border:1px solid #2ea043; background:#13351c; color:#a7e3b1; }
 </style>
 </head>
 <body class="pre">
@@ -105,6 +113,7 @@ export const PAGE = `<!doctype html>
   <div id="status"><span class="dot" id="dot"></span><span id="statusText">tap start to enable the mic…</span></div>
   <div id="debug"></div>
   <div class="hint" id="hint">Push-to-talk: hold <b>SPACE</b> (or press &amp; hold the orb) to talk — release to send.</div>
+  <div id="confirmations" aria-live="polite"></div>
   <div id="notice"><span id="noticeText"></span><button id="noticeClose" aria-label="dismiss">&times;</button></div>
 <script>
 // Token: the URL param wins and is remembered, so an installed PWA (whose
@@ -616,6 +625,50 @@ function handleNotify(msg) {
   enqueueAudio(buf);
 }
 
+const confirmationEl = document.getElementById("confirmations");
+const confirmationCards = new Map();
+function removeConfirmation(nonce) {
+  const card = confirmationCards.get(nonce);
+  if (!card) return;
+  card.remove();
+  confirmationCards.delete(nonce);
+}
+function clearConfirmations() {
+  confirmationCards.forEach((card) => card.remove());
+  confirmationCards.clear();
+}
+function showConfirmation(msg) {
+  if (typeof msg.nonce !== "string" || typeof msg.summary !== "string") return;
+  removeConfirmation(msg.nonce);
+  const card = document.createElement("div");
+  card.className = "confirm-card";
+  card.dataset.nonce = msg.nonce;
+  const summary = document.createElement("div");
+  summary.className = "confirm-summary";
+  summary.textContent = msg.summary;
+  const actions = document.createElement("div");
+  actions.className = "confirm-actions";
+  function decisionButton(label, approved, className) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.onclick = function () {
+      Array.from(actions.querySelectorAll("button")).forEach((item) => { item.disabled = true; });
+      try {
+        ws.send(JSON.stringify({ type: "confirm", sessionId: wsSessionId, nonce: msg.nonce, approved: approved }));
+      } catch (e) { removeConfirmation(msg.nonce); }
+    };
+    return button;
+  }
+  actions.appendChild(decisionButton("Deny", false, "confirm-deny"));
+  actions.appendChild(decisionButton("Approve", true, "confirm-approve"));
+  card.appendChild(summary);
+  card.appendChild(actions);
+  confirmationCards.set(msg.nonce, card);
+  confirmationEl.appendChild(card);
+}
+
 function handleVolumeControl(msg) {
   if (typeof msg.volume === "number") voiceGain = Math.max(0.2, Math.min(2.0, msg.volume));
   else voiceGain = Math.max(0.2, Math.min(2.0, voiceGain + (Number(msg.delta) || 0)));
@@ -640,6 +693,8 @@ function onWsMessage(e) {
     return;
   }
   if (!wsSessionId || msg.sessionId !== wsSessionId) return;
+  if (msg.type === "confirm_request") { showConfirmation(msg); return; }
+  if (msg.type === "confirm_result" || msg.type === "confirm_resolved") { removeConfirmation(msg.nonce); return; }
   if (msg.type === "notify") { handleNotify(msg); return; } // arrives any time, not just mid-turn
   if (msg.type === "history") { return; } // server replay ignored: each page load starts a fresh chat
   if (msg.type === "probe_on") { probeOn = true; return; } // server has an end-of-turn model
@@ -705,6 +760,7 @@ function connectWs() {
     setDot(false);
     if (ws !== sock) return;          // superseded by a newer socket — not ours to handle
     wsSessionId = ""; activeTurnId = null; captureTurnId = null;
+    clearConfirmations();
     if (state === "thinking" || state === "speaking") { stopPlayback(); setState("listening"); }
     if (convOn) scheduleReconnect(); else setStatus("disconnected");
   };
@@ -769,6 +825,7 @@ function stopConversation() {
   convOn = false; toggleLabel.textContent = "Start conversation"; toggle.classList.remove("on"); setDot(false);
   holding = false;
   notifyQueue = [];
+  clearConfirmations();
   releaseWakeLock();
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   reconnectAttempt = 0;
