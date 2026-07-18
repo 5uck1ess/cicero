@@ -51,9 +51,9 @@ on the box.
 The web-voice server binds `0.0.0.0` by default so a headless box is
 reachable from a phone browser on your network. That means mic audio and
 transcripts traverse your LAN when you use it — every turn and control
-surface requires the bearer token (only liveness probes and static client
-assets are unauthenticated), and by TLS that Cicero generates on first
-start:
+surface requires the bearer token (only liveness/readiness probes and
+static client assets are unauthenticated), and by TLS that Cicero
+generates on first start:
 it refuses to serve the authenticated API over plaintext HTTP on a
 non-loopback bind unless you explicitly opt out with
 `web_voice.tls.enabled: false`. Set `web_voice.host: 127.0.0.1` to keep it
