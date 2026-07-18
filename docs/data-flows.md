@@ -32,9 +32,12 @@ HTTP client that talks to them defaults to `localhost`
 this configuration, and transcripts leave it only as conversation input to
 the brain you chose — which is the next paragraph.
 
-**About brains, spelled out:** Cicero hands the brain nothing beyond your
-transcribed words, over stdio, on your machine. What the brain does next
-is its own vendor relationship — Claude Code talks to Anthropic, Codex
+**About brains, spelled out:** in an ordinary voice turn, Cicero hands the
+brain your transcribed words and the session's own context (conversation
+history, delivered notification text) — over stdio, on your machine, and
+nothing gathered from elsewhere on the box. Computer use widens that to
+tool output only under the opt-in in the table below. What the brain does
+with its input is its own vendor relationship — Claude Code talks to Anthropic, Codex
 talks to OpenAI, on their own accounts. Cicero adds no data to that
 exchange; it also can't subtract from it. A fully local brain (llama.cpp,
 Ollama, an ACP agent running a local model) keeps even the conversation
