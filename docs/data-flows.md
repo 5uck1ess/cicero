@@ -23,8 +23,8 @@ the complete map.
 | Microphone audio | Local STT sidecar over loopback (`servers/stt_faster_whisper_server.py`, spawned with `--host 127.0.0.1`) |
 | Synthesized speech | Local TTS sidecar over loopback (Kokoro by default) |
 | Turn detection & emotion audio | Local sidecars over loopback (Smart-Turn, SER) |
-| Conversation ↔ brain | Local subprocess over stdio (Claude Code, Codex, Gemini CLIs; ACP agents) |
-| Conversation history | `~/.cicero/` on disk, owner-only permissions, optional |
+| Conversation ↔ brain | Local subprocess over stdio (Claude Code, Codex, Gemini CLIs; ACP agents), or injection into a terminal tab on the same box (`tab-inject`) |
+| Conversation history | `~/.cicero/` on disk, one line per completed turn, owner-only permissions |
 
 The daemon spawns the model sidecars itself and pins them to loopback; the
 HTTP client that talks to them defaults to `localhost`
