@@ -33,3 +33,12 @@ updates:
       torch:
         patterns:
           - "torch*"
+    # torch is additionally pin-guarded: scripts/check-python-manifests.ts
+    # requires the manifests to resolve to its hardcoded torch/torchaudio
+    # pins, so a Dependabot PR that only edits requirements files can never
+    # pass CI (closed PR #28, which also paired torch 2.13.0 with a
+    # non-matching torchaudio 2.11.0). Moving torch is a coordinated,
+    # hardware-smoked change; security ALERTS for torch still surface on
+    # the repo's Dependabot alerts page regardless of this rule.
+    ignore:
+      - dependency-name: "torch*"
