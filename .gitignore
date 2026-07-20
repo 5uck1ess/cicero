@@ -36,4 +36,3 @@ __pycache__/
 # audio, never shippable (see: voice add moves them to ~/.cicero/voices).
 /*.wav
 /*.mp3
-vendor/
