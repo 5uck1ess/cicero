@@ -11,4 +11,4 @@
 
 # Upstream leaves torch unbounded; this is the release resolved and checked by
 # Cicero's Linux/Windows portability job.
-torch==2.10.0
+torch==2.13.0
