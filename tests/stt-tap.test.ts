@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -83,7 +84,10 @@ describe("stt tap", () => {
 
     const provider = wrapSTTWithTap(fakeProvider(), tapDir, { maxAudioBytes: 100 });
     expect(await provider.transcribe(wav)).toBe("hello world");
-    expect((await readdir(tapDir)).filter((f) => f.endsWith(".wav"))).toHaveLength(0);
+    // Oversized audio is rejected before any tap-dir I/O, so the dir may not
+    // even be created — either way, nothing is retained.
+    const wavs = existsSync(tapDir) ? (await readdir(tapDir)).filter((f) => f.endsWith(".wav")) : [];
+    expect(wavs).toHaveLength(0);
   });
 
   test("pruning keeps the newest utterance pairs and never touches unrelated files", async () => {
@@ -277,6 +281,88 @@ describe("stt tap", () => {
     await rm(tapDir);
     expect(await provider.transcribe(wav)).toBe("hello world");
     expect((await readdir(tapDir)).filter((f) => f.endsWith(".wav"))).toHaveLength(1);
+  });
+
+  test("a stalled tap-dir write never blocks the turn, and the next utterance is dropped, not queued", async () => {
+    const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
+    const tapDir = join(work, "tap");
+    const wav = await tempWav(work);
+
+    // Hold the first background write open to simulate a wedged mount.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let gated = 0;
+    const provider = wrapSTTWithTap(fakeProvider(), tapDir, {
+      writeDeadlineMs: 20, // the turn waits at most this long on the stalled write
+      writeGate: async () => {
+        if (gated++ === 0) await gate; // only the first write stalls
+      },
+    });
+
+    // The turn returns within the deadline despite the write being stuck, and
+    // nothing is on disk yet (without the bound, this would hang on the gate).
+    const started = Date.now();
+    expect(await provider.transcribe(wav)).toBe("hello world");
+    expect(Date.now() - started).toBeLessThan(1_000); // bounded by writeDeadlineMs (20ms) + slack
+    expect((await readdir(tapDir)).filter((f) => f.endsWith(".wav"))).toHaveLength(0);
+
+    // A second utterance while the first write is still stuck is dropped (single slot).
+    expect(await provider.transcribe(wav)).toBe("hello world");
+
+    release(); // the mount recovers — the first (only) capture finally lands
+    for (let i = 0; i < 200; i++) {
+      if ((await readdir(tapDir)).filter((f) => f.endsWith(".wav")).length === 1) break;
+      await Bun.sleep(5);
+    }
+    expect((await readdir(tapDir)).filter((f) => f.endsWith(".wav"))).toHaveLength(1);
+  });
+
+  test("overlapping captures share one slot — the second is dropped, not double-buffered", async () => {
+    const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
+    const tapDir = join(work, "tap");
+    const wav = await tempWav(work);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let gated = 0;
+    const provider = wrapSTTWithTap(fakeProvider(), tapDir, {
+      writeDeadlineMs: 20,
+      writeGate: async () => {
+        if (gated++ === 0) await gate; // the first write stalls, holding the slot
+      },
+    });
+
+    // Fire two transcriptions concurrently: the first reserves the slot and
+    // stalls, so the second must drop rather than read a second clip.
+    await Promise.all([provider.transcribe(wav), provider.transcribe(wav)]);
+    expect((await readdir(tapDir)).filter((f) => f.endsWith(".wav"))).toHaveLength(0);
+
+    release();
+    for (let i = 0; i < 200; i++) {
+      if ((await readdir(tapDir)).filter((f) => f.endsWith(".wav")).length === 1) break;
+      await Bun.sleep(5);
+    }
+    expect((await readdir(tapDir)).filter((f) => f.endsWith(".wav"))).toHaveLength(1); // exactly one landed
+  });
+
+  test("a pre-existing operator directory is never re-permissioned", async () => {
+    if (process.platform === "win32") return;
+    const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
+    const tapDir = join(work, "shared");
+    const { mkdir, chmod } = await import("node:fs/promises");
+    await mkdir(tapDir, { recursive: true });
+    await chmod(tapDir, 0o755); // a loose, shared operator directory (think /tmp)
+
+    const wav = await tempWav(work);
+    const provider = wrapSTTWithTap(fakeProvider(), tapDir);
+    await provider.transcribe(wav);
+
+    // The operator's directory is left exactly as they set it — NOT tightened to 0700...
+    expect((await stat(tapDir)).mode & 0o777).toBe(0o755);
+    // ...and the capture still lands, written 0600 regardless of the loose dir.
+    const wavs = (await readdir(tapDir)).filter((f) => f.endsWith(".wav"));
+    expect(wavs).toHaveLength(1);
+    expect((await stat(join(tapDir, wavs[0]!))).mode & 0o777).toBe(0o600);
   });
 
   test("delegates optional provider members", async () => {
