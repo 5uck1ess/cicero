@@ -14,6 +14,8 @@ bun run bench/stt-bench.ts --clips bench/stt/clips --candidates bench/stt/candid
 
 Drop test audio in `bench/stt/clips/` as **`name.wav` + `name.txt`** (the `.txt` is the ground-truth transcript). Clips are git-ignored — they're your data.
 
+**Capturing real clips from live use:** start the daemon with `CICERO_STT_TAP=<dir>` and every live utterance is teed into that directory — the exact WAV the STT provider received plus a `.json` sidecar (engine, transcript, timing). Talk to Cicero normally for a day, then replay the captured WAVs through other backends for a same-audio comparison on your real voice, mic, and room — the thing synthetic clips can't measure. Capture is bounded (oversized clips skipped, directory pruned to ~1000 utterances) and off unless the variable is set. The captures contain your actual voice and words — point the tap somewhere private (e.g. `~/.cicero/stt-tap`), never at a committed path.
+
 - Use **real conversational speech** at 16 kHz mono if you can — that's what Cicero feeds STT.
 - A handful of 5–15s clips covering your accent, jargon, and a noisy one is plenty to separate the field.
 - Good public source: LibriSpeech `test-clean` samples (each comes with a transcript).
