@@ -1,5 +1,6 @@
 import type { RuntimeConfig } from "../config";
 import { sttEndpointKey, type STTProvider, type STTProviderConfig } from "./stt/provider";
+import { wrapSTTWithTap } from "./stt/tap";
 import type { TTSProvider, TTSProviderConfig } from "./tts/provider";
 import type { LLMProvider } from "./llm/provider";
 import { MlxWhisperProvider } from "./stt/mlx-whisper";
@@ -47,6 +48,7 @@ export function createSTTProvider(config: RuntimeConfig): STTProvider {
   const primaryConfig = config.sttBackend;
   const primary = buildSTTProvider(primaryConfig, "stt.backend");
   const fallbackConfig = config.sttFallbackBackend;
+  let provider = primary;
   if (fallbackConfig) {
     const primaryEndpoint = sttEndpointKey(primaryConfig);
     const fallbackEndpoint = sttEndpointKey(fallbackConfig);
@@ -55,12 +57,20 @@ export function createSTTProvider(config: RuntimeConfig): STTProvider {
         `stt_fallback resolves to the primary STT endpoint (${primaryEndpoint}); configure a distinct host or port`,
       );
     }
-    return new FallbackSTTProvider(
+    provider = new FallbackSTTProvider(
       primary,
       buildSTTProvider(fallbackConfig, "stt_fallback.backend"),
     );
   }
-  return primary;
+  // Opt-in utterance capture for offline backend comparison (see stt/tap.ts).
+  // Wraps the outermost provider so the sidecar records whatever transcript
+  // the daemon actually used, fallback included.
+  // Trim only to decide whether the value is blank — pass the path through
+  // verbatim so a directory whose name legitimately has leading/trailing
+  // whitespace is honored rather than silently rewritten.
+  const tapDir = process.env.CICERO_STT_TAP;
+  if (tapDir && tapDir.trim()) provider = wrapSTTWithTap(provider, tapDir);
+  return provider;
 }
 
 function buildSTTProvider(sttConfig: STTProviderConfig, configKey: string): STTProvider {
