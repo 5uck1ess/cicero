@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { copyFile, lstat, readdir, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { log } from "../../logger";
@@ -34,6 +35,8 @@ interface TapLimits {
   maxRetainedUtterances?: number;
   maxAudioBytes?: number;
   pruneEvery?: number;
+  /** Injectable clock (tests pin it to target exact destination filenames). */
+  clock?: () => Date;
 }
 
 export function wrapSTTWithTap(provider: STTProvider, dir: string, limits?: TapLimits): STTProvider {
@@ -71,6 +74,7 @@ class SttTap {
   private readonly maxRetained: number;
   private readonly maxAudioBytes: number;
   private readonly pruneEvery: number;
+  private readonly clock: () => Date;
 
   constructor(
     private readonly dir: string,
@@ -80,6 +84,7 @@ class SttTap {
     this.maxRetained = limits?.maxRetainedUtterances ?? MAX_RETAINED_UTTERANCES;
     this.maxAudioBytes = limits?.maxAudioBytes ?? MAX_AUDIO_BYTES;
     this.pruneEvery = limits?.pruneEvery ?? PRUNE_EVERY;
+    this.clock = limits?.clock ?? (() => new Date());
   }
 
   /** Copy the utterance + write its sidecar; never throws into the STT path. */
@@ -94,14 +99,19 @@ class SttTap {
       }
       const source = await lstat(audioFile);
       if (!source.isFile() || source.size > this.maxAudioBytes) return;
-      const stamp = `${new Date().toISOString().replace(/[:.]/g, "-")}-${(this.counter++ % 1000).toString().padStart(3, "0")}`;
+      const now = this.clock();
+      const stamp = `${now.toISOString().replace(/[:.]/g, "-")}-${(this.counter++ % 1000).toString().padStart(3, "0")}`;
+      // Exclusive create for both writes: a pre-existing file OR symlink at the
+      // destination makes the operation fail instead of following/overwriting
+      // the target (the secure-temp-audio `wx` discipline). Stamps are unique
+      // in normal operation, so EXCL only ever trips on a planted path.
       const wavPath = join(this.dir, `${stamp}.wav`);
-      await copyFile(audioFile, wavPath);
-      ensurePrivateFileSync(wavPath);
+      await copyFile(audioFile, wavPath, constants.COPYFILE_EXCL);
+      ensurePrivateFileSync(wavPath); // fresh regular file — chmod 0600, symlink-safe
       await writeFile(
         join(this.dir, `${stamp}.json`),
-        JSON.stringify({ engine: this.engine, transcript, stt_ms: elapsedMs, audio_bytes: source.size, at: new Date().toISOString() }),
-        { mode: PRIVATE_FILE_MODE },
+        JSON.stringify({ engine: this.engine, transcript, stt_ms: elapsedMs, audio_bytes: source.size, at: now.toISOString() }),
+        { flag: "wx", mode: PRIVATE_FILE_MODE },
       );
       if (this.counter % this.pruneEvery === 0) await this.prune();
     } catch (error: unknown) {

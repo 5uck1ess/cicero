@@ -113,6 +113,31 @@ describe("stt tap", () => {
     }
   });
 
+  test("a symlink planted at a capture destination is not followed or overwritten", async () => {
+    if (process.platform === "win32") return;
+    const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
+    const tapDir = join(work, "tap");
+    const wav = await tempWav(work);
+    const secret = join(work, "secret.txt");
+    await writeFile(secret, "DO NOT REPLACE");
+
+    // Pin the clock so the destination filenames are known, and plant a symlink
+    // at BOTH (the .wav copy target and the .json write target), each aimed at
+    // the protected file an attacker wants clobbered.
+    const fixed = new Date("2026-07-21T12:34:56.789Z");
+    const stem = "2026-07-21T12-34-56-789Z-000";
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(tapDir, { recursive: true, mode: 0o700 });
+    await symlink(secret, join(tapDir, `${stem}.wav`));
+    await symlink(secret, join(tapDir, `${stem}.json`));
+
+    const provider = wrapSTTWithTap(fakeProvider(), tapDir, { clock: () => new Date(fixed) });
+    // Capture must fail closed (exclusive create refuses the pre-existing link)
+    // without disturbing the target or breaking transcription.
+    expect(await provider.transcribe(wav)).toBe("hello world");
+    expect(await readFile(secret, "utf8")).toBe("DO NOT REPLACE");
+  });
+
   test("a symlinked tap directory disables capture without breaking transcription", async () => {
     const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
     const real = join(work, "real");
