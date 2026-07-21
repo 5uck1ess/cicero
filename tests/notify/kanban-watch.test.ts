@@ -4,6 +4,7 @@ import {
   listViaCli,
   spokenLine,
   taskLinkViaCli,
+  taskParentsViaCli,
   type KanbanTask,
 } from "../../src/notify/kanban-watch";
 import { CommandAbortError, CommandDeadlineError } from "../../src/process/bounded-command";
@@ -183,6 +184,240 @@ test("nudge: reminders repeat with a doubling gap and stop when someone starts t
   board[0] = { ...board[0]!, started_at: Math.floor(clock / 1000) };
   clock += 5 * 3600_000; await w.tick();            // started — silence, state cleared
   expect(nudges).toEqual(["t1#1", "t1#2", "t1#3"]);
+});
+
+test("nudge: a task gated behind an unfinished parent is not nudged", async () => {
+  const nudges: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  const board: KanbanTask[] = [
+    { id: "work", title: "Implement X", status: "blocked", created_at: now - 2 * 3600 },
+    { id: "qa", title: "Verify X", status: "todo", created_at: now - 2 * 3600 }, // stale, but parented to blocked work
+  ];
+  const w = new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: (t) => nudges.push(t.id),
+    nudgeAfterMs: 60 * 60_000,
+    parents: async (t) => (t.id === "qa" ? ["work"] : []),
+  });
+  await w.tick();
+  expect(nudges).toEqual([]); // qa is parked behind blocked work, not neglected
+});
+
+test("nudge: the gate opens once the parent is done, then the task nudges", async () => {
+  const nudges: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  const work: KanbanTask = { id: "work", title: "Implement X", status: "blocked", created_at: now - 2 * 3600 };
+  const qa: KanbanTask = { id: "qa", title: "Verify X", status: "todo", created_at: now - 2 * 3600 };
+  let board: KanbanTask[] = [work, qa];
+  const w = new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: (t) => nudges.push(t.id),
+    nudgeAfterMs: 60 * 60_000,
+    gateRecheckMs: 0, // re-check the gate on the very next tick, not after a backoff
+    parents: async (t) => (t.id === "qa" ? ["work"] : []),
+  });
+  await w.tick();                                        // gated — no nudge
+  board = [{ ...work, status: "done" }, qa];             // parent finishes
+  await w.tick();                                        // gate open — qa is genuinely unpicked now
+  expect(nudges).toEqual(["qa"]);
+});
+
+test("nudge: a terminal-but-not-done parent (archived) does not gate forever", async () => {
+  const nudges: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  const board: KanbanTask[] = [
+    { id: "work", title: "Implement X", status: "archived", created_at: now - 2 * 3600, started_at: now - 3600 },
+    { id: "qa", title: "Verify X", status: "todo", created_at: now - 2 * 3600 },
+  ];
+  const w = new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: (t) => nudges.push(t.id),
+    nudgeAfterMs: 60 * 60_000,
+    parents: async (t) => (t.id === "qa" ? ["work"] : []),
+  });
+  await w.tick();
+  expect(nudges).toEqual(["qa"]); // archived is terminal — the dependency is satisfied
+});
+
+test("nudge: a self-referential parent does not gate the task against itself", async () => {
+  const nudges: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  const board: KanbanTask[] = [
+    { id: "loop", title: "Waiting on itself", status: "todo", created_at: now - 2 * 3600 },
+  ];
+  const w = new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: (t) => nudges.push(t.id),
+    nudgeAfterMs: 60 * 60_000,
+    parents: async () => ["loop"], // a self-parent must not silence the task
+  });
+  await w.tick();
+  expect(nudges).toEqual(["loop"]);
+});
+
+test("nudge: the gate sees the parent even when the child is listed first", async () => {
+  const nudges: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  // Child precedes its parent in the feed — statusById is built for the whole
+  // list before the nudge loop, so ordering must not affect the gate.
+  const board: KanbanTask[] = [
+    { id: "qa", title: "Verify X", status: "todo", created_at: now - 2 * 3600 },
+    { id: "work", title: "Implement X", status: "doing", created_at: now - 2 * 3600, started_at: now - 3600 },
+  ];
+  const w = new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: (t) => nudges.push(t.id),
+    nudgeAfterMs: 60 * 60_000,
+    parents: async (t) => (t.id === "qa" ? ["work"] : []),
+  });
+  await w.tick();
+  expect(nudges).toEqual([]); // parent is unfinished regardless of list order
+});
+
+test("nudge: a parked task re-checks its gate on a cadence, not every poll", async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const board: KanbanTask[] = [
+    { id: "work", title: "Implement X", status: "doing", created_at: now - 2 * 3600, started_at: now - 3600 },
+    { id: "qa", title: "Verify X", status: "todo", created_at: now - 2 * 3600 },
+  ];
+  let lookups = 0;
+  const w = new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: () => {},
+    nudgeAfterMs: 60 * 60_000,
+    gateRecheckMs: 60 * 60_000, // a long backoff: the second quick tick must not re-look-up
+    parents: async (t) => {
+      if (t.id === "qa") lookups++;
+      return t.id === "qa" ? ["work"] : [];
+    },
+  });
+  await w.tick();
+  await w.tick();
+  expect(lookups).toBe(1); // the parked task is not re-queried on every poll
+});
+
+test("nudge: parent-gate lookups are bounded per poll and deferred work is retried, not starved", async () => {
+  const now = Math.floor(Date.now() / 1000);
+  // One in-progress parent gating many stale children — more than fit in a
+  // single poll's lookup budget (16).
+  const children = Array.from({ length: 20 }, (_, i) => ({
+    id: `qa${i}`,
+    title: `Verify ${i}`,
+    status: "todo",
+    created_at: now - 2 * 3600,
+  }));
+  const board: KanbanTask[] = [
+    { id: "work", title: "Implement", status: "doing", created_at: now - 2 * 3600, started_at: now - 3600 },
+    ...children,
+  ];
+  let lookups = 0;
+  const w = new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: () => {},
+    nudgeAfterMs: 60 * 60_000,
+    gateRecheckMs: 60 * 60_000, // looked-up tasks cool down so the deferred ones get a turn
+    parents: async (t) => {
+      if (t.id.startsWith("qa")) lookups++;
+      return t.id.startsWith("qa") ? ["work"] : [];
+    },
+  });
+  await w.tick();
+  expect(lookups).toBe(16); // capped at MAX_GATE_LOOKUPS_PER_POLL — not all 20 in one poll
+  await w.tick();
+  expect(lookups).toBe(20); // the deferred 4 are retried next poll, none starved
+});
+
+test("nudge: an aborted parent lookup does not emit a late nudge on shutdown", async () => {
+  const nudges: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  const board: KanbanTask[] = [
+    { id: "qa", title: "Verify X", status: "todo", created_at: now - 2 * 3600 },
+  ];
+  let entered!: () => void;
+  const reached = new Promise<void>((r) => (entered = r));
+  const w = new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: (t) => nudges.push(t.id),
+    nudgeAfterMs: 60 * 60_000,
+    parents: (_t, signal) =>
+      new Promise<string[]>((_res, reject) => {
+        entered();
+        signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }),
+  });
+  const tick = w.tick();
+  await reached;   // the poll is now parked inside the parent lookup
+  await w.stop();  // aborts the in-flight poll
+  await tick;
+  expect(nudges).toEqual([]); // a superseded/aborted poll must publish nothing
+});
+
+test("taskParentsViaCli reads the parents array from the task detail JSON", async () => {
+  const cmd = [process.execPath, "-e", "console.log(JSON.stringify({ parents: ['work', 'other'] }))"];
+  expect(await taskParentsViaCli("qa", cmd)).toEqual(["work", "other"]);
+});
+
+test("taskParentsViaCli swallows failures and malformed output into an empty list", async () => {
+  expect(await taskParentsViaCli("x", [process.execPath, "-e", "process.exit(3)"])).toEqual([]);
+  expect(await taskParentsViaCli("x", [process.execPath, "-e", "console.log('{ not json')"])).toEqual([]);
+  expect(
+    await taskParentsViaCli("x", [process.execPath, "-e", "console.log(JSON.stringify({ parents: 'nope' }))"]),
+  ).toEqual([]);
+  expect(
+    await taskParentsViaCli("x", [process.execPath, "-e", "console.log(JSON.stringify({ other: 1 }))"]),
+  ).toEqual([]);
+});
+
+test("nudge: a parent that is done-and-archived (off the board) does not gate", async () => {
+  const nudges: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  const board: KanbanTask[] = [
+    { id: "qa", title: "Verify X", status: "todo", created_at: now - 2 * 3600 },
+  ];
+  const w = new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: (t) => nudges.push(t.id),
+    nudgeAfterMs: 60 * 60_000,
+    parents: async () => ["archived-parent"], // parent not present in the snapshot
+  });
+  await w.tick();
+  expect(nudges).toEqual(["qa"]); // absent parent = satisfied gate, so it's genuinely unpicked
+});
+
+test("nudge: a parent lookup failure informs rather than hides a stalled task", async () => {
+  const nudges: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  const board: KanbanTask[] = [
+    { id: "orphan", title: "Waiting", status: "todo", created_at: now - 2 * 3600 },
+  ];
+  const w = new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: (t) => nudges.push(t.id),
+    nudgeAfterMs: 60 * 60_000,
+    parents: async () => { throw new Error("kanban show failed"); },
+  });
+  await w.tick();
+  expect(nudges).toEqual(["orphan"]); // unknown gate state must not silence the nudge
 });
 
 test("nudge: off without a callback or with nudgeAfterMs 0", async () => {

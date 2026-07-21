@@ -71,7 +71,7 @@ import { MAX_TURN_AUDIO_BYTES } from "./web-voice/protocol";
 import { TurnHistory } from "./web-voice/history";
 import { classifyCallIntent, sendTelegramVoice, sendTelegramText, startTelegramUpdatePoller, telegramToken } from "./notify/telegram";
 import { briefingTurnContext, notificationTurnContext } from "./notify/context";
-import { KanbanWatcher, listViaCli, nudgeLine, spokenLine, taskLinkViaCli, type KanbanTask } from "./notify/kanban-watch";
+import { KanbanWatcher, listViaCli, nudgeLine, spokenLine, taskLinkViaCli, taskParentsViaCli, type KanbanTask } from "./notify/kanban-watch";
 import { inQuietHours, composeBriefing, composeBriefingDigest, chunkBriefingDigest, minutesPrompt, worthMinutes, callMinutesThresholdMs, dayOf } from "./notify/briefing";
 import { PromptScheduler, scheduleLabel } from "./notify/schedules";
 import {
@@ -395,6 +395,13 @@ export class CiceroDaemon {
           await this.webVoice?.notify(nudgeLine(t, waited, nth));
         },
         nudgeAfterMs: (kw.nudge_after_minutes ?? 60) * 60_000,
+        // Parents come from the per-task detail (the list feed omits them), so a
+        // gated companion (e.g. a QA card parented to a not-yet-done work card)
+        // is recognized as parked-behind-a-dependency, not "nobody picked it up".
+        // Only wired when a task_command exists; without it, nudge on age alone.
+        parents: kw.task_command
+          ? (t, signal) => taskParentsViaCli(t.id, kw.task_command!, { signal })
+          : undefined,
       });
       // Poll immediately only when no web voice surface will exist (Telegram-only
       // / host-mic-only), so the board snapshot is still populated there. When web
