@@ -1,4 +1,4 @@
-import { lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { log } from "../../logger";
 import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE } from "../../platform/secure-storage";
@@ -13,6 +13,16 @@ import type { STTProvider, STTTranscriptionResult } from "./provider";
  * voice through *your* mic. The tap turns normal daily use into a benchmark
  * corpus (see bench/stt/README.md) and captures evidence for tail-clipping /
  * misheard-word reports that are unreproducible after the fact.
+ *
+ * Threat model (scope): single-operator, self-hosted; the operator chooses the
+ * capture directory. Hardening here targets the operator's own mistakes and
+ * unreliable filesystems — an unwritable/loose/wedged dir, a hostile provider
+ * name or env path in logs, umask surprises — NOT a local attacker who already
+ * has write access to the chosen directory. Anchoring against ancestor-symlink
+ * swaps, source-file TOCTOU races, and forged filenames in a shared capture dir
+ * are deliberately out of scope: they presuppose a co-resident attacker, which
+ * is a different threat model than this opt-in debug feature serves. Capture
+ * files are still created 0600 and the leaf dir is symlink-refused.
  *
  * Hot path vs. background (the turn must never wait on the tap dir):
  * - The source WAV is read in the hot path because the caller may reclaim that
@@ -65,9 +75,25 @@ const MAX_TRANSCRIPT_CHARS = 8192; // a spoken utterance is tiny; this only boun
 const PRUNE_EVERY = 25;
 const MAX_STEM_ATTEMPTS = 64; // retry ceiling for filename collisions
 const WRITE_DEADLINE_MS = 2000; // longest the turn will wait on the tap-dir write before proceeding
+const SHUTDOWN_GRACE_MS = 2000; // longest shutdown waits to drain an in-flight write before proceeding
+
+const MAX_ENGINE_CHARS = 128; // provider name is untrusted; cap it in logs + sidecar
 
 /** Matches only files this tap wrote: an ISO-ish stamp plus a 3-digit counter. */
 const TAP_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2}T[0-9-]+Z-\d{3})\.(wav|json)$/;
+
+/**
+ * Make a value safe to interpolate into a log line: strip C0/C7F control
+ * characters (so a newline or terminal escape in an env path / provider name
+ * can't forge log entries or emit control sequences) and length-cap it.
+ */
+function sanitizeLabel(value: string, max: number): string {
+  const cleaned = Array.from(value, (ch) => {
+    const c = ch.codePointAt(0)!;
+    return c < 0x20 || c === 0x7f ? "\uFFFD" : ch; // strip C0/DEL controls
+  });
+  return cleaned.length > max ? cleaned.slice(0, max).join("") + "\u2026" : cleaned.join("");
+}
 
 /** One utterance, fully read from the source and ready to persist off the hot path. */
 interface Capture {
@@ -83,6 +109,8 @@ interface TapLimits {
   pruneEvery?: number;
   /** Longest the transcribe path will wait on a background tap write (ms). */
   writeDeadlineMs?: number;
+  /** Longest shutdown() waits to drain an in-flight write before proceeding (ms). */
+  shutdownGraceMs?: number;
   /**
    * Test seam: awaited inside the background write, after the directory is
    * ensured but before any capture file is created. Tests use it to hold a
@@ -99,25 +127,32 @@ export function wrapSTTWithTap(provider: STTProvider, dir: string, limits?: TapL
   const wrapped: STTProvider = {
     name: provider.name,
     transcribe: async (audioFile: string) => {
-      const started = Date.now();
+      const started = performance.now(); // monotonic: NTP/clock steps must not skew stt_ms
       const text = await provider.transcribe(audioFile);
-      await tap.record(audioFile, text ?? "", Date.now() - started);
+      await tap.record(audioFile, text ?? "", Math.round(performance.now() - started));
       return text;
     },
     health: () => provider.health(),
   };
   if (provider.transcribeResult) {
     wrapped.transcribeResult = async (audioFile: string): Promise<STTTranscriptionResult> => {
-      const started = Date.now();
+      const started = performance.now();
       const result = await provider.transcribeResult!(audioFile);
       const text = result.kind === "transcript" ? result.text : `<${result.kind}>`;
-      await tap.record(audioFile, text, Date.now() - started);
+      await tap.record(audioFile, text, Math.round(performance.now() - started));
       return result;
     };
   }
   if (provider.requiredHealth) wrapped.requiredHealth = () => provider.requiredHealth!();
   if (provider.start) wrapped.start = () => provider.start!();
-  if (provider.stop) wrapped.stop = () => provider.stop!();
+  // Always own a stop(): the tap holds a background write that must be drained
+  // (bounded) before shutdown completes, else a capture can reach the disk after
+  // the daemon has released its lease and logged "stopped". Delegates to the
+  // underlying provider's stop() afterward when it has one.
+  wrapped.stop = async () => {
+    await tap.shutdown();
+    if (provider.stop) await provider.stop();
+  };
   if (provider.warmup) wrapped.warmup = () => provider.warmup!();
   return wrapped;
 }
@@ -139,7 +174,14 @@ async function ensureTapDirectory(dir: string): Promise<{ looseMode?: number }> 
     throw new Error(`refusing unsafe stt tap directory '${dir}'`);
   }
   const created = firstCreated !== undefined; // recursive mkdir returns undefined when the leaf existed
-  if (!created && process.platform !== "win32" && (info.mode & 0o077) !== 0) {
+  if (created) {
+    // mkdir's mode is masked by umask, so a restrictive umask (e.g. 0777) can
+    // leave a dir the tap owns at mode 000 and unusable. We created it, so set
+    // the exact private mode explicitly.
+    if (process.platform !== "win32") await chmod(dir, PRIVATE_DIRECTORY_MODE);
+  } else if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
+    // Pre-existing and group/other-accessible: warn, but never re-permission an
+    // operator's directory (it may be shared, e.g. /tmp). Captures stay 0600.
     return { looseMode: info.mode & 0o777 };
   }
   return {};
@@ -149,7 +191,12 @@ class SttTap {
   private announced = false;
   private captured = 0; // successful captures this process — drives prune cadence
   private counter = 0; // stem disambiguator within a millisecond
-  private warned = false;
+  /** One-shot latch PER warning category, so a loose-dir warning never masks a
+   * later capture-failure/drop/collision warning (or vice versa). */
+  private warned = new Set<string>();
+  /** Engine label, control-stripped and length-capped once at construction so
+   * neither logs nor the sidecar can be flooded/forged by a hostile name. */
+  private readonly engine: string;
   /**
    * True while a capture is being read OR written. A single synchronous slot:
    * reserved at the top of record() before the first await (so overlapping
@@ -157,26 +204,58 @@ class SttTap {
    * when the background write settles (so at most one write is ever stranded).
    */
   private inFlight = false;
+  /** The current background write, awaited (bounded) at shutdown so tap I/O
+   * doesn't outlive the daemon. Null between captures. */
+  private inflightTask: Promise<void> | null = null;
+  /** Set once shutdown starts: a post-deadline write continuation must not
+   * touch the disk after the daemon has declared itself stopped. */
+  private stopped = false;
   private readonly maxRetained: number;
   private readonly maxAudioBytes: number;
   private readonly maxTranscriptChars: number;
   private readonly pruneEvery: number;
   private readonly writeDeadlineMs: number;
+  private readonly shutdownGraceMs: number;
   private readonly writeGate?: () => Promise<void>;
   private readonly clock: () => Date;
 
   constructor(
     private readonly dir: string,
-    private readonly engine: string,
+    engine: string,
     limits?: TapLimits,
   ) {
+    this.engine = sanitizeLabel(engine, MAX_ENGINE_CHARS);
     this.maxRetained = limits?.maxRetainedUtterances ?? MAX_RETAINED_UTTERANCES;
     this.maxAudioBytes = limits?.maxAudioBytes ?? MAX_AUDIO_BYTES;
     this.maxTranscriptChars = limits?.maxTranscriptChars ?? MAX_TRANSCRIPT_CHARS;
     this.pruneEvery = limits?.pruneEvery ?? PRUNE_EVERY;
     this.writeDeadlineMs = limits?.writeDeadlineMs ?? WRITE_DEADLINE_MS;
+    this.shutdownGraceMs = limits?.shutdownGraceMs ?? SHUTDOWN_GRACE_MS;
     this.writeGate = limits?.writeGate;
     this.clock = limits?.clock ?? (() => new Date());
+  }
+
+  /**
+   * Quiesce the tap for shutdown. Marks the tap stopped (so a post-deadline
+   * write continuation skips the disk write) and waits — bounded — for any
+   * in-flight write to settle, so tap I/O never outlives the daemon's declared
+   * shutdown. A wedged mount can't hang shutdown: past the grace window the wait
+   * returns, the stopped flag prevents a late write, and process exit reclaims
+   * the stuck fs op.
+   */
+  async shutdown(): Promise<void> {
+    this.stopped = true;
+    const task = this.inflightTask;
+    if (!task) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const grace = new Promise<void>((res) => {
+      timer = setTimeout(res, this.shutdownGraceMs);
+    });
+    try {
+      await Promise.race([task, grace]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**
@@ -190,7 +269,7 @@ class SttTap {
     // safe against overlapping record() calls (barge-in) — the second sees the
     // reservation and drops rather than both buffering a full clip.
     if (this.inFlight) {
-      this.warnOnce("stt tap: previous capture still in flight (slow tap directory?) — dropping this utterance");
+      this.warnOnce("drop", "stt tap: previous capture still in flight (slow tap directory?) — dropping this utterance");
       return;
     }
     this.inFlight = true;
@@ -199,7 +278,7 @@ class SttTap {
       capture = await this.readSource(audioFile, transcript, elapsedMs);
     } catch (error: unknown) {
       this.inFlight = false;
-      this.warnOnce(`stt tap: capture failed (${error instanceof Error ? error.message : String(error)})`);
+      this.warnOnce("capture", `stt tap: capture failed (${error instanceof Error ? error.message : String(error)})`);
       return;
     }
     if (!capture) {
@@ -235,8 +314,12 @@ class SttTap {
       }
       const bytes = filled === stat.size ? buffer : buffer.subarray(0, filled);
 
+      // Cap by Unicode scalar, not UTF-16 unit, so truncation can't leave an
+      // unpaired surrogate half in the sidecar.
       const cappedTranscript =
-        transcript.length > this.maxTranscriptChars ? transcript.slice(0, this.maxTranscriptChars) : transcript;
+        transcript.length > this.maxTranscriptChars
+          ? Array.from(transcript).slice(0, this.maxTranscriptChars).join("")
+          : transcript;
       return {
         bytes,
         now,
@@ -273,11 +356,13 @@ class SttTap {
     // first. A wedged write keeps the slot until it eventually settles.
     const task = this.persist(capture)
       .catch((error: unknown) =>
-        this.warnOnce(`stt tap: capture failed (${error instanceof Error ? error.message : String(error)})`),
+        this.warnOnce("capture", `stt tap: capture failed (${error instanceof Error ? error.message : String(error)})`),
       )
       .finally(() => {
         this.inFlight = false;
+        this.inflightTask = null;
       });
+    this.inflightTask = task; // shutdown() awaits this so I/O can't outlive the daemon
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<void>((res) => {
@@ -292,20 +377,30 @@ class SttTap {
 
   /** Ensure the dir, write the pair, and prune. Runs off the hot path. */
   private async persist(capture: Capture): Promise<void> {
+    // Shutdown may have begun while the source was still being read (before this
+    // task existed): bail before touching the filesystem at all, so no mkdir or
+    // write starts after the daemon declared itself stopped.
+    if (this.stopped) return;
     // Re-checked every capture: a transient failure (unmounted disk, permission
     // hiccup) must not latch capture off for the daemon's life.
     const dirState = await ensureTapDirectory(this.dir);
+    const safeDir = sanitizeLabel(this.dir, 512); // untrusted env path — never let it forge log lines
     if (dirState.looseMode !== undefined) {
       this.warnOnce(
-        `stt tap: capture directory ${this.dir} is accessible to other users (mode ${dirState.looseMode.toString(8)}); leaving its permissions unchanged — capture files are still written 0600`,
+        "loose-dir",
+        `stt tap: capture directory ${safeDir} is accessible to other users (mode ${dirState.looseMode.toString(8)}); leaving its permissions unchanged — capture files are still written 0600`,
       );
     }
     if (!this.announced) {
       this.announced = true;
-      log("info", `stt tap: recording utterances to ${this.dir} (engine '${this.engine}')`);
+      log("info", `stt tap: recording utterances to ${safeDir} (engine '${this.engine}')`);
     }
 
     if (this.writeGate) await this.writeGate();
+    // A prior await (a slow/wedged dir-ensure or the write gate) may have spanned
+    // shutdown; if so, don't create capture files after the daemon declared
+    // itself stopped — the write would outlive the process's ownership of it.
+    if (this.stopped) return;
     const written = await this.writePair(capture);
     if (!written) return;
 
@@ -325,6 +420,11 @@ class SttTap {
    */
   private async writePair(capture: Capture): Promise<boolean> {
     for (let attempt = 0; attempt < MAX_STEM_ATTEMPTS; attempt++) {
+      // Between retries an await may have spanned shutdown; start no new
+      // capture-file I/O once stopped. (An open already in flight when stop
+      // fires can't be cancelled — fs/promises has no cancellation — but this
+      // ensures no fresh stem is opened after the daemon declared itself stopped.)
+      if (this.stopped) return false;
       const stem = this.nextStem(capture.now);
       const wavPath = join(this.dir, `${stem}.wav`);
       const jsonPath = join(this.dir, `${stem}.json`);
@@ -367,7 +467,7 @@ class SttTap {
         await json.close().catch(() => {});
       }
     }
-    this.warnOnce("stt tap: could not allocate a free capture filename — skipping");
+    this.warnOnce("collision", "stt tap: could not allocate a free capture filename — skipping");
     return false;
   }
 
@@ -400,9 +500,10 @@ class SttTap {
     }
   }
 
-  private warnOnce(message: string): void {
-    if (this.warned) return;
-    this.warned = true;
+  /** Warn at most once per category, so unrelated warnings don't mask each other. */
+  private warnOnce(category: string, message: string): void {
+    if (this.warned.has(category)) return;
+    this.warned.add(category);
     log("warn", message);
   }
 }

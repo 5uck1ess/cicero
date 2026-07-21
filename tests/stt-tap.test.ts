@@ -1,10 +1,19 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { wrapSTTWithTap } from "../src/backends/stt/tap";
 import type { STTProvider } from "../src/backends/stt/provider";
+
+// This suite owns the "stt-tap-" temp prefix; reclaim its trees so repeated
+// runs don't accumulate captured WAVs/sidecars/symlinks in the OS temp dir.
+afterEach(async () => {
+  const tmp = tmpdir();
+  for (const name of await readdir(tmp).catch(() => [] as string[])) {
+    if (name.startsWith("stt-tap-")) await rm(join(tmp, name), { recursive: true, force: true }).catch(() => {});
+  }
+});
 
 /** Mirrors the tap's own file-naming pattern for assertions. */
 const TAP_MATCH = /^\d{4}-\d{2}-\d{2}T[0-9-]+Z-\d{3}\.(wav|json)$/;
@@ -363,6 +372,73 @@ describe("stt tap", () => {
     const wavs = (await readdir(tapDir)).filter((f) => f.endsWith(".wav"));
     expect(wavs).toHaveLength(1);
     expect((await stat(join(tapDir, wavs[0]!))).mode & 0o777).toBe(0o600);
+  });
+
+  test("stop() drains the in-flight write and a post-shutdown resume never lands on disk", async () => {
+    const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
+    const tapDir = join(work, "tap");
+    const wav = await tempWav(work);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let providerStopped = false;
+    const provider = wrapSTTWithTap(
+      fakeProvider({ stop: async () => { providerStopped = true; } }),
+      tapDir,
+      { writeDeadlineMs: 20, shutdownGraceMs: 20, writeGate: async () => { await gate; } },
+    );
+
+    await provider.transcribe(wav); // write stalls; the turn returns after the deadline
+    await provider.stop!();          // shutdown drains (bounded) then delegates to the provider
+    expect(providerStopped).toBe(true);
+
+    // The mount "recovers" AFTER shutdown — the resumed write must NOT create files.
+    release();
+    await Bun.sleep(50);
+    expect((await readdir(tapDir)).filter((f) => f.endsWith(".wav"))).toHaveLength(0);
+  });
+
+  test("stop() drains the tap even when the underlying provider has no stop()", async () => {
+    const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
+    const tapDir = join(work, "tap");
+    const wav = await tempWav(work);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // A provider WITHOUT stop() — the wrapper must still expose one and quiesce.
+    const bare = fakeProvider();
+    delete (bare as { stop?: unknown }).stop;
+    const provider = wrapSTTWithTap(bare, tapDir, {
+      writeDeadlineMs: 20,
+      shutdownGraceMs: 20,
+      writeGate: async () => { await gate; },
+    });
+    expect(typeof provider.stop).toBe("function"); // decorator owns stop() regardless
+
+    await provider.transcribe(wav);
+    await provider.stop!();
+    release();
+    await Bun.sleep(50);
+    expect((await readdir(tapDir)).filter((f) => f.endsWith(".wav"))).toHaveLength(0);
+  });
+
+  test("a captured transcript is truncated on a Unicode-scalar boundary", async () => {
+    const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
+    const tapDir = join(work, "tap");
+    const wav = await tempWav(work);
+    const huge = "a".repeat(7) + "😀".repeat(5); // multi-code-unit scalars past the cap
+
+    const provider = wrapSTTWithTap(
+      fakeProvider({ transcribe: async () => huge }),
+      tapDir,
+      { maxTranscriptChars: 8 },
+    );
+    await provider.transcribe(wav);
+    const sidecarName = (await readdir(tapDir)).find((f) => f.endsWith(".json"))!;
+    const sidecar = JSON.parse(await readFile(join(tapDir, sidecarName), "utf8"));
+    // No lone surrogate survived: re-encoding round-trips cleanly.
+    expect(sidecar.transcript).toBe(Array.from(huge).slice(0, 8).join(""));
+    expect(sidecar.transcript.includes("�")).toBe(false);
   });
 
   test("delegates optional provider members", async () => {

@@ -65,8 +65,11 @@ export function createSTTProvider(config: RuntimeConfig): STTProvider {
   // Opt-in utterance capture for offline backend comparison (see stt/tap.ts).
   // Wraps the outermost provider so the sidecar records whatever transcript
   // the daemon actually used, fallback included.
-  const tapDir = process.env.CICERO_STT_TAP?.trim();
-  if (tapDir) provider = wrapSTTWithTap(provider, tapDir);
+  // Trim only to decide whether the value is blank — pass the path through
+  // verbatim so a directory whose name legitimately has leading/trailing
+  // whitespace is honored rather than silently rewritten.
+  const tapDir = process.env.CICERO_STT_TAP;
+  if (tapDir && tapDir.trim()) provider = wrapSTTWithTap(provider, tapDir);
   return provider;
 }
 
