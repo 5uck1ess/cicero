@@ -78,10 +78,13 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
 
     let sourceFinished = false;
     let sourceReadAhead: Promise<string | null> | null = null;
+    // Pin one generation for this whole reply: a live swap mid-stream must not
+    // move a later sentence onto a different provider than the reply started on.
+    const pin = this.pinTurnProvider();
 
     try {
       const first = await this.readNextSentence(iterator);
-      let current = first ? this.prepareSentence(first) : null;
+      let current = first ? this.prepareSentence(first, pin.provider) : null;
       if (!current) sourceFinished = true;
 
       while (current && !stale()) {
@@ -100,7 +103,7 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
         // as its text arrives. This overlaps it with current playback without
         // issuing concurrent renders to providers that require serialization.
         const nextPrepared = nextText.then((text): PreparedSentence | null =>
-          text && !stale() ? this.prepareSentence(text) : null
+          text && !stale() ? this.prepareSentence(text, pin.provider) : null
         );
         void nextPrepared.catch(() => {});
 
@@ -131,6 +134,9 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
         log("warn", `Streaming TTS error: ${msg}`);
       }
     } finally {
+      // Each speakStream owns its own pin; release regardless of ownership so a
+      // superseded turn frees its generation for a swap that is waiting to drain.
+      pin.release();
       if (!sourceFinished) {
         const pendingRead = sourceReadAhead;
         const closeIterator = async () => {
@@ -254,9 +260,9 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     if (this.playerReleaseFailure) throw this.playerReleaseFailure;
   }
 
-  private async generateAudioSafe(text: string): Promise<ArrayBuffer | null> {
+  private async generateAudioSafe(text: string, provider: TTSProvider): Promise<ArrayBuffer | null> {
     try {
-      return await this.generateAudio(text);
+      return await this.generateAudio(text, provider);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       log("warn", `TTS generation failed for "${text.substring(0, 30)}...": ${msg}`);
@@ -274,8 +280,8 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     }
   }
 
-  private prepareSentence(text: string): PreparedSentence {
-    return { text, audio: this.generateAudioSafe(text) };
+  private prepareSentence(text: string, provider: TTSProvider): PreparedSentence {
+    return { text, audio: this.generateAudioSafe(text, provider) };
   }
 
   /**

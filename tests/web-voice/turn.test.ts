@@ -1,5 +1,7 @@
 import { test, expect } from "bun:test";
 import { OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS, silenceWavLike, SPEAKER_BEAT_MS, processWebTurn, streamWebTurn, streamWebTextTurn, isExpandRequest, isRepeatRequest, isResumeRequest, applyVoiceControl, concatWavs, type WebTurnDeps, type WebStreamDeps, type WebReplySink } from "../../src/web-voice/turn";
+import { ProviderSlot, SwappableTTSProvider } from "../../src/backends/hot-swap";
+import type { TTSProvider } from "../../src/backends/tts/provider";
 
 async function* tokens(...parts: string[]) { for (const p of parts) yield p; }
 
@@ -972,4 +974,72 @@ test("silenceWavLike preserves odd-data RIFF padding without treating it as PCM"
   expect(silence.byteLength).toBe(46);
   expect(bytes[44]).toBe(128);
   expect(bytes[45]).toBe(0);
+});
+
+// A test TTS provider that counts synthesis and lets a test await the Nth call,
+// so a swap can be timed to land mid-turn.
+class CountingTTS implements TTSProvider {
+  calls = 0;
+  starts = 0;
+  warmups = 0;
+  stops = 0;
+  healthy = true;
+  private waiters: Array<{ n: number; resolve: () => void }> = [];
+  constructor(readonly name: string) {}
+  async start(): Promise<void> { this.starts += 1; }
+  async warmup(): Promise<void> { this.warmups += 1; }
+  async health(): Promise<boolean> { return this.healthy; }
+  async stop(): Promise<void> { this.stops += 1; }
+  async generateAudio(): Promise<ArrayBuffer> {
+    this.calls += 1;
+    this.waiters = this.waiters.filter((w) => { if (this.calls >= w.n) { w.resolve(); return false; } return true; });
+    return tinyWav([1]);
+  }
+  until(n: number): Promise<void> {
+    return new Promise<void>((resolve) => { if (this.calls >= n) resolve(); else this.waiters.push({ n, resolve }); });
+  }
+}
+
+test("a live TTS swap mid-turn keeps the whole turn on its original provider", async () => {
+  const old = new CountingTTS("tts-old");
+  const next = new CountingTTS("tts-new");
+  const slot = new ProviderSlot<TTSProvider>(old);
+  const facade = new SwappableTTSProvider(slot);
+
+  // A brain stream that hands over the second sentence only when we release it,
+  // so the swap can be timed to land between the two sentences of one turn.
+  let releaseSecond!: () => void;
+  const secondGate = new Promise<void>((r) => { releaseSecond = r; });
+  async function* stream(): AsyncGenerator<string> {
+    yield "First sentence. ";
+    await secondGate;
+    yield "Second sentence.";
+  }
+  const deps: WebStreamDeps = {
+    stt: { transcribe: async () => "" },
+    brain: { send: async () => "", sendStream: () => stream() },
+    tts: facade,
+  };
+  const { sink, calls } = capturingSink();
+  const turn = streamWebTextTurn("hello", deps, sink);
+
+  // Once the first sentence has synthesized on `old`, swap the live provider.
+  await old.until(1);
+  const swapping = slot.swap(next, () => {});
+  await Bun.sleep(0);
+  expect(slot.providerName).toBe("tts-new"); // a NEW turn would get the replacement
+
+  // Let the in-flight turn finish its second sentence.
+  releaseSecond();
+  await turn;
+
+  // Both sentences of the in-flight turn stayed on the original provider.
+  expect(old.calls).toBe(2);
+  expect(next.calls).toBe(0);
+  expect(calls.audio).toBe(2);
+
+  // The turn released its pin on completion, so the retired generation drains.
+  await swapping;
+  expect(old.stops).toBe(1);
+  await slot.stop();
 });

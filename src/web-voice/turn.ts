@@ -2,6 +2,7 @@ import { unlink } from "node:fs/promises";
 import type { Brain } from "../types";
 import type { STTProvider } from "../backends/stt/provider";
 import type { TTSProvider } from "../backends/tts/provider";
+import { pinGeneration } from "../backends/hot-swap";
 import { segmentSentences } from "../speaker/sentence-stream";
 import { newTurnTimer } from "../timing";
 import { log } from "../logger";
@@ -775,10 +776,13 @@ export async function streamWebTurn(
   // not) at speculation time, from the probe tail.
   const tonePending = beginOwnedTone(deps.tone, wav, "streaming web turn tone classification");
   let tmpFile: string | undefined;
+  // Pin the STT generation for this turn's transcription: a swap must not move a
+  // turn onto a different STT provider than the one it started decoding with.
+  const sttPin = pinGeneration(deps.stt);
   try {
     tmpFile = await writeSecureTempAudio(wav, { prefix: "cicero-web" });
     if (deps.signal?.aborted || sink.aborted()) return;
-    const transcript = (await deps.stt.transcribe(tmpFile))?.trim() ?? "";
+    const transcript = (await sttPin.provider.transcribe(tmpFile))?.trim() ?? "";
     if (deps.signal?.aborted || sink.aborted()) return;
     timer.mark("stt");
     sink.transcript(transcript);
@@ -788,6 +792,7 @@ export async function streamWebTurn(
   } catch (err: unknown) {
     sink.error(err instanceof Error ? err.message : String(err));
   } finally {
+    sttPin.release();
     timer.report("web-turn");
     await retainOwnedTone(tonePending, deps.trackBackground, deps.signal);
     if (tmpFile) await unlink(tmpFile).catch(() => { /* best-effort cleanup */ });
@@ -922,6 +927,11 @@ async function streamReply(
     else deps.signal.addEventListener("abort", abortFromTransport, { once: true });
   }
   let detached = false;
+  // Pin one TTS generation for this whole reply — every sentence, the park line,
+  // and the TLDR coda synthesize on the provider the turn began on. A live swap
+  // cuts over only for the next turn; the parked background never synthesizes, so
+  // releasing on return (below) does not strand a generation.
+  const ttsPin = pinGeneration(deps.tts);
   try {
     // Latency-gated filler: arm a pre-rendered "let me think…" clip (0 ms synth —
     // it's cached), but only speak it if the brain's first sentence hasn't shown
@@ -1000,7 +1010,7 @@ async function streamReply(
           continue;
         }
         const audio = admitProviderAudio(
-          await deps.tts.generateAudio(sentence, undefined, { speed: deps.voice?.state.rate }),
+          await ttsPin.provider.generateAudio(sentence, undefined, { speed: deps.voice?.state.rate }),
         );
         if (sink.aborted() && !parked) break;
         if (audio.byteLength > 0) {
@@ -1036,7 +1046,7 @@ async function streamReply(
         const line = parkCfg.line ?? DEFAULT_PARK_LINE;
         sink.sentence(line);
         const audio = admitProviderAudio(
-          await deps.tts.generateAudio(line, undefined, { speed: deps.voice?.state.rate }),
+          await ttsPin.provider.generateAudio(line, undefined, { speed: deps.voice?.state.rate }),
         );
         if (audio.byteLength > 0) sink.audio(audio);
         sink.done();
@@ -1079,7 +1089,7 @@ async function streamReply(
       }
       sink.sentence(coda);
       const audio = admitProviderAudio(
-        await deps.tts.generateAudio(coda, undefined, { speed: deps.voice?.state.rate }),
+        await ttsPin.provider.generateAudio(coda, undefined, { speed: deps.voice?.state.rate }),
       );
       if (!sink.aborted() && audio.byteLength > 0) {
         sink.audio(audio);
@@ -1094,6 +1104,10 @@ async function streamReply(
     if (error instanceof Error) throw error;
     throw new Error("streaming web reply failed", { cause: error });
   } finally {
+    // Release before/independent of the parked handoff: the detached background
+    // collects text but never synthesizes, so the turn's TTS generation is free
+    // the moment streamReply returns.
+    ttsPin.release();
     cancelFiller(); // turn over (or failed) — never speak a filler after the fact
     if (!detached) deps.signal?.removeEventListener("abort", abortFromTransport);
   }
