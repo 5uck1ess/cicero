@@ -419,6 +419,18 @@ export class RuntimeConfig {
   get quickIntents(): CiceroConfig["quick_intents"] { return this.config.quick_intents; }
   get raw(): CiceroConfig { return this.config; }
 
+  /** Commit one validated live provider selection after its candidate is ready. */
+  setVoiceBackend(role: "stt" | "tts", value: STTProviderConfig | TTSProviderConfig): void {
+    if (role === "stt") this.config.stt = { ...value } as CiceroConfig["stt"];
+    else this.config.tts = { ...value } as CiceroConfig["tts"];
+  }
+
+  /** Keep runtime fallback ownership aligned with an atomically persisted swap plan. */
+  setVoiceFallback(role: "stt" | "tts", value: STTProviderConfig | TTSProviderConfig): void {
+    if (role === "stt") this.config.stt_fallback = { ...value } as CiceroConfig["stt_fallback"];
+    else this.config.tts_fallback = { ...value } as CiceroConfig["tts_fallback"];
+  }
+
   get sttBackend(): STTProviderConfig {
     if (this.config.stt) {
       return this.config.stt as STTProviderConfig;

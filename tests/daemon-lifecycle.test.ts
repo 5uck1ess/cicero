@@ -687,8 +687,8 @@ describe("CiceroDaemon lifecycle", () => {
     expect(state.lifecycle).toBe("idle");
   });
 
-  test("an ingress drain failure blocks dependency teardown and a later stop retries", async () => {
-    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-ingress-retry-test-"));
+  test("an ingress drain failure is best-effort and never blocks provider teardown", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-ingress-besteffort-test-"));
     const daemon = new CiceroDaemon(loadConfig({}, { home }));
     let webStops = 0;
     let dashboardStops = 0;
@@ -708,26 +708,21 @@ describe("CiceroDaemon lifecycle", () => {
     state.dashboard = {
       stop: () => { dashboardStops += 1; return Promise.resolve(); },
     };
+    // A web ingress handle that never drains cleanly (its own socket release is
+    // still bounded elsewhere). Admission is revoked synchronously, so this must
+    // not strand the brain/speaker/provider teardown that follows.
     state.webVoice = {
-      stop: () => {
-        webStops += 1;
-        return webStops === 1
-          ? Promise.reject(new Error("web handler still owns the brain"))
-          : Promise.resolve();
-      },
+      stop: () => { webStops += 1; return Promise.reject(new Error("web handler still owns the brain")); },
     };
     state.brain = { stop: () => { brainStops += 1; return Promise.resolve(); } };
     state.streamingSpeaker = { stop: () => Promise.resolve() };
     state.speaker = { stop: () => { speakerStops += 1; return Promise.resolve(); } };
 
-    await expect(daemon.stop()).rejects.toThrow("external ingress did not drain");
-    expect(brainStops).toBe(0);
-    expect(speakerStops).toBe(0);
-    expect(state.lifecycle).toBe("stopping");
-
+    // One pass completes: the ingress failure is logged, not fatal, and shutdown
+    // proceeds all the way to dependency teardown and idle.
     await daemon.stop();
-    expect(webStops).toBe(2);
-    expect(dashboardStops).toBe(2);
+    expect(webStops).toBe(1);
+    expect(dashboardStops).toBe(1);
     expect(brainStops).toBe(1);
     expect(speakerStops).toBe(1);
     expect(state.lifecycle).toBe("idle");
@@ -788,7 +783,7 @@ describe("CiceroDaemon lifecycle", () => {
     }
   });
 
-  test("--no-servers still verifies a required external primary without taking ownership", async () => {
+  test("--no-servers verifies a required external primary AND owns its teardown", async () => {
     const home = mkdtempSync(join(tmpdir(), "cicero-daemon-external-provider-test-"));
     const pidFile = join(home, "cicero.pid");
     const config = loadConfig({}, { home });
@@ -823,7 +818,10 @@ describe("CiceroDaemon lifecycle", () => {
       await expect(daemon.start()).rejects.toThrow(
         "stt.backend='remote-company-stt' failed its health check",
       );
-      expect(lifecycleCalls).toEqual(["health"]);
+      // Health-gated before ownership, THEN stopped on rollback: under --no-servers
+      // the daemon still owns provider teardown (regression: it used to skip the
+      // provider stop entirely, leaking the created generation).
+      expect(lifecycleCalls).toEqual(["health", "stop"]);
       expect(existsSync(pidFile)).toBe(false);
     } catch (error) {
       await daemon.stop().catch(() => {});
@@ -915,6 +913,78 @@ describe("CiceroDaemon lifecycle", () => {
     } catch (error) {
       await daemon.stop().catch(() => {});
       throw new Error(`optional warmup test failed: ${(error as Error).message}`, { cause: error });
+    }
+  });
+
+  test("--no-servers still stops the live STT/TTS providers on daemon.stop() (no leak)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-noservers-teardown-test-"));
+    const pidFile = join(home, "cicero.pid");
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.dashboard = { enabled: false };
+    config.raw.stt = { backend: "company-stt-plugin" };
+    config.raw.tts = { backend: "company-tts-plugin" };
+    config.raw.web_voice = {
+      enabled: true,
+      port: 0,
+      token: "test-token-that-is-long-enough",
+      tls: { enabled: false },
+    };
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+    };
+    const stops: string[] = [];
+    const daemon = new CiceroDaemon(config, {
+      skipServers: true, // the leak path: no managed ServerManager was retained before
+      pidFile,
+      webVoiceServerStarter: () => ({
+        scheme: "http",
+        port: 18_444,
+        clientCount: () => 0,
+        notify: () => Promise.resolve(null),
+        stop: () => Promise.resolve(),
+      }),
+      providerFactory: () => ({
+        stt: {
+          name: "company-stt-plugin",
+          transcribe: () => Promise.resolve(null),
+          start: () => Promise.resolve(),
+          health: () => Promise.resolve(true),
+          stop: async () => { stops.push("stt"); },
+        },
+        tts: {
+          name: "company-tts-plugin",
+          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+          start: () => Promise.resolve(),
+          health: () => Promise.resolve(true),
+          stop: async () => { stops.push("tts"); },
+        },
+        llm: {
+          name: "company-llm-plugin",
+          chatCompletion: () => Promise.resolve("ok"),
+          start: () => Promise.resolve(),
+          health: () => Promise.resolve(true),
+          stop: async () => { stops.push("llm"); },
+        },
+      }),
+    });
+
+    try {
+      await daemon.start();
+      expect(existsSync(pidFile)).toBe(true);
+      // The real CiceroDaemon.stop() — not a manual slot.stop() — must reap the
+      // providers even though no managed servers were started under --no-servers.
+      await daemon.stop();
+      expect(new Set(stops)).toEqual(new Set(["stt", "tts", "llm"]));
+      expect(existsSync(pidFile)).toBe(false);
+    } catch (error) {
+      await daemon.stop().catch(() => {});
+      throw new Error(`no-servers teardown test failed: ${(error as Error).message}`, { cause: error });
     }
   });
 });

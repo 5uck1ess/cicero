@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, rmSync, watch } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "node:os";
-import type { RuntimeConfig } from "./config";
+import { createServer } from "node:net";
+import { RuntimeConfig, updateConfigFields } from "./config";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
 import { log, logStep, logError } from "./logger";
 import { createListener, createConversationalListener } from "./listener";
@@ -36,7 +37,14 @@ import { FillerBank } from "./speaker/filler-bank";
 import { ciceroPath } from "./platform/paths";
 import { warmupProvider } from "./backends/tts/warmup";
 import { buildRecoveryContext } from "./speaker/recovery";
-import { createProviders, type BackendProviders } from "./backends/registry";
+import { createProviders, createSTTProvider, createTTSProvider, type BackendProviders } from "./backends/registry";
+import { ProviderSlot, SwappableSTTProvider, SwappableTTSProvider } from "./backends/hot-swap";
+import type { STTProvider, STTProviderConfig } from "./backends/stt/provider";
+import type { TTSProvider, TTSProviderConfig } from "./backends/tts/provider";
+import { sttDefaultPort } from "./backends/stt/provider";
+import { ttsDefaultPort } from "./backends/tts/provider";
+import { isLocalHost } from "./backends/net";
+import { startRuntimeControl, type RuntimeControlHandle, type SwapRequest, type SwapResult, type SwapRole } from "./runtime-control";
 import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "./backends/llm/openai";
 import type { LLMProviderConfig } from "./backends/llm/provider";
 import {
@@ -255,6 +263,12 @@ export interface DaemonOptions {
   skipServers?: boolean;
   /** Dependency injection hook for embedding/tests. Defaults to createProviders. */
   providerFactory?: typeof createProviders;
+  /** Candidate factories for live swaps. Defaults to the built-in registry. */
+  sttProviderFactory?: (config: RuntimeConfig) => STTProvider;
+  ttsProviderFactory?: (config: RuntimeConfig) => TTSProvider;
+  /** Override persistence and runtime-control publication for tests/embedders. */
+  configPath?: string;
+  runtimeControlDescriptorPath?: string;
   /** Optional speech-emotion provider injection for lifecycle tests/embedders. */
   serProviderFactory?: typeof createSerProvider;
   /** Optional TLS setup injection for lifecycle tests/embedders. */
@@ -272,6 +286,80 @@ export interface DaemonOptions {
 }
 
 const DEFAULT_DAEMON_SHUTDOWN_DRAIN_TIMEOUT_MS = 95_000;
+const MANAGED_STT_BACKENDS = new Set(["mlx-whisper", "faster-whisper", "audiocpp"]);
+const MANAGED_TTS_BACKENDS = new Set(["mlx-audio", "kokoro", "audiocpp", "pocket-tts", "vibevoice"]);
+
+export interface VoiceProviderSwapPlan {
+  selection: STTProviderConfig | TTSProviderConfig;
+  fallback?: STTProviderConfig | TTSProviderConfig;
+}
+
+async function availableLoopbackPort(): Promise<number> {
+  const server = createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("could not allocate a loopback provider port");
+    return address.port;
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => {});
+  }
+}
+
+function managedVoiceEndpoint(role: SwapRole, selection: STTProviderConfig | TTSProviderConfig): string | null {
+  const managed = role === "stt" ? MANAGED_STT_BACKENDS : MANAGED_TTS_BACKENDS;
+  if (!selection.backend || !managed.has(selection.backend) || !isLocalHost(selection.host)) return null;
+  const port = selection.port ?? (role === "stt"
+    ? sttDefaultPort(selection.backend)
+    : ttsDefaultPort(selection.backend));
+  return port === undefined ? null : `local:${port}`;
+}
+
+export async function planVoiceProviderSwap(
+  config: RuntimeConfig,
+  request: SwapRequest,
+  allocatePort: () => Promise<number> = availableLoopbackPort,
+): Promise<VoiceProviderSwapPlan> {
+  const explicitSelection = request.role === "stt" ? config.raw.stt : config.raw.tts;
+  const currentSelection = explicitSelection
+    ?? (request.role === "stt" ? config.sttBackend : config.ttsBackend);
+  const selection: STTProviderConfig | TTSProviderConfig = currentSelection?.backend === request.backend
+    ? { ...currentSelection, ...(request.model ? { model: request.model } : {}) }
+    : { backend: request.backend, ...(request.model ? { model: request.model } : {}) };
+  const fallback = request.role === "stt" ? config.sttFallbackBackend : config.ttsFallbackBackend;
+  const occupied = new Set<string>();
+  for (const [role, provider] of [
+    ["stt", config.sttBackend],
+    ["stt", config.sttFallbackBackend],
+    ["tts", config.ttsBackend],
+    ["tts", config.ttsFallbackBackend],
+  ] as const) {
+    if (!provider) continue;
+    const endpoint = managedVoiceEndpoint(role, provider);
+    if (endpoint) occupied.add(endpoint);
+  }
+
+  const stage = async <T extends STTProviderConfig | TTSProviderConfig>(role: SwapRole, value: T): Promise<T> => {
+    const staged = { ...value };
+    let endpoint = managedVoiceEndpoint(role, staged);
+    if (endpoint && occupied.has(endpoint)) {
+      staged.port = await allocatePort();
+      endpoint = managedVoiceEndpoint(role, staged);
+    }
+    if (endpoint) occupied.add(endpoint);
+    return staged;
+  };
+
+  const stagedSelection = await stage(request.role, selection);
+  if (!fallback) return { selection: stagedSelection };
+  return {
+    selection: stagedSelection,
+    fallback: await stage(request.role, fallback),
+  };
+}
 
 /** Wrap one finished string as a single-shot async stream for the streaming speaker. */
 async function* asyncOnce(text: string): AsyncGenerator<string> {
@@ -291,6 +379,10 @@ export class CiceroDaemon {
   private startupPolicies: BackendStartupPolicies = {};
   private contextStore = new ContextStore();
   private providers!: BackendProviders;
+  private sttSlot: ProviderSlot<STTProvider> | null = null;
+  private ttsSlot: ProviderSlot<TTSProvider> | null = null;
+  private runtimeControl: RuntimeControlHandle | null = null;
+  private voiceSwapRunning = false;
   /** Ready to accept turns; kept separate from the finer-grained lifecycle state. */
   private running = false;
   private lifecycle: "idle" | "starting" | "running" | "stopping" = "idle";
@@ -586,6 +678,7 @@ export class CiceroDaemon {
   private activeLocalTurn: AbortController | null = null;
   /** Every local mic/dashboard command, including superseded turns winding down. */
   private localTurnTasks = new Set<Promise<void>>();
+  private startupVoiceWarmups = new Map<SwapRole, BackgroundTaskHandle>();
   private hotkeyProc: ReturnType<typeof Bun.spawn> | null = null;
 
   constructor(config: RuntimeConfig, options: DaemonOptions = {}) {
@@ -722,8 +815,23 @@ export class CiceroDaemon {
     this.pidLease = await claimDaemonPidFile(pidFile);
     this.assertStartupActive();
 
-    // Create providers from config
-    this.providers = (this.options.providerFactory ?? createProviders)(this.config);
+    // Create providers from config. Stable facades keep every long-lived listener,
+    // speaker, and web handler pointed at the current generation after a live swap.
+    const initialProviders = (this.options.providerFactory ?? createProviders)(this.config);
+    this.sttSlot = new ProviderSlot(initialProviders.stt);
+    this.ttsSlot = new ProviderSlot(initialProviders.tts);
+    this.providers = {
+      ...initialProviders,
+      stt: new SwappableSTTProvider(this.sttSlot),
+      tts: new SwappableTTSProvider(this.ttsSlot),
+    };
+    this.runtimeControl = await startRuntimeControl({
+      token: this.pidLease.record.token,
+      pid: this.pidLease.record.pid,
+      descriptorPath: this.options.runtimeControlDescriptorPath,
+      onSwap: (request) => this.swapVoiceProvider(request),
+    });
+    this.assertStartupActive();
     this.startupPolicies = createBackendStartupPolicies(this.config, {
       builtInProviders: this.options.providerFactory === undefined
         || this.options.providerFactory === createProviders,
@@ -751,13 +859,17 @@ export class CiceroDaemon {
     }
 
     // Step 1: Start model servers via providers
+    // Retain the ServerManager in BOTH paths: it is the shutdown owner that stops
+    // every provider (initial and any hot-swapped-in generation via the slot
+    // facades). Under --no-servers we skip *starting* managed servers but must
+    // still own teardown, or a swapped/initial STT/TTS provider leaks past stop().
+    this.servers = new ServerManager();
     if (this.options.skipServers) {
       logStep(1, totalSteps, "Skipping model servers (--no-servers)");
-      await new ServerManager().verifyRequired(this.providers, this.startupPolicies);
+      await this.servers.verifyRequired(this.providers, this.startupPolicies);
       this.assertStartupActive();
     } else {
       logStep(1, totalSteps, "Starting model servers...");
-      this.servers = new ServerManager();
       await this.servers.start(this.providers, this.startupPolicies);
       this.assertStartupActive();
     }
@@ -947,19 +1059,19 @@ export class CiceroDaemon {
     // Pre-warm TTS and STT so the first turn isn't hit with a multi-second cold
     // model load. Fire-and-forget — startup must not block on warmup.
     if (!this.startupPolicies.tts?.skipReason) {
-      this.runBackground(
+      this.startupVoiceWarmups.set("tts", this.runBackground(
         "TTS warmup",
         () => warmupProvider(this.providers.tts),
         { drainOnShutdown: false },
-      );
+      ));
     }
     if (!this.options.skipServers) {
       if (!this.startupPolicies.stt?.skipReason && this.providers.stt.warmup) {
-        this.runBackground(
+        this.startupVoiceWarmups.set("stt", this.runBackground(
           "STT warmup",
           () => this.providers.stt.warmup!(),
           { drainOnShutdown: false },
-        );
+        ));
       }
       // Warm the router/LLM model too — the first classify cold-loads it (~5s).
       if (!this.startupPolicies.llm?.skipReason) {
@@ -1799,6 +1911,69 @@ export class CiceroDaemon {
     return task;
   }
 
+  /** Generic STT/TTS swap transaction used by the authenticated local control channel. */
+  private async swapVoiceProvider(request: SwapRequest): Promise<SwapResult> {
+    if (!this.running || this.stopRequested || this.lifecycle !== "running") {
+      throw new Error("Cicero is not ready to swap providers");
+    }
+    if (this.startupVoiceWarmups.get(request.role)?.settled === false) {
+      throw new Error(`${request.role.toUpperCase()} startup warmup is still in progress; retry the swap shortly`);
+    }
+    if (this.voiceSwapRunning) throw new Error("another provider swap is already in progress");
+    this.voiceSwapRunning = true;
+    try {
+      const plan = await planVoiceProviderSwap(this.config, request);
+      const selection = plan.selection;
+      const candidateConfig = new RuntimeConfig(structuredClone(this.config.raw));
+      candidateConfig.setVoiceBackend(request.role, selection);
+      if (plan.fallback) candidateConfig.setVoiceFallback(request.role, plan.fallback);
+
+      if (request.role === "stt") {
+        const slot = this.sttSlot;
+        if (!slot) throw new Error("STT provider slot is unavailable");
+        const candidate = (this.options.sttProviderFactory ?? createSTTProvider)(candidateConfig);
+        await slot.swap(candidate, () => {
+          updateConfigFields(
+            {
+              stt: selection as STTProviderConfig,
+              ...(plan.fallback ? { stt_fallback: plan.fallback as STTProviderConfig } : {}),
+            },
+            this.options.configPath,
+            { replaceTopLevel: plan.fallback ? ["stt", "stt_fallback"] : ["stt"] },
+          );
+          this.config.setVoiceBackend("stt", selection);
+          if (plan.fallback) this.config.setVoiceFallback("stt", plan.fallback);
+        });
+      } else {
+        const slot = this.ttsSlot;
+        if (!slot) throw new Error("TTS provider slot is unavailable");
+        const candidate = (this.options.ttsProviderFactory ?? createTTSProvider)(candidateConfig);
+        await slot.swap(candidate, () => {
+          updateConfigFields(
+            {
+              tts: selection as TTSProviderConfig,
+              ...(plan.fallback ? { tts_fallback: plan.fallback as TTSProviderConfig } : {}),
+            },
+            this.options.configPath,
+            { replaceTopLevel: plan.fallback ? ["tts", "tts_fallback"] : ["tts"] },
+          );
+          this.config.setVoiceBackend("tts", selection);
+          if (plan.fallback) this.config.setVoiceFallback("tts", plan.fallback);
+        });
+        dashBus.setConfig({
+          brain: this.config.brain.backend,
+          model: this.config.raw.llm?.model ?? this.config.servers.router.model,
+          ttsVoice: this.config.raw.tts?.voice ?? this.config.voice,
+          ttsBackend: request.backend,
+        });
+      }
+      log("ok", `${request.role.toUpperCase()} swapped live to ${request.backend}${request.model ? ` (${request.model})` : ""}`);
+      return { ...request, status: "active" };
+    } finally {
+      this.voiceSwapRunning = false;
+    }
+  }
+
   private async drainLocalTurns(): Promise<void> {
     // A finishing task cannot legitimately create a new local turn during
     // shutdown, but drain to a stable empty set so listener adapters with a
@@ -2558,6 +2733,7 @@ export class CiceroDaemon {
       }
     };
     return Promise.allSettled([
+      invoke(this.runtimeControl),
       invoke(this.dashboard),
       invoke(this.webVoiceTunnelOwner),
       invoke(this.webVoice),
@@ -2612,9 +2788,14 @@ export class CiceroDaemon {
 
       // Stop accepting external work before tearing down any dependency an
       // HTTP/WebSocket/dashboard handler may still be using. Both stop methods
-      // quiesce synchronously, then resolve only after their owned jobs drain.
+      // quiesce admission synchronously (in stop()'s own stack), then resolve
+      // only after their owned jobs drain. The DRAIN is best-effort here: a
+      // slow/hung swap (or any ingress that will not drain) must not abort the
+      // shutdown before provider teardown and PID release — admission is already
+      // revoked, each ingress releases its own socket on timeout, and the
+      // provider slots below are the authoritative bounded resource release.
       this.removeWebVoicePairingState();
-      await (initialIngressStop ?? this.stopExternalIngress());
+      await cleanup("external ingress", () => initialIngressStop ?? this.stopExternalIngress());
       await cleanup("startup background tasks", () => this.drainBackgroundTasks());
       await cleanup("actions reloader", () => this.actionsReloader?.stop());
       this.actionsReloader = null;
@@ -2721,6 +2902,10 @@ export class CiceroDaemon {
         this.startupPolicies = {};
         this.serProvider = null;
         this.dashboard = null;
+        this.runtimeControl = null;
+        this.sttSlot = null;
+        this.ttsSlot = null;
+        this.voiceSwapRunning = false;
         this.webVoiceTunnelOwner = null;
         this.webVoiceTunnel = null;
         this.webVoice = null;

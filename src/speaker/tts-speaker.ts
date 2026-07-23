@@ -1,5 +1,6 @@
 import type { Speaker } from "../types";
 import type { TTSProvider } from "../backends/tts/provider";
+import { pinGeneration, type GenerationPin } from "../backends/hot-swap";
 import type { AudioPlayer } from "../platform/audio";
 import { AudioReleaseUnconfirmedError } from "../platform/owned-audio-player";
 import { unlink } from "node:fs/promises";
@@ -50,20 +51,23 @@ export class TTSSpeaker implements Speaker {
     await this.retryUnconfirmedOutputRelease();
     await this.waitForFallbackOutput();
     if (this.stopped) return;
+    // Pin one generation for this whole utterance: a live swap mid-speak must not
+    // move the second chunk onto a different provider than the first.
+    const pin = this.pinTurnProvider();
     try {
-      const healthy = await this.provider.health();
+      const healthy = await pin.provider.health();
       if (this.stopped) return;
       if (this.outputReleaseFailure) throw this.outputReleaseFailure;
       if (!healthy) {
-        log("warn", `${this.provider.name} unavailable, falling back`);
+        log("warn", `${pin.provider.name} unavailable, falling back`);
         return this.speakFallbackOutput(text);
       }
 
       const sentences = this.splitSentences(text);
       if (sentences.length > 2 && text.length > 300) {
-        await this.speakChunked(sentences);
+        await this.speakChunked(sentences, pin.provider);
       } else {
-        await this.speakSingle(text);
+        await this.speakSingle(text, pin.provider);
       }
     } catch (err: unknown) {
       if (this.stopped) return;
@@ -75,7 +79,14 @@ export class TTSSpeaker implements Speaker {
       }
       log("warn", `TTS failed, using fallback: ${msg}`);
       return this.speakFallbackOutput(text);
+    } finally {
+      pin.release();
     }
+  }
+
+  /** Pin the live TTS generation for the span of one turn (see {@link pinGeneration}). */
+  protected pinTurnProvider(): GenerationPin<TTSProvider> {
+    return pinGeneration(this.provider);
   }
 
   /** Invoke the fallback once and retain fatal ownership uncertainty globally. */
@@ -103,30 +114,30 @@ export class TTSSpeaker implements Speaker {
     await this.retryUnconfirmedOutputRelease();
   }
 
-  private async speakSingle(text: string): Promise<void> {
-    const audioData = await this.generateAudio(text);
+  private async speakSingle(text: string, provider: TTSProvider = this.provider): Promise<void> {
+    const audioData = await this.generateAudio(text, provider);
     if (this.stopped) return;
-    log("info", `${this.provider.name}: ${audioData.byteLength} bytes`);
+    log("info", `${provider.name}: ${audioData.byteLength} bytes`);
     await this.playAudio(audioData);
   }
 
-  private async speakChunked(sentences: string[]): Promise<void> {
-    log("info", `${this.provider.name}: chunked mode (${sentences.length} sentences)`);
-    const firstAudio = await this.generateAudio(sentences[0]);
+  private async speakChunked(sentences: string[], provider: TTSProvider = this.provider): Promise<void> {
+    log("info", `${provider.name}: chunked mode (${sentences.length} sentences)`);
+    const firstAudio = await this.generateAudio(sentences[0], provider);
     if (this.stopped) return;
     const remaining = sentences.slice(1).join(" ");
     const [, restAudio] = await Promise.all([
       this.playAudio(firstAudio),
-      remaining ? this.generateAudio(remaining) : Promise.resolve(null),
+      remaining ? this.generateAudio(remaining, provider) : Promise.resolve(null),
     ]);
     if (restAudio && !this.stopped) {
       await this.playAudio(restAudio);
     }
   }
 
-  protected async generateAudio(text: string): Promise<ArrayBuffer> {
+  protected async generateAudio(text: string, provider: Pick<TTSProvider, "generateAudio"> = this.provider): Promise<ArrayBuffer> {
     try {
-      const audio = await this.provider.generateAudio(text);
+      const audio = await provider.generateAudio(text);
       return snapshotSynthesizedWav(audio, { allowEmpty: true }).audio;
     } catch (error: unknown) {
       if (error instanceof Error) throw error;

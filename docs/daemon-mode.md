@@ -15,6 +15,42 @@ marker is replaced on the next start. Unsafe legacy, symlinked, non-regular, or
 non-private markers are rejected with an actionable error instead of followed
 or overwritten.
 
+## Live STT/TTS swaps
+
+A running daemon can replace either speech provider without restarting:
+
+```bash
+cicero swap stt faster-whisper
+cicero swap stt faster-whisper Systran/faster-whisper-large-v3-turbo
+cicero swap tts kokoro
+cicero swap tts kokoro hexgrad/Kokoro-82M
+```
+
+The optional final argument overrides the model. Cicero constructs and starts
+the complete configured provider, including its fallback, then requires warmup
+and a healthy primary before cutover. Local managed replacements that would
+collide with the live provider are staged on a free loopback port. New work uses
+the replacement after cutover; work already holding the old generation is
+allowed to finish before that generation is stopped.
+
+Only a successful readiness gate is written to `~/.cicero/config.yaml`, using
+the same atomic private-file update as other configuration commands. A startup,
+warmup, health, or persistence failure cleans up the candidate and leaves both
+the active provider and config unchanged. One swap may run at a time across
+both roles, preventing simultaneous STT/TTS writes from racing the shared
+config file. A concurrent
+request exits non-zero with `another provider swap is already in progress`.
+The command's success line names the active backend/model and says
+`Config persisted`; preparation and persistence failures explicitly say the
+current provider and config were retained. A rare post-cutover cleanup failure
+instead reports that cutover committed but old-provider cleanup is unconfirmed;
+the daemon does not lie about rolling back after ownership became uncertain.
+
+The CLI reaches the daemon through a loopback-only authenticated control socket.
+Its short-lived descriptor is private under `~/.cicero/` and is removed during
+clean shutdown. If the descriptor is absent, the CLI reports that runtime
+control is unavailable instead of editing config behind a stopped daemon.
+
 ## Conversational mode
 
 Type `voice` in the cicero prompt or, on macOS with the helper built, press **Ctrl+Shift+Space** to toggle. The native helper currently listens to that fixed chord; configuring another display value does not rebind it. Cicero continuously listens, transcribes, responds via streaming TTS. Say "stop listening" or "goodbye" to deactivate.
