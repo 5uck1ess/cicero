@@ -28,6 +28,7 @@ const KEEP_LINES = 500;   // … rewrite keeping this many
 export class TurnHistory {
   private pending: Promise<void> = Promise.resolve();
   private available = true;
+  private lineCount: number | null = null;
 
   constructor(private file: string) {
     try {
@@ -72,8 +73,14 @@ export class TurnHistory {
   }
 
   private async trimIfNeeded(): Promise<void> {
+    if (this.lineCount !== null) {
+      this.lineCount += 1;
+      if (this.lineCount <= MAX_LINES) return;
+    }
     const lines = (await readFile(this.file, "utf8")).split("\n").filter(Boolean);
-    if (lines.length <= MAX_LINES) return;
+    this.lineCount = lines.length;
+    if (this.lineCount <= MAX_LINES) return;
     await writeFile(this.file, lines.slice(-KEEP_LINES).join("\n") + "\n", { mode: PRIVATE_FILE_MODE });
+    this.lineCount = KEEP_LINES;
   }
 }
