@@ -136,10 +136,19 @@ export class SubprocessCLIBrain implements Brain {
   /** Called after a turn's subprocess exits 0 — hook for session tracking. */
   protected onTurnComplete(): void {}
 
+  private resolvedBinary(env: Record<string, string | undefined>): string {
+    if (process.platform !== "win32") return this.config.binary;
+    let path: string | undefined;
+    for (const [key, value] of Object.entries(env)) {
+      if (key.toLowerCase() === "path") path = value;
+    }
+    return Bun.which(this.config.binary, { PATH: path }) ?? this.config.binary;
+  }
+
   private spawnProc(message: string, options: BrainTurnOptions) {
     const fullMessage = this.buildPrompt(message, options.systemContext);
     const env = this.buildEnv();
-    const { binary } = this.config;
+    const binary = this.resolvedBinary(env);
     const args = this.argsForTurn();
 
     if (this.config.promptViaStdin) {
@@ -167,7 +176,7 @@ export class SubprocessCLIBrain implements Brain {
    */
   protected spawnWithArgs(args: string[], message: string, systemContext?: string) {
     const env = this.buildEnv();
-    return spawnOwnedProcess([this.config.binary, ...args, this.buildPrompt(message, systemContext)], {
+    return spawnOwnedProcess([this.resolvedBinary(env), ...args, this.buildPrompt(message, systemContext)], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
