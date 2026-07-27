@@ -1565,6 +1565,29 @@ test("handle.notify() forwards telegramMirror to onNotify (the morning-briefing 
   expect(seen).toEqual([false, undefined]);
 });
 
+test("handle.notify() reports a quiet-hours defer to in-process callers too", async () => {
+  // The kanban watcher and other in-process callers go through handle.notify()
+  // rather than the HTTP route; a defer must be distinguishable there as well,
+  // not just for the CLI.
+  start({
+    onStreamTurn: async () => { /* unused */ },
+    onNotify: async () => null, // daemon signals quiet-hours deferral
+  });
+  expect(await handle!.notify("fork sync needs a decision"))
+    .toEqual({ delivered: 0, parked: false, deferred: true });
+});
+
+test("handle.notify() forwards urgent so an in-process alert can skip quiet hours", async () => {
+  const seen: Array<boolean | undefined> = [];
+  start({
+    onStreamTurn: async () => { /* unused */ },
+    onNotify: async (_text, _voice, opts) => { seen.push(opts?.urgent); return wav(1); },
+  });
+  await handle!.notify("build is down", undefined, { urgent: true });
+  await handle!.notify("routine news");
+  expect(seen).toEqual([true, undefined]);
+});
+
 test("/api/say renders text to WAV without broadcasting; 501/400 guarded", async () => {
   let notified = 0;
   let said = 0;
