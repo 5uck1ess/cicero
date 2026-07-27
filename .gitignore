@@ -1,5 +1,8 @@
 .DS_Store
-node_modules/
+# No trailing slash: a `dir/` pattern matches directories only, so a
+# node_modules symlinked at a shared install (a common git-worktree setup)
+# stays untracked-but-visible and can be swept into a commit by `git add -A`.
+node_modules
 dist/
 .env
 .env.*
