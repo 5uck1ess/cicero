@@ -22,6 +22,42 @@ export interface SubprocessCLIBrainConfig {
 }
 
 export type TurnProcess = OwnedProcess;
+
+/**
+ * The child's PATH, however it happens to be spelled. Windows environment
+ * blocks are case-insensitive, so an env assembled by spreading `config.env`
+ * over `process.env` can carry both `Path` and `PATH`. The last key wins,
+ * which matches that spread order: an explicitly configured PATH overrides
+ * the inherited one regardless of the casing either side used.
+ */
+export function pathFromEnv(env: Record<string, string | undefined>): string | undefined {
+  let value: string | undefined;
+  for (const [key, candidate] of Object.entries(env)) {
+    if (key.toLowerCase() === "path") value = candidate;
+  }
+  return value;
+}
+
+/**
+ * Windows CreateProcess does not search PATH for the command shims (`foo.cmd`,
+ * `foo.bat`) that npm-style installers put there, so a bare binary name a
+ * terminal resolves fine fails to spawn. Resolve it against the child's own
+ * PATH first, and fall back to the raw name so a miss keeps the previous
+ * behavior and lets the spawn report its own error.
+ *
+ * `platform` and `which` are injected so the Windows branch stays exercisable
+ * from a POSIX CI run — the real Windows shim lookup still needs Windows.
+ */
+export function resolveCommandBinary(
+  binary: string,
+  env: Record<string, string | undefined>,
+  platform: string = process.platform,
+  which: typeof Bun.which = Bun.which,
+): string {
+  if (platform !== "win32") return binary;
+  return which(binary, { PATH: pathFromEnv(env) }) ?? binary;
+}
+
 const CANCEL_GRACE_MS = 500;
 const CANCEL_REAP_TIMEOUT_MS = 2_000;
 const OUTPUT_CLOSE_EXIT_GRACE_MS = 500;
@@ -137,12 +173,7 @@ export class SubprocessCLIBrain implements Brain {
   protected onTurnComplete(): void {}
 
   private resolvedBinary(env: Record<string, string | undefined>): string {
-    if (process.platform !== "win32") return this.config.binary;
-    let path: string | undefined;
-    for (const [key, value] of Object.entries(env)) {
-      if (key.toLowerCase() === "path") path = value;
-    }
-    return Bun.which(this.config.binary, { PATH: path }) ?? this.config.binary;
+    return resolveCommandBinary(this.config.binary, env);
   }
 
   private spawnProc(message: string, options: BrainTurnOptions) {

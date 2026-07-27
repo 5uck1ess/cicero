@@ -882,6 +882,11 @@ export class CiceroDaemon {
     };
     this.brain.setCallMeHandler?.(dialBack);
 
+    // ONE history for every surface that records a turn. Separate instances
+    // over the same file each keep their own append chain, so one instance's
+    // trim rewrite can drop lines another just appended — and TurnHistory's
+    // cached line count assumes a single writer. Built lazily: a daemon with
+    // neither Telegram nor web voice never touches the file.
     let conversationHistory: TurnHistory | undefined;
     const history = () => conversationHistory ??= new TurnHistory(
       join(homedir(), ".cicero", "web-voice", "history.jsonl"),
