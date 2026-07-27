@@ -1,4 +1,7 @@
 import { test, expect } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import {
   awaitOwnedTurnExit,
   SubprocessCLIBrain,
@@ -10,6 +13,33 @@ test("SubprocessCLIBrain spawns the configured binary with prompt", async () => 
   await brain.start();
   const out = await brain.send("hello");
   expect(out).toContain("hello");
+});
+
+test.skipIf(process.platform !== "win32")("resolves Windows PATH command shims before spawning", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cicero-brain-shim-"));
+  try {
+    writeFileSync(join(directory, "cicero-brain-shim.cmd"), "@echo off\r\necho %*\r\n");
+    class InspectBrain extends SubprocessCLIBrain {
+      spawnExplicit() {
+        return this.spawnWithArgs(["--stream"], "hello");
+      }
+    }
+    const brain = new InspectBrain({
+      name: "test",
+      binary: "cicero-brain-shim",
+      args: ["--print"],
+      env: { PATH: `${directory}${delimiter}${process.env.PATH ?? ""}` },
+      rememberTurns: false,
+    });
+
+    expect(await brain.send("hello")).toContain("--print hello");
+    const explicit = brain.spawnExplicit();
+    const output = await new Response(explicit.stdout).text();
+    expect(await awaitOwnedTurnExit(explicit)).toBe(0);
+    expect(output).toContain("--stream hello");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("injected context is prepended once and completed turns become bounded history", () => {
