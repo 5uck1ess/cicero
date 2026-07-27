@@ -58,6 +58,28 @@ test("a quiet-hours defer is distinct from a park and from a zero delivery", asy
     .rejects.toThrow(/invalid delivery result/);
 });
 
+test("a defer from a daemon predating the field is still reported as a defer", async () => {
+  // Rolling upgrade: new CLI, daemon not yet restarted. That daemon cannot send
+  // `deferred`, but its wire format is unambiguous anyway — every real
+  // zero-delivery parks, so zero delivered AND not parked can only be the
+  // quiet-hours defer. Without this the CLI falls back to "no voice client is
+  // connected", which is exactly the misreport this change exists to kill.
+  const responder = (payload: unknown) => (async () => Response.json(payload)) as typeof fetch;
+  const base = { scheme: "https" as const, port: 8090, token: "secret", text: "fork sync stalled" };
+
+  // Legacy defer, both shapes the old route could emit.
+  expect(await sendWebVoiceNotification(base, responder({ delivered: 0 })))
+    .toEqual({ delivered: 0, parked: false, deferred: true });
+  expect(await sendWebVoiceNotification(base, responder({ delivered: 0, parked: false })))
+    .toEqual({ delivered: 0, parked: false, deferred: true });
+
+  // Legacy park and legacy delivery must NOT be inferred as defers.
+  expect(await sendWebVoiceNotification(base, responder({ delivered: 0, parked: true })))
+    .toEqual({ delivered: 0, parked: true, deferred: false });
+  expect(await sendWebVoiceNotification(base, responder({ delivered: 3 })))
+    .toEqual({ delivered: 3, parked: false, deferred: false });
+});
+
 test("notify rejects character and encoded-JSON overflow before fetch", async () => {
   let calls = 0;
   const mockFetch = (async () => {

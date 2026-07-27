@@ -387,8 +387,13 @@ program
         // Not a delivery failure and not a drop: quiet hours queued it for the
         // next morning briefing. Saying "no voice client is connected" here
         // (as this used to) reads as lost, which hides real alerts.
+        //
+        // A defer that survives --urgent means the daemon is older than the
+        // flag and dropped it, so pointing at --urgent again would be a loop.
         console.error(
-          "[cicero] notify deferred by quiet hours — queued for the next morning briefing. Use --urgent to deliver now.",
+          opts.urgent === true
+            ? "[cicero] notify deferred by quiet hours despite --urgent — the running daemon predates the flag. Restart it to pick up the current build."
+            : "[cicero] notify deferred by quiet hours — queued for the next morning briefing. Use --urgent to deliver now.",
         );
       } else if (result.delivered === 0) {
         const suffix = result.parked ? " It was parked for the next client." : "";

@@ -94,8 +94,14 @@ export async function sendWebVoiceNotification(
   return {
     delivered: payload.delivered,
     parked: payload.parked === true,
-    // Absent on an older daemon that predates the field — reads as "not
-    // deferred", which matches how that daemon actually behaved.
-    deferred: payload.deferred === true,
+    // A daemon predating `deferred` still says which case it was, implicitly:
+    // every real zero-delivery on that daemon parks (`parked: true`), so the
+    // only way it reports zero delivered AND not parked is the quiet-hours
+    // defer. Inferring it keeps a CLI upgraded ahead of its daemon — the
+    // window between deploying new code and restarting the daemon — from
+    // reporting a queued escalation as undelivered, which is the whole point
+    // of the field.
+    deferred: payload.deferred === true
+      || (payload.deferred === undefined && payload.delivered === 0 && payload.parked !== true),
   };
 }
