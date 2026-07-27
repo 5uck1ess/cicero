@@ -49,14 +49,19 @@ The browser driver is optional. Install its browser once before using `--web`:
 bun x playwright install chromium
 ```
 
-`--web` can only run where Playwright ships a prebuilt browser, so its Linux
-floor is whatever the installed Playwright supports. **From Playwright 1.62
-that means Debian 12+ or Ubuntu 20.04+** (x86-64 or arm64): 1.62 removed the
-Debian 11 builds that 1.61.x still provides, so on Debian 11 a 1.62
-`playwright install` has no browser to fetch and a later `--web` navigation
-fails at launch. macOS and Windows are unaffected. So are the CLI, the daemon,
-voice, and every other computer-use tool — only this optional driver needs a
-prebuilt browser.
+`--web` can only run where Playwright ships a prebuilt browser, so it inherits
+the installed Playwright's platform support — a narrower set than the rest of
+Cicero. **Playwright 1.62 supports Debian 12/13 or Ubuntu 22.04/24.04/26.04
+(x86-64 or arm64), macOS 14+, and Windows 11+ / Server 2019+ / WSL.** It
+dropped the Debian 11 and macOS 13-and-older builds that 1.61.x still ships,
+so on a dropped platform `playwright install` has no browser to fetch and a
+later `--web` navigation fails at launch. Cicero already requires macOS 14+,
+so only the Linux floor is new here.
+
+Nothing else is affected: the browser package is an optional dependency,
+imported lazily and only when `--web` is passed, so the CLI, the daemon,
+voice, and every other computer-use tool run normally with no browser
+installed.
 
 ```bash
 cicero do "summarize the README files in this folder"
