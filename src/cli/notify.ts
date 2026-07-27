@@ -18,11 +18,22 @@ export interface NotifyRequest {
   token: string;
   text: string;
   timeoutMs?: number;
+  /**
+   * Skip the daemon's quiet-hours defer. For alerts that need a human now
+   * (an ops escalation) rather than in the next morning briefing. Off by
+   * default so ordinary notifications keep respecting quiet hours.
+   */
+  urgent?: boolean;
 }
 
 export interface NotifyResult {
   delivered: number;
   parked: boolean;
+  /**
+   * Quiet hours deferred it into the morning briefing. Distinct from a plain
+   * `delivered: 0` — the text is queued, not dropped and not parked.
+   */
+  deferred: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -38,7 +49,7 @@ export async function sendWebVoiceNotification(
   if (text.length > MAX_NOTIFY_TEXT_CHARS) {
     throw new RangeError(`notification text exceeds ${MAX_NOTIFY_TEXT_CHARS} characters`);
   }
-  const body = JSON.stringify({ text });
+  const body = JSON.stringify(request.urgent ? { text, urgent: true } : { text });
   if (new TextEncoder().encode(body).byteLength > MAX_NOTIFY_JSON_BYTES) {
     throw new RangeError(`notification JSON exceeds ${MAX_NOTIFY_JSON_BYTES} bytes`);
   }
@@ -76,11 +87,15 @@ export async function sendWebVoiceNotification(
     || !Number.isSafeInteger(payload.delivered)
     || payload.delivered < 0
     || (payload.parked !== undefined && typeof payload.parked !== "boolean")
+    || (payload.deferred !== undefined && typeof payload.deferred !== "boolean")
   ) {
     throw new Error("notify response has an invalid delivery result");
   }
   return {
     delivered: payload.delivered,
     parked: payload.parked === true,
+    // Absent on an older daemon that predates the field — reads as "not
+    // deferred", which matches how that daemon actually behaved.
+    deferred: payload.deferred === true,
   };
 }

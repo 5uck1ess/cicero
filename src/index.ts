@@ -352,7 +352,8 @@ program
   .command("notify")
   .description("Speak a notification through connected web-voice clients (proactive voice-back — use from kanban hooks, cron, CI)")
   .argument("[text...]", "Notification text (or pipe from stdin)")
-  .action(async (textParts: string[]) => {
+  .option("--urgent", "Skip quiet hours — deliver now instead of queueing for the morning briefing (for alerts that need a human tonight)")
+  .action(async (textParts: string[], opts: { urgent?: boolean }) => {
     const text = await commandText(
       textParts,
       Bun.stdin.stream(),
@@ -380,8 +381,16 @@ program
         token: wv.token,
         text,
         timeoutMs: config.ttsBackend.timeout_ms,
+        urgent: opts.urgent === true,
       });
-      if (result.delivered === 0) {
+      if (result.deferred) {
+        // Not a delivery failure and not a drop: quiet hours queued it for the
+        // next morning briefing. Saying "no voice client is connected" here
+        // (as this used to) reads as lost, which hides real alerts.
+        console.error(
+          "[cicero] notify deferred by quiet hours — queued for the next morning briefing. Use --urgent to deliver now.",
+        );
+      } else if (result.delivered === 0) {
         const suffix = result.parked ? " It was parked for the next client." : "";
         console.error(`[cicero] notify rendered, but no voice client is connected right now.${suffix}`);
       } else {

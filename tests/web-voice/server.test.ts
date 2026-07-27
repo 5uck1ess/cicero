@@ -1136,6 +1136,55 @@ test("onNotified does NOT fire when the daemon defers the notification (quiet ho
   expect(called).toBe(0);
 });
 
+test("a quiet-hours defer reports deferred:true, not a silent zero delivery", async () => {
+  // Regression: the defer used to be indistinguishable from "nobody connected",
+  // so an ops escalation queued for the morning briefing read as undelivered.
+  const base = start({ onNotify: async () => null });
+  const res = await fetch(base + "/api/notify", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "fork sync needs a decision" }),
+  });
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ delivered: 0, deferred: true });
+});
+
+test("POST /api/notify forwards urgent:true so an alert can skip quiet hours", async () => {
+  const seen: Array<boolean | undefined> = [];
+  const base = start({
+    onNotify: async (_text, _voice, opts) => { seen.push(opts?.urgent); return wav(5); },
+  });
+  await fetch(base + "/api/notify", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "build is down", urgent: true }),
+  });
+  expect(seen).toEqual([true]);
+});
+
+test("POST /api/notify defaults urgent to false so quiet hours still apply", async () => {
+  const seen: Array<boolean | undefined> = [];
+  const base = start({
+    onNotify: async (_text, _voice, opts) => { seen.push(opts?.urgent); return wav(5); },
+  });
+  await fetch(base + "/api/notify", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "routine news" }),
+  });
+  expect(seen).toEqual([false]);
+});
+
+test("POST /api/notify rejects a non-boolean urgent", async () => {
+  const base = start({ onNotify: async () => wav(5) });
+  const res = await fetch(base + "/api/notify", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "hi", urgent: "yes" }),
+  });
+  expect(res.status).toBe(400);
+});
+
 test("a throwing onNotified hook does not fail the delivery", async () => {
   const base = start({
     onNotify: async () => wav(5),

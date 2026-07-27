@@ -18,7 +18,7 @@ test("notify stays on loopback, disables redirects, and validates delivery JSON"
     text: " hello ",
   }, mockFetch);
 
-  expect(result).toEqual({ delivered: 2, parked: false });
+  expect(result).toEqual({ delivered: 2, parked: false, deferred: false });
   expect(observedUrl).toBe("https://127.0.0.1:8090/api/notify");
   expect(observedInit?.redirect).toBe("error");
   expect(observedInit?.headers).toEqual({
@@ -27,6 +27,35 @@ test("notify stays on loopback, disables redirects, and validates delivery JSON"
   });
   expect(observedInit?.body).toBe(JSON.stringify({ text: "hello" }));
   expect(observedInit?.signal).toBeInstanceOf(AbortSignal);
+});
+
+test("urgent rides the body only when asked for", async () => {
+  let body: string | undefined;
+  const mockFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    body = init?.body as string;
+    return Response.json({ delivered: 1 });
+  }) as typeof fetch;
+  const base = { scheme: "https" as const, port: 8090, token: "secret", text: "build is down" };
+
+  await sendWebVoiceNotification({ ...base, urgent: true }, mockFetch);
+  expect(JSON.parse(body!)).toEqual({ text: "build is down", urgent: true });
+
+  await sendWebVoiceNotification(base, mockFetch);
+  expect(JSON.parse(body!)).toEqual({ text: "build is down" });
+});
+
+test("a quiet-hours defer is distinct from a park and from a zero delivery", async () => {
+  // Regression: an ops escalation deferred into the morning briefing used to be
+  // reported as "no voice client is connected", which reads as lost.
+  const responder = (payload: unknown) => (async () => Response.json(payload)) as typeof fetch;
+  const base = { scheme: "https" as const, port: 8090, token: "secret", text: "fork sync stalled" };
+
+  expect(await sendWebVoiceNotification(base, responder({ delivered: 0, deferred: true })))
+    .toEqual({ delivered: 0, parked: false, deferred: true });
+  expect(await sendWebVoiceNotification(base, responder({ delivered: 0, parked: true })))
+    .toEqual({ delivered: 0, parked: true, deferred: false });
+  await expect(sendWebVoiceNotification(base, responder({ delivered: 0, deferred: "yes" })))
+    .rejects.toThrow(/invalid delivery result/);
 });
 
 test("notify rejects character and encoded-JSON overflow before fetch", async () => {

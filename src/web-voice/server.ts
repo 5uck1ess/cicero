@@ -178,7 +178,7 @@ export interface WebVoiceHandle {
    * broadcast, park when nobody's connected) — for in-process callers like the
    * kanban watcher. Resolves null when unavailable, saturated, or quiescing.
    */
-  notify: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal }) => Promise<{ delivered: number; parked: boolean } | null>;
+  notify: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal }) => Promise<{ delivered: number; parked: boolean; deferred?: boolean } | null>;
   /** Broadcast a newly pending brain-owned confirmation to live clients. */
   confirmPending: (summary: string, nonce: string) => number;
   /** Quiesce ingress, cancel owned work, close sockets, and drain handlers. */
@@ -660,7 +660,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     text: string,
     voice?: string,
     notifyOpts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal },
-  ): Promise<{ delivered: number; parked: boolean } | null> => {
+  ): Promise<{ delivered: number; parked: boolean; deferred?: boolean } | null> => {
     if (!onNotify) return null;
     const signal = notifyOpts?.signal ?? shutdownController.signal;
     if (signal.aborted) return null;
@@ -683,9 +683,12 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     }
     if (signal.aborted) return null;
     // null = the daemon deferred it (quiet hours) — no broadcast, no parking.
+    // `deferred` distinguishes this from an ordinary zero-delivery: the text is
+    // queued for the morning briefing, NOT dropped and NOT parked. Callers that
+    // report delivery to a human must be able to tell those apart.
     if (providerAudio === null) {
       log("info", `notify: "${text.substring(0, 60)}" deferred (quiet hours)`);
-      return { delivered: 0, parked: false };
+      return { delivered: 0, parked: false, deferred: true };
     }
     const audio = snapshotSynthesizedWav(providerAudio, {
       maxBytes: MAX_TURN_AUDIO_BYTES,
@@ -746,7 +749,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     text: string,
     voice?: string,
     notifyOpts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal },
-  ): Promise<{ delivered: number; parked: boolean } | null> => {
+  ): Promise<{ delivered: number; parked: boolean; deferred?: boolean } | null> => {
     const normalizedText = text.trim();
     const normalizedVoice = voice?.trim() || undefined;
     if (
@@ -993,6 +996,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           return withRequestLease(req, async (signal) => {
             let text = "";
             let voice: string | undefined;
+            let urgent = false;
             try {
               const body = await readRequestJsonLimited(req, {
                 maxBytes: MAX_NOTIFY_JSON_BYTES,
@@ -1005,8 +1009,15 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               if (body.voice !== undefined && typeof body.voice !== "string") {
                 return Response.json({ error: "voice must be a string" }, { status: 400 });
               }
+              if (body.urgent !== undefined && typeof body.urgent !== "boolean") {
+                return Response.json({ error: "urgent must be a boolean" }, { status: 400 });
+              }
               text = body.text.trim();
               voice = body.voice?.trim() || undefined;
+              // Opt-in only: an urgent notification skips the quiet-hours defer
+              // so an alert that needs a human tonight is not queued until the
+              // morning briefing. Everything else keeps the quiet-hours default.
+              urgent = body.urgent === true;
             } catch (error) {
               return jsonReadError(error, shutdownController.signal.aborted);
             }
@@ -1015,9 +1026,12 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               return Response.json({ error: "notification text or voice is too long" }, { status: 413 });
             }
             try {
-              const result = await dispatchNotify(text, voice, { signal });
+              const result = await dispatchNotify(text, voice, { urgent, signal });
               if (signal.aborted) return requestAbortedResponse(signal);
               if (!result) return Response.json({ error: "notify not available" }, { status: 501 });
+              if (result.deferred) {
+                return Response.json({ delivered: result.delivered, deferred: true });
+              }
               return result.parked
                 ? Response.json({ delivered: result.delivered, parked: true })
                 : Response.json({ delivered: result.delivered });
