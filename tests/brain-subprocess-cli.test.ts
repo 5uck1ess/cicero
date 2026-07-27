@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
   awaitOwnedTurnExit,
+  pathFromEnv,
+  resolveCommandBinary,
   SubprocessCLIBrain,
   type TurnProcess,
 } from "../src/brain/subprocess-cli";
@@ -13,6 +15,39 @@ test("SubprocessCLIBrain spawns the configured binary with prompt", async () => 
   await brain.start();
   const out = await brain.send("hello");
   expect(out).toContain("hello");
+});
+
+// The shim lookup itself needs Windows, but its decision logic must not go
+// unexercised on a POSIX CI run — these drive the win32 branch with an
+// injected platform and `which`.
+test("PATH lookup is case-insensitive and the last spelling wins", () => {
+  expect(pathFromEnv({ PATH: "/usr/bin" })).toBe("/usr/bin");
+  expect(pathFromEnv({ Path: "C:\\tools" })).toBe("C:\\tools");
+  // buildEnv() spreads config.env last, so a configured PATH must beat the
+  // inherited one whichever casing each side used.
+  expect(pathFromEnv({ Path: "C:\\inherited", PATH: "C:\\configured" })).toBe("C:\\configured");
+  expect(pathFromEnv({ PATH: "C:\\inherited", Path: "C:\\configured" })).toBe("C:\\configured");
+  expect(pathFromEnv({ HOME: "/root" })).toBeUndefined();
+});
+
+test("command resolution is a no-op off Windows and resolves shims on it", () => {
+  const seen: Array<{ command: string; PATH?: string }> = [];
+  const which = ((command: string, options?: { PATH?: string }) => {
+    seen.push({ command, PATH: options?.PATH });
+    return command === "codex" ? "C:\\shims\\codex.cmd" : null;
+  }) as typeof Bun.which;
+
+  // POSIX spawns already search PATH — the binary must pass through untouched
+  // and cost nothing.
+  expect(resolveCommandBinary("codex", { PATH: "/usr/bin" }, "linux", which)).toBe("codex");
+  expect(seen).toHaveLength(0);
+
+  expect(resolveCommandBinary("codex", { Path: "C:\\shims" }, "win32", which)).toBe("C:\\shims\\codex.cmd");
+  expect(seen).toEqual([{ command: "codex", PATH: "C:\\shims" }]);
+
+  // An unresolvable name falls back to the raw binary so the spawn reports the
+  // failure itself instead of this layer inventing one.
+  expect(resolveCommandBinary("missing", { Path: "C:\\shims" }, "win32", which)).toBe("missing");
 });
 
 test.skipIf(process.platform !== "win32")("resolves Windows PATH command shims before spawning", async () => {

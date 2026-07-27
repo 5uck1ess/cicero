@@ -72,6 +72,16 @@ export class TurnHistory {
     }
   }
 
+  /**
+   * Trim without rereading the whole log after every turn. The cached count is
+   * only sound while this instance is the file's sole writer — the daemon
+   * therefore shares ONE TurnHistory across Telegram, warmup, and web voice
+   * rather than opening one per surface. A writer outside this process would
+   * make the count read low and let the file overshoot MAX_LINES until our own
+   * appends cross the threshold; the reread below then resyncs it. Every miss
+   * (first append, threshold crossed, failed write) falls back to the count on
+   * disk, so the cache can only ever delay a trim, never skip one.
+   */
   private async trimIfNeeded(): Promise<void> {
     if (this.lineCount !== null) {
       this.lineCount += 1;
