@@ -542,6 +542,72 @@ test("a wrapper that refuses to act speculatively drops the speculation instead 
   await turn.abort();
 });
 
+test("a refusal landing AFTER adoption re-runs the turn instead of dropping the call", async () => {
+  // The live race, end to end through streamWebTurn: "phone me now" misses the
+  // lexical pattern, so DialBackBrain awaits the semantic classifier before it
+  // can refuse. transcript() resolves once the pump has STARTED, not settled,
+  // so the turn claims and adopts the stream first. A clean EOF at that point
+  // reads as a finished turn — the user asked to be phoned and nothing rings.
+  const rings: string[] = [];
+  const classifierStillThinking = deferred();
+  const brain = {
+    send: async (m: string) => { rings.push(m); return "Ringing you now."; },
+    sendStream: (m: string, o?: { speculative?: boolean }) => (async function* (): AsyncGenerator<string> {
+      if (o?.speculative) {
+        await classifierStillThinking.promise;
+        throw new SpeculativeSideEffectError();
+      }
+      rings.push(m); // the real dial-back, on the non-speculative path
+      yield "Ringing you now.";
+    })(),
+  };
+  const { deps: sd } = deps({ transcript: "phone me now", brain });
+  const turn = makeSpeculator(sd)(pcm(1000), 16_000, 1000, 0.95)!;
+
+  const sttCalls: string[] = [];
+  const { sink, calls } = capturingSink();
+  const running = streamWebTurn(wavOf(1000), { ...turnDeps(sttCalls), brain }, sink, turn);
+  // Let the turn claim and start consuming the adopted stream, THEN refuse.
+  await Bun.sleep(25);
+  classifierStillThinking.resolve();
+  await running;
+
+  expect(rings).toEqual(["phone me now"]); // dialed exactly once, on the retry
+  expect(calls.sentence).toEqual(["Ringing you now."]);
+  expect(calls.done).toBe(1);
+  expect(calls.error).toEqual([]);         // a refusal is not a turn failure
+  expect(sttCalls).toEqual([]);            // adopted transcript stands; no re-STT
+});
+
+test("any error from an adopted stream surfaces instead of ending the turn cleanly", async () => {
+  // Root cause of the refusal being dropped, and wider than dial-backs: a
+  // `return` inside abortable's finally DISCARDED the exception the generator
+  // was throwing, so a brain that died after adoption looked like a completed
+  // turn — sink.done(), no error, nothing spoken.
+  const died = deferred();
+  const brain = {
+    send: async () => "unused fallback",
+    sendStream: (_m: string, o?: { speculative?: boolean }) => (async function* (): AsyncGenerator<string> {
+      if (o?.speculative) {
+        yield "Partial ";
+        await died.promise;
+        throw new Error("brain died mid-turn");
+      }
+      yield "unused fallback";
+    })(),
+  };
+  const { deps: sd } = deps({ transcript: "what time is it in tokyo", brain });
+  const turn = makeSpeculator(sd)(pcm(1000), 16_000, 1000, 0.95)!;
+  const sttCalls: string[] = [];
+  const { sink, calls } = capturingSink();
+  const running = streamWebTurn(wavOf(1000), { ...turnDeps(sttCalls), brain }, sink, turn);
+  await Bun.sleep(25);
+  died.resolve();
+  await running;
+  expect(calls.error).toEqual(["brain died mid-turn"]);
+  expect(calls.done).toBe(0); // a dead brain is not a finished turn
+});
+
 test("passes speculative: true so wrappers can tell the turn is provisional", async () => {
   let seen: boolean | undefined;
   const { deps: d } = deps({

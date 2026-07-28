@@ -261,6 +261,14 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
           // and let the final audio drive the normal path.
           if (err instanceof SpeculativeSideEffectError) {
             log("info", "speculative: turn would place a call — deferring to the final utterance");
+            // Before the claim, dropping the speculation silently is right: the
+            // final audio drives the normal path and dials there. AFTER the
+            // claim the consumer is already streaming this buffer, and a clean
+            // EOF would read as a finished turn — the requested call would
+            // never be placed at all. Surface the refusal so the adopted path
+            // can re-run the utterance non-speculatively. (`end()` is
+            // first-wins, so the finally below cannot clobber this.)
+            if (claimed) buf.end(err);
             void doAbort("side effect refused").catch((abortError: unknown) => {
               log("warn", `speculative cleanup failed: ${abortError instanceof Error ? abortError.message : String(abortError)}`);
             });
