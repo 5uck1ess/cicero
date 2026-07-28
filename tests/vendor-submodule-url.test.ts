@@ -210,6 +210,94 @@ test("the provisioner rebuilds when the pin moves, instead of trusting a stale b
   expect(readFileSync(stamp, "utf8").trim()).toBe(shaB);
 });
 
+const BUILD_STUB = [
+  "#!/usr/bin/env bash",
+  "set -euo pipefail",
+  'echo "build $*" >> "${BUILD_LOG:?}"',
+  "mkdir -p build/linux-cuda-release/bin",
+  "printf '#!/bin/sh\\nexit 0\\n' > build/linux-cuda-release/bin/audiocpp_server",
+  "chmod +x build/linux-cuda-release/bin/audiocpp_server",
+].join("\n");
+
+test("a standalone clone reaches a fork-only pin without losing its upstream remote", () => {
+  // The dev/fork-sync layout: vendor/audio.cpp is a standalone clone whose
+  // `origin` tracks UPSTREAM. Skipping `submodule sync` protects that remote,
+  // but `submodule update` then fetches from `origin` — which does not carry a
+  // fork-only pin — so provisioning died before the build. The pin has to be
+  // fetched by URL instead: no remote created, none rewritten.
+  const dir = mkdtempSync(join(tmpdir(), "provision-standalone-"));
+  const buildLog = join(dir, "build-invocations");
+  const commit = (cwd: string, msg: string) =>
+    git(cwd, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg);
+
+  // upstream has A; the fork has A + B, and B exists ONLY in the fork.
+  const upWork = join(dir, "up-work");
+  git(dir, "init", "-q", upWork);
+  mkdirSync(join(upWork, "scripts"), { recursive: true });
+  writeFileSync(join(upWork, "scripts/build_linux.sh"), BUILD_STUB);
+  git(upWork, "add", "-A");
+  commit(upWork, "upstream A");
+  const shaA = git(upWork, "rev-parse", "HEAD").out.trim();
+  const upBare = join(dir, "up.git");
+  git(dir, "clone", "-q", "--bare", upWork, upBare);
+
+  const forkWork = join(dir, "fork-work");
+  git(dir, "clone", "-q", upBare, forkWork);
+  writeFileSync(join(forkWork, "PCM"), "live pcm ingest\n");
+  git(forkWork, "add", "-A");
+  commit(forkWork, "fork-only B");
+  const shaB = git(forkWork, "rev-parse", "HEAD").out.trim();
+  git(forkWork, "branch", "-M", "cicero-integration");
+  const forkBare = join(dir, "fork.git");
+  git(dir, "clone", "-q", "--bare", forkWork, forkBare);
+
+  // Superproject: the real provisioner, .gitmodules naming the fork, gitlink at B.
+  const root = join(dir, "root");
+  git(dir, "init", "-q", root);
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  writeFileSync(
+    join(root, "scripts/provision-audiocpp.sh"),
+    readFileSync(new URL("../scripts/provision-audiocpp.sh", import.meta.url), "utf8"),
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    join(root, ".gitmodules"),
+    `[submodule "vendor/audio.cpp"]\n\tpath = vendor/audio.cpp\n\turl = ${forkBare}\n\tbranch = cicero-integration\n`,
+  );
+  git(root, "add", "-A");
+  commit(root, "root with provisioner");
+  git(root, "update-index", "--add", "--cacheinfo", `160000,${shaB},vendor/audio.cpp`);
+  commit(root, "pin to the fork-only commit");
+
+  // vendor/audio.cpp as a STANDALONE clone of upstream, detached at A, no B.
+  mkdirSync(join(root, "vendor"), { recursive: true });
+  git(root, "clone", "-q", upBare, join(root, "vendor/audio.cpp"));
+  const sub = join(root, "vendor/audio.cpp");
+  git(sub, "checkout", "-q", "--detach", shaA);
+  expect(git(sub, "cat-file", "-e", `${shaB}^{commit}`).ok).toBe(false); // genuinely absent
+
+  const r = Bun.spawnSync(["bash", join(root, "scripts/provision-audiocpp.sh")], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      BUILD_LOG: buildLog,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "protocol.file.allow",
+      GIT_CONFIG_VALUE_0: "always",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+  });
+  const out = `${r.stdout.toString()}${r.stderr.toString()}`;
+  expect({ ok: r.exitCode === 0, out }).toMatchObject({ ok: true });
+  // The pin is now reachable and checked out...
+  expect(git(sub, "rev-parse", "HEAD").out.trim()).toBe(shaB);
+  // ...and the upstream-tracking remote the sync pipeline reads is untouched.
+  expect(git(sub, "remote", "get-url", "origin").out.trim()).toBe(upBare);
+  expect((readFileSync(buildLog, "utf8").match(/^build /gm) ?? []).length).toBe(1);
+});
+
 test("a binary with no recorded provenance is rebuilt rather than trusted", () => {
   // Every install predating the stamp is in this state; assuming it is current
   // would silently keep the pre-fix binary running.

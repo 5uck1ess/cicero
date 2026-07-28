@@ -33,6 +33,26 @@ echo "==> Syncing vendor/audio.cpp submodule to its pinned commit…"
 # clobber `origin` and break the upstream-sync pipeline that reads it.
 if [[ -d "$SUB/.git" ]]; then
   echo "    vendor/audio.cpp is a standalone clone — leaving its remotes untouched."
+  # Leaving the remotes alone is not enough: `submodule update` fetches from
+  # whatever `origin` is, and on this layout `origin` is UPSTREAM, which does not
+  # carry a fork-only pin. Fetch the pinned commit directly BY URL from the one
+  # recorded in .gitmodules — a URL fetch creates and rewrites no remote, so the
+  # upstream-tracking `origin` the sync pipeline reads is preserved.
+  PIN="$(git -C "$ROOT" rev-parse "HEAD:vendor/audio.cpp" 2>/dev/null || true)"
+  URL="$(git -C "$ROOT" config -f "$ROOT/.gitmodules" --get submodule.vendor/audio.cpp.url || true)"
+  if [[ -n "$PIN" && -n "$URL" ]] && ! git -C "$SUB" cat-file -e "$PIN^{commit}" 2>/dev/null; then
+    echo "    pinned $PIN is not present locally — fetching it from $URL"
+    # Fetch the exact commit when the server allows it; otherwise take the
+    # recorded branch (or all refs) and re-check.
+    git -C "$SUB" fetch --quiet "$URL" "$PIN" 2>/dev/null \
+      || git -C "$SUB" fetch --quiet "$URL" \
+           "$(git -C "$ROOT" config -f "$ROOT/.gitmodules" --get submodule.vendor/audio.cpp.branch || echo HEAD)" 2>/dev/null \
+      || git -C "$SUB" fetch --quiet "$URL" || true
+    if ! git -C "$SUB" cat-file -e "$PIN^{commit}" 2>/dev/null; then
+      echo "!! pinned $PIN is not reachable from $URL — cannot provision this checkout." >&2
+      exit 1
+    fi
+  fi
 else
   git -C "$ROOT" submodule sync --recursive vendor/audio.cpp
 fi
