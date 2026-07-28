@@ -1064,7 +1064,26 @@ async function streamReply(
         timer.mark("parked");
         detached = true;
         const background = consumption
-          .catch(() => { /* brain died mid-background — deliver what we have */ })
+          .catch(async (error: unknown) => {
+            // A refusal that lands after we PARKED cannot be handled by the
+            // caller's retry: the turn is already acknowledged and closed, so
+            // streamReply returns successfully and the outer catch never runs.
+            // The race above already prefers a refusal that arrives before the
+            // park deadline; this covers the deadline winning. Place the call on
+            // the normal path and let its ack ride the parked delivery, so the
+            // phone still rings instead of the request vanishing.
+            if (error instanceof SpeculativeSideEffectError) {
+              log("info", "web voice: speculation refused after parking — dialing on the normal path");
+              try {
+                const reply = (await deps.brain.send(brainInput)).trim();
+                if (reply) parkedTexts.push(reply);
+              } catch (retryError: unknown) {
+                log("warn", `parked dial-back retry failed: ${retryError instanceof Error ? retryError.message : String(retryError)}`);
+              }
+              return;
+            }
+            /* brain died mid-background — deliver what we have */
+          })
           .then(() => deps.signal?.aborted
             ? undefined
             : parkCfg.onParked(parkedTexts.join(" "), transcript))

@@ -579,6 +579,48 @@ test("a refusal landing AFTER adoption re-runs the turn instead of dropping the 
   expect(sttCalls).toEqual([]);            // adopted transcript stands; no re-STT
 });
 
+test("a refusal that lands after PARKING still dials, through the parked delivery", async () => {
+  // The daemon enables speculation and parking on the SAME turn. The park race
+  // already prefers a refusal that arrives before the deadline; when the
+  // deadline wins, the turn is acknowledged and closed, streamReply returns
+  // successfully, and the caller's retry never runs — so the refusal used to be
+  // swallowed by the background .catch() and the phone never rang.
+  const rings: string[] = [];
+  const refuse = deferred();
+  const brain = {
+    send: async (m: string) => { rings.push(m); return "Ringing you now."; },
+    sendStream: (_m: string, o?: { speculative?: boolean }) => (async function* (): AsyncGenerator<string> {
+      if (o?.speculative) {
+        await refuse.promise;
+        throw new SpeculativeSideEffectError();
+      }
+      yield "unused";
+    })(),
+  };
+  const { deps: sd } = deps({ transcript: "phone me now", brain });
+  const turn = makeSpeculator(sd)(pcm(1000), 16_000, 1000, 0.95)!;
+  const delivered: string[] = [];
+  const background: Promise<void>[] = [];
+  const sttCalls: string[] = [];
+  const { sink, calls } = capturingSink();
+  const running = streamWebTurn(wavOf(1000), {
+    ...turnDeps(sttCalls),
+    brain,
+    park: { afterMs: 10, line: "Still on it.", onParked: (reply) => { delivered.push(reply); } },
+    trackBackground: (task) => { background.push(task); return true; },
+  }, sink, turn);
+
+  await Bun.sleep(60); // let the 10ms park deadline win the race
+  refuse.resolve();
+  await running;
+  await Promise.all(background);
+
+  expect(calls.sentence).toEqual(["Still on it."]); // parked hand-back, as before
+  expect(calls.done).toBe(1);
+  expect(rings).toEqual(["phone me now"]);          // dialed on the normal path
+  expect(delivered).toEqual(["Ringing you now."]);  // and the ack was delivered
+});
+
 test("any error from an adopted stream surfaces instead of ending the turn cleanly", async () => {
   // Root cause of the refusal being dropped, and wider than dial-backs: a
   // `return` inside abortable's finally DISCARDED the exception the generator
