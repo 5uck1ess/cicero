@@ -882,13 +882,23 @@ export class CiceroDaemon {
     };
     this.brain.setCallMeHandler?.(dialBack);
 
+    // ONE history for every surface that records a turn. Separate instances
+    // over the same file each keep their own append chain, so one instance's
+    // trim rewrite can drop lines another just appended — and TurnHistory's
+    // cached line count assumes a single writer. Built lazily: a daemon with
+    // neither Telegram nor web voice never touches the file.
+    let conversationHistory: TurnHistory | undefined;
+    const history = () => conversationHistory ??= new TurnHistory(
+      join(homedir(), ".cicero", "web-voice", "history.jsonl"),
+    );
+
     if (this.config.notify?.telegram) {
       // Since Jul 10 the bot is the office's TEXT surface (the tgcall userbot
       // keeps only calls): "log …" hits the health record instantly, "call me"
       // spools a dial-back for the tgcall sidecar, and anything else is a
       // chat turn against the same brain the voice surfaces reach — recorded
       // in the shared history so voice sessions resume with it.
-      const tgHistory = new TurnHistory(join(homedir(), ".cicero", "web-voice", "history.jsonl"));
+      const tgHistory = history();
       // Semantic fallback for dial-back phrasings the lexical pattern misses
       // ("get ada on the horn") — the same small local model the
       // switchboard uses for spoken transfers. Lexical-only without a
@@ -929,8 +939,7 @@ export class CiceroDaemon {
       const resumeTurns = this.config.web_voice?.resume_turns ?? 10;
       if (this.config.web_voice?.enabled && resumeTurns > 0) {
         try {
-          const history = new TurnHistory(join(homedir(), ".cicero", "web-voice", "history.jsonl"));
-          const primer = buildResumePrimer(await history.recent(resumeTurns));
+          const primer = buildResumePrimer(await history().recent(resumeTurns));
           if (primer) warmMsg = primer;
         } catch { /* no history — plain warmup */ }
       }
@@ -1050,7 +1059,7 @@ export class CiceroDaemon {
       }
       this.assertStartupActive();
       assertWebTlsPolicy(webHost, tls, tlsExplicitlyDisabled);
-      const webHistory = new TurnHistory(join(homedir(), ".cicero", "web-voice", "history.jsonl"));
+      const webHistory = history();
       // Every spoken sentence funnels through here — the one place to strip
       // Markdown/typography so a voice never says "dash" or glitches on an
       // em-dash. A sentence that is pure markup flattens to nothing and is
