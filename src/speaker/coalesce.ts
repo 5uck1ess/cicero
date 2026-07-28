@@ -53,10 +53,13 @@ export const MAX_QUEUED_CHARS = 16_000;
  * in-flight read — a producer parked mid-read cannot be made to stop now, only
  * asked to stop next. Waiting for confirmation without a bound would hand a
  * stalled brain stream the power to block barge-in cleanup, which is the
- * opposite of what cancellation is for. So: ask, wait briefly, move on. The
- * abandoned drain is inert either way — `closed` makes it exit on the first
- * resumption, and it can retain at most one more sentence in a queue that has
- * already been dropped.
+ * opposite of what cancellation is for. So: ask, wait briefly, move on.
+ *
+ * An abandoned drain cannot resurrect — `closed` is re-checked immediately after
+ * the read, so it exits on first resumption and publishes nothing. Until then it
+ * does keep its source and whatever was already queued alive, which is the price
+ * of not blocking: a producer that never resumes is a producer nothing can
+ * collect.
  */
 export const CLOSE_CONFIRM_MS = 250;
 
@@ -78,7 +81,11 @@ function settleWithin<T>(work: Promise<T>, ms: number): Promise<T | null> {
  * Without that, an interrupted turn would leave the previous reply's producer
  * running and buffering into a queue nobody reads.
  */
-function eagerQueue(source: AsyncIterable<string>, maxQueuedChars: number): {
+function eagerQueue(
+  source: AsyncIterable<string>,
+  maxQueuedChars: number,
+  cancel?: AbortSignal,
+): {
   take: () => Promise<string[] | null>;
   close: () => Promise<void>;
 } {
@@ -95,18 +102,30 @@ function eagerQueue(source: AsyncIterable<string>, maxQueuedChars: number): {
 
   const iterator = source[Symbol.asyncIterator]();
 
+  // A consumer parked in take() cannot observe a return() — the language queues
+  // it behind the pending next(). So cancellation has to arrive out of band:
+  // aborting wakes the consumer, take() reports the end, and the generator
+  // unwinds into its finally on its own.
+  let cancelled = cancel?.aborted ?? false;
+  const onCancel = (): void => {
+    cancelled = true;
+    wakeConsumer?.();
+    wakeProducer?.();
+  };
+  cancel?.addEventListener("abort", onCancel, { once: true });
+
   const drain = (async () => {
     try {
       for (;;) {
-        while (!closed && queuedChars >= maxQueuedChars) {
+        while (!closed && !cancelled && queuedChars >= maxQueuedChars) {
           await new Promise<void>((resolve) => { wakeProducer = resolve; });
           wakeProducer = undefined;
         }
-        if (closed) break;
+        if (closed || cancelled) break;
         const next = await iterator.next();
         // Re-checked after the read: close() may have landed while it was in
         // flight, and a closed queue must not retain one last sentence.
-        if (next.done || closed) break;
+        if (next.done || closed || cancelled) break;
         queued.push(next.value);
         queuedChars += next.value.length;
         wakeConsumer?.();
@@ -126,10 +145,13 @@ function eagerQueue(source: AsyncIterable<string>, maxQueuedChars: number): {
   return {
     /** Everything available now, awaiting only when the queue is empty. */
     async take(): Promise<string[] | null> {
-      while (queued.length === 0 && !done) {
+      while (queued.length === 0 && !done && !cancelled) {
         await new Promise<void>((resolve) => { wakeConsumer = resolve; });
         wakeConsumer = undefined;
       }
+      // A cancelled turn is being torn down; its remaining text is not going to
+      // be spoken, and reporting the end is what lets the generator unwind.
+      if (cancelled) return null;
       if (queued.length === 0) {
         if (failed) throw failure;
         return null;
@@ -150,6 +172,7 @@ function eagerQueue(source: AsyncIterable<string>, maxQueuedChars: number): {
       // the drain is mid-next(), this queues behind that read and would inherit
       // however long the producer takes.
       void Promise.resolve(iterator.return?.()).catch(() => { /* being abandoned */ });
+      cancel?.removeEventListener("abort", onCancel);
       await settleWithin(drain, CLOSE_CONFIRM_MS);
     },
   };
@@ -158,9 +181,10 @@ function eagerQueue(source: AsyncIterable<string>, maxQueuedChars: number): {
 export async function* coalesceSentences(
   sentences: AsyncIterable<string>,
   options: Partial<CoalesceOptions> = {},
+  cancel?: AbortSignal,
 ): AsyncGenerator<string> {
   const { maxChars, passthroughFirst } = { ...DEFAULT_COALESCE_OPTIONS, ...options };
-  const queue = eagerQueue(sentences, MAX_QUEUED_CHARS);
+  const queue = eagerQueue(sentences, MAX_QUEUED_CHARS, cancel);
   let emitted = 0;
   /** Carried across take() calls so a partial merge is not flushed early. */
   let pending = "";

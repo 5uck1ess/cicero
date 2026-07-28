@@ -15,9 +15,12 @@
  *   TOTAL wall-clock to synthesize the whole reply. This is what coalescing is
  *         supposed to improve, by making fewer, larger calls.
  *
- * A win is: TTFA unchanged (within noise) and TOTAL meaningfully lower. TTFA can
- * only regress at `passthroughFirst: 0`, where sentence one is eligible to be
- * merged; raising it to 1 fixes that. Above 1 it protects later sentences, not
+ * A win is: TTFA unchanged (within noise) and TOTAL meaningfully lower. The only
+ * setting that deliberately puts anything in front of first audio is
+ * `passthroughFirst: 0`, where sentence one is eligible to be merged; raising it
+ * to 1 removes that. (The wrapper's own queue and scheduling cost is not zero at
+ * any setting, just far below the noise floor here.) Above 1 it protects later
+ * sentences, not
  * first audio — so a TTFA regression at 1 or higher is not something this knob
  * can fix, and is worth re-running before believing (these deltas are small
  * enough that run-to-run noise reaches them).

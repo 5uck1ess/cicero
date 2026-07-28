@@ -79,7 +79,14 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     // It costs barge-in granularity: an interrupted merged chunk reports as one
     // pending item, so getSnapshot() can no longer say which of its sentences
     // were actually heard. That's the trade the config flag buys.
-    const source = this.coalesce ? coalesceSentences(sentences, this.coalesce) : sentences;
+    // The coalescer reads ahead, so it can be parked waiting on the brain when
+    // this turn is torn down. return() cannot reach it there — it queues behind
+    // the pending read — so teardown aborts this instead, which releases the
+    // wait and lets the generator run its own cleanup.
+    const coalesceAbort = this.coalesce ? new AbortController() : null;
+    const source = this.coalesce
+      ? coalesceSentences(sentences, this.coalesce, coalesceAbort!.signal)
+      : sentences;
     const iterator = source[Symbol.asyncIterator]();
     this.playing = true;
     this.spoken = [];
@@ -142,6 +149,10 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
         log("warn", `Streaming TTS error: ${msg}`);
       }
     } finally {
+      // Before the iterator dance below: a parked coalescer cannot observe
+      // return(), and this is the signal that frees it. Harmless once it has
+      // finished on its own.
+      coalesceAbort?.abort();
       if (!sourceFinished) {
         const pendingRead = sourceReadAhead;
         const closeIterator = async () => {

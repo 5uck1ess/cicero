@@ -193,3 +193,58 @@ test("closing settles promptly even when the producer is parked mid-read", async
   // never returns and the test times out.
   expect(elapsed).toBeLessThan(CLOSE_CONFIRM_MS * 4);
 });
+
+test("an outstanding next() blocks return(), and the cancel signal releases it", async () => {
+  let released = false;
+  let resume!: () => void;
+  const stall = new Promise<void>((resolve) => { resume = resolve; });
+  async function* stalls(): AsyncGenerator<string> {
+    try {
+      yield "First.";
+      await stall;
+      yield "Second.";
+    } finally {
+      released = true;
+    }
+  }
+
+  const cancel = new AbortController();
+  const merged = coalesceSentences(stalls(), { maxChars: 240, passthroughFirst: 1 }, cancel.signal);
+  expect((await merged.next()).value).toBe("First.");
+
+  // Parked waiting for a second sentence. return() cannot overtake this read,
+  // so cleanup has to be reachable some other way.
+  const parked = merged.next();
+  const done = merged.return(undefined);
+
+  cancel.abort();
+  // Teardown settles on the signal alone, without the producer moving at all.
+  expect(await Promise.race([done, Bun.sleep(CLOSE_CONFIRM_MS * 4).then(() => "hung")]))
+    .not.toBe("hung");
+  expect((await parked).done).toBe(true);
+
+  // Release was requested during teardown; it lands as soon as the producer's
+  // own await settles. A producer that never resumes can never be collected —
+  // that is the cost of not blocking on it, and why teardown does not wait.
+  resume();
+  await Bun.sleep(5);
+  expect(released).toBe(true);
+});
+
+test("a turn cancelled mid-reply stops emitting", async () => {
+  const cancel = new AbortController();
+  async function* slow(): AsyncGenerator<string> {
+    yield "One.";
+    await Bun.sleep(5);
+    yield "Two.";
+    await Bun.sleep(5);
+    yield "Three.";
+  }
+
+  const out: string[] = [];
+  for await (const chunk of coalesceSentences(slow(), { maxChars: 240, passthroughFirst: 1 }, cancel.signal)) {
+    out.push(chunk);
+    cancel.abort();
+  }
+  expect(out).toEqual(["One."]);
+});

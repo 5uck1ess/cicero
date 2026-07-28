@@ -39,9 +39,17 @@ With coalescing off, that record is per sentence.
 It also changes how far ahead the brain is allowed to run. Without coalescing the
 speaker pulls exactly one sentence at a time, which paces the brain to the
 speaking rate. Coalescing has to read ahead to have anything to merge, so it
-drains the reply into a queue capped at 16,000 characters and stops pulling past
-that — far more than any merged chunk needs, but bounded rather than open-ended.
-The queue is closed and the source released when a turn is interrupted.
+drains the reply into a queue and stops pulling once 16,000 characters are
+waiting — so the peak is that plus whatever sentence was already in flight. Far
+more than any merged chunk needs, but bounded rather than open-ended.
+
+An interrupted turn stops the read-ahead immediately and asks the source to
+close. The close itself is best-effort: an async iterator cannot be made to
+abandon a read that is already in flight, so a brain stalled mid-response is
+released when that read finally settles rather than at the moment of the
+barge-in. Nothing is spoken from a cancelled turn either way — the wait for
+confirmation is bounded precisely so a stalled producer cannot hold up the
+next turn.
 
 The text handed to the engine is otherwise identical; only its grouping differs.
 
