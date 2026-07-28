@@ -127,6 +127,49 @@ of every escaped or reparented descendant. ACP turns receive the caller's signal
 cancellation, return the interrupted consumer promptly, and keep the session
 lock closed until cancellation settles or the session is restarted fail-closed.
 
+## Background history compaction
+
+The retained transcript is bounded: 12 turns or 32,000 characters, whichever
+comes first. By default, crossing that cap drops the oldest turns, so a long
+conversation quietly forgets how it started. This affects every adapter that
+replays Cicero-managed history — including `claude-code`, which uses it by
+default — but not stateful sessions (ACP, tab-inject, resumed Codex lanes),
+which keep their history in the agent itself.
+
+Compaction replaces that silent drop with a summary:
+
+```yaml
+brain:
+  history_compaction:
+    enabled: true
+    summarizer_url: http://127.0.0.1:8080/v1   # OpenAI-compatible
+    summarizer_model: your-small-model
+```
+
+Omit `summarizer_url` to reuse `web_voice.tldr.summarizer_url`. With neither set,
+compaction stays off and `cicero doctor` says so rather than failing to start.
+
+When the cap is crossed, the older half is sent to that endpoint in the
+background while the conversation continues against the **full, un-compacted**
+history. Once the summary returns, those turns are replaced by it and it is
+carried in every later prompt under "Summary of earlier conversation:". A
+following compaction is given the current summary and folds into it, so the
+history holds one running summary rather than a growing stack.
+
+The bounds matter more than the feature:
+
+- One compaction at a time. A second trigger while one is in flight is a no-op.
+- 30-second absolute deadline; the summary itself is capped at 4,000 characters.
+- History may overrun to twice its normal cap while a compaction runs, and no
+  further — a summarizer that never answers cannot grow the transcript.
+- Any failure (timeout, endpoint down, empty response) falls back to today's
+  eviction and logs why. It is retried on the next crossing, so recovery does
+  not need a restart.
+- `restart()` discards a compaction already in flight rather than letting it
+  attach a summary of the conversation you just cleared.
+
+Because it runs in the background, a compaction never adds latency to a turn.
+
 ## Progress narration
 
 When an agent can stream structured events — **`codex`** (`exec --json`) and **`claude-code`** (`--output-format stream-json`) — Cicero speaks a running summary of what it's *doing*: its plan, the commands it runs ("Running ls.", "Editing auth.ts."), and the final answer — so you hear it work, not just the end result. On by default; disable with `brain: { narrate_progress: false }`. Brains without event streaming fall back to speaking their answer.

@@ -981,6 +981,29 @@ export async function collectChecks(
     }
   }
 
+  // -- background history compaction ----------------------------------------
+  const compaction = config.brain?.history_compaction;
+  if (compaction?.enabled) {
+    const url = compaction.summarizer_url ?? config.web_voice?.tldr?.summarizer_url;
+    if (!url) {
+      checks.push({
+        name: "history compaction",
+        level: "warn",
+        detail: "enabled but no summarizer_url is set — old turns are dropped instead of summarized",
+        hint: "set brain.history_compaction.summarizer_url (or web_voice.tldr.summarizer_url)",
+      });
+    } else {
+      checks.push((await probe(`${url.replace(/\/$/, "")}/models`))
+        ? { name: "history compaction", level: "ok", detail: url }
+        : {
+            name: "history compaction",
+            level: "warn",
+            detail: `${url} not responding — long conversations fall back to dropping their oldest turns`,
+            hint: "start the summarizer endpoint or set brain.history_compaction.enabled: false",
+          });
+    }
+  }
+
   // -- input-side tone (speech emotion) -------------------------------------
   const tone = config.tone;
   if (tone.enabled) {

@@ -331,6 +331,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     checkKnownKeys(config.brain, "brain", [
       "backend", "mode", "target_tab", "auto_approve_tools", "confirm_tools", "confirm_retry",
       "max_queue_bytes", "max_response_bytes", "max_pending_turns", "escalate", "lanes",
+      "history_compaction",
       "binary", "binary_args", "ollama_port", "ollama_model",
       "base_url", "model", "api_key", "api_key_env", "max_tokens", "timeout_ms", "turn_timeout_ms",
       "headers", "session_header", "narrate_progress", "unset_env", "agent_first", "thinking_filler",
@@ -355,6 +356,14 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
     for (const key of ["auto_approve_tools", "confirm_retry", "narrate_progress", "agent_first", "thinking_filler"]) {
       checkOptionalBoolean(config.brain, key, "brain", issues);
+    }
+    if (config.brain.history_compaction !== undefined
+      && checkRecord(config.brain.history_compaction, "brain.history_compaction", issues)) {
+      const compaction = config.brain.history_compaction;
+      checkKnownKeys(compaction, "brain.history_compaction", ["enabled", "summarizer_url", "summarizer_model"], issues);
+      checkOptionalBoolean(compaction, "enabled", "brain.history_compaction", issues);
+      checkOptionalHttpUrl(compaction, "summarizer_url", "brain.history_compaction", issues);
+      checkOptionalString(compaction, "summarizer_model", "brain.history_compaction", issues);
     }
     if (config.brain.ollama_port !== undefined) {
       checkInteger(config.brain.ollama_port, "brain.ollama_port", issues, { min: 1, max: 65_535 });
