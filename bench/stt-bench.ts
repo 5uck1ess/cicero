@@ -7,14 +7,19 @@
  * (process-time / audio-duration), then prints a ranked table and writes a
  * markdown report.
  *
- * SCOPE / HONEST LIMITATION: this is a *batch* bench — it transcribes whole
- * clips. That's the right axis for accuracy (WER) and throughput (RTF), and it
- * surfaces cold-vs-warm load cost. It does NOT measure true *streaming*
- * time-to-first-partial / time-to-final, which is what a live loop actually feels
- * (see realtime-stt-selection-jun2026.md: STT streams while the user talks, so
- * its marginal latency is small and the LLM TTFT dominates). Use this to compare
- * accuracy + footprint + batch speed; confirm streaming feel with a live mic test
- * on the model you shortlist.
+ * Two measurement modes, reported in separate tables because their latencies are
+ * not comparable:
+ *
+ *  - `provider` / `command` candidates are **batch**: transcribe a whole clip,
+ *    time it end to end. Right axis for accuracy (WER) and throughput (RTF), and
+ *    it surfaces cold-vs-warm load cost.
+ *  - `stream` candidates drive audio.cpp's `POST /v1/audio/transcriptions/live`,
+ *    feeding PCM at real-time pace and timing the SSE deltas: first partial,
+ *    partials arriving *during* capture, and time-to-final measured from the end
+ *    of the audio. This is what a live loop actually feels.
+ *
+ * Streaming still doesn't tell you how a model handles your room and your mic —
+ * every clip here is a recording. Confirm the shortlist with a live mic test.
  *
  * Run:  bun run bench:stt
  *       bun run bench/stt-bench.ts --clips bench/stt/clips --candidates bench/stt/candidates.json --runs 3
@@ -26,7 +31,8 @@ import { MlxWhisperProvider } from "../src/backends/stt/mlx-whisper";
 import { FasterWhisperProvider } from "../src/backends/stt/faster-whisper";
 import type { STTProvider } from "../src/backends/stt/provider";
 import { wordErrorRate } from "./stt/wer";
-import type { Candidate, Clip, ProviderCandidate } from "./stt/types";
+import { transcribeLive } from "./stt/live-stream";
+import type { Candidate, Clip, ProviderCandidate, StreamCandidate } from "./stt/types";
 
 interface Args { clipsDir: string; candidatesFile: string; runs: number }
 
@@ -88,8 +94,10 @@ function makeProvider(c: ProviderCandidate): STTProvider {
   return c.backend === "faster-whisper" ? new FasterWhisperProvider(cfg) : new MlxWhisperProvider(cfg);
 }
 
-/** Build a transcribe(path)→text fn for a candidate, or null if it's unavailable. */
-async function makeRunner(c: Candidate): Promise<((audioPath: string) => Promise<string>) | null> {
+/** Build a transcribe(path)→text fn for a batch candidate, or null if it's unavailable. */
+async function makeRunner(
+  c: Exclude<Candidate, StreamCandidate>,
+): Promise<((audioPath: string) => Promise<string>) | null> {
   if (c.kind === "provider") {
     const provider = makeProvider(c);
     if (!(await provider.health())) {
@@ -119,6 +127,14 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 };
 
+/** Streaming-only metrics; absent on batch rows, which have no meaningful value for them. */
+interface StreamStats {
+  firstDeltaMs: number;      // median across clips, from the first PCM byte
+  finalAfterAudioMs: number; // median; negative = transcript done before the audio ended
+  deltasDuringAudio: number; // summed over clips (first run)
+  deltas: number;            // summed over clips (first run)
+}
+
 interface Row {
   name: string;
   available: boolean;
@@ -128,11 +144,94 @@ interface Row {
   rtf: number;          // warmMs / audioDuration; <1 = faster than realtime
   errors: number;       // clips that failed/empty
   clips: number;
+  streaming?: StreamStats;
+}
+
+const emptyRow = (name: string, available: boolean): Row =>
+  ({ name, available, meanWerPct: 0, warmMs: 0, coldMs: 0, rtf: 0, errors: 0, clips: 0 });
+
+/** Cheap liveness probe — a stream candidate has no provider `health()` to ask. */
+async function portOpen(host: string, port: number): Promise<boolean> {
+  try {
+    const sock = await Bun.connect({ hostname: host, port, socket: { data: () => {} } });
+    sock.end();
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * Feed each clip at real-time pace and time the deltas. Note the wall-clock cost:
+ * a real-time feed spends at least the clip's duration per run, so a 75s clip set
+ * at 3 runs is ~4 minutes per candidate before the model does any work.
+ */
+async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], runs: number): Promise<Row> {
+  const host = c.host ?? "127.0.0.1";
+  if (!(await portOpen(host, c.port))) {
+    console.warn(`  ⚠️  ${c.name}: nothing listening on ${host}:${c.port} — skipping`);
+    return emptyRow(c.name, false);
+  }
+
+  const wers: number[] = [];
+  const firstDeltas: number[] = [];
+  const finals: number[] = [];
+  const totals: number[] = [];
+  let deltasDuringAudio = 0;
+  let deltas = 0;
+  let errors = 0;
+
+  for (const clip of clips) {
+    const clipFirst: number[] = [];
+    const clipFinal: number[] = [];
+    const clipTotal: number[] = [];
+    let transcript = "";
+    for (let r = 0; r < runs; r++) {
+      const t0 = performance.now();
+      try {
+        const res = await transcribeLive(clip.path, c);
+        clipTotal.push(performance.now() - t0);
+        clipFinal.push(res.finalAfterAudioMs);
+        if (res.firstDeltaMs !== null) clipFirst.push(res.firstDeltaMs);
+        if (r === 0) {
+          transcript = res.text;
+          deltas += res.deltas;
+          deltasDuringAudio += res.deltasDuringAudio;
+        }
+      } catch (err: unknown) {
+        console.warn(`  ⚠️  ${c.name} / ${clip.name}: ${err instanceof Error ? err.message : String(err)}`);
+        break;
+      }
+    }
+    if (!transcript) { errors++; continue; }
+
+    const { wer } = wordErrorRate(clip.reference, transcript);
+    wers.push(wer * 100);
+    if (clipFirst.length) firstDeltas.push(median(clipFirst));
+    if (clipFinal.length) finals.push(median(clipFinal));
+    if (clipTotal.length) totals.push(median(clipTotal));
+  }
+
+  return {
+    ...emptyRow(c.name, true),
+    meanWerPct: wers.length ? wers.reduce((a, b) => a + b, 0) / wers.length : 0,
+    warmMs: median(totals),
+    errors,
+    clips: wers.length,
+    streaming: {
+      // NaN, not 0, when a model emitted no partial at all — 0 would read as
+      // "instant" in a latency column, which is the opposite of what happened.
+      firstDeltaMs: firstDeltas.length ? median(firstDeltas) : NaN,
+      finalAfterAudioMs: median(finals),
+      deltasDuringAudio,
+      deltas,
+    },
+  };
 }
 
 async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promise<Row> {
+  if (c.kind === "stream") return benchStreamCandidate(c, clips, runs);
+
   const runner = await makeRunner(c);
-  if (!runner) return { name: c.name, available: false, meanWerPct: 0, warmMs: 0, coldMs: 0, rtf: 0, errors: 0, clips: 0 };
+  if (!runner) return emptyRow(c.name, false);
 
   const wers: number[] = [];
   const warmTimes: number[] = [];
@@ -182,16 +281,45 @@ async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promis
   };
 }
 
+const fmt = (n: number, d = 1) => (Number.isFinite(n) ? n.toFixed(d) : "n/a");
+
 function renderTable(rows: Row[]): string {
-  const avail = rows.filter((r) => r.available).sort((a, b) => a.meanWerPct - b.meanWerPct);
+  const avail = rows.filter((r) => r.available && !r.streaming).sort((a, b) => a.meanWerPct - b.meanWerPct);
   const header = "| Candidate | WER % | warm ms | cold ms | RTF | errors | clips |";
   const sep = "|---|---:|---:|---:|---:|---:|---:|";
-  const fmt = (n: number, d = 1) => (Number.isFinite(n) ? n.toFixed(d) : "n/a");
   const lines = avail.map((r) =>
     `| ${r.name} | ${fmt(r.meanWerPct)} | ${fmt(r.warmMs, 0)} | ${fmt(r.coldMs, 0)} | ${r.rtf ? fmt(r.rtf, 3) : "n/a"} | ${r.errors} | ${r.clips} |`,
   );
   const skipped = rows.filter((r) => !r.available).map((r) => `- ${r.name} (unavailable — server down or command missing)`);
   return [header, sep, ...lines, ...(skipped.length ? ["", "**Skipped:**", ...skipped] : [])].join("\n");
+}
+
+/**
+ * Streaming rows get their own table: "warm ms" for a real-time feed is dominated
+ * by the clip's own duration, so putting it beside a batch latency would invite a
+ * comparison that means nothing. Time-to-final is measured from the end of the
+ * audio, which is the number a live loop actually waits out.
+ */
+function renderStreamingTable(rows: Row[]): string {
+  const avail = rows.filter((r) => r.available && r.streaming).sort((a, b) => a.meanWerPct - b.meanWerPct);
+  if (!avail.length) return "";
+  const header = "| Candidate | WER % | first delta ms | deltas during audio | final after audio ms | errors | clips |";
+  const sep = "|---|---:|---:|---:|---:|---:|---:|";
+  const lines = avail.map((r) => {
+    const s = r.streaming!;
+    const during = s.deltas ? `${s.deltasDuringAudio} / ${s.deltas}` : "0";
+    return `| ${r.name} | ${fmt(r.meanWerPct)} | ${fmt(s.firstDeltaMs, 0)} | ${during} | ${fmt(s.finalAfterAudioMs, 0)} | ${r.errors} | ${r.clips} |`;
+  });
+  return [
+    "### Streaming (real-time feed, `/v1/audio/transcriptions/live`)",
+    "",
+    header, sep, ...lines,
+    "",
+    "_`first delta` is from the first PCM byte; `final after audio` is `transcript.text.done`"
+    + " relative to the last sample (negative = done before the audio ended). `n/a` first delta"
+    + " means the model emitted no partial at all — it buffers internally and behaves like a"
+    + " batch model over this endpoint._",
+  ].join("\n");
 }
 
 async function main(): Promise<void> {
@@ -215,22 +343,33 @@ async function main(): Promise<void> {
   }
 
   const table = renderTable(rows);
+  const streamTable = renderStreamingTable(rows);
   console.log(`\n${table}\n`);
-  console.log("RTF < 1 = faster than real-time. WER lower = better. Batch latency only — confirm streaming feel live.");
+  if (streamTable) console.log(`${streamTable}\n`);
+  console.log("RTF < 1 = faster than real-time. WER lower = better. Recorded clips only — confirm the shortlist with a live mic test.");
 
+  const stamp = new Date().toISOString();
   const report = [
-    `# STT bench — ${new Date().toISOString()}`,
+    `# STT bench — ${stamp}`,
     "",
     `Clips: ${clips.length} (${totalAudio.toFixed(1)}s), runs/clip: ${args.runs}`,
     "",
-    table,
+    "### Batch (whole-clip transcribe)",
     "",
-    "_Batch transcribe latency + accuracy. Does NOT measure streaming time-to-final — confirm that with a live mic test._",
+    table,
+    ...(streamTable ? ["", streamTable] : []),
+    "",
+    "_Every clip here is a recording: this measures accuracy, batch latency and streaming"
+    + " time-to-final, not how a model copes with your room and mic._",
     "",
   ].join("\n");
+  // Archived under a run stamp as well, because last-results.md is overwritten on
+  // every run — losing a sweep to a one-candidate re-run is otherwise easy.
+  const archivePath = resolve(`bench/stt/results/${stamp.replace(/[:.]/g, "-")}.md`);
   const reportPath = resolve("bench/stt/last-results.md");
+  await Bun.write(archivePath, report);
   await Bun.write(reportPath, report);
-  console.log(`\nReport written to ${reportPath}`);
+  console.log(`\nReport written to ${reportPath} (archived: ${archivePath})`);
 }
 
 main().catch((err: unknown) => {
