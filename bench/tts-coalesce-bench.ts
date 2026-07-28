@@ -18,7 +18,9 @@
  * A win is: TTFA unchanged (within noise) and TOTAL meaningfully lower. TTFA can
  * only regress at `passthroughFirst: 0`, where sentence one is eligible to be
  * merged; raising it to 1 fixes that. Above 1 it protects later sentences, not
- * first audio, so a TTFA regression at 1 or higher is the engine, not the knob.
+ * first audio — so a TTFA regression at 1 or higher is not something this knob
+ * can fix, and is worth re-running before believing (these deltas are small
+ * enough that run-to-run noise reaches them).
  *
  * The third number, and the reason coalescing could be a bad trade even when
  * both of the above look good:
@@ -237,7 +239,7 @@ async function main(): Promise<void> {
     "\nAdopt only if TTFA is unchanged within noise AND total drops meaningfully"
     + "\nAND coalesced slack stays comfortably positive."
     + "\nA TTFA regression at --passthrough-first 0 means raise it to 1; at 1 or"
-    + "\nhigher the knob no longer touches first audio, so the engine is the cause."
+    + "\nhigher the knob no longer touches first audio, so re-run before believing it."
     + "\nIf slack went negative or near zero, lower --max-chars: the chunks got"
     + "\nbigger than the audio ahead of them.",
   );

@@ -37,11 +37,37 @@ export const DEFAULT_COALESCE_OPTIONS: CoalesceOptions = {
  * Reading ahead is the whole point, but it also removes the backpressure the
  * speaker used to apply by pulling exactly one sentence at a time: a brain that
  * generates faster than the engine speaks would otherwise buffer an entire
- * unbounded reply in memory. At this size the queue always holds far more than
- * a merged chunk needs, so the cap never changes what gets emitted — it just
- * stops the read-ahead from becoming a sink.
+ * unbounded reply in memory.
+ *
+ * A batch that ends at the cap does flush a merge early, so one chunk per 16k
+ * characters can come out shorter than it strictly had to. That is a rounding
+ * error against a 240-char chunk, and it costs a fraction of a call rather than
+ * any correctness: no sentence is lost, reordered, or split.
  */
 export const MAX_QUEUED_CHARS = 16_000;
+
+/**
+ * How long close() waits for the drain to confirm it stopped.
+ *
+ * Async iterators serialize next() and return(), so return() cannot overtake an
+ * in-flight read — a producer parked mid-read cannot be made to stop now, only
+ * asked to stop next. Waiting for confirmation without a bound would hand a
+ * stalled brain stream the power to block barge-in cleanup, which is the
+ * opposite of what cancellation is for. So: ask, wait briefly, move on. The
+ * abandoned drain is inert either way — `closed` makes it exit on the first
+ * resumption, and it can retain at most one more sentence in a queue that has
+ * already been dropped.
+ */
+export const CLOSE_CONFIRM_MS = 250;
+
+/** Bounded wait that never leaves a timer holding the event loop open. */
+function settleWithin<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  return Promise.race([work, deadline]).finally(() => { if (timer) clearTimeout(timer); });
+}
 
 /**
  * Drain `source` into a queue eagerly, so the consumer can always ask "what has
@@ -78,7 +104,9 @@ function eagerQueue(source: AsyncIterable<string>, maxQueuedChars: number): {
         }
         if (closed) break;
         const next = await iterator.next();
-        if (next.done) break;
+        // Re-checked after the read: close() may have landed while it was in
+        // flight, and a closed queue must not retain one last sentence.
+        if (next.done || closed) break;
         queued.push(next.value);
         queuedChars += next.value.length;
         wakeConsumer?.();
@@ -112,15 +140,17 @@ function eagerQueue(source: AsyncIterable<string>, maxQueuedChars: number): {
       return batch;
     },
 
-    /** Stop the drain and release the source, then wait for it to actually stop. */
+    /** Stop the drain and release the source, bounded so cleanup cannot hang. */
     async close(): Promise<void> {
       closed = true;
+      // A drain parked on backpressure stops immediately; this is the one park
+      // we own and can release ourselves.
       wakeProducer?.();
-      // Closes a generator source (running its finally blocks). If the drain is
-      // parked in next(), this is queued behind it and the loop's `closed` check
-      // ends the read on the following pass.
-      await iterator.return?.().catch(() => { /* the source is being abandoned */ });
-      await drain;
+      // Closes a generator source, running its finally blocks. Not awaited: if
+      // the drain is mid-next(), this queues behind that read and would inherit
+      // however long the producer takes.
+      void Promise.resolve(iterator.return?.()).catch(() => { /* being abandoned */ });
+      await settleWithin(drain, CLOSE_CONFIRM_MS);
     },
   };
 }

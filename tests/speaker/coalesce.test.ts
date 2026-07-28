@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { coalesceSentences, MAX_QUEUED_CHARS } from "../../src/speaker/coalesce";
+import { coalesceSentences, CLOSE_CONFIRM_MS, MAX_QUEUED_CHARS } from "../../src/speaker/coalesce";
 
 /** Yield each item immediately — everything is "already available". */
 async function* immediate(items: string[]): AsyncGenerator<string> {
@@ -172,4 +172,24 @@ test("a falsy producer failure still propagates instead of ending the reply", as
   const first = await merged.next();
   expect(first.value).toBe("First.");
   await expect(merged.next()).rejects.toBeNull();
+});
+
+test("closing settles promptly even when the producer is parked mid-read", async () => {
+  // Never yields again: a brain stream stalled on the network. Async iterators
+  // serialize next()/return(), so return() cannot overtake this read — cleanup
+  // must not wait on it.
+  async function* stalls(): AsyncGenerator<string> {
+    yield "First.";
+    await new Promise<void>(() => { /* never resolves */ });
+  }
+
+  const merged = coalesceSentences(stalls(), { maxChars: 240, passthroughFirst: 1 });
+  expect((await merged.next()).value).toBe("First.");
+
+  const start = performance.now();
+  await merged.return(undefined);
+  const elapsed = performance.now() - start;
+  // Bounded by CLOSE_CONFIRM_MS, not by the producer. Without the bound this
+  // never returns and the test times out.
+  expect(elapsed).toBeLessThan(CLOSE_CONFIRM_MS * 4);
 });
