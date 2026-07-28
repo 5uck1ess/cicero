@@ -15,6 +15,7 @@ import { OvernightStore } from "../src/notify/overnight-store";
 import type { WebReplySink } from "../src/web-voice/turn";
 import type { HistoryTurn } from "../src/web-voice/history";
 import { readPairingState } from "../src/web-voice/pairing-state";
+import { hasDefaultHistoryCompactor } from "../src/brain/turn-context";
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -254,6 +255,101 @@ describe("CiceroDaemon lifecycle", () => {
     } catch (error) {
       await daemon.stop().catch(() => {});
       throw new Error(`successful lifecycle timer test failed: ${(error as Error).message}`, { cause: error });
+    }
+  });
+
+  // The compactor is registered process-wide, so a daemon that fails to start
+  // or is stopped must take it back down with it — otherwise a retired daemon's
+  // summarizer endpoint keeps serving every brain in the process.
+  test("history compaction is registered on start and unregistered on rollback", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-compaction-test-"));
+    const pidFile = join(home, "cicero.pid");
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.web_voice = { ...config.raw.web_voice, enabled: true };
+    config.raw.dashboard = { enabled: false };
+    config.raw.tts_enabled = false;
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+      history_compaction: { enabled: true, summarizer_url: "http://127.0.0.1:1/v1" },
+    };
+    let releaseProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    let signalProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { signalProviderStarted = resolve; });
+    const daemon = new CiceroDaemon(config, {
+      pidFile,
+      providerFactory: () => ({
+        stt: {
+          name: "test-stt",
+          transcribe: () => Promise.resolve(null),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+        tts: {
+          name: "test-tts",
+          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+        llm: {
+          name: "test-llm",
+          chatCompletion: () => Promise.resolve("ok"),
+          health: () => Promise.resolve(true),
+          start: async () => { signalProviderStarted(); await providerGate; },
+          stop: () => Promise.resolve(),
+        },
+      }),
+    });
+
+    expect(hasDefaultHistoryCompactor()).toBe(false);
+    try {
+      const startResult = daemon.start().then(() => null, (error: unknown) => error);
+      await providerStarted;
+      // Registered before the daemon is even fully up.
+      expect(hasDefaultHistoryCompactor()).toBe(true);
+
+      const stopping = daemon.stop();
+      const observedStop = stopping.then(() => undefined, () => undefined);
+      releaseProvider();
+      await startResult;
+      await observedStop;
+      expect(hasDefaultHistoryCompactor()).toBe(false);
+    } catch (error) {
+      releaseProvider();
+      await daemon.stop().catch(() => {});
+      throw new Error(`compaction registration test failed: ${(error as Error).message}`, { cause: error });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // Enabled with nowhere to send the summary must not look like it is working.
+  test("history compaction with no summarizer URL stays unregistered", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-compaction-nourl-test-"));
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.web_voice = { ...config.raw.web_voice, enabled: true };
+    config.raw.dashboard = { enabled: false };
+    config.raw.tts_enabled = false;
+    config.raw.brain = { ...config.raw.brain, history_compaction: { enabled: true } };
+    const daemon = new CiceroDaemon(config, {
+      pidFile: join(home, "cicero.pid"),
+      providerFactory: () => { throw new Error("stop here"); },
+    });
+    try {
+      await expect(daemon.start()).rejects.toThrow(/stop here/);
+      expect(hasDefaultHistoryCompactor()).toBe(false);
+      await daemon.stop();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 

@@ -125,6 +125,29 @@ describe("process-wide registration", () => {
     expect(text).not.toContain("q0");
   });
 
+  // A daemon restart re-registers before the old instance finishes stopping.
+  // If release restored "whatever was there before", it would wipe the new one.
+  test("a late release does not clobber a newer registration", async () => {
+    stubSummarizer("old");
+    const releaseOld = setDefaultHistoryCompactor(createHistoryCompactor({ summarizer_url: "http://x:1/v1" })!);
+    const releaseNew = setDefaultHistoryCompactor(async () => "new registration");
+    releaseOld(); // out of order, after the newer one took over
+    try {
+      const ctx = new BrainTurnContext();
+      for (let i = 0; i < 13; i += 1) ctx.remember(`q${i}`, `a${i}`);
+      await ctx.settled();
+      expect(ctx.buildTextPrompt("now", true)).toContain("new registration");
+    } finally {
+      releaseNew();
+    }
+  });
+
+  test("releasing twice is harmless", () => {
+    const release = setDefaultHistoryCompactor(async () => "s");
+    release();
+    expect(() => release()).not.toThrow();
+  });
+
   // An explicit off must not silently fall back to the process-wide default.
   test("setCompactor(null) turns compaction off for that context", async () => {
     stubSummarizer("default summary");

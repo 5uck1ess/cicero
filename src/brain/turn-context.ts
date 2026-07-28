@@ -53,11 +53,24 @@ export type HistoryCompactor = (
  */
 let defaultCompactor: HistoryCompactor | null = null;
 
-/** Register the daemon-wide compactor. Returns a disposer that restores the previous one. */
+/**
+ * Register the daemon-wide compactor. Returns a disposer that unregisters it.
+ *
+ * The disposer only clears the compactor it installed. Restoring whatever was
+ * there before would let an out-of-order release clobber a newer registration —
+ * a daemon restart re-registers before the old instance finishes stopping.
+ * Calling the disposer twice, or after someone else has registered, is a no-op.
+ */
 export function setDefaultHistoryCompactor(compactor: HistoryCompactor | null): () => void {
-  const previous = defaultCompactor;
   defaultCompactor = compactor;
-  return () => { defaultCompactor = previous; };
+  return () => {
+    if (defaultCompactor === compactor) defaultCompactor = null;
+  };
+}
+
+/** Whether a daemon-wide compactor is currently registered. */
+export function hasDefaultHistoryCompactor(): boolean {
+  return defaultCompactor !== null;
 }
 
 /**

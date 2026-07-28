@@ -743,7 +743,18 @@ export class CiceroDaemon {
         summarizer_url: compaction.summarizer_url ?? this.config.web_voice?.tldr?.summarizer_url,
         summarizer_model: compaction.summarizer_model ?? this.config.web_voice?.tldr?.summarizer_model,
       });
-      if (compactor) this.releaseCompactor = setDefaultHistoryCompactor(compactor);
+      if (compactor) {
+        // Shutdown must be able to cancel a compaction that is already in the
+        // air, not just stop new ones from starting. This controller is the
+        // daemon's handle on every request the registered compactor makes.
+        const abort = new AbortController();
+        const unregister = setDefaultHistoryCompactor((input, signal) =>
+          compactor(input, AbortSignal.any([signal, abort.signal])));
+        this.releaseCompactor = () => {
+          unregister();
+          abort.abort();
+        };
+      }
       else log("warn", "brain.history_compaction is enabled but no summarizer_url is configured — history will evict its oldest turns instead");
     }
 
