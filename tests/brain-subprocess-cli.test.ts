@@ -2,9 +2,12 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { chmodSync } from "node:fs";
 import {
   awaitOwnedTurnExit,
+  isBatchShim,
   pathFromEnv,
+  promptGoesToStdin,
   resolveCommandBinary,
   SubprocessCLIBrain,
   type TurnProcess,
@@ -72,6 +75,68 @@ test.skipIf(process.platform !== "win32")("resolves Windows PATH command shims b
     const output = await new Response(explicit.stdout).text();
     expect(await awaitOwnedTurnExit(explicit)).toBe(0);
     expect(output).toContain("--stream hello");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// A Windows `.cmd`/`.bat` shim runs through cmd.exe, which reinterprets argv
+// (CVE-2024-24576). A turn's prompt is untrusted, so it must never be a command
+// -line value on that path. The decision is pure so it is exercised off Windows.
+test("a batch shim is recognized by extension, case-insensitively", () => {
+  expect(isBatchShim("C:\\shims\\codex.cmd")).toBe(true);
+  expect(isBatchShim("C:\\shims\\CODEX.CMD")).toBe(true);
+  expect(isBatchShim("C:\\shims\\run.bat")).toBe(true);
+  // A real executable carries no cmd.exe parsing, and a name that merely
+  // contains "cmd" is not a shim.
+  expect(isBatchShim("codex")).toBe(false);
+  expect(isBatchShim("C:\\bin\\codex.exe")).toBe(false);
+  expect(isBatchShim("/usr/bin/cmdtool")).toBe(false);
+});
+
+test("the prompt is routed to stdin for a Windows shim, and POSIX is left alone", () => {
+  // An explicitly configured stdin brain (qwen/gemini) always pipes.
+  expect(promptGoesToStdin("qwen", true, "linux")).toBe(true);
+  // The argv brains (codex/claude) must switch to stdin once resolution has
+  // handed them a shim.
+  expect(promptGoesToStdin("C:\\shims\\codex.cmd", undefined, "win32")).toBe(true);
+  // A real Windows executable keeps the existing argv path.
+  expect(promptGoesToStdin("C:\\bin\\codex.exe", undefined, "win32")).toBe(false);
+  // POSIX behavior must be unchanged even for an operator who configured a
+  // binary that happens to end in .cmd — there is no cmd.exe to reinterpret it.
+  expect(promptGoesToStdin("/opt/bin/weird.cmd", undefined, "linux")).toBe(false);
+});
+
+/** A probe that reports how it received its argv and stdin. */
+function writeProbe(directory: string, name: string): string {
+  const path = join(directory, name);
+  writeFileSync(path, '#!/bin/sh\necho "ARGS:$*"\necho "STDIN:$(cat)"\n');
+  chmodSync(path, 0o755);
+  return path;
+}
+
+test.skipIf(process.platform === "win32")("spawnWithArgs pipes the prompt instead of putting it in argv", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cicero-stdin-probe-"));
+  try {
+    class InspectBrain extends SubprocessCLIBrain {
+      spawnExplicit(message: string) { return this.spawnWithArgs(["--stream"], message); }
+    }
+    // The progress path ignored promptViaStdin and always appended the prompt to
+    // argv, so a stdin brain still leaked its prompt onto the command line.
+    const brain = new InspectBrain({
+      name: "test",
+      binary: writeProbe(directory, "probe.sh"),
+      args: ["--print"],
+      promptViaStdin: true,
+      rememberTurns: false,
+    });
+
+    const proc = brain.spawnExplicit("secret prompt");
+    const output = await new Response(proc.stdout).text();
+    expect(await awaitOwnedTurnExit(proc)).toBe(0);
+    expect(output).toContain("STDIN:secret prompt");
+    expect(output).toContain("ARGS:--stream");
+    expect(output).not.toContain("ARGS:--stream secret prompt");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
