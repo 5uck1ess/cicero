@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClassifierProvider, createProviders } from "../../src/backends/registry";
 import { createBackendStartupPolicies } from "../../src/servers/startup-policy";
+import { ServerManager } from "../../src/servers";
 import { loadConfig as loadConfigRaw } from "../../src/config";
 import { validateRuntimeConfig } from "../../src/config-validation";
 import { DEFAULT_CONFIG, RuntimeConfig } from "../../src/config";
@@ -167,5 +168,59 @@ describe("classifier doctor coverage", () => {
     const text = `${check!.detail ?? ""} ${check!.hint ?? ""}`;
     expect(text).toContain("classifier.backend");
     expect(text).not.toContain("llm.backend");
+  });
+});
+
+describe("classifier lifecycle", () => {
+  /** A provider that records whether it was started and stopped. */
+  function recorder(name: string, log: string[]) {
+    return {
+      name,
+      chatCompletion: () => Promise.resolve("ok"),
+      health: () => Promise.resolve(true),
+      start: () => { log.push(`start:${name}`); return Promise.resolve(); },
+      stop: () => { log.push(`stop:${name}`); return Promise.resolve(); },
+    };
+  }
+
+  // A role wired into start but not stop leaves a model resident after the
+  // daemon says it stopped -- on a VRAM-tight box that is the whole seat.
+  test("a configured classifier is both started and stopped", async () => {
+    const events: string[] = [];
+    const providers = {
+      stt: { name: "stt", transcribe: () => Promise.resolve(null), ...recorder("stt", events) },
+      tts: { name: "tts", generateAudio: () => Promise.resolve(new ArrayBuffer(0)), ...recorder("tts", events) },
+      llm: recorder("llm", events),
+      classifier: recorder("classifier", events),
+    } as never;
+
+    const manager = new ServerManager();
+    await manager.start(providers, {});
+    expect(events).toContain("start:classifier");
+
+    await manager.stop(providers);
+    expect(events).toContain("stop:classifier");
+    // And every other role still stops, so this did not narrow the set.
+    for (const role of ["stt", "tts", "llm"]) expect(events).toContain(`stop:${role}`);
+  });
+
+  test("a classifier that fails to start does not stop the daemon", async () => {
+    const providers = {
+      stt: { name: "stt", transcribe: () => Promise.resolve(null), health: () => Promise.resolve(true) },
+      tts: { name: "tts", generateAudio: () => Promise.resolve(new ArrayBuffer(0)), health: () => Promise.resolve(true) },
+      llm: { name: "llm", chatCompletion: () => Promise.resolve("ok"), health: () => Promise.resolve(true) },
+      classifier: {
+        name: "classifier",
+        chatCompletion: () => Promise.resolve("ok"),
+        health: () => Promise.resolve(false),
+        start: () => Promise.reject(new Error("classifier model failed to load")),
+      },
+    } as never;
+
+    const policies = createBackendStartupPolicies(
+      configWith({ backend: "llama-cpp", host: "127.0.0.1", port: 8090 }),
+    );
+    // Never required, so a failure is a warning rather than a startup abort.
+    await expect(new ServerManager().start(providers, policies)).resolves.toBeUndefined();
   });
 });

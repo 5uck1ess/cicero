@@ -105,8 +105,10 @@ export class ServerManager {
   }
 
   async stop(providers: BackendProviderSet): Promise<void> {
-    for (const provider of [providers.stt, providers.tts, providers.llm]) {
-      if (provider?.stop) {
+    // Derived from providerEntries, not a second hand-written role list: a role
+    // added to one and forgotten in the other gets started and never stopped.
+    for (const [, provider] of providerEntries(providers)) {
+      if (provider.stop) {
         try {
           await provider.stop();
         } catch (error: unknown) {
