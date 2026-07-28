@@ -164,8 +164,8 @@ The bounds matter more than the feature:
   deletes something it did not summarize.
 - The summarizer request times out after 15 seconds, and the compaction as a
   whole is abandoned after 30 whether or not the summarizer honors the
-  cancellation. The retained summary is capped at 4,000 characters and counts
-  toward the transcript's own character ceiling.
+  cancellation. The retained summary is capped at 4,000 characters — inclusive
+  of its truncation marker — and counts toward the transcript's own ceiling.
 - History may overrun to twice its normal cap while a compaction runs, and no
   further — a summarizer that never answers cannot grow the transcript. It is
   trimmed back to the normal cap as soon as the compaction settles.

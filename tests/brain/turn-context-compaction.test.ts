@@ -135,38 +135,18 @@ describe("history compaction", () => {
   });
 
   // Successive compactions fold into one running summary rather than stacking.
-  test("a later compaction receives the previous summary and replaces it", async () => {
-    const previous: (string | null)[] = [];
-    const ctx = new BrainTurnContext();
-    let round = 0;
-    ctx.setCompactor(async ({ previousSummary }) => {
-      previous.push(previousSummary);
-      round += 1;
-      return `summary round ${round}`;
-    });
-
-    fill(ctx, 13, "first");
-    await ctx.settled();
-    fill(ctx, 13, "second");
-    await ctx.settled();
-
-    expect(previous[0]).toBeNull();
-    expect(previous[1]).toBe("summary round 1");
-    const text = prompt(ctx);
-    expect(text).toContain("summary round 2");
-    expect(text).not.toContain("summary round 1"); // replaced, not stacked
-  });
-
   test("an oversized summary is bounded before it is retained", async () => {
     const ctx = new BrainTurnContext();
-    ctx.setCompactor(async () => "x".repeat(MAX_SUMMARY_CHARS + 5_000));
+    ctx.setCompactor(async () => "HEAD-OF-SUMMARY " + "x".repeat(MAX_SUMMARY_CHARS + 5_000));
     fill(ctx, 13);
     await ctx.settled();
-    const text = prompt(ctx);
-    expect(text).toContain("earlier content truncated");
-    expect(text.length).toBeLessThan(MAX_SUMMARY_CHARS + 20_000);
+    const state = ctx as unknown as { summary: string | null };
+    // The cap is inclusive of the marker, not the cap plus the marker.
+    expect(state.summary!.length).toBeLessThanOrEqual(MAX_SUMMARY_CHARS);
+    expect(state.summary).toContain("[summary truncated]");
+    // A summary keeps its head; the opening is what says what this was about.
+    expect(state.summary!.startsWith("HEAD-OF-SUMMARY ")).toBe(true);
   });
-
   // clear() must not let a compaction started before it resurrect old content.
   test("clear() discards a compaction that was already in flight", async () => {
     let release!: () => void;

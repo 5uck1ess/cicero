@@ -35,6 +35,20 @@ function tail(value: string, max: number): string {
   return value.length <= max ? value : `[earlier content truncated]\n${value.slice(-max)}`;
 }
 
+const SUMMARY_TRUNCATION_MARKER = "\n[summary truncated]";
+
+/**
+ * Bound a summary to MAX_SUMMARY_CHARS *inclusive* of its marker, so the cap is
+ * the number documented rather than that plus however long the marker is.
+ *
+ * Unlike a transcript, a summary keeps its head: it opens with what the
+ * conversation was about, and the tail is the most recent detail.
+ */
+function boundSummary(value: string): string {
+  if (value.length <= MAX_SUMMARY_CHARS) return value;
+  return value.slice(0, MAX_SUMMARY_CHARS - SUMMARY_TRUNCATION_MARKER.length) + SUMMARY_TRUNCATION_MARKER;
+}
+
 interface HistoryTurn { user: string; assistant: string }
 
 /**
@@ -277,7 +291,7 @@ export class BrainTurnContext {
   private applyCompaction(batch: readonly HistoryTurn[], summary: string): void {
     const retired = new Set<HistoryTurn>(batch);
     this.history = this.history.filter((turn) => !retired.has(turn));
-    this.summary = tail(summary, MAX_SUMMARY_CHARS);
+    this.summary = boundSummary(summary);
   }
 
   buildTextPrompt(message: string, includeHistory: boolean, systemContext?: string): string {
