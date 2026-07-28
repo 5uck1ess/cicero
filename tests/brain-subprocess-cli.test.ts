@@ -53,13 +53,16 @@ test("command resolution is a no-op off Windows and resolves shims on it", () =>
   expect(resolveCommandBinary("missing", { Path: "C:\\shims" }, "win32", which)).toBe("missing");
 });
 
-test.skipIf(process.platform !== "win32")("resolves Windows PATH command shims before spawning", async () => {
+test.skipIf(process.platform !== "win32")("a resolved Windows shim is spawned, and the prompt never reaches its command line", async () => {
   const directory = mkdtempSync(join(tmpdir(), "cicero-brain-shim-"));
   try {
-    writeFileSync(join(directory, "cicero-brain-shim.cmd"), "@echo off\r\necho %*\r\n");
+    // Reports the argv cmd.exe actually parsed, then drains stdin so the write
+    // side never sees a closed pipe. `more` exits 0 whether or not it read
+    // anything, keeping the turn's exit status about the spawn.
+    writeFileSync(join(directory, "cicero-brain-shim.cmd"), "@echo off\r\necho ARGS:%*\r\nmore >nul 2>&1\r\n");
     class InspectBrain extends SubprocessCLIBrain {
-      spawnExplicit() {
-        return this.spawnWithArgs(["--stream"], "hello");
+      spawnExplicit(message: string) {
+        return this.spawnWithArgs(["--stream"], message);
       }
     }
     const brain = new InspectBrain({
@@ -70,11 +73,21 @@ test.skipIf(process.platform !== "win32")("resolves Windows PATH command shims b
       rememberTurns: false,
     });
 
-    expect(await brain.send("hello")).toContain("--print hello");
-    const explicit = brain.spawnExplicit();
+    // Reaching a shim's command line, `%PATH%` would expand and `&` would start
+    // a second command. Both spawn paths must keep the prompt off it entirely;
+    // that it still arrives intact over stdin is covered on POSIX above, where
+    // CI can actually run it.
+    const prompt = "hello %PATH% & echo INJECTED";
+    const sent = await brain.send(prompt);
+    expect(sent).toContain("ARGS:--print");
+    expect(sent).not.toContain("hello");
+    expect(sent).not.toContain("INJECTED");
+
+    const explicit = brain.spawnExplicit(prompt);
     const output = await new Response(explicit.stdout).text();
     expect(await awaitOwnedTurnExit(explicit)).toBe(0);
-    expect(output).toContain("--stream hello");
+    expect(output).toContain("ARGS:--stream");
+    expect(output).not.toContain("hello");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
