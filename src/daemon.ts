@@ -80,7 +80,7 @@ import {
   type BriefingRunResult,
 } from "./notify/briefing-scheduler";
 import { OvernightStore } from "./notify/overnight-store";
-import { sendUnattended } from "./brain/capabilities";
+import { brainExecutesTools, sendUnattended } from "./brain/capabilities";
 import { buildResumePrimer, buildRosterNote } from "./web-voice/resume";
 import { HealthStore, briefLine } from "./health/store";
 import {
@@ -1280,7 +1280,21 @@ export class CiceroDaemon {
       // confident "complete" probe the tail is transcribed and the brain
       // started before the final WAV lands — see speculative.ts for the gates.
       const specCfg = wv.speculative;
-      const speculator = specCfg?.enabled && this.config.turn.enabled && this.brain.sendStream
+      // A speculative turn runs on speech the user has not finished. Tokens
+      // from a wrong guess are discarded; a tool call is not recallable. So a
+      // tool-executing brain stays out of the speculative path unless the
+      // operator has accepted that trade explicitly.
+      const specToolBrain = brainExecutesTools(this.config.brain);
+      const specSideEffectsAllowed = !specToolBrain || specCfg?.allow_tool_brains === true;
+      if (specCfg?.enabled && this.config.turn.enabled && !specSideEffectsAllowed) {
+        log(
+          "warn",
+          `speculative turns are configured but disabled: the "${this.config.brain.backend}" brain runs tools, ` +
+            "and speculation would start them on an unfinished utterance. " +
+            "Set web_voice.speculative.allow_tool_brains: true to accept that.",
+        );
+      }
+      const speculator = specCfg?.enabled && this.config.turn.enabled && this.brain.sendStream && specSideEffectsAllowed
         ? makeSpeculator({
             stt: this.providers.stt,
             brain: this.brain,

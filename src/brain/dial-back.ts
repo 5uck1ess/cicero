@@ -1,8 +1,13 @@
-import { classifyCallIntent, dialBackMemo, matchCallMe, type CallIntentClassifier } from "../call-intent";
+import { classifyCallIntent, dialBackMemo, matchCallMe, SpeculativeSideEffectError, type CallIntentClassifier } from "../call-intent";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions } from "../types";
 import { bindBrainCapability, sendUnattended } from "./capabilities";
 
 type DialBackHandler = (who?: string, options?: BrainTurnOptions) => Promise<string>;
+
+// Defined in ../call-intent alongside the shared dial-back vocabulary, because
+// SwitchboardBrain raises it too. Re-exported here so importers of the wrapper
+// keep working.
+export { SpeculativeSideEffectError } from "../call-intent";
 
 /**
  * Whole-utterance dial-back control shared by every brain backend.
@@ -76,6 +81,11 @@ export class DialBackBrain implements Brain {
       );
       this.control = call !== null;
       if (!call) return null;
+      // Both branches above can select a call — the regex AND the semantic
+      // classifier — so this refusal sits below both. A speculative turn must
+      // never reach the handler: it spools a real callback the final
+      // utterance cannot cancel.
+      if (options?.speculative) throw new SpeculativeSideEffectError();
       const reply = await this.handler(call.who, options);
       // The ring happened outside the brain's context; without this one-shot
       // memo it denies the call on the very next turn ("did you call me?").

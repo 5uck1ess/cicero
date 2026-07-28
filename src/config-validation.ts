@@ -621,9 +621,12 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
     if (isRecord(config.web_voice.speculative)) {
       checkKnownKeys(config.web_voice.speculative, "web_voice.speculative", [
-        "enabled", "min_probability",
+        "enabled", "min_probability", "allow_tool_brains",
       ], issues);
       checkOptionalNumber(config.web_voice.speculative, "min_probability", "web_voice.speculative", issues, { min: 0, max: 1 });
+      // Safety opt-in: a mistyped value fails closed (speculation stays off),
+      // so report it rather than let the operator believe it took effect.
+      checkOptionalBoolean(config.web_voice.speculative, "allow_tool_brains", "web_voice.speculative", issues);
     }
     if (isRecord(config.web_voice.long_turn)) {
       checkKnownKeys(config.web_voice.long_turn, "web_voice.long_turn", [

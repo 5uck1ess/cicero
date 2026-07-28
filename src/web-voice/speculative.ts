@@ -5,6 +5,7 @@ import type { Brain } from "../types";
 import { beginOwnedTone, settleTone, type ToneOptions } from "./tone";
 import { captureOperationalContext } from "./turn";
 import { writeSecureTempAudio } from "../platform/secure-temp-audio";
+import { SpeculativeSideEffectError } from "../brain/dial-back";
 
 /**
  * Speculative turns: when a mid-pause probe comes back "complete" with high
@@ -227,6 +228,9 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
           it = deps.brain.sendStream!(input, {
             signal: turnAbort.signal,
             systemContext: systemContext ?? undefined,
+            // Tells every wrapper this turn may be discarded, so anything it
+            // cannot take back must refuse instead of acting.
+            speculative: true,
           })[Symbol.asyncIterator]();
           while (!aborted) {
             const next = it.next();
@@ -251,6 +255,25 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
             }
           }
         } catch (err: unknown) {
+          // A wrapper refused to act speculatively (e.g. this turn is a
+          // dial-back request). That is not a failure — it means this
+          // utterance must not be speculated at all, so drop the speculation
+          // and let the final audio drive the normal path.
+          if (err instanceof SpeculativeSideEffectError) {
+            log("info", "speculative: turn would place a call — deferring to the final utterance");
+            // Before the claim, dropping the speculation silently is right: the
+            // final audio drives the normal path and dials there. AFTER the
+            // claim the consumer is already streaming this buffer, and a clean
+            // EOF would read as a finished turn — the requested call would
+            // never be placed at all. Surface the refusal so the adopted path
+            // can re-run the utterance non-speculatively. (`end()` is
+            // first-wins, so the finally below cannot clobber this.)
+            if (claimed) buf.end(err);
+            void doAbort("side effect refused").catch((abortError: unknown) => {
+              log("warn", `speculative cleanup failed: ${abortError instanceof Error ? abortError.message : String(abortError)}`);
+            });
+            return;
+          }
           buf.end(err);
         } finally {
           // Abort does not own the brain until the source's finalizer has

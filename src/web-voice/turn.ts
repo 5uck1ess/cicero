@@ -7,6 +7,7 @@ import { newTurnTimer } from "../timing";
 import { log } from "../logger";
 import type { PreparedFiller } from "../speaker/filler-bank";
 import type { SpeculativeTurn } from "./speculative";
+import { SpeculativeSideEffectError } from "../call-intent";
 import { beginOwnedTone, settleTone, type OwnedTone, type ToneOptions } from "./tone";
 import { writeSecureTempAudio } from "../platform/secure-temp-audio";
 import {
@@ -705,21 +706,26 @@ async function* abortable(
       finalization = Promise.reject(error);
     }
     if (drainSource) {
+      // NO `return` here. A `return` inside `finally` DISCARDS the exception
+      // the generator body is currently throwing, so every error raised by an
+      // adopted speculative stream — a wrapper's side-effect refusal, a buffer
+      // limit, a brain failure — was silently converted into a clean
+      // end-of-stream, and the consumer read it as a completed turn.
       try {
         await finalization;
       } catch (error: unknown) {
         log("warn", `speculative token finalization failed: ${error instanceof Error ? error.message : String(error)}`);
         throw error;
       }
-      return;
-    }
-    const observedFinalization = finalization.catch((error: unknown) => {
-      log("warn", `brain token finalization failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
-    if (trackFinalization && !trackFinalization(observedFinalization)) {
-      await observedFinalization;
-    } else if (!trackFinalization) {
-      void observedFinalization;
+    } else {
+      const observedFinalization = finalization.catch((error: unknown) => {
+        log("warn", `brain token finalization failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      if (trackFinalization && !trackFinalization(observedFinalization)) {
+        await observedFinalization;
+      } else if (!trackFinalization) {
+        void observedFinalization;
+      }
     }
   }
 }
@@ -756,7 +762,22 @@ export async function streamWebTurn(
         try {
           await streamReply(transcript, deps, sink, timer, spec.tokens() ?? undefined);
         } catch (err: unknown) {
-          sink.error(err instanceof Error ? err.message : String(err));
+          // A wrapper refused mid-flight, AFTER we adopted its stream — the
+          // semantic dial-back classifier can resolve well after transcript()
+          // settles. Nothing was spoken, and treating the ended stream as a
+          // finished turn would swallow the request silently: the user asked to
+          // be phoned and the phone would never ring. Re-run the utterance on
+          // the normal path, where the side effect is allowed to happen.
+          if (err instanceof SpeculativeSideEffectError) {
+            log("info", "web voice: speculation refused after adoption — re-running the turn on the normal path");
+            try {
+              await streamReply(transcript, deps, sink, timer);
+            } catch (retryErr: unknown) {
+              sink.error(retryErr instanceof Error ? retryErr.message : String(retryErr));
+            }
+          } else {
+            sink.error(err instanceof Error ? err.message : String(err));
+          }
         } finally {
           // Token exhaustion is not the whole speculative lifetime: the probe
           // tone classifier (and third-party provider work) may still be live.
@@ -1018,7 +1039,17 @@ async function streamReply(
       }
     })();
 
-    if (deps.park) {
+    // Parking is deliberately NOT available to an adopted speculative stream.
+    // The caller's finally calls spec.abort() as soon as streamReply returns —
+    // including the parked return — which cancels the pump the "detached"
+    // consumer is still draining, so the parked reply was truncated to whatever
+    // happened to be buffered. For a turn whose brain has produced nothing yet
+    // (the only state that parks) that is nothing at all, and any error still
+    // pending — a wrapper's side-effect refusal, a cancelled classifier — was
+    // swallowed by the background handler after the turn had already been
+    // acknowledged. Letting these turns run to completion keeps exactly one
+    // termination path for an adopted stream: the caller's, which can retry.
+    if (deps.park && pretokens === undefined) {
       const parkCfg = deps.park;
       const outcome = await new Promise<"park" | "done">((resolve) => {
         const watchdog = setTimeout(() => resolve("park"), parkCfg.afterMs);
