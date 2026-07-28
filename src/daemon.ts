@@ -497,6 +497,7 @@ export class CiceroDaemon {
     };
     addUrlCredentials(this.config.brain?.base_url);
     addUrlCredentials(this.config.llmBackend?.baseUrl);
+    addUrlCredentials(this.config.classifierBackend?.baseUrl);
 
     // Lane agents receive their configured env maps verbatim (brain.lanes.*.env
     // and each fallback's env) — an ANTHROPIC_API_KEY placed there reaches the
@@ -515,6 +516,14 @@ export class CiceroDaemon {
       addEnv(resolveOpenAiTarget(llm).apiKeyEnv);
     }
     addHeaderValues(llm?.extraHeaders);
+    // The classifier takes the same credential fields as the reply model, so it
+    // needs the same inventory — a key here is no less a key.
+    const classifier = this.config.classifierBackend;
+    add(classifier?.apiKey);
+    if (classifier && OPENAI_COMPATIBLE_BACKENDS.includes(classifier.backend ?? "")) {
+      addEnv(resolveOpenAiTarget(classifier).apiKeyEnv);
+    }
+    addHeaderValues(classifier?.extraHeaders);
     add(this.config.ttsBackend?.apiKey);
     add(this.config.ttsFallbackBackend?.apiKey);
     // ElevenLabs resolves its key from ELEVENLABS_API_KEY when no inline key is

@@ -295,7 +295,9 @@ async function checkEngine(
   }
   const sttRole = role.startsWith("stt");
   const ttsRole = role.startsWith("tts");
-  const llmRole = role === "llm";
+  // The classifier is an LLM in every respect that matters here: same ports,
+  // same defaults, same probes. Only its config key differs.
+  const llmRole = role === "llm" || role === "classifier";
   const voiceContract = role.startsWith("tts")
     ? voiceProviderContractForBackend(cfg.backend)
     : null;
@@ -538,7 +540,7 @@ async function checkLlm(
         record({
           level: "fail",
           detail: `remote Ollama endpoint ${endpoint} is not responding with a valid model list`,
-          hint: `start Ollama on ${cfg.host} or fix llm.host/llm.port`,
+          hint: `start Ollama on ${cfg.host} or fix ${role}.host/${role}.port`,
         });
       } else if (!hasOllamaModel(models, model)) {
         record({
@@ -594,7 +596,7 @@ async function checkLlm(
         : {
             level: "fail",
             detail: `remote llama-server ${endpoint} is not responding`,
-            hint: `start llama-server on ${cfg.host} or fix llm.host/llm.port`,
+            hint: `start llama-server on ${cfg.host} or fix ${role}.host/${role}.port`,
           });
       return;
     }
@@ -604,12 +606,12 @@ async function checkLlm(
     const missing: string[] = [];
     if (!binary) missing.push("'llama-server' is not on PATH");
     if (model === LLM_DEFAULT_MODEL["llama-cpp"]) {
-      missing.push("llm.model must name a GGUF file or Hugging Face GGUF repo");
+      missing.push(`${role}.model must name a GGUF file or Hugging Face GGUF repo`);
     } else if (model.toLowerCase().endsWith(".gguf")) {
       const problem = localGgufProblem(model);
       if (problem) missing.push(problem);
     } else if (!isHuggingFaceGgufRepo(model)) {
-      missing.push(`llm.model is not a valid Hugging Face GGUF repo (expected owner/repo[:quant]): ${model}`);
+      missing.push(`${role}.model is not a valid Hugging Face GGUF repo (expected owner/repo[:quant]): ${model}`);
     }
     if (missing.length > 0) {
       record({
@@ -617,7 +619,7 @@ async function checkLlm(
         detail: up
           ? `local llama-server is healthy, but Cicero cannot relaunch it (${missing.join("; ")})`
           : `local llama.cpp launch prerequisites are incomplete (${missing.join("; ")})`,
-        hint: "install llama.cpp's llama-server on PATH and set llm.model to a readable .gguf path or owner/repo[:quant]",
+        hint: `install llama.cpp's llama-server on PATH and set ${role}.model to a readable .gguf path or owner/repo[:quant]`,
       });
     } else {
       record(up
@@ -636,7 +638,7 @@ async function checkLlm(
       record({
         level: "fail",
         detail: "the configured OpenAI-compatible base URL is invalid",
-        hint: "set llm.baseUrl to an http:// or https:// API base ending in /v1",
+        hint: `set ${role}.baseUrl to an http:// or https:// API base ending in /v1`,
       });
       return;
     }
@@ -644,7 +646,7 @@ async function checkLlm(
       record({
         level: "fail",
         detail: `unsupported OpenAI-compatible URL scheme '${parsed.protocol}'`,
-        hint: "set llm.baseUrl to an http:// or https:// API base ending in /v1",
+        hint: `set ${role}.baseUrl to an http:// or https:// API base ending in /v1`,
       });
       return;
     }
@@ -661,7 +663,7 @@ async function checkLlm(
       record({
         level: "fail",
         detail: `OpenAI-compatible endpoint ${displayBase} contains a query string or fragment, which cannot be used as an API base`,
-        hint: "remove the query/fragment and set llm.baseUrl to the API base ending in /v1",
+        hint: `remove the query/fragment and set ${role}.baseUrl to the API base ending in /v1`,
       });
       return;
     }
@@ -691,7 +693,7 @@ async function checkLlm(
       : {
           level: "fail",
           detail: `${backend} endpoint ${displayEndpoint} is not responding`,
-          hint: "check llm.baseUrl, network access, and the configured API credential",
+          hint: `check ${role}.baseUrl, network access, and the configured API credential`,
         });
     return;
   }

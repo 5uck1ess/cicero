@@ -40,9 +40,10 @@ quietly costing a full reply per utterance, and on a VRAM-tight box it would
 contend with the STT/TTS seat. There is no implicit default either — unlike
 `llm`, an absent `classifier` section resolves to nothing at all.
 
-A configured but **unsupported** backend is an error at startup, not a fallback,
-and the message names `classifier.backend` rather than `llm.backend` so it is
-clear which of the two sections is wrong.
+A configured but **unsupported** backend is an error at startup, not a fallback.
+The message names the classifier (`Unknown classifier backend '<name>'`) rather
+than the reply model, so it is clear which of the two sections is wrong, and
+`cicero doctor` points at `classifier.backend` for the same reason.
 
 ## Failure behavior
 
@@ -51,10 +52,11 @@ start, the daemon logs a warning and carries on — a per-utterance helper being
 down must not stop a daemon that can still hold a conversation. Features that
 need it decline rather than guess.
 
-`cicero doctor` reports a configured-but-unreachable classifier as a warning; an
-unconfigured one is silent, since absence is a valid choice rather than a
-problem. `cicero status` shows a `Classifier` row only when the role is
-configured.
+`cicero doctor` reports a configured-but-unreachable classifier as a failing
+check, exactly as it does for an unreachable reply model — the role was asked
+for and is not there. An unconfigured one is silent, since absence is a valid
+choice rather than a problem. `cicero status` shows a `Classifier` row only when
+the role is configured.
 
 ## VRAM
 

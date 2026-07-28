@@ -46,9 +46,9 @@ describe("classifier backend role", () => {
   // AGENTS.md: an explicitly configured unsupported backend is an error.
   test("an unsupported backend is an error, not a silent fallback", () => {
     const config = configWith({ backend: "definitely-not-a-backend" });
-    expect(() => createClassifierProvider(config)).toThrow(/Unknown classifier backend/);
-    // And it blames the classifier key, not llm -- the operator has to know
-    // which of the two sections is wrong.
+    expect(() => createClassifierProvider(config)).toThrow(/Unknown classifier backend 'definitely-not-a-backend'/);
+    // And it blames the classifier, not llm -- the operator has to know which of
+    // the two sections is wrong.
     expect(() => createClassifierProvider(config)).not.toThrow(/llm backend/);
   });
 
@@ -58,8 +58,9 @@ describe("classifier backend role", () => {
   });
 
   // Remote-host and local-managed are different code paths and must be
-  // exercised separately (AGENTS.md).
-  test("remote-host mode builds against the configured host", async () => {
+  // exercised separately (AGENTS.md). The distinction that matters is whether
+  // Cicero manages a local process, not merely which URL it builds.
+  test("remote-host mode talks to the configured host and manages no local process", async () => {
     let seen = "";
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       seen = String(input);
@@ -74,14 +75,40 @@ describe("classifier backend role", () => {
     await provider.chatCompletion([{ role: "user", content: "hi" }]);
     expect(seen).toContain("classifier-box.local");
     expect(seen).toContain("9099");
+
+    // A remote endpoint is not ours to launch: start() must be a no-op that
+    // spawns nothing, rather than trying to run a server on someone else's box.
+    const spawned: string[] = [];
+    const realSpawn = Bun.spawn;
+    (Bun as unknown as { spawn: unknown }).spawn = ((cmd: string[]) => {
+      spawned.push(cmd.join(" "));
+      return realSpawn(["true"]);
+    }) as unknown as typeof Bun.spawn;
+    try {
+      await provider.start?.();
+      expect(spawned).toEqual([]);
+    } finally {
+      (Bun as unknown as { spawn: unknown }).spawn = realSpawn;
+    }
   });
 
-  test("local-managed mode targets localhost and owns a lifecycle", () => {
-    const config = configWith({ backend: "mlx-lm", port: 8123, model: "tiny" });
+  test("local-managed mode targets localhost rather than a remote host", async () => {
+    let seen = "";
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seen = String(input);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "yes" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const config = configWith({ backend: "llama-cpp", port: 8123, model: "tiny" });
     const provider = createClassifierProvider(config)!;
-    expect(provider.name).toBeTruthy();
-    // A managed provider is what the ServerManager starts and stops.
-    expect(typeof provider.health).toBe("function");
+    await provider.chatCompletion([{ role: "user", content: "hi" }]);
+    // No host configured, so it is Cicero's own managed endpoint.
+    expect(seen).toMatch(/127\.0\.0\.1|localhost/);
+    expect(seen).toContain("8123");
+    expect(typeof provider.stop).toBe("function");
   });
 });
 
@@ -154,7 +181,7 @@ describe("classifier doctor coverage", () => {
   // Configured-but-unreachable is a problem: features that depend on it will
   // decline turns, and the operator should learn it here rather than from a
   // feature that quietly does nothing.
-  test("warns when configured but unreachable, naming classifier.backend", async () => {
+  test("fails when configured but unreachable, and blames only classifier.*", async () => {
     globalThis.fetch = (() => Promise.reject(new Error("connection refused"))) as unknown as typeof fetch;
     const checks = await collectChecks(
       doctorConfig({ backend: "llama-cpp", host: "127.0.0.1", port: 8090, model: "tiny" }),
@@ -162,12 +189,13 @@ describe("classifier doctor coverage", () => {
     );
     const check = checks.find((c) => c.name.startsWith("classifier"));
     expect(check).toBeDefined();
-    expect(check!.level).not.toBe("ok");
+    expect(check!.level).toBe("fail");
     // The message must blame the right section; llm and classifier are
-    // configured separately and either could be the broken one.
+    // configured separately and either could be the broken one. Excluding only
+    // llm.backend would let llm.host/llm.port/llm.model guidance slip through.
     const text = `${check!.detail ?? ""} ${check!.hint ?? ""}`;
-    expect(text).toContain("classifier.backend");
-    expect(text).not.toContain("llm.backend");
+    expect(text).toContain("classifier.");
+    expect(text).not.toMatch(/\bllm\./);
   });
 });
 
