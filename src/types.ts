@@ -8,9 +8,8 @@ export interface CiceroConfig {
   tts_enabled: boolean;
   tts_summary_max_tokens?: number; // max tokens for brain response TLDR (default 100)
   tts_local_max_tokens?: number;   // max tokens for local-llm responses (default 150)
-  wake_word_enabled: boolean;
   hotkey: string;
-  wispr_hotkey: string; // hotkey to activate Wispr Flow (e.g. "option+space")
+  dictation?: DictationConfig;
   terminal: "auto" | "kitty" | "wezterm" | "tmux" | "none";
   voice: string;
   voice_ref_audio?: string; // path to reference audio for voice cloning
@@ -375,6 +374,23 @@ export interface ComponentHealth {
 }
 
 // Component interfaces
+/**
+ * Native dictation: record on a hotkey, transcribe with Cicero's own STT, and
+ * deliver the transcript. Replaces the previous integration that drove a paid
+ * third-party macOS dictation app and polled the clipboard for its output.
+ */
+export interface DictationConfig {
+  /** Off by default — dictation types into other applications, so it is opt-in. */
+  enabled?: boolean;
+  /**
+   * "focused-app" types the transcript into whatever window has focus (the
+   * dictation-app replacement). "cicero" hands it to Cicero as a spoken command.
+   */
+  target?: "focused-app" | "cicero";
+  /** Hard ceiling on one capture, so a forgotten dictation cannot record forever. */
+  max_recording_seconds?: number;
+}
+
 export interface Listener {
   start(): Promise<void>;
   stop(): Promise<void>;

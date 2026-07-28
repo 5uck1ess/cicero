@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import type { RuntimeConfig } from "./config";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
 import { log, logStep, logError } from "./logger";
-import { createListener, createConversationalListener } from "./listener";
+import { createListener, createConversationalListener, createDictationListener } from "./listener";
+import type { DictationListener } from "./listener/dictation";
 import { createRouter } from "./router";
 import { createBrain, summarizerClassifier } from "./brain";
 import {
@@ -586,6 +587,7 @@ export class CiceroDaemon {
   private activeLocalTurn: AbortController | null = null;
   /** Every local mic/dashboard command, including superseded turns winding down. */
   private localTurnTasks = new Set<Promise<void>>();
+  private dictation: DictationListener | null = null;
   private hotkeyProc: ReturnType<typeof Bun.spawn> | null = null;
 
   constructor(config: RuntimeConfig, options: DaemonOptions = {}) {
@@ -943,6 +945,24 @@ export class CiceroDaemon {
         log("ok", warmMsg.length > 60 ? "Brain warmed (cache primed + conversation resumed)" : "Brain warmed (prompt cache primed)");
       }
     });
+
+    // Native dictation is opt-in. Resolve its typing capability now rather than
+    // on first use, so an operator on a session that cannot synthesize
+    // keystrokes (Wayland, or Linux without xdotool) learns at startup instead
+    // of pressing the hotkey and watching nothing happen.
+    if (this.config.dictation.enabled) {
+      const built = createDictationListener(this.config, this.providers.stt, audioRecorder);
+      if ("listener" in built) {
+        this.dictation = built.listener;
+        // The "cicero" target delivers through this callback. Without it the
+        // whole path succeeds and then silently drops every transcript.
+        this.dictation.onCommand((text) => this.dispatchCommand(text));
+        await this.dictation.start();
+      } else {
+        log("warn", `Dictation is configured but unavailable: ${built.unavailable}`);
+      }
+      this.assertStartupActive();
+    }
 
     // Pre-warm TTS and STT so the first turn isn't hit with a multi-second cold
     // model load. Fire-and-forget — startup must not block on warmup.
@@ -1394,6 +1414,11 @@ export class CiceroDaemon {
         // deferred) becomes one-shot brain context, so "call me" or "what do
         // we do about that?" right after an announcement lands on-topic.
         onNotified: (text) => this.brain.injectContext(notificationTurnContext(text, new Date())),
+        onDictate: async () => {
+          if (!this.dictation) throw new Error("dictation is not enabled on this daemon");
+          await this.dictation.toggle();
+          return { state: this.dictation.getState() };
+        },
         onNotify: async (text, voice, opts) => {
           try {
             if (opts?.signal?.aborted) return null;
@@ -2620,6 +2645,8 @@ export class CiceroDaemon {
       this.actionsReloader = null;
       await cleanup("Telegram poller", () => this.stopTelegramPoller?.());
       this.stopTelegramPoller = null;
+      await cleanup("dictation", () => this.dictation?.stop());
+      this.dictation = null;
       await cleanup("hotkey helper", () => this.hotkeyProc?.kill());
       this.hotkeyProc = null;
       await cleanup("voice lifecycle", async () => {

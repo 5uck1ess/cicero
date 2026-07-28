@@ -96,6 +96,11 @@ export interface WebVoiceServerOptions {
    * audioBase64} to every connected voice client — Cicero speaks up unprompted
    * ("PR #142 is up") instead of only answering. Optional.
    */
+  /**
+   * Toggle native dictation on the daemon. Separate from onNotify because it
+   * neither renders nor fans out — it starts or ends a local capture.
+   */
+  onDictate?: () => Promise<{ state: string }>;
   onNotify?: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal; skipRender?: boolean }) => Promise<ArrayBuffer | null>;
   /**
    * Render a notification clip with no fan-out — the lazy half of onNotify.
@@ -319,7 +324,7 @@ function requestedId(req: Request, url: URL, header: string, query: string): str
  * because a headless box is driven from another machine's browser.
  */
 export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle | null {
-  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness, confirmations } = opts;
+  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onDictate, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness, confirmations } = opts;
   const scheme: "http" | "https" = tls ? "https" : "http";
   const configuredDrainTimeout = opts.shutdownDrainTimeoutMs;
   const shutdownDrainTimeoutMs = typeof configuredDrainTimeout === "number" && Number.isFinite(configuredDrainTimeout) && configuredDrainTimeout >= 1
@@ -989,6 +994,26 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         // Proactive voice-back: render text to speech and push it to every
         // connected voice client. Anything can call this — kanban hooks, cron,
         // CI, `cicero notify` — and Cicero speaks up in the browser.
+        // Toggle dictation: press-to-start / press-again-to-stop, driven from
+        // the CLI so an operator can bind it to any OS-level keyboard shortcut
+        // rather than Cicero shipping a global-hotkey helper per platform.
+        if (req.method === "POST" && url.pathname === "/api/dictate") {
+          if (!onDictate) {
+            return Response.json({ error: "dictation not available" }, { status: 501, headers: { Connection: "close" } });
+          }
+          return withRequestLease(req, async () => {
+            try {
+              const result = await onDictate();
+              return Response.json({ ok: true, state: result.state });
+            } catch (error) {
+              return Response.json(
+                { error: error instanceof Error ? error.message : String(error) },
+                { status: 500 },
+              );
+            }
+          });
+        }
+
         if (req.method === "POST" && url.pathname === "/api/notify") {
           if (!onNotify) {
             return Response.json({ error: "notify not available" }, { status: 501, headers: { Connection: "close" } });
