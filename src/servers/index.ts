@@ -166,6 +166,7 @@ function providerEntries(
   if (providers.llm) entries.push(["llm", providers.llm]);
   if (providers.tts) entries.push(["tts", providers.tts]);
   if (providers.stt) entries.push(["stt", providers.stt]);
+  if (providers.classifier) entries.push(["classifier", providers.classifier]);
   return entries;
 }
 

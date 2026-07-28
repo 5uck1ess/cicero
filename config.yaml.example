@@ -134,6 +134,17 @@ llm:
 #   brain: { backend: codex }                              # Codex CLI
 #   brain: { backend: ollama, ollama_model: qwen3.5:4b }   # fully local
 #   brain: { backend: openai-compatible, base_url: http://127.0.0.1:8080/v1, model: your-model, timeout_ms: 120000 }
+# Optional classification-only model, held apart from the reply model above.
+# Per-utterance decisions (see docs/classifier.md) need a small warm model; the
+# reply model is far too expensive to run on every utterance. Same shape as an
+# `llm:` section. There is no default and no fallback: leave this out and the
+# features that need it stay off and log why.
+# classifier:
+#   backend: llama-cpp
+#   host: 127.0.0.1
+#   port: 8090
+#   model: your-small-model
+
 brain:
   backend: acp
   binary: hermes                # install/auth this ACP agent, or replace it; see docs/brains.md

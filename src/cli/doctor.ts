@@ -501,15 +501,16 @@ async function checkLlm(
   checks: Check[],
   options: DoctorCheckOptions,
   implicitDefault: boolean,
+  role: "llm" | "classifier" = "llm",
 ): Promise<void> {
   const backend = cfg.backend ?? "unknown";
-  const validValues = supportedBackendsForRole("llm") ?? [];
+  const validValues = supportedBackendsForRole(role) ?? [];
   if (backend === "mlx-lm" || !validValues.includes(backend)) {
-    await checkEngine("llm", cfg, checks, options, implicitDefault);
+    await checkEngine(role, cfg, checks, options, implicitDefault);
     return;
   }
 
-  const label = `llm (${backend})`;
+  const label = `${role} (${backend})`;
   const record = (check: Omit<Check, "name">): void => {
     if (check.level === "ok") {
       checks.push({ name: label, ...check });
@@ -518,8 +519,8 @@ async function checkLlm(
     checks.push({
       name: label,
       ...check,
-      detail: `${implicitDefault ? "implicit " : ""}llm.backend='${backend}': ${check.detail}`,
-      hint: `${check.hint ? `${check.hint}; ` : ""}${supportedBackendHint("llm.backend", validValues)}`,
+      detail: `${implicitDefault ? "implicit " : ""}${role}.backend='${backend}': ${check.detail}`,
+      hint: `${check.hint ? `${check.hint}; ` : ""}${supportedBackendHint(`${role}.backend`, validValues)}`,
     });
   };
   const timeoutMs = options.cloudProbeTimeoutMs ?? DOCTOR_HTTP_TIMEOUT_MS;
@@ -772,6 +773,13 @@ export async function collectChecks(
   await checkEngine("tts", config.ttsBackend, checks, options, config.raw.tts === undefined);
   await checkEngine("tts_fallback", config.ttsFallbackBackend ?? undefined, checks, options);
   await checkLlm(config.llmBackend, checks, options, config.raw.llm === undefined);
+  // The classifier is optional, so absence is silent. Configured-but-unreachable
+  // is not: features that depend on it will decline turns, and the operator
+  // should learn that here rather than from a feature that quietly does nothing.
+  const classifierBackend = config.classifierBackend;
+  if (classifierBackend) {
+    await checkLlm(classifierBackend, checks, options, false, "classifier");
+  }
 
   // -- semantic end-of-turn sidecar ---------------------------------------
   const turn = config.turn;

@@ -249,7 +249,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     "wake_word_enabled", "hotkey", "wispr_hotkey", "terminal", "voice", "voice_ref_audio",
     "voice_ref_text", "barge_in_enabled", "full_duplex", "aec", "silence_duration",
     "silence_threshold", "phonetic_aliases", "brain", "servers", "actions", "deployment", "stt",
-    "stt_fallback", "tts", "tts_fallback", "llm", "compute", "sidecar", "dashboard", "web_voice",
+    "stt_fallback", "tts", "tts_fallback", "llm", "classifier", "compute", "sidecar", "dashboard", "web_voice",
     "notify", "headless", "turn", "tone", "clap", "vad", "earcons",
   ], issues);
 
@@ -442,12 +442,12 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
   }
 
-  for (const name of ["stt", "stt_fallback", "tts", "tts_fallback", "llm"] as const) {
+  for (const name of ["stt", "stt_fallback", "tts", "tts_fallback", "llm", "classifier"] as const) {
     const provider = config[name];
     if (provider === undefined) continue;
     if (!checkRecord(provider, name, issues)) continue;
     const commonProviderKeys = ["backend", "host", "port", "model", "timeout_ms"] as const;
-    const roleProviderKeys = name === "llm"
+    const roleProviderKeys = name === "llm" || name === "classifier"
       ? ["apiKey", "apiKeyEnv", "baseUrl", "extraHeaders", "extra"] as const
       : name === "stt" || name === "stt_fallback"
         ? ["compute_type"] as const
@@ -460,7 +460,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
     if (provider.baseUrl !== undefined) checkHttpUrl(provider.baseUrl, `${name}.baseUrl`, issues);
     if (provider.extraHeaders !== undefined) checkStringRecord(provider.extraHeaders, `${name}.extraHeaders`, issues);
-    if (name === "llm" && provider.extra !== undefined) checkRecord(provider.extra, `${name}.extra`, issues);
+    if ((name === "llm" || name === "classifier") && provider.extra !== undefined) checkRecord(provider.extra, `${name}.extra`, issues);
     if (provider.responseTimeoutMs !== undefined) {
       checkInteger(provider.responseTimeoutMs, `${name}.responseTimeoutMs`, issues, {
         min: 1,

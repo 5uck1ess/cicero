@@ -30,6 +30,10 @@ export interface CiceroConfig {
   tts?: TTSBackendConfig;
   tts_fallback?: TTSBackendConfig; // hot-standby engine used when the primary fails a generation
   llm?: LLMBackendConfig;
+  // Optional small model held apart from the reply model, for per-utterance
+  // classification (see docs/classifier.md). Same shape as `llm`. There is no
+  // default and no fallback to `llm`: features that need it stay off and say so.
+  classifier?: LLMBackendConfig;
   compute?: {
     /** Permit computer-use goals, file observations, and command output to reach a public/cloud LLM. */
     allow_cloud?: boolean;

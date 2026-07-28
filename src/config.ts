@@ -479,6 +479,15 @@ export class RuntimeConfig {
       model: this.config.servers.router.model,
     };
   }
+
+  /**
+   * Optional classification-only model. Unlike llmBackend there is no implicit
+   * default: an absent section means the role is unconfigured, which callers
+   * must treat as "off", never as "borrow the reply model".
+   */
+  get classifierBackend(): LLMProviderConfig | null {
+    return (this.config.classifier as LLMProviderConfig | undefined) ?? null;
+  }
 }
 
 /**
