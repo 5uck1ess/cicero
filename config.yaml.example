@@ -56,6 +56,19 @@ web_voice:
   speculative:
     enabled: false
     min_probability: 0.85       # end-of-turn confidence required to jump the gun
+    # A speculative turn starts before you have finished speaking. On a brain
+    # that only returns text a wrong guess costs nothing — the tokens are
+    # thrown away. On a brain that runs tools the turn may already have written
+    # files or run commands by the time the guess is retracted, which is not
+    # undoable. Those brains ignore `enabled` unless you also set this.
+    #
+    # Treated as tool-capable (speculation off unless you opt in): claude-code,
+    # codex, gemini, qwen, acp, any tab-inject brain, any unrecognized backend
+    # name, AND any OpenAI-compatible brain with an explicit `base_url` — that
+    # URL can point at an agent that runs tools server-side, and config alone
+    # cannot tell that apart from a plain model server.
+    # Treated as text-only: ollama, and an OpenAI preset on its own endpoint.
+    allow_tool_brains: false
   # Long-turn parking: if a reply's first sentence hasn't arrived in
   # park_after_s, Cicero says "I'll keep working on it" and releases the audio
   # floor; the finished reply is spoken later via the notify path. A stateful

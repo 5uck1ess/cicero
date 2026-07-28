@@ -519,3 +519,30 @@ test("dry speculative transcript aborts and falls back", async () => {
   expect(aborts).toEqual(["abort"]);
   expect(calls.transcript).toEqual(["fallback transcript"]);
 });
+
+test("never starts the brain for an utterance that commits a side effect on turn start", async () => {
+  // "call me" reaches the dial-back decorator BEFORE the inner brain streams a
+  // token, so speculating on it would queue a real call for speech the user
+  // has not finished ("call me *when the build is done*").
+  const { deps: d, brainCalls } = deps({ transcript: "call me" });
+  const turn = makeSpeculator({
+    ...d,
+    startsSideEffect: (text) => /^call me\b/i.test(text.trim()),
+  })(pcm(1500), 16000, 1500, 0.95)!;
+  expect(turn).not.toBeNull();
+  expect(await turn.transcript()).toBe("call me");
+  expect(brainCalls).toEqual([]);   // the brain was never started
+  expect(turn.tokens()).toBeNull(); // and there is nothing to adopt
+  await turn.abort();
+});
+
+test("startsSideEffect leaves ordinary utterances alone", async () => {
+  const { deps: d, brainCalls } = deps({ transcript: "what time is it in tokyo" });
+  const turn = makeSpeculator({
+    ...d,
+    startsSideEffect: (text) => /^call me\b/i.test(text.trim()),
+  })(pcm(1500), 16000, 1500, 0.95)!;
+  expect(await turn.transcript()).toBe("what time is it in tokyo");
+  expect(brainCalls.length).toBe(1);
+  await turn.abort();
+});

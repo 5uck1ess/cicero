@@ -107,6 +107,14 @@ export interface WebVoiceConfig {
   speculative?: {
     enabled?: boolean;         // default false
     min_probability?: number;  // end-of-turn confidence required to speculate (default 0.85)
+    // Speculation starts a turn before the user has finished speaking. A brain
+    // that only returns text loses nothing on a wrong guess — the tokens are
+    // dropped. A brain that runs tools may already have written files or run
+    // commands by the time the guess is retracted, so it does not speculate
+    // unless this is set. See `brainExecutesTools` for the classification,
+    // which fails closed on anything it cannot prove is text-only.
+    // Default false.
+    allow_tool_brains?: boolean;
   };
   // Long-turn parking: when a reply's FIRST sentence hasn't arrived within
   // park_after_s (deep tool loop, slow delegate), the turn speaks a short

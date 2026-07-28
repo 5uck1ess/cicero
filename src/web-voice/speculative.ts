@@ -48,6 +48,15 @@ export interface SpeculatorDeps {
   brain: Pick<Brain, "sendStream" | "hasPendingConfirmation">;
   /** Utterances the reply pipeline answers WITHOUT a brain turn. */
   isLocalFastPath: (transcript: string) => boolean;
+  /**
+   * Utterances that commit an irreversible action the moment the brain turn
+   * STARTS, rather than when its reply is adopted — "call me" reaches the
+   * dial-back decorator before the inner brain sees a token, so a speculative
+   * turn would queue a real call for speech the user has not finished ("call
+   * me *when the build is done*"). Declining to speculate is always safe: the
+   * utterance simply takes the normal path and acts on the final WAV.
+   */
+  startsSideEffect?: (transcript: string) => boolean;
   /** Only speculate at or above this end-of-turn probability. */
   minProbability: number;
   /** Optional input-side tone tag, classified from the probe tail — see {@link ToneOptions}. */
@@ -204,7 +213,7 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
     // Start the brain as soon as the tail transcript is in — unless the turn
     // was aborted first, the utterance is a local fast-path, or STT came up dry.
     const brainStarted: Promise<void> = transcriptPromise.then(async (text) => {
-      if (aborted || !text || deps.isLocalFastPath(text)) return;
+      if (aborted || !text || deps.isLocalFastPath(text) || deps.startsSideEffect?.(text)) return;
       const tag = await settleTone(tonePending?.result ?? null, deps.tone?.graceMs);
       if (aborted) return;
       const input = tag ? `${text}\n\n${tag}` : text;

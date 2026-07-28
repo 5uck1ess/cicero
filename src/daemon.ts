@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import type { RuntimeConfig } from "./config";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
 import { log, logStep, logError } from "./logger";
+import { matchCallMe } from "./call-intent";
 import { createListener, createConversationalListener } from "./listener";
 import { createRouter } from "./router";
 import { createBrain, summarizerClassifier } from "./brain";
@@ -80,7 +81,7 @@ import {
   type BriefingRunResult,
 } from "./notify/briefing-scheduler";
 import { OvernightStore } from "./notify/overnight-store";
-import { sendUnattended } from "./brain/capabilities";
+import { brainExecutesTools, sendUnattended } from "./brain/capabilities";
 import { buildResumePrimer, buildRosterNote } from "./web-voice/resume";
 import { HealthStore, briefLine } from "./health/store";
 import {
@@ -1271,11 +1272,29 @@ export class CiceroDaemon {
       // confident "complete" probe the tail is transcribed and the brain
       // started before the final WAV lands — see speculative.ts for the gates.
       const specCfg = wv.speculative;
-      const speculator = specCfg?.enabled && this.config.turn.enabled && this.brain.sendStream
+      // A speculative turn runs on speech the user has not finished. Tokens
+      // from a wrong guess are discarded; a tool call is not recallable. So a
+      // tool-executing brain stays out of the speculative path unless the
+      // operator has accepted that trade explicitly.
+      const specToolBrain = brainExecutesTools(this.config.brain);
+      const specSideEffectsAllowed = !specToolBrain || specCfg?.allow_tool_brains === true;
+      if (specCfg?.enabled && this.config.turn.enabled && !specSideEffectsAllowed) {
+        log(
+          "warn",
+          `speculative turns are configured but disabled: the "${this.config.brain.backend}" brain runs tools, ` +
+            "and speculation would start them on an unfinished utterance. " +
+            "Set web_voice.speculative.allow_tool_brains: true to accept that.",
+        );
+      }
+      const speculator = specCfg?.enabled && this.config.turn.enabled && this.brain.sendStream && specSideEffectsAllowed
         ? makeSpeculator({
             stt: this.providers.stt,
             brain: this.brain,
             isLocalFastPath,
+            // The dial-back decorator wraps every brain and acts before the
+            // inner brain streams a token, so "call me" must never be
+            // speculated — see SpeculatorDeps.startsSideEffect.
+            startsSideEffect: (text) => matchCallMe(text) !== null,
             minProbability: specCfg.min_probability ?? 0.85,
             tone,
             operationalContext: (signal) => this.operationalContext(signal),
