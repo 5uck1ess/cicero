@@ -47,12 +47,27 @@ describe("verdict parsing", () => {
     ["broken JSON", '{"directed": false, "confidence":}'],
     ["empty", ""],
     ["an array", '[{"directed": true, "confidence": 1}]'],
+    ["a bare string", '"directed"'],
+    ["a bare number", "0.9"],
+    ["confidence as Infinity", '{"directed": false, "confidence": 1e999}'],
   ];
   for (const [name, raw] of rejected) {
     test(`rejects ${name}`, () => {
       expect(parseVerdict(raw)).toBeNull();
     });
   }
+
+  // Model output reaching a parser is the classic pollution vector.
+  test("a __proto__ key cannot pollute anything", () => {
+    const before = ({} as Record<string, unknown>).polluted;
+    const verdict = parseVerdict('{"__proto__": {"polluted": true}, "directed": false, "confidence": 0.9}');
+    expect(verdict).toEqual({ directed: false, confidence: 0.9 });
+    expect(({} as Record<string, unknown>).polluted).toBe(before);
+  });
+
+  test("negative zero is a valid confidence and reads as unconfident", () => {
+    expect(parseVerdict('{"directed": false, "confidence": -0}')).toEqual({ directed: false, confidence: -0 });
+  });
 
   test("accepts a well-formed verdict", () => {
     expect(parseVerdict('{"directed": false, "confidence": 0.82}')).toEqual({ directed: false, confidence: 0.82 });
