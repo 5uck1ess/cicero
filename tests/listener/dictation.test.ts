@@ -298,3 +298,25 @@ test("a recorder that never exits is abandoned at the bound rather than hanging"
   expect(Date.now() - started).toBeLessThan(1000);
   expect(dict.getState()).toBe("idle");
 });
+
+// Regression: the in-flight latch used to be compared against the un-chained
+// promise, so it never cleared — stop() kept awaiting a long-settled task and
+// the "nothing in flight" path was unreachable.
+test("the in-flight latch clears between captures", async () => {
+  const { dict, typed } = listener();
+  await dict.start();
+
+  await dict.toggle();
+  await dict.toggle();
+  expect(typed).toEqual(["hello world"]);
+
+  // A second full cycle must behave identically to the first.
+  await dict.toggle();
+  await dict.toggle();
+  expect(typed).toEqual(["hello world", "hello world"]);
+
+  // And a stop with nothing in flight returns promptly.
+  const started = Date.now();
+  await dict.stop();
+  expect(Date.now() - started).toBeLessThan(200);
+});

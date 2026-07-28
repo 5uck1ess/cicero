@@ -142,14 +142,25 @@ export class DictationListener implements Listener {
       return;
     }
     if (this.state === "recording") {
-      const finishing = this.finishRecording();
-      this.pending = finishing.finally(() => {
-        if (this.pending === finishing) this.pending = null;
-      });
-      await this.pending;
+      await this.trackFinish();
       return;
     }
     this.beginRecording();
+  }
+
+  /**
+   * Run finishRecording() and expose it as the drainable in-flight task.
+   *
+   * `tracked` must be the promise the field holds, not finishRecording()'s own:
+   * comparing the field against the un-chained promise never matches, so the
+   * latch would never clear and stop() would keep awaiting a stale task.
+   */
+  private trackFinish(): Promise<void> {
+    const tracked: Promise<void> = this.finishRecording().finally(() => {
+      if (this.pending === tracked) this.pending = null;
+    });
+    this.pending = tracked;
+    return tracked;
   }
 
   private beginRecording(): void {
@@ -171,11 +182,7 @@ export class DictationListener implements Listener {
     const capture: Capture = { file, proc, timer: undefined, stopped, finish, settled: false };
     capture.timer = setTimeout(() => {
       log("warn", `Dictation hit its ${Math.round(this.maxRecordingMs / 1000)}s ceiling — stopping`);
-      const finishing = this.finishRecording();
-      this.pending = finishing.finally(() => {
-        if (this.pending === finishing) this.pending = null;
-      });
-      void this.pending.catch((error: unknown) => {
+      void this.trackFinish().catch((error: unknown) => {
         log("error", `Dictation ceiling stop failed: ${detail(error)}`);
       });
     }, this.maxRecordingMs);
