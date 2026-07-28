@@ -25,8 +25,9 @@ sentence would be trading time-to-first-audio for throughput, which is the wrong
 direction for a voice assistant.
 
 `passthrough_first` sends that many sentences alone before any merging starts,
-so the opening sentence of every reply reaches the engine exactly as fast as it
-does with the feature off. `max_chars` caps a merged chunk, because a chunk that
+so nothing is deliberately placed in front of the opening sentence of a reply.
+(The queue itself costs a scheduling hop, which measured below the run-to-run
+noise on every configuration tested — small, but not literally zero.) `max_chars` caps a merged chunk, because a chunk that
 takes longer to synthesize than the audio playing ahead of it is a gap the user
 hears.
 
@@ -43,8 +44,10 @@ drains the reply into a queue and stops pulling once 16,000 characters are
 waiting — so the peak is that plus whatever sentence was already in flight. Far
 more than any merged chunk needs, but bounded rather than open-ended.
 
-An interrupted turn stops the read-ahead immediately and asks the source to
-close. The close itself is best-effort: an async iterator cannot be made to
+A barge-in, a shutdown, or a superseding reply all stop the read-ahead at the
+moment they retire the turn — the same operation that makes its output stale
+also cancels its reading — and then ask the source to close. The close itself is
+best-effort: an async iterator cannot be made to
 abandon a read that is already in flight, so a brain stalled mid-response is
 released when that read finally settles rather than at the moment of the
 barge-in. Nothing is spoken from a cancelled turn either way — the wait for

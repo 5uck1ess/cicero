@@ -168,12 +168,18 @@ function eagerQueue(
       // A drain parked on backpressure stops immediately; this is the one park
       // we own and can release ourselves.
       wakeProducer?.();
-      // Closes a generator source, running its finally blocks. Not awaited: if
-      // the drain is mid-next(), this queues behind that read and would inherit
-      // however long the producer takes.
-      void Promise.resolve(iterator.return?.()).catch(() => { /* being abandoned */ });
-      cancel?.removeEventListener("abort", onCancel);
-      await settleWithin(drain, CLOSE_CONFIRM_MS);
+      try {
+        // Closes a generator source, running its finally blocks. Not awaited: if
+        // the drain is mid-next(), this queues behind that read and would inherit
+        // however long the producer takes.
+        void Promise.resolve(iterator.return?.()).catch(() => { /* being abandoned */ });
+        await settleWithin(drain, CLOSE_CONFIRM_MS);
+      } finally {
+        // In a finally because a hand-rolled iterator can throw synchronously
+        // from return(), and a listener left on a long-lived signal outlives
+        // every turn that follows.
+        cancel?.removeEventListener("abort", onCancel);
+      }
     },
   };
 }

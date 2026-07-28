@@ -25,7 +25,7 @@ function recordingProvider(): { provider: TTSProvider; rendered: string[] } {
   };
 }
 
-const noopPlayer = { async play() {} } as unknown as AudioPlayer;
+const noopPlayer = { async play() {}, async stopAll() {} } as unknown as AudioPlayer;
 const noopFallback = { async speak() {}, async health() { return true; }, async stop() {} } as unknown as Speaker;
 
 /**
@@ -122,4 +122,85 @@ test("max_chars from config splits a batch that would otherwise merge whole", as
   // no chunk exceeds it.
   expect(rendered).toEqual([sentence("A"), `${sentence("B")} ${sentence("C")}`, sentence("D")]);
   for (const chunk of rendered) expect(chunk.length).toBeLessThanOrEqual(70);
+});
+
+/**
+ * A brain that produces one sentence and then stops responding — the state a
+ * coalescer parks in, and the one nothing inside speakStream can escape: an
+ * async iterator cannot abandon a read already in flight, so return() queues
+ * behind it forever. Only an out-of-band cancel gets the turn out.
+ *
+ * These assert the turn SETTLES, which is the property that matters and the one
+ * that fails without the wiring: with the abort removed, speakStream never
+ * returns and each of these times out.
+ */
+function stalledBrain(): AsyncGenerator<string> {
+  return (async function* (): AsyncGenerator<string> {
+    yield "First.";
+    await new Promise<void>(() => { /* never produces again */ });
+  })();
+}
+
+const coalescing = { maxChars: 240, passthroughFirst: 1 };
+
+async function settles(turn: Promise<void>): Promise<boolean> {
+  return (await Promise.race([turn.then(() => "done"), Bun.sleep(2_000).then(() => "hung")])) === "done";
+}
+
+test("interrupt frees a turn parked on a stalled brain", async () => {
+  const { provider } = recordingProvider();
+  const sp = new StreamingTTSSpeaker(provider, noopPlayer, noopFallback, null, undefined, coalescing);
+
+  const turn = sp.speakStream(stalledBrain());
+  await Bun.sleep(10);
+  sp.interrupt();
+  expect(await settles(turn)).toBe(true);
+});
+
+test("stop frees a turn parked on a stalled brain", async () => {
+  const { provider } = recordingProvider();
+  const sp = new StreamingTTSSpeaker(provider, noopPlayer, noopFallback, null, undefined, coalescing);
+
+  const turn = sp.speakStream(stalledBrain());
+  await Bun.sleep(10);
+  await sp.stop();
+  expect(await settles(turn)).toBe(true);
+});
+
+test("a superseding turn frees the previous turn's read-ahead", async () => {
+  const { provider } = recordingProvider();
+  const sp = new StreamingTTSSpeaker(provider, noopPlayer, noopFallback, null, undefined, coalescing);
+
+  const first = sp.speakStream(stalledBrain());
+  await Bun.sleep(10);
+  await sp.speakStream(wholeReply());
+  expect(await settles(first)).toBe(true);
+});
+
+test("a released stalled source actually closes once it can resume", async () => {
+  let released = false;
+  let resume!: () => void;
+  const stall = new Promise<void>((resolve) => { resume = resolve; });
+  const source = (async function* (): AsyncGenerator<string> {
+    try {
+      yield "First.";
+      await stall;
+      yield "Second.";
+    } finally {
+      released = true;
+    }
+  })();
+
+  const { provider } = recordingProvider();
+  const sp = new StreamingTTSSpeaker(provider, noopPlayer, noopFallback, null, undefined, coalescing);
+  const turn = sp.speakStream(source);
+  await Bun.sleep(10);
+  sp.interrupt();
+  expect(await settles(turn)).toBe(true);
+
+  // The turn is already over; the close was requested during teardown and lands
+  // when the producer's own await settles.
+  resume();
+  await Bun.sleep(10);
+  expect(released).toBe(true);
 });
