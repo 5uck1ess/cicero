@@ -17,6 +17,21 @@ FORCE=0
 [[ "${1:-}" == "--force" ]] && FORCE=1
 
 echo "==> Syncing vendor/audio.cpp submodule to its pinned commit…"
+# `update --init` writes .git/config only for a submodule it is initializing for
+# the FIRST time. A checkout that initialized the submodule before its URL
+# changed keeps the old URL and tries to fetch the newly pinned commit from a
+# repo that does not have it, failing before the build. `submodule sync` is the
+# only operation that republishes .gitmodules → .git/config.
+#
+# Skipped when vendor/audio.cpp is a standalone clone — its own .git DIRECTORY
+# rather than a gitlink file. That is the fork-sync development layout, where
+# `origin` deliberately tracks upstream and `fork` tracks ours; sync would
+# clobber `origin` and break the upstream-sync pipeline that reads it.
+if [[ -d "$SUB/.git" ]]; then
+  echo "    vendor/audio.cpp is a standalone clone — leaving its remotes untouched."
+else
+  git -C "$ROOT" submodule sync --recursive vendor/audio.cpp
+fi
 git -C "$ROOT" submodule update --init --recursive vendor/audio.cpp
 
 if [[ -x "$BIN" && "$FORCE" -eq 0 ]]; then
