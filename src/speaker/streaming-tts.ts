@@ -8,6 +8,7 @@ import { log } from "../logger";
 import { AecReleaseUnconfirmedError, type AecAudioHub, pcm16kFromWav } from "../platform/aec-hub";
 import { AudioReleaseUnconfirmedError } from "../platform/owned-audio-player";
 import { terminateDirectChild, type DirectChildProcess } from "../process/direct-child";
+import { coalesceSentences, type CoalesceOptions } from "./coalesce";
 
 interface PreparedSentence {
   text: string;
@@ -42,6 +43,8 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
   // the mic cancels it) instead of afplay.
   private readonly hub: AecAudioHub | null;
   private readonly spawnPlayer: SpawnPlayer;
+  /** Merge already-available sentences into fewer synthesis calls. Off unless configured. */
+  private readonly coalesce: CoalesceOptions | null;
   private readonly playerReleases = new Map<InterruptiblePlayer, Promise<void>>();
   /** Exact children whose release has not yet been positively observed. */
   private readonly unreleasedPlayers = new Set<InterruptiblePlayer>();
@@ -53,10 +56,12 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     fallback: Speaker,
     hub: AecAudioHub | null = null,
     spawnPlayer: SpawnPlayer = (command) => Bun.spawn(command, { stdout: "ignore", stderr: "ignore" }),
+    coalesce: CoalesceOptions | null = null,
   ) {
     super(provider, audioPlayer, fallback);
     this.hub = hub;
     this.spawnPlayer = spawnPlayer;
+    this.coalesce = coalesce;
   }
 
   async speakStream(sentences: AsyncIterable<string>): Promise<void> {
@@ -69,7 +74,13 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     // starting a raw player on top of a still-speaking system child.
     await this.waitForFallbackOutput();
     if (this.stopped || stale()) return;
-    const iterator = sentences[Symbol.asyncIterator]();
+    // Coalescing sits here rather than at each caller so every producer — brain
+    // stream, notifications, web-voice replies — gets one consistent policy.
+    // It costs barge-in granularity: an interrupted merged chunk reports as one
+    // pending item, so getSnapshot() can no longer say which of its sentences
+    // were actually heard. That's the trade the config flag buys.
+    const source = this.coalesce ? coalesceSentences(sentences, this.coalesce) : sentences;
+    const iterator = source[Symbol.asyncIterator]();
     this.playing = true;
     this.spoken = [];
     this.inFlight = null;

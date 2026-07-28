@@ -62,6 +62,20 @@ export interface CiceroConfig {
   clap?: ClapConfig; // double-clap to activate voice mode (default on)
   vad?: VadConfig; // streaming voice-activity end-of-turn (default on)
   earcons?: boolean; // play activate/ready/thinking/success/error beeps (default true)
+  tts_coalesce?: TTSCoalesceConfig; // merge already-available sentences into fewer TTS calls (default off)
+}
+
+/**
+ * Batch adjacent sentences before synthesis. Worth enabling only for an engine
+ * with real per-call overhead — a hosted API, or a cold local server. Against a
+ * warm local GPU seat it measurably cuts synthesis work while changing nothing
+ * the user hears, because the speaker already renders ahead during playback.
+ * See bench/tts-coalesce-bench.ts.
+ */
+export interface TTSCoalesceConfig {
+  enabled?: boolean;           // default false
+  max_chars?: number;          // upper bound on a merged chunk (default 240)
+  passthrough_first?: number;  // sentences sent alone before merging, protects first audio (default 1)
 }
 
 /** Browser audio client: capture mic + play TTS in the browser, talk to a headless box. */

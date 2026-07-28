@@ -250,7 +250,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     "voice_ref_text", "barge_in_enabled", "full_duplex", "aec", "silence_duration",
     "silence_threshold", "phonetic_aliases", "brain", "servers", "actions", "deployment", "stt",
     "stt_fallback", "tts", "tts_fallback", "llm", "compute", "sidecar", "dashboard", "web_voice",
-    "notify", "headless", "turn", "tone", "clap", "vad", "earcons",
+    "notify", "headless", "turn", "tone", "clap", "vad", "earcons", "tts_coalesce",
   ], issues);
 
   checkBoolean(config.tts_enabled, "tts_enabled", issues);
@@ -577,6 +577,19 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     checkKnownKeys(config.vad, "vad", [
       "enabled", "hangover_ms", "open_factor", "min_speech_ms", "calibration_ms", "preroll_ms",
     ], issues);
+  }
+  if (isRecord(config.tts_coalesce)) {
+    checkKnownKeys(config.tts_coalesce, "tts_coalesce", [
+      "enabled", "max_chars", "passthrough_first",
+    ], issues);
+    checkOptionalBoolean(config.tts_coalesce, "enabled", "tts_coalesce", issues);
+    // The cap is what keeps a merged chunk from taking longer to synthesize than
+    // the audio playing ahead of it, so it is bounded on both ends: too small and
+    // nothing ever merges, too large and the speaker can starve mid-reply.
+    checkOptionalInteger(config.tts_coalesce, "max_chars", "tts_coalesce", issues, { min: 40, max: 2_000 });
+    // Zero is legal and means "merge from the very first sentence" — measurably
+    // worse for time-to-first-audio, but it is the operator's call to make.
+    checkOptionalInteger(config.tts_coalesce, "passthrough_first", "tts_coalesce", issues, { min: 0, max: 10 });
   }
 
   if (isRecord(config.web_voice)) {
