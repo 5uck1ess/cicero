@@ -71,8 +71,10 @@ Against audio.cpp / pocket-tts on a local 3090, `--runs 5`:
 | typical (5 sentences) | 54ms → 53ms | 320ms → 254ms | 5 → 2 | 1.8s → 1.6s |
 | long (10 sentences) | 53ms → 52ms | 673ms → 561ms | 10 → 3 | 1.6s → 1.5s |
 
-Synthesis work drops about 20%, first audio does not move, and playback keeps
-well over a second of buffer. But **none of that 20% is time the user waits**:
+Elapsed synthesis time drops about 20%, first audio does not move, and playback
+keeps well over a second of buffer. (Elapsed time, not compute: the bench times
+calls, and part of what it removes is per-call overhead rather than GPU work.)
+But **none of that 20% is time the user waits**:
 the streaming speaker already renders the next chunk during playback of the
 current one, and a chunk of audio lasts ~2s against ~60ms of synthesis. On this
 setup the honest summary is "fewer GPU calls, same experience."

@@ -68,7 +68,7 @@ export interface CiceroConfig {
 /**
  * Batch adjacent sentences before synthesis. Worth enabling only for an engine
  * with real per-call overhead — a hosted API, or a cold local server. Against a
- * warm local GPU seat it measurably cuts synthesis work while changing nothing
+ * warm local GPU seat it measurably cuts elapsed synthesis time while changing nothing
  * the user hears, because the speaker already renders ahead during playback.
  * See bench/tts-coalesce-bench.ts.
  */

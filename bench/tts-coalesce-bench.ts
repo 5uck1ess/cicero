@@ -173,9 +173,10 @@ async function main(): Promise<void> {
     }
     const audio = await res.arrayBuffer();
     // Modeled per-call overhead. A local GPU seat has almost none, which is why
-    // coalescing barely moves anything against one; a hosted engine pays a TLS
-    // round trip and queue wait on EVERY call, and that is the cost coalescing
-    // actually removes. Sweeping this answers "how slow does my engine have to
+    // coalescing barely moves anything against one; a hosted engine pays a
+    // network round trip and whatever queue wait it has on EVERY call (less than
+    // a full handshake when the connection is kept alive, but never nothing),
+    // and that is the cost coalescing actually removes. Sweeping this answers "how slow does my engine have to
     // be before this matters?" without billing a metered provider to find out.
     // It models latency only, not a real provider's behavior under load.
     if (args.overheadMs > 0) await Bun.sleep(args.overheadMs);
