@@ -234,6 +234,8 @@ export class BrainTurnContext {
         expire(new Error(`compaction exceeded ${this.compactionTimeoutMs}ms`));
       }, this.compactionTimeoutMs);
       try {
+        // race() subscribes to both, so a compactor that rejects after the
+        // deadline already won is handled and ignored, not unhandled.
         const result = await Promise.race([
           compactor({ turns: batch, previousSummary }, controller.signal),
           deadline,

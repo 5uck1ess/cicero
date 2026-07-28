@@ -263,18 +263,29 @@ describe("history compaction", () => {
     expect(turns).toBeLessThanOrEqual(12);
   });
 
-  // The documented 2x ceiling has to count everything that gets replayed.
+  // The documented ceiling has to count everything that gets replayed.
   test("the running summary counts toward the character ceiling", async () => {
     const ctx = new BrainTurnContext();
     ctx.setCompactor(async () => "S".repeat(MAX_SUMMARY_CHARS));
     for (let i = 0; i < 13; i += 1) ctx.remember(`u${i}`.padEnd(1_500, "x"), `a${i}`.padEnd(1_500, "y"));
     await ctx.settled();
-    // Push well past the cap with the summary now in place.
-    for (let i = 0; i < 20; i += 1) {
-      ctx.remember(`later${i}`.padEnd(1_500, "x"), `reply${i}`.padEnd(1_500, "y"));
-      await ctx.settled();
-    }
-    const state = ctx as unknown as { retainedChars: () => number };
-    expect(state.retainedChars()).toBeLessThanOrEqual(32_000);
+
+    // With the summary in place, turn compaction off so plain eviction is what
+    // enforces the ceiling — otherwise compaction keeps trimming first and the
+    // char accounting is never what binds.
+    ctx.setCompactor(null);
+    for (let i = 0; i < 30; i += 1) ctx.remember(`later${i}`.padEnd(1_500, "x"), `reply${i}`.padEnd(1_500, "y"));
+
+    // Measured independently of retainedChars(), or this would just assert that
+    // the helper agrees with itself and pass with the accounting removed.
+    const state = ctx as unknown as {
+      history: { user: string; assistant: string }[];
+      summary: string | null;
+    };
+    expect(state.summary).not.toBeNull();
+    const replayed = state.history.reduce((n, t) => n + t.user.length + t.assistant.length, 0)
+      + (state.summary?.length ?? 0);
+    expect(replayed).toBeLessThanOrEqual(32_000);
   });
+
 });
