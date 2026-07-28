@@ -1,21 +1,13 @@
-import { classifyCallIntent, dialBackMemo, matchCallMe, type CallIntentClassifier } from "../call-intent";
+import { classifyCallIntent, dialBackMemo, matchCallMe, SpeculativeSideEffectError, type CallIntentClassifier } from "../call-intent";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions } from "../types";
 import { bindBrainCapability, sendUnattended } from "./capabilities";
 
 type DialBackHandler = (who?: string, options?: BrainTurnOptions) => Promise<string>;
 
-/**
- * Thrown instead of dialing when a speculative turn turns out to be a
- * dial-back request. Placing a call is not retractable, so the speculation is
- * discarded and the utterance takes the normal path, where it dials on the
- * final audio.
- */
-export class SpeculativeSideEffectError extends Error {
-  constructor() {
-    super("dial-back refused on a speculative turn");
-    this.name = "SpeculativeSideEffectError";
-  }
-}
+// Defined in ../call-intent alongside the shared dial-back vocabulary, because
+// SwitchboardBrain raises it too. Re-exported here so importers of the wrapper
+// keep working.
+export { SpeculativeSideEffectError } from "../call-intent";
 
 /**
  * Whole-utterance dial-back control shared by every brain backend.

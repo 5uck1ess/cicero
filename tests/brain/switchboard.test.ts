@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { SwitchboardBrain, type LaneDef } from "../../src/brain/switchboard";
+import { SpeculativeSideEffectError } from "../../src/brain/dial-back";
 import type { Brain, BrainTurnOptions } from "../../src/types";
 
 const NONCE_A = "11111111-1111-4111-8111-111111111111";
@@ -1917,6 +1918,68 @@ test("classifier-routed dial-backs leave the same memo", async () => {
   } finally {
     await sb.stop().catch(() => { /* test cleanup */ });
   }
+});
+
+test("a speculative turn refuses the lexical dial-back instead of ringing", async () => {
+  // The switchboard exposes setCallMeHandler, so createBrain does NOT wrap it
+  // in DialBackBrain — its refusal never runs on a lane setup. Without this,
+  // a speculative "call me" spools a callback the final utterance cannot
+  // retract (Codex merge review, 2026-07-28).
+  const rang: Array<string | undefined> = [];
+  const sb = board([]);
+  sb.setCallMeHandler(async (who) => { rang.push(who); return "Ringing you now."; });
+  await sb.start();
+  expect(sb.send("call me", { speculative: true })).rejects.toThrow(SpeculativeSideEffectError);
+  await Bun.sleep(5);
+  expect(rang).toEqual([]);
+  // No memo either: nothing was rung, so the next turn must not be told it was.
+  const injected: string[] = [];
+  const front = { ...fakeBrain("front", []), injectContext: (c: string) => injected.push(c) };
+  const sb2 = new SwitchboardBrain(front, { coder: { brain: fakeBrain("coder", []) } });
+  sb2.setCallMeHandler(async () => "Ringing.");
+  await sb2.start();
+  await sb2.send("call me", { speculative: true }).catch(() => { /* expected */ });
+  await sb2.send("what's up?");
+  expect(injected).toEqual([]);
+});
+
+test("a speculative turn refuses the classifier dial-back too", async () => {
+  // The classifier path passed no options at all, so it was the wider hole of
+  // the two — "phone me now" reaches it without matching any pattern.
+  const sb = new SwitchboardBrain(fakeBrain("front", []), {
+    coder: { brain: fakeBrain("coder", []) },
+  }, async () => "callme");
+  const rang: Array<string | undefined> = [];
+  sb.setCallMeHandler(async (who) => { rang.push(who); return "Ringing."; });
+  await sb.start();
+  expect(sb.send("I want you to phone me", { speculative: true }))
+    .rejects.toThrow(SpeculativeSideEffectError);
+  await Bun.sleep(5);
+  expect(rang).toEqual([]);
+});
+
+test("the speculative refusal reaches sendStream, the speculator's own entry point", async () => {
+  const sb = board([]);
+  const rang: Array<string | undefined> = [];
+  sb.setCallMeHandler(async (who) => { rang.push(who); return "Ringing."; });
+  await sb.start();
+  await expect((async () => {
+    for await (const _chunk of sb.sendStream("call me", { speculative: true })) { /* drain */ }
+  })()).rejects.toThrow(SpeculativeSideEffectError);
+  expect(rang).toEqual([]);
+});
+
+test("a non-speculative dial-back forwards the turn options to the handler", async () => {
+  // Both dial sites used to drop the caller's options — the lexical one
+  // replaced them with a bare { signal }, the classifier one sent none.
+  const seen: Array<BrainTurnOptions | undefined> = [];
+  const sb = board([]);
+  sb.setCallMeHandler(async (_who, options) => { seen.push(options); return "Ringing."; });
+  await sb.start();
+  expect(await sb.send("call me")).toBe("Ringing.");
+  expect(seen.length).toBe(1);
+  expect(seen[0]?.signal).toBeDefined();      // the turn's signal, not the caller's
+  expect(seen[0]?.speculative).toBeUndefined();
 });
 
 test("release and roll call leave memos — the front desk knows what it missed", async () => {
