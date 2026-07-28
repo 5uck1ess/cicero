@@ -14,9 +14,25 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUB="$ROOT/vendor/audio.cpp"
 BUILD_DIR="$SUB/build/linux-cuda-release"
 BIN="$BUILD_DIR/bin/audiocpp_server"
-# Which source commit produced $BIN. Lives inside the (git-ignored) build tree,
-# so it is discarded exactly when the build output is.
+# How $BIN was produced: source commit on line 1, build options on line 2. Lives
+# inside the (git-ignored) build tree, so it is discarded exactly when the build
+# output is. Both halves matter — see BUILD_ARGS.
 STAMP="$BUILD_DIR/.built-from-commit"
+
+# `--deployment-build` compiles the model_specs catalog INTO the binary. Without
+# it audio.cpp resolves a family's spec from disk at load time, searching the
+# model directory, its parent's model_specs/, and model_specs/ under the CWD's
+# ancestors — none of which is where a Cicero checkout keeps the file
+# (vendor/audio.cpp/model_specs/). The documented setup installs a model without
+# a spec file (the fork's model manager fetches weights only), and Cicero launches
+# the server without a CWD or --model-spec-override, so a non-deployment build
+# throws "model contract spec not found for family 'pocket_tts'" and exits 1
+# before serving. Embedding the catalog makes a provisioned binary self-contained
+# instead of dependent on where it happens to be started from.
+BUILD_ARGS=(--backend cuda --deployment-build --target audiocpp_cli --target audiocpp_server)
+# Recorded next to the commit because the same source can build either a binary
+# that resolves specs or one that cannot; only the option set separates them.
+BUILD_ID="${BUILD_ARGS[*]}"
 FORCE=0
 [[ "${1:-}" == "--force" ]] && FORCE=1
 
@@ -63,10 +79,14 @@ git -C "$ROOT" submodule update --init --recursive vendor/audio.cpp
 # keep running the previously built revision — including past the security and
 # stability fixes the new pin was chosen for. Compare commits, not presence.
 SRC_COMMIT="$(git -C "$SUB" rev-parse HEAD 2>/dev/null || true)"
-BUILT_COMMIT="$(cat "$STAMP" 2>/dev/null || true)"
+BUILT_COMMIT=""
+BUILT_BUILD_ID=""
+if [[ -f "$STAMP" ]]; then
+  { IFS= read -r BUILT_COMMIT || true; IFS= read -r BUILT_BUILD_ID || true; } < "$STAMP"
+fi
 
 if [[ -x "$BIN" && "$FORCE" -eq 0 ]]; then
-  if [[ -n "$SRC_COMMIT" && "$BUILT_COMMIT" == "$SRC_COMMIT" ]]; then
+  if [[ -n "$SRC_COMMIT" && "$BUILT_COMMIT" == "$SRC_COMMIT" && "$BUILT_BUILD_ID" == "$BUILD_ID" ]]; then
     echo "==> Already built at $SRC_COMMIT: $BIN"
     echo "    (re-run with --force to rebuild)"
     exit 0
@@ -77,8 +97,13 @@ if [[ -x "$BIN" && "$FORCE" -eq 0 ]]; then
     echo "==> Cannot determine the source commit of $SUB — rebuilding rather than trusting the existing binary."
   elif [[ -z "$BUILT_COMMIT" ]]; then
     echo "==> $BIN exists but records no source commit — rebuilding so it matches $SRC_COMMIT."
-  else
+  elif [[ "$BUILT_COMMIT" != "$SRC_COMMIT" ]]; then
     echo "==> $BIN was built from $BUILT_COMMIT, but the checkout is now $SRC_COMMIT — rebuilding."
+  else
+    # Same commit, different options. A binary from before --deployment-build
+    # carries no embedded specs and cannot start the documented TTS seat, so
+    # matching the commit alone is not enough to trust it.
+    echo "==> $BIN was built at $SRC_COMMIT with different options — rebuilding for: $BUILD_ID"
   fi
 fi
 
@@ -92,12 +117,12 @@ echo "==> Building audio.cpp (CUDA) — compiles the ggml CUDA kernels, takes se
 # current directory, so it must be invoked with $SUB as CWD. Also run it via
 # bash — git records it as mode 0644 (no exec bit), so a clean submodule
 # checkout can't execute it directly.
-( cd "$SUB" && bash scripts/build_linux.sh --backend cuda --target audiocpp_cli --target audiocpp_server )
+( cd "$SUB" && bash scripts/build_linux.sh "${BUILD_ARGS[@]}" )
 
 if [[ -x "$BIN" ]]; then
   # Record provenance only after the binary exists, so a failed build cannot
   # leave a stamp that makes the next run skip.
-  if [[ -n "$SRC_COMMIT" ]]; then printf '%s\n' "$SRC_COMMIT" > "$STAMP"; else rm -f "$STAMP"; fi
+  if [[ -n "$SRC_COMMIT" ]]; then printf '%s\n%s\n' "$SRC_COMMIT" "$BUILD_ID" > "$STAMP"; else rm -f "$STAMP"; fi
   echo "==> Built: $BIN"
   echo "    Next: add your model paths to servers/audiocpp_server.local.json"
   echo "    (a task:\"tts\" entry for the TTS seat, a task:\"asr\" entry for STT)."

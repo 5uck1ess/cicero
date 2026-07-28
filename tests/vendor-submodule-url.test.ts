@@ -176,12 +176,18 @@ test("the provisioner rebuilds when the pin moves, instead of trusting a stale b
   const builds = (): number =>
     (readFileSync(buildLog, "utf8").match(/^build /gm) ?? []).length;
   const stamp = join(root, "vendor/audio.cpp/build/linux-cuda-release/.built-from-commit");
+  const stampLines = (): string[] => readFileSync(stamp, "utf8").split("\n").filter(Boolean);
 
-  // 1. First provision builds and records what it built from.
+  // 1. First provision builds and records what it built from — commit AND options.
   const first = provision();
   expect(first.ok).toBe(true);
   expect(builds()).toBe(1);
-  expect(readFileSync(stamp, "utf8").trim()).toBe(shaA);
+  expect(stampLines()[0]).toBe(shaA);
+  expect(stampLines()[1]).toContain("--deployment-build");
+  // The catalog must be compiled in: a model directory carries weights only, so a
+  // non-deployment binary cannot resolve pocket_tts's spec from any path Cicero
+  // starts it from, and exits before serving.
+  expect(readFileSync(buildLog, "utf8")).toContain("--deployment-build");
 
   // 2. Unchanged pin: skip, no rebuild.
   const second = provision();
@@ -207,7 +213,25 @@ test("the provisioner rebuilds when the pin moves, instead of trusting a stale b
   expect(third.ok).toBe(true);
   expect(third.out).toContain(`was built from ${shaA}`);
   expect(builds()).toBe(2);
-  expect(readFileSync(stamp, "utf8").trim()).toBe(shaB);
+  expect(stampLines()[0]).toBe(shaB);
+
+  // 4. Same pin, but the binary predates the current build options. Matching the
+  // commit is not enough to trust it: a binary built before --deployment-build
+  // has no embedded spec catalog and cannot start the documented TTS seat, so an
+  // existing install must rebuild rather than be declared current.
+  writeFileSync(stamp, `${shaB}\n--backend cuda --target audiocpp_server\n`);
+  const fourth = provision();
+  expect(fourth.ok).toBe(true);
+  expect(fourth.out).toContain("built at");
+  expect(fourth.out).toContain("with different options");
+  expect(builds()).toBe(3);
+  expect(stampLines()[1]).toContain("--deployment-build");
+
+  // 5. And with the options now recorded, it settles back to skipping.
+  const fifth = provision();
+  expect(fifth.ok).toBe(true);
+  expect(fifth.out).toContain(`Already built at ${shaB}`);
+  expect(builds()).toBe(3);
 });
 
 const BUILD_STUB = [
