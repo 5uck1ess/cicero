@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { coalesceSentences } from "../../src/speaker/coalesce";
+import { coalesceSentences, MAX_QUEUED_CHARS } from "../../src/speaker/coalesce";
 
 /** Yield each item immediately — everything is "already available". */
 async function* immediate(items: string[]): AsyncGenerator<string> {
@@ -111,4 +111,65 @@ describe("sentence coalescing", () => {
     }
     await expect(collect(coalesceSentences(failing(), {}))).rejects.toThrow(/brain stream died/);
   });
+});
+
+test("abandoning the coalescer closes the source and stops the drain", async () => {
+  let closed = false;
+  let produced = 0;
+  // An unbounded producer: if nothing closes it, it keeps generating forever.
+  async function* endless(): AsyncGenerator<string> {
+    try {
+      for (;;) {
+        produced += 1;
+        yield `Sentence ${produced}.`;
+      }
+    } finally {
+      closed = true;
+    }
+  }
+
+  const merged = coalesceSentences(endless(), { maxChars: 240, passthroughFirst: 1 });
+  await merged.next();
+  await merged.return(undefined);
+
+  expect(closed).toBe(true);
+  const producedAtClose = produced;
+  // The drain is a background loop; if close() only requested a stop without
+  // awaiting it, the producer would keep running past this point.
+  await Bun.sleep(20);
+  expect(produced).toBe(producedAtClose);
+});
+
+test("read-ahead stops at the queue cap instead of buffering an unbounded reply", async () => {
+  let produced = 0;
+  async function* endless(): AsyncGenerator<string> {
+    for (;;) {
+      produced += 1;
+      yield "x".repeat(1_000);
+    }
+  }
+
+  const merged = coalesceSentences(endless(), { maxChars: 240, passthroughFirst: 1 });
+  await merged.next();
+  await Bun.sleep(20);
+  const parked = produced;
+  await Bun.sleep(20);
+  // Backpressure: nothing has been taken since, so the drain must be parked.
+  expect(produced).toBe(parked);
+  expect(produced * 1_000).toBeLessThanOrEqual(MAX_QUEUED_CHARS + 1_000);
+  await merged.return(undefined);
+});
+
+test("a falsy producer failure still propagates instead of ending the reply", async () => {
+  async function* throwsNull(): AsyncGenerator<string> {
+    yield "First.";
+    // Legal, and the reason failure is tracked by a flag rather than truthiness:
+    // treating this as a clean end would silently truncate the reply.
+    throw null;
+  }
+
+  const merged = coalesceSentences(throwsNull(), { maxChars: 240, passthroughFirst: 1 });
+  const first = await merged.next();
+  expect(first.value).toBe("First.");
+  await expect(merged.next()).rejects.toBeNull();
 });

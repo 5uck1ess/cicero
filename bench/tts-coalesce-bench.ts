@@ -15,8 +15,10 @@
  *   TOTAL wall-clock to synthesize the whole reply. This is what coalescing is
  *         supposed to improve, by making fewer, larger calls.
  *
- * A win is: TTFA unchanged (within noise) and TOTAL meaningfully lower. If TTFA
- * regresses, the answer is a larger `passthroughFirst`, not a faster engine.
+ * A win is: TTFA unchanged (within noise) and TOTAL meaningfully lower. TTFA can
+ * only regress at `passthroughFirst: 0`, where sentence one is eligible to be
+ * merged; raising it to 1 fixes that. Above 1 it protects later sentences, not
+ * first audio, so a TTFA regression at 1 or higher is the engine, not the knob.
  *
  * The third number, and the reason coalescing could be a bad trade even when
  * both of the above look good:
@@ -234,8 +236,8 @@ async function main(): Promise<void> {
   console.log(
     "\nAdopt only if TTFA is unchanged within noise AND total drops meaningfully"
     + "\nAND coalesced slack stays comfortably positive."
-    + "\nIf TTFA regressed, raise --passthrough-first rather than accepting it:"
-    + "\nfirst audio is the property the streaming speaker exists to protect."
+    + "\nA TTFA regression at --passthrough-first 0 means raise it to 1; at 1 or"
+    + "\nhigher the knob no longer touches first audio, so the engine is the cause."
     + "\nIf slack went negative or near zero, lower --max-chars: the chunks got"
     + "\nbigger than the audio ahead of them.",
   );

@@ -32,28 +32,63 @@ export const DEFAULT_COALESCE_OPTIONS: CoalesceOptions = {
 };
 
 /**
+ * How much unspoken text may sit in the queue before the drain stops pulling.
+ *
+ * Reading ahead is the whole point, but it also removes the backpressure the
+ * speaker used to apply by pulling exactly one sentence at a time: a brain that
+ * generates faster than the engine speaks would otherwise buffer an entire
+ * unbounded reply in memory. At this size the queue always holds far more than
+ * a merged chunk needs, so the cap never changes what gets emitted — it just
+ * stops the read-ahead from becoming a sink.
+ */
+export const MAX_QUEUED_CHARS = 16_000;
+
+/**
  * Drain `source` into a queue eagerly, so the consumer can always ask "what has
  * arrived so far?" without awaiting anything it does not already have.
+ *
+ * The drain is a background loop, so it needs an owner: `close()` stops it and
+ * returns the source iterator, and the coalescer calls it on every exit path.
+ * Without that, an interrupted turn would leave the previous reply's producer
+ * running and buffering into a queue nobody reads.
  */
-function eagerQueue<T>(source: AsyncIterable<T>): {
-  take: () => Promise<T[] | null>;
+function eagerQueue(source: AsyncIterable<string>, maxQueuedChars: number): {
+  take: () => Promise<string[] | null>;
+  close: () => Promise<void>;
 } {
-  const queued: T[] = [];
+  const queued: string[] = [];
+  let queuedChars = 0;
   let done = false;
+  // Tracked separately from the value: `throw null` is legal, and treating a
+  // falsy failure as a clean end would truncate the reply silently.
+  let failed = false;
   let failure: unknown = null;
-  let wake: (() => void) | undefined;
+  let closed = false;
+  let wakeConsumer: (() => void) | undefined;
+  let wakeProducer: (() => void) | undefined;
+
+  const iterator = source[Symbol.asyncIterator]();
 
   const drain = (async () => {
     try {
-      for await (const item of source) {
-        queued.push(item);
-        wake?.();
+      for (;;) {
+        while (!closed && queuedChars >= maxQueuedChars) {
+          await new Promise<void>((resolve) => { wakeProducer = resolve; });
+          wakeProducer = undefined;
+        }
+        if (closed) break;
+        const next = await iterator.next();
+        if (next.done) break;
+        queued.push(next.value);
+        queuedChars += next.value.length;
+        wakeConsumer?.();
       }
     } catch (error: unknown) {
+      failed = true;
       failure = error;
     } finally {
       done = true;
-      wake?.();
+      wakeConsumer?.();
     }
   })();
   // The consumer observes completion through take(); this keeps a producer
@@ -62,16 +97,30 @@ function eagerQueue<T>(source: AsyncIterable<T>): {
 
   return {
     /** Everything available now, awaiting only when the queue is empty. */
-    async take(): Promise<T[] | null> {
+    async take(): Promise<string[] | null> {
       while (queued.length === 0 && !done) {
-        await new Promise<void>((resolve) => { wake = resolve; });
-        wake = undefined;
+        await new Promise<void>((resolve) => { wakeConsumer = resolve; });
+        wakeConsumer = undefined;
       }
       if (queued.length === 0) {
-        if (failure) throw failure;
+        if (failed) throw failure;
         return null;
       }
-      return queued.splice(0, queued.length);
+      const batch = queued.splice(0, queued.length);
+      queuedChars = 0;
+      wakeProducer?.();
+      return batch;
+    },
+
+    /** Stop the drain and release the source, then wait for it to actually stop. */
+    async close(): Promise<void> {
+      closed = true;
+      wakeProducer?.();
+      // Closes a generator source (running its finally blocks). If the drain is
+      // parked in next(), this is queued behind it and the loop's `closed` check
+      // ends the read on the following pass.
+      await iterator.return?.().catch(() => { /* the source is being abandoned */ });
+      await drain;
     },
   };
 }
@@ -81,7 +130,7 @@ export async function* coalesceSentences(
   options: Partial<CoalesceOptions> = {},
 ): AsyncGenerator<string> {
   const { maxChars, passthroughFirst } = { ...DEFAULT_COALESCE_OPTIONS, ...options };
-  const queue = eagerQueue(sentences);
+  const queue = eagerQueue(sentences, MAX_QUEUED_CHARS);
   let emitted = 0;
   /** Carried across take() calls so a partial merge is not flushed early. */
   let pending = "";
@@ -94,38 +143,45 @@ export async function* coalesceSentences(
     }
   };
 
-  for (;;) {
-    const batch = await queue.take();
-    if (batch === null) break;
+  try {
+    for (;;) {
+      const batch = await queue.take();
+      if (batch === null) break;
 
-    for (const sentence of batch) {
-      // Early sentences go out untouched, and cannot be held back by a pending
-      // merge either — nothing may sit in front of first audio.
-      if (emitted < passthroughFirst && !pending) {
-        yield sentence;
-        emitted += 1;
-        continue;
+      for (const sentence of batch) {
+        // Early sentences go out untouched, and cannot be held back by a pending
+        // merge either — nothing may sit in front of first audio.
+        if (emitted < passthroughFirst && !pending) {
+          yield sentence;
+          emitted += 1;
+          continue;
+        }
+        if (!pending) {
+          pending = sentence;
+          continue;
+        }
+        const merged = `${pending} ${sentence}`;
+        if (merged.length > maxChars) {
+          // Emitting `pending` rather than the oversized merge keeps every chunk
+          // under the cap; an already-oversized single sentence still goes out
+          // whole, since splitting it is the segmenter's job, not ours.
+          yield* flush();
+          pending = sentence;
+          continue;
+        }
+        pending = merged;
       }
-      if (!pending) {
-        pending = sentence;
-        continue;
-      }
-      const merged = `${pending} ${sentence}`;
-      if (merged.length > maxChars) {
-        // Emitting `pending` rather than the oversized merge keeps every chunk
-        // under the cap; an already-oversized single sentence still goes out
-        // whole, since splitting it is the segmenter's job, not ours.
-        yield* flush();
-        pending = sentence;
-        continue;
-      }
-      pending = merged;
+
+      // Nothing more has arrived, so holding `pending` back would be pure added
+      // latency. This is the line that makes coalescing free.
+      yield* flush();
     }
 
-    // Nothing more has arrived, so holding `pending` back would be pure added
-    // latency. This is the line that makes coalescing free.
     yield* flush();
+  } finally {
+    // Reached on normal completion, on a producer error, and — the case that
+    // matters — when the speaker abandons this generator mid-reply after a
+    // barge-in. The drain owns a live iterator; nothing else will stop it.
+    await queue.close();
   }
-
-  yield* flush();
 }

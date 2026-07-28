@@ -578,7 +578,10 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       "enabled", "hangover_ms", "open_factor", "min_speech_ms", "calibration_ms", "preroll_ms",
     ], issues);
   }
-  if (isRecord(config.tts_coalesce)) {
+  // checkRecord, not isRecord: `tts_coalesce: true` is a plausible typo for
+  // `tts_coalesce: {enabled: true}`, and silently reading it as "off" would look
+  // exactly like the feature not working.
+  if (config.tts_coalesce !== undefined && checkRecord(config.tts_coalesce, "tts_coalesce", issues)) {
     checkKnownKeys(config.tts_coalesce, "tts_coalesce", [
       "enabled", "max_chars", "passthrough_first",
     ], issues);

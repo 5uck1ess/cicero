@@ -34,8 +34,16 @@ hears.
 
 An interrupted merged chunk reports as a single pending item, so after a barge-in
 Cicero can no longer tell which sentences inside that chunk were actually heard.
-With coalescing off, that record is per sentence. Nothing else changes: the text
-handed to the engine is identical, only its grouping differs.
+With coalescing off, that record is per sentence.
+
+It also changes how far ahead the brain is allowed to run. Without coalescing the
+speaker pulls exactly one sentence at a time, which paces the brain to the
+speaking rate. Coalescing has to read ahead to have anything to merge, so it
+drains the reply into a queue capped at 16,000 characters and stops pulling past
+that — far more than any merged chunk needs, but bounded rather than open-ended.
+The queue is closed and the source released when a turn is interrupted.
+
+The text handed to the engine is otherwise identical; only its grouping differs.
 
 ## The measurement
 
