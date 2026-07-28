@@ -12,7 +12,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUB="$ROOT/vendor/audio.cpp"
-BIN="$SUB/build/linux-cuda-release/bin/audiocpp_server"
+BUILD_DIR="$SUB/build/linux-cuda-release"
+BIN="$BUILD_DIR/bin/audiocpp_server"
+# Which source commit produced $BIN. Lives inside the (git-ignored) build tree,
+# so it is discarded exactly when the build output is.
+STAMP="$BUILD_DIR/.built-from-commit"
 FORCE=0
 [[ "${1:-}" == "--force" ]] && FORCE=1
 
@@ -34,10 +38,28 @@ else
 fi
 git -C "$ROOT" submodule update --init --recursive vendor/audio.cpp
 
+# Checking out a new pin does not rebuild anything: /build*/ is git-ignored, so
+# the old executable survives the update. Skipping on its mere existence would
+# keep running the previously built revision — including past the security and
+# stability fixes the new pin was chosen for. Compare commits, not presence.
+SRC_COMMIT="$(git -C "$SUB" rev-parse HEAD 2>/dev/null || true)"
+BUILT_COMMIT="$(cat "$STAMP" 2>/dev/null || true)"
+
 if [[ -x "$BIN" && "$FORCE" -eq 0 ]]; then
-  echo "==> Already built: $BIN"
-  echo "    (re-run with --force to rebuild)"
-  exit 0
+  if [[ -n "$SRC_COMMIT" && "$BUILT_COMMIT" == "$SRC_COMMIT" ]]; then
+    echo "==> Already built at $SRC_COMMIT: $BIN"
+    echo "    (re-run with --force to rebuild)"
+    exit 0
+  fi
+  # Fail closed: an unknown or mismatched provenance means rebuild. The first
+  # run after this check was introduced has no stamp, so it rebuilds once.
+  if [[ -z "$SRC_COMMIT" ]]; then
+    echo "==> Cannot determine the source commit of $SUB — rebuilding rather than trusting the existing binary."
+  elif [[ -z "$BUILT_COMMIT" ]]; then
+    echo "==> $BIN exists but records no source commit — rebuilding so it matches $SRC_COMMIT."
+  else
+    echo "==> $BIN was built from $BUILT_COMMIT, but the checkout is now $SRC_COMMIT — rebuilding."
+  fi
 fi
 
 if [[ ! -f "$SUB/scripts/build_linux.sh" ]]; then
@@ -53,6 +75,9 @@ echo "==> Building audio.cpp (CUDA) — compiles the ggml CUDA kernels, takes se
 ( cd "$SUB" && bash scripts/build_linux.sh --backend cuda --target audiocpp_cli --target audiocpp_server )
 
 if [[ -x "$BIN" ]]; then
+  # Record provenance only after the binary exists, so a failed build cannot
+  # leave a stamp that makes the next run skip.
+  if [[ -n "$SRC_COMMIT" ]]; then printf '%s\n' "$SRC_COMMIT" > "$STAMP"; else rm -f "$STAMP"; fi
   echo "==> Built: $BIN"
   echo "    Next: add your model paths to servers/audiocpp_server.local.json"
   echo "    (a task:\"tts\" entry for the TTS seat, a task:\"asr\" entry for STT)."

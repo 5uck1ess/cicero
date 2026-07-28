@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -114,6 +114,113 @@ test("the provisioner syncs the submodule URL before updating, and spares standa
   // The dev/fork-sync layout is a standalone clone whose `origin` tracks
   // upstream; syncing it would clobber that remote.
   expect(script).toContain('if [[ -d "$SUB/.git" ]]');
+});
+
+test("the provisioner rebuilds when the pin moves, instead of trusting a stale binary", () => {
+  // `/build*/` is git-ignored, so checking out a new pin leaves the previously
+  // built executable in place. Skipping on mere presence would keep running the
+  // old revision — past the very fixes the new pin was chosen for. Drives the
+  // REAL script against a stub build_linux.sh, so no compiler is needed.
+  const dir = mkdtempSync(join(tmpdir(), "provision-stale-"));
+  const buildLog = join(dir, "build-invocations");
+  const commit = (cwd: string, msg: string) =>
+    git(cwd, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg);
+
+  // A "vendor" repo whose build script just fabricates the binary.
+  const depWork = join(dir, "dep-work");
+  git(dir, "init", "-q", depWork);
+  mkdirSync(join(depWork, "scripts"), { recursive: true });
+  writeFileSync(join(depWork, "scripts/build_linux.sh"), [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    'echo "build $*" >> "${BUILD_LOG:?}"',
+    "mkdir -p build/linux-cuda-release/bin",
+    "printf '#!/bin/sh\\nexit 0\\n' > build/linux-cuda-release/bin/audiocpp_server",
+    "chmod +x build/linux-cuda-release/bin/audiocpp_server",
+  ].join("\n"));
+  git(depWork, "add", "-A");
+  commit(depWork, "vendor at A");
+  const shaA = git(depWork, "rev-parse", "HEAD").out.trim();
+  const depBare = join(dir, "dep.git");
+  git(dir, "clone", "-q", "--bare", depWork, depBare);
+
+  // A superproject holding the real provisioner and that repo as a submodule.
+  const root = join(dir, "root");
+  git(dir, "init", "-q", root);
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  const realScript = readFileSync(new URL("../scripts/provision-audiocpp.sh", import.meta.url), "utf8");
+  writeFileSync(join(root, "scripts/provision-audiocpp.sh"), realScript, { mode: 0o755 });
+  git(root, "add", "-A");
+  commit(root, "root init");
+  expect(git(root, "-c", "protocol.file.allow=always",
+    "submodule", "add", "-q", depBare, "vendor/audio.cpp").ok).toBe(true);
+  commit(root, "add submodule at A");
+
+  const provision = (): { ok: boolean; out: string } => {
+    const r = Bun.spawnSync(["bash", join(root, "scripts/provision-audiocpp.sh")], {
+      cwd: dir,   // deliberately NOT inside root: the script resolves its own ROOT
+      env: {
+        ...process.env,
+        BUILD_LOG: buildLog,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+        // Let the script's own git calls touch the file:// submodule remote.
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "protocol.file.allow",
+        GIT_CONFIG_VALUE_0: "always",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    });
+    return { ok: r.exitCode === 0, out: `${r.stdout.toString()}${r.stderr.toString()}` };
+  };
+  const builds = (): number =>
+    (readFileSync(buildLog, "utf8").match(/^build /gm) ?? []).length;
+  const stamp = join(root, "vendor/audio.cpp/build/linux-cuda-release/.built-from-commit");
+
+  // 1. First provision builds and records what it built from.
+  const first = provision();
+  expect(first.ok).toBe(true);
+  expect(builds()).toBe(1);
+  expect(readFileSync(stamp, "utf8").trim()).toBe(shaA);
+
+  // 2. Unchanged pin: skip, no rebuild.
+  const second = provision();
+  expect(second.ok).toBe(true);
+  expect(second.out).toContain(`Already built at ${shaA}`);
+  expect(builds()).toBe(1);
+
+  // 3. Move the pin — the exact shape of repointing at a fixed upstream commit.
+  writeFileSync(join(depWork, "FIX"), "oom hardening\n");
+  git(depWork, "add", "-A");
+  commit(depWork, "vendor at B (the fix the new pin is chosen for)");
+  const shaB = git(depWork, "rev-parse", "HEAD").out.trim();
+  git(depWork, "push", "-q", depBare, "HEAD");
+  const sub = join(root, "vendor/audio.cpp");
+  git(sub, "fetch", "-q", depBare, shaB);
+  git(sub, "checkout", "-q", shaB);
+  git(root, "add", "vendor/audio.cpp");
+  commit(root, "repin to B");
+  // The stale binary really does survive the repin — that is the premise.
+  expect(existsSync(join(sub, "build/linux-cuda-release/bin/audiocpp_server"))).toBe(true);
+
+  const third = provision();
+  expect(third.ok).toBe(true);
+  expect(third.out).toContain(`was built from ${shaA}`);
+  expect(builds()).toBe(2);
+  expect(readFileSync(stamp, "utf8").trim()).toBe(shaB);
+});
+
+test("a binary with no recorded provenance is rebuilt rather than trusted", () => {
+  // Every install predating the stamp is in this state; assuming it is current
+  // would silently keep the pre-fix binary running.
+  const script = readFileSync(new URL("../scripts/provision-audiocpp.sh", import.meta.url), "utf8");
+  expect(script).toContain("records no source commit");
+  // The stamp is written only after the binary is confirmed present, so a
+  // failed build cannot make the next run skip.
+  const stampWrite = script.indexOf('> "$STAMP"');
+  const binCheck = script.lastIndexOf('if [[ -x "$BIN" ]]');
+  expect(binCheck).toBeGreaterThan(-1);
+  expect(stampWrite).toBeGreaterThan(binCheck);
 });
 
 test(".gitmodules points at a repo that still has the pinned commit's history", () => {
