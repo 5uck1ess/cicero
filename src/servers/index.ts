@@ -104,15 +104,27 @@ export class ServerManager {
     }
   }
 
+  /**
+   * Stop every managed provider, then report whether release was CONFIRMED.
+   * Each provider is still attempted even if an earlier one fails, but an
+   * unconfirmed release is surfaced rather than swallowed: a hot-swappable slot
+   * keeps a failed generation for retry, and that latch is unreachable if the
+   * daemon is told teardown succeeded.
+   */
   async stop(providers: BackendProviderSet): Promise<void> {
+    const failures: unknown[] = [];
     for (const provider of [providers.stt, providers.tts, providers.llm]) {
       if (provider?.stop) {
         try {
           await provider.stop();
         } catch (error: unknown) {
-          log("info", `Provider stop failed (best effort): ${errorDetail(error)}`);
+          log("warn", `Provider stop failed: ${errorDetail(error)}`);
+          failures.push(error);
         }
       }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "one or more providers did not confirm release");
     }
   }
 }

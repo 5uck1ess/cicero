@@ -39,6 +39,7 @@ import { warmupProvider } from "./backends/tts/warmup";
 import { buildRecoveryContext } from "./speaker/recovery";
 import { createProviders, createSTTProvider, createTTSProvider, type BackendProviders } from "./backends/registry";
 import { ProviderSlot, SwappableSTTProvider, SwappableTTSProvider } from "./backends/hot-swap";
+import { createLaneTts } from "./web-voice/lane-tts";
 import type { STTProvider, STTProviderConfig } from "./backends/stt/provider";
 import type { TTSProvider, TTSProviderConfig } from "./backends/tts/provider";
 import { sttDefaultPort } from "./backends/stt/provider";
@@ -1167,13 +1168,7 @@ export class CiceroDaemon {
       // Markdown/typography so a voice never says "dash" or glitches on an
       // em-dash. A sentence that is pure markup flattens to nothing and is
       // skipped without consuming a roll-call voice slot.
-      const laneTts = {
-        generateAudio: (text: string, _voice?: string, options?: { speed?: number }) => {
-          const clean = speakable(text);
-          if (!clean) return Promise.resolve(new ArrayBuffer(0));
-          return this.providers.tts.generateAudio(clean, this.brain.activeLaneVoice?.(), options);
-        },
-      };
+      const laneTts = createLaneTts(this.providers.tts, () => this.brain.activeLaneVoice?.());
       const voiceState: VoiceControlState = { ...DEFAULT_VOICE_CONTROL_STATE };
       // TLDR speech gate (on by default): long replies get their first sentences
       // spoken verbatim, the rest text-only, plus one spoken summary line.
@@ -2775,6 +2770,7 @@ export class CiceroDaemon {
     };
 
     let shutdownCompleted = false;
+    let providerReleaseUnconfirmed = false;
     try {
       // Quiesce every scheduler/timer synchronously, then drain the briefing's
       // exact owned run before dependencies are released.
@@ -2880,7 +2876,15 @@ export class CiceroDaemon {
       await cleanup("kanban watcher", () => this.kanbanWatcher?.stop());
       this.kanbanWatcher = null;
       if (this.servers && this.providers) {
-        await cleanup("model servers", async () => { await this.servers.stop(this.providers); });
+        try {
+          await this.servers.stop(this.providers);
+        } catch (error) {
+          // Release was not confirmed. The slots keep the unreaped generations so
+          // a later stop() can retry them, so do NOT clear the slot references
+          // below — dropping them here would strand the child for good.
+          providerReleaseUnconfirmed = true;
+          log("warn", `provider teardown was not confirmed: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
       const pidLease = this.pidLease;
       this.pidLease = null;
@@ -2903,8 +2907,13 @@ export class CiceroDaemon {
         this.serProvider = null;
         this.dashboard = null;
         this.runtimeControl = null;
-        this.sttSlot = null;
-        this.ttsSlot = null;
+        // Keep the slots when a provider would not confirm release: they hold the
+        // retry state for the unreaped generation. Clearing them would drop the
+        // only remaining reference and require a machine-level kill to recover.
+        if (!providerReleaseUnconfirmed) {
+          this.sttSlot = null;
+          this.ttsSlot = null;
+        }
         this.voiceSwapRunning = false;
         this.webVoiceTunnelOwner = null;
         this.webVoiceTunnel = null;

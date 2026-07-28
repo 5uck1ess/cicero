@@ -139,6 +139,10 @@ export class ProviderSlot<T extends SwappableProvider> {
           ? await candidate.requiredHealth()
           : await candidate.health();
         if (!healthy) throw new Error(`${candidate.name} failed its health check`);
+        // A shutdown can land while the candidate was starting. stop() snapshots
+        // the generations it owns, so anything installed after it ran would never
+        // be reaped. Refuse before persisting so config stays truthful too.
+        if (this.closed) throw new Error("provider slot is shutting down");
         await persist();
       } catch (error) {
         candidateOwned = false;
@@ -154,6 +158,13 @@ export class ProviderSlot<T extends SwappableProvider> {
         );
       }
 
+      // Narrow re-check: persist() awaited, so a shutdown may have started since
+      // the gate above. Config is already written (the operator's selection wins
+      // on the next start), but this generation must not be installed behind
+      // stop()'s back — the finally below releases the prepared candidate.
+      if (this.closed) {
+        throw new Error("provider slot began shutting down; the persisted selection takes effect on the next start");
+      }
       const previous = this.current;
       this.current = this.generation(candidate);
       candidateOwned = false;

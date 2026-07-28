@@ -6,6 +6,22 @@ import { ciceroPath } from "./platform/paths";
 const CONTROL_VERSION = 1 as const;
 const MAX_CONTROL_BODY_BYTES = 4_096;
 const CONTROL_TIMEOUT_MS = 120_000;
+const MAX_CONTROL_ERROR_CHARS = 500;
+
+/**
+ * A swap failure message can carry a candidate provider's HTTP error body
+ * verbatim, and `cicero swap` prints it straight to a terminal. Provider bodies
+ * are untrusted: strip C0/C1 control characters (escape sequences survive JSON
+ * transport intact and would otherwise execute as terminal commands) and bound
+ * the length before it is returned, logged, or printed.
+ */
+function safeControlMessage(value: unknown): string {
+  const raw = value instanceof Error ? value.message : String(value);
+  const stripped = raw.replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ").trim();
+  return stripped.length > MAX_CONTROL_ERROR_CHARS
+    ? `${stripped.slice(0, MAX_CONTROL_ERROR_CHARS)}…`
+    : stripped || "provider swap failed";
+}
 
 export type SwapRole = "stt" | "tts";
 export interface SwapRequest { role: SwapRole; backend: string; model?: string }
@@ -88,7 +104,7 @@ export async function startRuntimeControl(options: RuntimeControlOptions): Promi
           const result = await options.onSwap(body);
           return Response.json({ ok: true, ...result });
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message = safeControlMessage(error);
           const status = /already in progress/.test(message) ? 409 : 422;
           return Response.json({ ok: false, error: message }, { status });
         } finally {
@@ -125,13 +141,24 @@ export async function startRuntimeControl(options: RuntimeControlOptions): Promi
         // descriptor pointing at a daemon that is already tearing down. Provider
         // teardown (the slot's own bounded stop) reaps whatever the swap left.
         let drainError: unknown;
+        let drainTimer: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
             Promise.all([...active]).then(() => undefined),
-            Bun.sleep(drainTimeoutMs).then(() => { throw new Error(`runtime controls did not drain within ${drainTimeoutMs}ms`); }),
+            // Own the timer so the common case (nothing in flight) can cancel it.
+            // An uncancelled sleep keeps Bun's event loop alive for the whole
+            // timeout and delays daemon exit by that long on every clean stop.
+            new Promise<never>((_, reject) => {
+              drainTimer = setTimeout(
+                () => reject(new Error(`runtime controls did not drain within ${drainTimeoutMs}ms`)),
+                drainTimeoutMs,
+              );
+            }),
           ]);
         } catch (error) {
           drainError = error;
+        } finally {
+          if (drainTimer !== undefined) clearTimeout(drainTimer);
         }
         await server.stop(true);
         await unlink(descriptorPath).catch(() => {});
@@ -172,7 +199,11 @@ export async function requestRuntimeSwap(
     signal: AbortSignal.timeout(options.timeoutMs ?? CONTROL_TIMEOUT_MS),
   });
   const body = await response.json().catch(() => ({})) as { ok?: boolean; error?: string } & Partial<SwapResult>;
-  if (!response.ok || !body.ok) throw new Error(body.error ?? `runtime control returned HTTP ${response.status}`);
+  // Sanitize on receipt too: the daemon is trusted, but this is the last hop
+  // before the string reaches a terminal, and the body is transport-shaped data.
+  if (!response.ok || !body.ok) {
+    throw new Error(body.error ? safeControlMessage(body.error) : `runtime control returned HTTP ${response.status}`);
+  }
   if (body.role !== request.role || body.backend !== request.backend || body.status !== "active") {
     throw new Error("runtime control returned an invalid swap response");
   }

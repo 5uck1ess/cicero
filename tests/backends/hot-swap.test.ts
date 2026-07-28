@@ -233,4 +233,27 @@ describe("turn-length generation pins", () => {
     expect(pin.provider).toBe(old);
     expect(() => pin.release()).not.toThrow();
   });
+
+  test("a shutdown during candidate preparation refuses the cutover and releases the candidate", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    const owner = new ProviderSlot<TTSProvider>(old);
+    const next = new FakeVoiceProvider("tts-next");
+
+    // Hold the candidate inside start() so stop() lands mid-preparation — the
+    // window in which stop() snapshots the generations it will ever reap.
+    let releaseStart!: () => void;
+    next.startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+
+    let persisted = false;
+    const swapping = owner.swap(next, () => { persisted = true; });
+    await owner.stop();
+    releaseStart();
+
+    await expect(swapping).rejects.toThrow(/shutting down/);
+    // Refused before persistence, and the candidate it started was stopped
+    // rather than installed behind stop()'s back.
+    expect(persisted).toBe(false);
+    expect(next.stops).toBe(1);
+    expect(owner.currentProvider()).toBe(old);
+  });
 });

@@ -369,6 +369,8 @@ cicero status                        # bounded effective-config/runtime snapshot
 cicero doctor                        # check every configured backend, print fixes
 cicero pair                          # print the phone URL and credential-bearing QR
 cicero pair --no-token-in-qr         # scan the URL, then type the token separately
+cicero swap stt faster-whisper       # replace a live speech provider without restarting
+cicero swap tts kokoro hexgrad/Kokoro-82M   # optional trailing model override
 
 # Utility
 cicero speak "Hello from Cicero"     # speak arbitrary text

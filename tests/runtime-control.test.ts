@@ -132,4 +132,47 @@ describe("runtime swap control", () => {
 
     handle = null; // already stopped; afterEach must not double-stop
   });
+  test("strips terminal control sequences out of a candidate provider's error text", async () => {
+    dir = mkdtempSync(join(tmpdir(), "cicero-control-"));
+    const descriptorPath = join(dir, "runtime-control.json");
+    // A candidate TTS/STT server is untrusted: its HTTP error body can carry
+    // escape sequences, they survive JSON transport intact, and `cicero swap`
+    // prints the message straight to a terminal.
+    const hostile = "warmup failed: \u001b[2J\u001b]0;pwned\u0007 \u009bH still text";
+    handle = await startRuntimeControl({
+      token: "test-token",
+      descriptorPath,
+      onSwap: async () => { throw new Error(hostile); },
+    });
+
+    const failure = await requestRuntimeSwap(
+      { role: "tts", backend: "kokoro" },
+      { descriptorPath },
+    ).then(() => null, (error: unknown) => error as Error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure!.message).not.toMatch(/[\u0000-\u001F\u007F-\u009F]/);
+    // The human-readable part survives; only the control bytes are removed.
+    expect(failure!.message).toContain("warmup failed:");
+    expect(failure!.message).toContain("still text");
+    expect(failure!.message).not.toContain("pwned\u0007");
+  });
+
+  test("bounds an enormous provider error instead of relaying it whole", async () => {
+    dir = mkdtempSync(join(tmpdir(), "cicero-control-"));
+    const descriptorPath = join(dir, "runtime-control.json");
+    handle = await startRuntimeControl({
+      token: "test-token",
+      descriptorPath,
+      onSwap: async () => { throw new Error("x".repeat(50_000)); },
+    });
+
+    const failure = await requestRuntimeSwap(
+      { role: "stt", backend: "faster-whisper" },
+      { descriptorPath },
+    ).then(() => null, (error: unknown) => error as Error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure!.message.length).toBeLessThanOrEqual(501);
+  });
 });

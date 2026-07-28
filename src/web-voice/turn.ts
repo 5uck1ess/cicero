@@ -87,10 +87,21 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
   // the brain input waits for it at most the grace window past the transcript.
   const tonePending = beginOwnedTone(deps.tone, wav, "web turn tone classification");
   let tmpFile: string | undefined;
+  // The non-streaming path renders a whole reply sentence-by-sentence and
+  // concatenates it into one WAV, so it needs the same one-generation guarantee
+  // as the streaming path — otherwise a mid-turn swap splices two providers'
+  // voices into a single returned clip.
+  const ttsPin = pinGeneration(deps.tts);
   try {
     tmpFile = await writeSecureTempAudio(wav, { prefix: "cicero-web" });
     throwIfTurnAborted(deps.signal);
-    const transcript = (await deps.stt.transcribe(tmpFile))?.trim() ?? "";
+    const sttPin = pinGeneration(deps.stt);
+    let transcript: string;
+    try {
+      transcript = (await sttPin.provider.transcribe(tmpFile))?.trim() ?? "";
+    } finally {
+      sttPin.release();
+    }
     throwIfTurnAborted(deps.signal);
     if (!transcript) return { transcript: "", reply: "", audio: EMPTY };
 
@@ -98,7 +109,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     if (deps.tldr?.pending && isExpandRequest(transcript)) {
       const detail = deps.tldr.pending();
       if (detail) {
-        const providerAudio = await deps.tts.generateAudio(detail);
+        const providerAudio = await ttsPin.provider.generateAudio(detail);
         throwIfTurnAborted(deps.signal);
         const audio = admitProviderAudio(providerAudio, maxAudioBytes);
         return {
@@ -137,7 +148,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
       throwIfTurnAborted(deps.signal);
       const s = raw.trim();
       if (!s) continue;
-      const providerAudio = await deps.tts.generateAudio(s);
+      const providerAudio = await ttsPin.provider.generateAudio(s);
       throwIfTurnAborted(deps.signal);
       const part = admitProviderAudio(providerAudio, maxAudioBytes);
       if (part.byteLength > 0) {
@@ -155,6 +166,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     if (error instanceof Error) throw error;
     throw new Error("web voice turn failed", { cause: error });
   } finally {
+    ttsPin.release();
     await retainOwnedTone(tonePending, deps.trackBackground, deps.signal);
     if (tmpFile) await unlink(tmpFile).catch(() => { /* best-effort cleanup */ });
   }
@@ -782,7 +794,15 @@ export async function streamWebTurn(
   try {
     tmpFile = await writeSecureTempAudio(wav, { prefix: "cicero-web" });
     if (deps.signal?.aborted || sink.aborted()) return;
-    const transcript = (await sttPin.provider.transcribe(tmpFile))?.trim() ?? "";
+    let transcript: string;
+    try {
+      transcript = (await sttPin.provider.transcribe(tmpFile))?.trim() ?? "";
+    } finally {
+      // Release as soon as decoding is done. Holding it across the brain+TTS
+      // reply would pin a retired STT generation for the whole turn, and a swap
+      // that cut over meanwhile would time out waiting for it to drain.
+      sttPin.release();
+    }
     if (deps.signal?.aborted || sink.aborted()) return;
     timer.mark("stt");
     sink.transcript(transcript);
@@ -821,19 +841,27 @@ export async function streamWebTextTurn(text: string, deps: WebStreamDeps, sink:
 
 async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink): Promise<string[]> {
   const spokenTexts: string[] = [];
-  for await (const raw of segmentSentences(oneChunk(text))) {
-    if (sink.aborted()) break;
-    const s = raw.trim();
-    if (!s) continue;
-    sink.sentence(s);
-    const audio = admitProviderAudio(
-      await deps.tts.generateAudio(s, undefined, { speed: deps.voice?.state.rate }),
-    );
-    if (sink.aborted()) break;
-    if (audio.byteLength > 0) {
-      sink.audio(audio);
-      spokenTexts.push(s);
+  // The brain-free fast paths (voice-control ack, repeat, expand) render here and
+  // run before streamReply pins anything, so they hold their own pin: a replayed
+  // multi-sentence reply must not change provider halfway through.
+  const pin = pinGeneration(deps.tts);
+  try {
+    for await (const raw of segmentSentences(oneChunk(text))) {
+      if (sink.aborted()) break;
+      const s = raw.trim();
+      if (!s) continue;
+      sink.sentence(s);
+      const audio = admitProviderAudio(
+        await pin.provider.generateAudio(s, undefined, { speed: deps.voice?.state.rate }),
+      );
+      if (sink.aborted()) break;
+      if (audio.byteLength > 0) {
+        sink.audio(audio);
+        spokenTexts.push(s);
+      }
     }
+  } finally {
+    pin.release();
   }
   sink.done();
   return spokenTexts;

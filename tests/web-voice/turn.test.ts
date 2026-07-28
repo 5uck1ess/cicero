@@ -1,7 +1,8 @@
 import { test, expect } from "bun:test";
 import { OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS, silenceWavLike, SPEAKER_BEAT_MS, processWebTurn, streamWebTurn, streamWebTextTurn, isExpandRequest, isRepeatRequest, isResumeRequest, applyVoiceControl, concatWavs, type WebTurnDeps, type WebStreamDeps, type WebReplySink } from "../../src/web-voice/turn";
-import { ProviderSlot, SwappableTTSProvider } from "../../src/backends/hot-swap";
+import { ProviderSlot, SwappableSTTProvider, SwappableTTSProvider } from "../../src/backends/hot-swap";
 import type { TTSProvider } from "../../src/backends/tts/provider";
+import type { STTProvider } from "../../src/backends/stt/provider";
 
 async function* tokens(...parts: string[]) { for (const p of parts) yield p; }
 
@@ -1041,5 +1042,118 @@ test("a live TTS swap mid-turn keeps the whole turn on its original provider", a
   // The turn released its pin on completion, so the retired generation drains.
   await swapping;
   expect(old.stops).toBe(1);
+  await slot.stop();
+});
+
+// The brain-free fast paths (repeat / expand / voice-control ack) render through
+// speakDirect BEFORE streamReply pins anything. A multi-sentence replay must not
+// change provider halfway through either.
+test("a replayed multi-sentence reply stays on one provider across a live swap", async () => {
+  const old = new CountingTTS("tts-old");
+  const next = new CountingTTS("tts-new");
+  const slot = new ProviderSlot<TTSProvider>(old);
+  const facade = new SwappableTTSProvider(slot);
+
+  const deps: WebStreamDeps = {
+    stt: { transcribe: async () => "" },
+    brain: { send: async () => "", sendStream: () => (async function* () { yield ""; })() },
+    tts: facade,
+    lastReply: { store: () => {}, pending: () => "One sentence. Two sentence. Three sentence." },
+  };
+  const { sink, calls } = capturingSink();
+  const turn = streamWebTextTurn("say that again", deps, sink);
+
+  // Swap the live provider after the replay's first sentence has synthesized.
+  await old.until(1);
+  const swapping = slot.swap(next, () => {});
+  await Bun.sleep(0);
+  expect(slot.providerName).toBe("tts-new"); // a NEW turn would get the replacement
+
+  await turn;
+
+  // Every sentence of the replay stayed on the provider it started on.
+  expect(old.calls).toBe(3);
+  expect(next.calls).toBe(0);
+  expect(calls.audio).toBe(3);
+
+  await swapping;
+  expect(old.stops).toBe(1);
+  await slot.stop();
+});
+
+// The non-streaming turn concatenates its sentences into ONE returned WAV, so a
+// mid-turn swap there would splice two different voices into a single clip.
+test("processWebTurn keeps its concatenated reply on one provider across a live swap", async () => {
+  const old = new CountingTTS("tts-old");
+  const next = new CountingTTS("tts-new");
+  const slot = new ProviderSlot<TTSProvider>(old);
+  const facade = new SwappableTTSProvider(slot);
+
+  let swapping: Promise<void> | undefined;
+  const deps: WebTurnDeps = {
+    stt: { transcribe: async () => "hello" },
+    // Swap the live provider while the turn is between STT and synthesis.
+    brain: {
+      send: async () => {
+        swapping = slot.swap(next, () => {});
+        await Bun.sleep(0);
+        expect(slot.providerName).toBe("tts-new");
+        return "One sentence. Two sentence. Three sentence.";
+      },
+    },
+    tts: facade,
+  };
+
+  const result = await processWebTurn(tinyWav([1]), deps);
+
+  expect(result.transcript).toBe("hello");
+  expect(old.calls).toBe(3);
+  expect(next.calls).toBe(0);
+
+  await swapping;
+  expect(old.stops).toBe(1);
+  await slot.stop();
+});
+
+// The STT lease must cover DECODING only. Holding it across the brain+TTS reply
+// pins a retired generation for the whole turn, so a swap that cut over meanwhile
+// would sit waiting for it to drain and eventually report a cleanup timeout.
+test("an STT swap during a long reply drains without waiting for the reply to finish", async () => {
+  class GatedSTT implements STTProvider {
+    stops = 0;
+    constructor(readonly name: string) {}
+    async health(): Promise<boolean> { return true; }
+    async stop(): Promise<void> { this.stops += 1; }
+    async transcribe(): Promise<string> { return "hello"; }
+  }
+  const old = new GatedSTT("stt-old");
+  const next = new GatedSTT("stt-new");
+  const slot = new ProviderSlot<STTProvider>(old);
+
+  // The reply stays open until the test releases it, well past transcription.
+  let releaseReply!: () => void;
+  const replyGate = new Promise<void>((r) => { releaseReply = r; });
+  async function* stream(): AsyncGenerator<string> {
+    await replyGate;
+    yield "Done.";
+  }
+
+  const deps: WebStreamDeps = {
+    stt: new SwappableSTTProvider(slot),
+    brain: { send: async () => "", sendStream: () => stream() },
+    tts: { generateAudio: async () => tinyWav([1]) },
+  };
+  const { sink } = capturingSink();
+  const turn = streamWebTurn(new ArrayBuffer(8), deps, sink);
+
+  // Let transcription finish; the reply is now parked on its gate.
+  await Bun.sleep(1);
+
+  // Swap STT mid-reply: the old generation is no longer leased, so it drains now.
+  await slot.swap(next, () => {});
+  expect(old.stops).toBe(1);
+
+  releaseReply();
+  await turn;
   await slot.stop();
 });
