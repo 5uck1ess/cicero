@@ -88,7 +88,11 @@ function bounded(value: string, max: number): string {
  * field, a non-boolean, a confidence outside 0..1, prose wrapped around the
  * JSON. The caller treats null as "no opinion", which accepts the turn.
  */
-export function parseVerdict(raw: string): IntentVerdict | null {
+export function parseVerdict(raw: unknown): IntentVerdict | null {
+  // A provider returning undefined or an object breaks its TypeScript contract,
+  // but a runtime that does so must not throw out of decide() -- that would
+  // turn the one guaranteed fail-OPEN path into a dropped utterance.
+  if (typeof raw !== "string") return null;
   if (raw.length > MAX_VERDICT_CHARS) return null;
   let parsed: unknown;
   try {
@@ -117,8 +121,11 @@ export function parseVerdict(raw: string): IntentVerdict | null {
 }
 
 export function buildJudgePrompt(input: IntentJudgeInput, contextTurns: number): ChatMessage[] {
-  const recent = input.recentUtterances.slice(-contextTurns).map((line) => bounded(line, MAX_CONTEXT_LINE_CHARS));
-  const spoken = input.recentAssistantSpeech.slice(-contextTurns).map((line) => bounded(line, MAX_CONTEXT_LINE_CHARS));
+  // slice(-0) is slice(0) -- the whole array. Zero must mean no context at all,
+  // or turning context off would instead send everything retained.
+  const take = <T,>(lines: readonly T[]): T[] => (contextTurns <= 0 ? [] : lines.slice(-contextTurns));
+  const recent = take(input.recentUtterances).map((line) => bounded(line, MAX_CONTEXT_LINE_CHARS));
+  const spoken = take(input.recentAssistantSpeech).map((line) => bounded(line, MAX_CONTEXT_LINE_CHARS));
   const sections = [
     "You decide whether the final utterance was addressed to the voice assistant, or was other people talking, background media, or thinking aloud.",
     "Reply to the assistant, short commands, and follow-ups that continue the assistant's last reply all count as addressed to it. Speech about the assistant in the third person does not.",
@@ -161,6 +168,10 @@ export function createIntentJudge(
         return { accept: true, reason: "hot-window" };
       }
 
+      // Already cancelled: do not start a request whose only outcome is to be
+      // thrown away after the full deadline.
+      if (signal?.aborted) return { accept: true, reason: "unavailable" };
+
       const controller = new AbortController();
       let expire!: (reason: Error) => void;
       // Aborting only asks. This judge sits in the audio path: a classifier that
@@ -199,7 +210,14 @@ export function createIntentJudge(
         signal?.removeEventListener("abort", abortOnCaller);
       }
 
-      const verdict = parseVerdict(raw);
+      let verdict: IntentVerdict | null;
+      try {
+        verdict = parseVerdict(raw);
+      } catch {
+        // parseVerdict is defensive, but this is the invariant the whole
+        // feature rests on: decide() resolves, never rejects.
+        verdict = null;
+      }
       if (!verdict) {
         log("info", "Intent judge returned an unusable verdict, accepting the turn");
         return { accept: true, reason: "unavailable" };

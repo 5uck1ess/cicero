@@ -7,6 +7,8 @@ import {
 } from "../../src/listener/intent-judge";
 import type { ChatMessage, LLMCompletionOpts, LLMProvider } from "../../src/backends/llm/provider";
 import { ConversationalListener } from "../../src/listener/conversational";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { DEFAULT_CONFIG, RuntimeConfig } from "../../src/config";
 import { validateRuntimeConfig } from "../../src/config-validation";
 
@@ -335,5 +337,93 @@ describe("intent judge configuration", () => {
 
   test("a zero timeout is rejected", () => {
     expect(issuesFor({ timeout_ms: 0 }).some((i) => i.includes("intent_judge.timeout_ms"))).toBe(true);
+  });
+});
+
+describe("the gate every dispatch path goes through", () => {
+  type Gated = {
+    addressedToMe: (transcript: string, epoch: number) => Promise<boolean>;
+    activationEpoch: number;
+    active: boolean;
+    recentUtterances: string[];
+    setIntentJudge: (j: unknown) => void;
+  };
+
+  /** An activated listener — the gate's epoch check requires one. */
+  function gated(): Gated {
+    const l = new ConversationalListener(
+      { name: "stt", transcribe: () => Promise.resolve(null), health: () => Promise.resolve(true) } as never,
+      {} as never,
+      {} as never,
+    ) as unknown as Gated;
+    l.active = true;
+    return l;
+  }
+
+  const epochOf = (l: Gated): number => l.activationEpoch;
+
+  test("with no judge every utterance passes", async () => {
+    const l = gated();
+    expect(await l.addressedToMe("do the thing", epochOf(l))).toBe(true);
+  });
+
+  test("a confident undirected verdict stops the dispatch", async () => {
+    const l = gated();
+    l.setIntentJudge(createIntentJudge(fakeClassifier('{"directed": false, "confidence": 0.95}')));
+    expect(await l.addressedToMe("someone else talking", epochOf(l))).toBe(false);
+  });
+
+  test("a directed verdict lets it through", async () => {
+    const l = gated();
+    l.setIntentJudge(createIntentJudge(fakeClassifier('{"directed": true, "confidence": 0.95}')));
+    expect(await l.addressedToMe("open the log", epochOf(l))).toBe(true);
+  });
+
+  // Every failure of the judge must leave behavior exactly as it was.
+  test("a broken judge never blocks a dispatch", async () => {
+    const l = gated();
+    l.setIntentJudge(createIntentJudge(fakeClassifier(() => Promise.reject(new Error("down")))));
+    expect(await l.addressedToMe("open the log", epochOf(l))).toBe(true);
+  });
+
+  // A provider breaking its type contract must not throw out of the gate --
+  // the listener's outer catch would drop the utterance, i.e. fail CLOSED.
+  test("a provider returning a non-string still fails open", async () => {
+    const l = gated();
+    l.setIntentJudge(createIntentJudge({
+      name: "broken",
+      chatCompletion: () => Promise.resolve(undefined as unknown as string),
+      health: () => Promise.resolve(true),
+    }));
+    expect(await l.addressedToMe("open the log", epochOf(l))).toBe(true);
+  });
+
+  // Deciding costs a model call, and voice mode can end across it.
+  test("a decision that lands after the activation moved on does not dispatch", async () => {
+    const l = gated();
+    l.setIntentJudge(createIntentJudge(fakeClassifier('{"directed": true, "confidence": 1}')));
+    const staleEpoch = epochOf(l) - 1;
+    expect(await l.addressedToMe("open the log", staleEpoch)).toBe(false);
+  });
+
+  test("the utterance becomes context whether or not it was accepted", async () => {
+    const l = gated();
+    l.setIntentJudge(createIntentJudge(fakeClassifier('{"directed": false, "confidence": 0.95}')));
+    await l.addressedToMe("chatter in the room", epochOf(l));
+    expect(l.recentUtterances).toContain("chatter in the room");
+  });
+
+  // Full duplex is the noisy-room case this feature exists for; a barge-in
+  // path that skipped the gate would miss the utterances that matter most.
+  test("both barge-in paths run the gate, not just the idle loop", () => {
+    const source = readFileSync(
+      join(import.meta.dir, "../../src/listener/conversational.ts"),
+      "utf8",
+    );
+    const dispatches = source.match(/this\.fireCallback\(/g) ?? [];
+    const gates = source.match(/await this\.addressedToMe\(/g) ?? [];
+    // One gate per dispatch site: idle loop plus both barge-in paths.
+    expect(gates.length).toBeGreaterThanOrEqual(3);
+    expect(dispatches.length).toBeGreaterThanOrEqual(3);
   });
 });

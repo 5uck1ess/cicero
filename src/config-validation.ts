@@ -585,7 +585,8 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     checkOptionalBoolean(config.intent_judge, "enabled", "intent_judge", issues);
     checkOptionalInteger(config.intent_judge, "hot_window_ms", "intent_judge", issues, { min: 0 });
     checkOptionalNumber(config.intent_judge, "min_confidence", "intent_judge", issues, { min: 0, max: 1 });
-    checkOptionalInteger(config.intent_judge, "context_turns", "intent_judge", issues, { min: 0, max: 20 });
+    // Capped at the listener ring size: a larger value could never surface more.
+    checkOptionalInteger(config.intent_judge, "context_turns", "intent_judge", issues, { min: 0, max: 6 });
     checkOptionalInteger(config.intent_judge, "timeout_ms", "intent_judge", issues, {
       min: 1,
       max: MAX_PROVIDER_TIMEOUT_MS,

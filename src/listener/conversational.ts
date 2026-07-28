@@ -19,6 +19,11 @@ import { ensurePrivateDirectorySync } from "../platform/secure-storage";
 const MAX_INTENT_CONTEXT_LINES = 6;
 const MAX_INTENT_CONTEXT_CHARS = 300;
 
+/** Transcripts are untrusted input; the log line must not carry an unbounded one. */
+function boundedForLog(line: string): string {
+  return line.length <= MAX_INTENT_CONTEXT_CHARS ? line : `${line.slice(0, MAX_INTENT_CONTEXT_CHARS)}…`;
+}
+
 function pushBounded(ring: string[], line: string): void {
   ring.push(line.length <= MAX_INTENT_CONTEXT_CHARS ? line : line.slice(0, MAX_INTENT_CONTEXT_CHARS));
   if (ring.length > MAX_INTENT_CONTEXT_LINES) ring.splice(0, ring.length - MAX_INTENT_CONTEXT_LINES);
@@ -312,6 +317,38 @@ export class ConversationalListener implements Listener {
   }
 
   /**
+   * The single gate every captured utterance passes through before it becomes a
+   * command — the idle loop and both barge-in paths alike. Routing them all
+   * through here is the point: full-duplex is exactly the noisy-room case this
+   * feature exists for, so a barge-in path that skipped it would miss the
+   * utterances that matter most.
+   *
+   * Returns true to dispatch. It is a veto only: with no judge, or on any
+   * judge failure, this returns true and behavior is unchanged.
+   */
+  private async addressedToMe(transcript: string, epoch: number): Promise<boolean> {
+    if (!this.intentJudge) return true;
+    const decision = await this.intentJudge.decide({
+      utterance: transcript,
+      recentUtterances: this.recentUtterances,
+      recentAssistantSpeech: this.recentAssistantSpeech,
+      msSinceAssistantSpoke: this.lastSpokeAtMs === null ? null : Date.now() - this.lastSpokeAtMs,
+    });
+    // Room speech is context whether or not it was for us.
+    pushBounded(this.recentUtterances, transcript);
+    // Deciding takes a model call, and voice mode can be deactivated or
+    // superseded across it. Every other await in this loop re-checks the epoch
+    // before acting; this one must too, or a stale utterance dispatches into a
+    // session that has moved on.
+    if (!this.isCurrentActivation(epoch)) return false;
+    if (decision.accept) return true;
+    // A false negative is invisible and infuriating, so say so plainly --
+    // bounded, because a transcript is untrusted input.
+    log("info", `🙉 Not addressed to me (${decision.confidence.toFixed(2)}), ignoring: "${boundedForLog(transcript)}"`);
+    return false;
+  }
+
+  /**
    * Register callback to interrupt TTS playback when barge-in is detected.
    */
   onBargeIn(callback: () => void): void {
@@ -595,20 +632,7 @@ export class ConversationalListener implements Listener {
         // Was that addressed to Cicero at all? Asked after the deactivation
         // check so "stop listening" always works even if the judge disagrees,
         // and after self-echo so we never spend a model call on our own voice.
-        if (this.intentJudge) {
-          const decision = await this.intentJudge.decide({
-            utterance: transcript,
-            recentUtterances: this.recentUtterances,
-            recentAssistantSpeech: this.recentAssistantSpeech,
-            msSinceAssistantSpoke: this.lastSpokeAtMs === null ? null : Date.now() - this.lastSpokeAtMs,
-          });
-          pushBounded(this.recentUtterances, transcript);
-          if (!decision.accept) {
-            // A false negative is invisible and infuriating, so say so plainly.
-            log("info", `🙉 Not addressed to me (${decision.confidence.toFixed(2)}), ignoring: "${transcript}"`);
-            continue;
-          }
-        }
+        if (!(await this.addressedToMe(transcript, epoch))) continue;
 
         // Fire callback (handleCommand logs "Heard:" — no need to duplicate here)
         if (this.callback) {
@@ -1097,6 +1121,9 @@ export class ConversationalListener implements Listener {
         return;
       }
       if (bargeTranscript && this.isCurrentActivation(epoch)) {
+        // Full duplex is the noisy-room case: background speech captured over
+        // Cicero's own reply has to face the same veto as anything else.
+        if (!(await this.addressedToMe(bargeTranscript, epoch))) continue;
         // The replacement turn owns the interruption window now. Keep the mic
         // armed around its reply instead of waiting for it with no detector.
         done = this.fireCallback(bargeTranscript).then(() => "done" as const);
@@ -1177,6 +1204,7 @@ export class ConversationalListener implements Listener {
       // same detector loop to it. Awaiting the callback here would leave the
       // replacement reply uninterruptible until it finished.
       if (this.isCurrentActivation(epoch)) {
+        if (!(await this.addressedToMe(bargeTranscript, epoch))) continue;
         done = this.fireCallback(bargeTranscript).then(() => "done" as const);
         const immediate = await Promise.race([
           done,

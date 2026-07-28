@@ -2060,6 +2060,7 @@ export class CiceroDaemon {
             } else {
               await this.speaker.speak(textToSpeak);
             }
+            // Streaming and non-streaming both land here; noted once for both.
             this.conversational?.noteSpoken(textToSpeak);
           }
         }
@@ -2071,7 +2072,7 @@ export class CiceroDaemon {
         this.conversational.playSound("error");
       }
       if (this.config.ttsEnabled) {
-        await this.speaker.speak("That command failed. Check the log for details.");
+        await this.speakAndNote("That command failed. Check the log for details.");
       }
     }
   }
@@ -2116,14 +2117,14 @@ export class CiceroDaemon {
         const refusal =
           "Computer use is connected to a cloud model. Enable compute dot allow cloud in the config if you want file and command observations sent there.";
         log("warn", "Computer-use request refused: configured LLM is public/cloud and compute.allow_cloud is false");
-        if (this.config.ttsEnabled) await this.speaker.speak(refusal);
+        if (this.config.ttsEnabled) await this.speakAndNote(refusal);
         return;
       }
       const result = await runVoiceAction(goal, {
         llm: this.providers.llm,
         speak: async (text) => {
           signal.throwIfAborted();
-          await this.speaker.speak(text);
+          await this.speakAndNote(text);
           signal.throwIfAborted();
         },
         listenOnce: async () => {
@@ -2152,14 +2153,14 @@ export class CiceroDaemon {
       }
       if (this.config.ttsEnabled && result.summary) {
         log("speak", "Speaking action result...");
-        await this.speaker.speak(result.summary);
+        await this.speakAndNote(result.summary);
       }
     } catch (err: unknown) {
       if (signal.aborted) return;
       logError("Computer-use failed", err instanceof Error ? err : new Error(String(err)));
       if (this.conversational?.isActive()) this.conversational.playSound("error");
       if (this.config.ttsEnabled) {
-        await this.speaker.speak("That action failed. Check the log for details.");
+        await this.speakAndNote("That action failed. Check the log for details.");
       }
     }
   }
@@ -2217,13 +2218,13 @@ export class CiceroDaemon {
       const tabName = result.params.tab.replace(/\s*\btab\b\s*$/i, "").trim();
       if (isVagueTabName(tabName)) {
         if (this.config.ttsEnabled) {
-          await this.speaker.speak("Which tab? Say the tab name, like 'switch to sales'.");
+          await this.speakAndNote("Which tab? Say the tab name, like 'switch to sales'.");
         }
         return true;
       }
       this.brain.switchTab(tabName);
       if (this.config.ttsEnabled) {
-        await this.speaker.speak(`Switched brain to ${tabName} tab.`);
+        await this.speakAndNote(`Switched brain to ${tabName} tab.`);
       }
       return true;
     }
@@ -2234,7 +2235,7 @@ export class CiceroDaemon {
       const tabName = (result.params.tab || "").replace(/\s*\btab\b\s*$/i, "").trim();
       if (!tabName || isVagueTabName(tabName)) {
         if (this.config.ttsEnabled) {
-          await this.speaker.speak("Which tab? Say the tab name.");
+          await this.speakAndNote("Which tab? Say the tab name.");
         }
         return true;
       }
@@ -2249,7 +2250,7 @@ export class CiceroDaemon {
         // Simple switch
         this.brain.switchTab(tabName);
         if (this.config.ttsEnabled) {
-          await this.speaker.speak(`Switched brain to ${tabName} tab.`);
+          await this.speakAndNote(`Switched brain to ${tabName} tab.`);
         }
       }
       return true;
@@ -2510,6 +2511,19 @@ export class CiceroDaemon {
     }
 
     dashBus.setVoiceActive(conversational.isActive());
+  }
+
+  /**
+   * Speak, and tell the listener what was said.
+   *
+   * Everything Cicero says is context for "was that addressed to me?" and opens
+   * the intent judge's hot window. Call sites that spoke directly through
+   * `this.speaker` were invisible to both, so the next utterance could be judged
+   * without the speech it was answering.
+   */
+  private async speakAndNote(text: string): Promise<void> {
+    await this.speaker.speak(text);
+    this.conversational?.noteSpoken(text);
   }
 
   async stop(): Promise<void> {

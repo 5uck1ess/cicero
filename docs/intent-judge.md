@@ -55,6 +55,10 @@ It declines only on a well-formed, confident `directed: false`.
   its own question is recognised as directed at it
 - nothing else
 
+`context_turns: 0` sends no context at all. The listener retains six lines of
+each, so values above six cannot surface more and are rejected by config
+validation.
+
 All of it is bounded per line and in total before it leaves the process —
 captured room audio is untrusted input, and these buffers are small rings, not a
 transcript log.
@@ -69,15 +73,24 @@ to get wrong and the case we are most certain about, so it is not worth asking.
 It also removes the model call from the most latency-sensitive moment in a
 conversation. Past the window the judge applies again.
 
-## Ordering
+## Ordering and coverage
 
 The judge runs **after** self-echo rejection and **after** the deactivation
 phrases. So "stop listening" always works even if the judge would have
 disagreed, and Cicero never spends a model call deciding about its own voice.
 
+All three paths that can turn captured speech into a command go through the same
+gate: the idle listening loop and both barge-in paths (full-duplex and legacy).
+Full duplex is the noisy-room case this feature exists for, so a barge-in that
+skipped the judge would miss exactly the utterances that matter most.
+
+Because a verdict takes a model call, the activation epoch is re-checked after
+it: if voice mode was deactivated or superseded while deciding, the utterance is
+dropped rather than dispatched into a session that has moved on.
+
 ## Cost and latency
 
-One classifier call per utterance, outside the hot window, bounded by
+At most one classifier call per captured utterance, outside the hot window, bounded by
 `timeout_ms` (default 1.5s). The deadline settles the wait itself rather than
 trusting the provider to honor cancellation — this sits in the audio path, and a
 classifier that ignored its abort signal would otherwise block every utterance.
