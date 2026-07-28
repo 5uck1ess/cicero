@@ -1969,17 +1969,37 @@ test("the speculative refusal reaches sendStream, the speculator's own entry poi
   expect(rang).toEqual([]);
 });
 
-test("a non-speculative dial-back forwards the turn options to the handler", async () => {
-  // Both dial sites used to drop the caller's options — the lexical one
-  // replaced them with a bare { signal }, the classifier one sent none.
-  const seen: Array<BrainTurnOptions | undefined> = [];
-  const sb = board([]);
-  sb.setCallMeHandler(async (_who, options) => { seen.push(options); return "Ringing."; });
-  await sb.start();
-  expect(await sb.send("call me")).toBe("Ringing.");
-  expect(seen.length).toBe(1);
-  expect(seen[0]?.signal).toBeDefined();      // the turn's signal, not the caller's
-  expect(seen[0]?.speculative).toBeUndefined();
+test("the dial sites pass the handler exactly what they always did", async () => {
+  // Guards against re-introducing the regression this PR briefly shipped:
+  // forwarding the whole turn options to the handler. The refusal above the
+  // dial needs `options`; the HANDLER must keep its original arguments, because
+  // it pins the named lane by calling transferTo() back into this switchboard
+  // and that admission supersedes the turn it was called from. (That
+  // re-entrancy defect is pre-existing and tracked separately — this test only
+  // pins the argument contract.)
+  const seen: Array<{ who?: string; keys: string[] }> = [];
+  const lexical = board([]);
+  lexical.setCallMeHandler(async (who, options) => {
+    seen.push({ who, keys: Object.keys(options ?? {}) });
+    return "Ringing.";
+  });
+  await lexical.start();
+  expect(await lexical.send("call me")).toBe("Ringing.");
+
+  const classified = new SwitchboardBrain(fakeBrain("front", []), {
+    coder: { brain: fakeBrain("coder", []) },
+  }, async () => "callme:coder");
+  classified.setCallMeHandler(async (who, options) => {
+    seen.push({ who, keys: Object.keys(options ?? {}) });
+    return "Ringing.";
+  });
+  await classified.start();
+  expect(await classified.send("I need the coder to phone me")).toBe("Ringing.");
+
+  expect(seen).toEqual([
+    { who: undefined, keys: ["signal"] }, // lexical: the turn signal, nothing else
+    { who: "coder", keys: [] },           // classifier: no options at all
+  ]);
 });
 
 test("release and roll call leave memos — the front desk knows what it missed", async () => {

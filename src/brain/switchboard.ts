@@ -972,7 +972,13 @@ export class SwitchboardBrain implements Brain {
         // callback is not retractable by the final utterance.
         if (options.speculative) throw new SpeculativeSideEffectError();
         log("info", `switchboard: dial-back requested${call.who ? ` — ${call.who}` : ""}`);
-        const reply = await this.callMe(call.who, options);
+        // Handler args deliberately unchanged by this PR: only `{ signal }`, as
+        // before. `options` is needed for the refusal above, NOT by the handler
+        // — forwarding it there regressed named dial-backs, and the underlying
+        // re-entrancy defect (the handler pins the lane by calling transferTo()
+        // back into this switchboard, whose admission supersedes the turn it was
+        // called from) is pre-existing and tracked separately.
+        const reply = await this.callMe(call.who, { signal: turn.signal });
         // Memo even if this turn was superseded meanwhile: the call was placed.
         this.leaveMemo(dialBackMemo(call.who));
         return reply;
@@ -1082,7 +1088,8 @@ export class SwitchboardBrain implements Brain {
       // patterns miss ("phone me now"), so no phrase list can cover this.
       if (options.speculative) throw new SpeculativeSideEffectError();
       log("info", `switchboard: dial-back requested (classifier)${who ? ` — ${who}` : ""}`);
-      const reply = await this.callMe(who || undefined, options);
+      // Handler args unchanged by this PR — see the note on the lexical path.
+      const reply = await this.callMe(who || undefined);
       // Memo before the turn assert: a superseding turn still needs to know.
       this.leaveMemo(dialBackMemo(who || undefined));
       this.assertAcceptedTurn(turn);
