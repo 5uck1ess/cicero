@@ -399,6 +399,14 @@ export interface BrainTurnOptions {
   /** Cancels this turn only. Adapters should stop their underlying work promptly. */
   signal?: AbortSignal;
   /**
+   * This turn runs on speech the user has NOT finished saying, and may be
+   * discarded. Generated text is safe — it is buffered and dropped if the
+   * guess was wrong. Anything a wrapper cannot take back is not: it must
+   * refuse the turn (throw) rather than act, so the utterance falls through
+   * to the normal path and acts on the final audio instead.
+   */
+  speculative?: boolean;
+  /**
    * Immutable host-produced context for this invocation only. Adapters must
    * forward it unchanged and must never retain it as conversation memory.
    */

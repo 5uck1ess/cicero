@@ -5,6 +5,7 @@ import type { Brain } from "../types";
 import { beginOwnedTone, settleTone, type ToneOptions } from "./tone";
 import { captureOperationalContext } from "./turn";
 import { writeSecureTempAudio } from "../platform/secure-temp-audio";
+import { SpeculativeSideEffectError } from "../brain/dial-back";
 
 /**
  * Speculative turns: when a mid-pause probe comes back "complete" with high
@@ -48,15 +49,6 @@ export interface SpeculatorDeps {
   brain: Pick<Brain, "sendStream" | "hasPendingConfirmation">;
   /** Utterances the reply pipeline answers WITHOUT a brain turn. */
   isLocalFastPath: (transcript: string) => boolean;
-  /**
-   * Utterances that commit an irreversible action the moment the brain turn
-   * STARTS, rather than when its reply is adopted — "call me" reaches the
-   * dial-back decorator before the inner brain sees a token, so a speculative
-   * turn would queue a real call for speech the user has not finished ("call
-   * me *when the build is done*"). Declining to speculate is always safe: the
-   * utterance simply takes the normal path and acts on the final WAV.
-   */
-  startsSideEffect?: (transcript: string) => boolean;
   /** Only speculate at or above this end-of-turn probability. */
   minProbability: number;
   /** Optional input-side tone tag, classified from the probe tail — see {@link ToneOptions}. */
@@ -213,7 +205,7 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
     // Start the brain as soon as the tail transcript is in — unless the turn
     // was aborted first, the utterance is a local fast-path, or STT came up dry.
     const brainStarted: Promise<void> = transcriptPromise.then(async (text) => {
-      if (aborted || !text || deps.isLocalFastPath(text) || deps.startsSideEffect?.(text)) return;
+      if (aborted || !text || deps.isLocalFastPath(text)) return;
       const tag = await settleTone(tonePending?.result ?? null, deps.tone?.graceMs);
       if (aborted) return;
       const input = tag ? `${text}\n\n${tag}` : text;
@@ -236,6 +228,9 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
           it = deps.brain.sendStream!(input, {
             signal: turnAbort.signal,
             systemContext: systemContext ?? undefined,
+            // Tells every wrapper this turn may be discarded, so anything it
+            // cannot take back must refuse instead of acting.
+            speculative: true,
           })[Symbol.asyncIterator]();
           while (!aborted) {
             const next = it.next();
@@ -260,6 +255,17 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
             }
           }
         } catch (err: unknown) {
+          // A wrapper refused to act speculatively (e.g. this turn is a
+          // dial-back request). That is not a failure — it means this
+          // utterance must not be speculated at all, so drop the speculation
+          // and let the final audio drive the normal path.
+          if (err instanceof SpeculativeSideEffectError) {
+            log("info", "speculative: turn would place a call — deferring to the final utterance");
+            void doAbort("side effect refused").catch((abortError: unknown) => {
+              log("warn", `speculative cleanup failed: ${abortError instanceof Error ? abortError.message : String(abortError)}`);
+            });
+            return;
+          }
           buf.end(err);
         } finally {
           // Abort does not own the brain until the source's finalizer has

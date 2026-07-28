@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import type { RuntimeConfig } from "./config";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
 import { log, logStep, logError } from "./logger";
-import { matchCallMe } from "./call-intent";
 import { createListener, createConversationalListener } from "./listener";
 import { createRouter } from "./router";
 import { createBrain, summarizerClassifier } from "./brain";
@@ -1291,10 +1290,6 @@ export class CiceroDaemon {
             stt: this.providers.stt,
             brain: this.brain,
             isLocalFastPath,
-            // The dial-back decorator wraps every brain and acts before the
-            // inner brain streams a token, so "call me" must never be
-            // speculated — see SpeculatorDeps.startsSideEffect.
-            startsSideEffect: (text) => matchCallMe(text) !== null,
             minProbability: specCfg.min_probability ?? 0.85,
             tone,
             operationalContext: (signal) => this.operationalContext(signal),

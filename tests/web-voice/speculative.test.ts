@@ -7,6 +7,7 @@ import {
   type SpeculatorDeps,
 } from "../../src/web-voice/speculative";
 import { wavDurationMs, isLocalFastPath } from "../../src/web-voice/turn";
+import { SpeculativeSideEffectError } from "../../src/brain/dial-back";
 
 /** One second of 16 kHz silence-ish PCM. */
 function pcm(ms: number, sampleRate = 16000): Float32Array {
@@ -520,29 +521,39 @@ test("dry speculative transcript aborts and falls back", async () => {
   expect(calls.transcript).toEqual(["fallback transcript"]);
 });
 
-test("never starts the brain for an utterance that commits a side effect on turn start", async () => {
-  // "call me" reaches the dial-back decorator BEFORE the inner brain streams a
-  // token, so speculating on it would queue a real call for speech the user
-  // has not finished ("call me *when the build is done*").
-  const { deps: d, brainCalls } = deps({ transcript: "call me" });
-  const turn = makeSpeculator({
-    ...d,
-    startsSideEffect: (text) => /^call me\b/i.test(text.trim()),
-  })(pcm(1500), 16000, 1500, 0.95)!;
-  expect(turn).not.toBeNull();
-  expect(await turn.transcript()).toBe("call me");
-  expect(brainCalls).toEqual([]);   // the brain was never started
-  expect(turn.tokens()).toBeNull(); // and there is nothing to adopt
+test("a wrapper that refuses to act speculatively drops the speculation instead of failing", async () => {
+  // DialBackBrain throws this rather than spooling a real callback. Both its
+  // branches (the "call me" regex AND the semantic classifier) sit above the
+  // throw, so no wording can slip past by being phrased differently.
+  const { deps: d } = deps({
+    transcript: "phone me now",
+    brain: {
+      sendStream: () => (async function* (): AsyncGenerator<string> {
+        throw new SpeculativeSideEffectError();
+      })(),
+    },
+  });
+  const turn = makeSpeculator(d)(pcm(1500), 16000, 1500, 0.95)!;
+  await turn.transcript();
+  // Aborted, not errored: claim() fails so the caller runs the normal path,
+  // where the final utterance dials for real.
+  expect(turn.claim()).toBe(false);
+  expect(turn.tokens()).toBeNull();
   await turn.abort();
 });
 
-test("startsSideEffect leaves ordinary utterances alone", async () => {
-  const { deps: d, brainCalls } = deps({ transcript: "what time is it in tokyo" });
-  const turn = makeSpeculator({
-    ...d,
-    startsSideEffect: (text) => /^call me\b/i.test(text.trim()),
-  })(pcm(1500), 16000, 1500, 0.95)!;
-  expect(await turn.transcript()).toBe("what time is it in tokyo");
-  expect(brainCalls.length).toBe(1);
+test("passes speculative: true so wrappers can tell the turn is provisional", async () => {
+  let seen: boolean | undefined;
+  const { deps: d } = deps({
+    brain: {
+      sendStream: (_m: string, o?: { speculative?: boolean }) => {
+        seen = o?.speculative;
+        return (async function* () { yield "ok"; })();
+      },
+    },
+  });
+  const turn = makeSpeculator(d)(pcm(1500), 16000, 1500, 0.95)!;
+  await turn.transcript();
+  expect(seen).toBe(true);
   await turn.abort();
 });
