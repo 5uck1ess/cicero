@@ -43,63 +43,45 @@ shipped `examples/config.json` has an empty `"mcps": {}`.
 **Source:** `huggingface/speech-to-speech`, `LLM/voice_prompt.py` and
 `LLM/text_prompt.py` (Apache 2.0 — their voice rules may be lifted verbatim).
 
-## Problem
+## CORRECTION (2026-07-28): the original premise was wrong
 
-Cicero speaks and types through the same prompt. `src/executor/index.ts:20` is a
-single hardcoded line:
+This spec first claimed that `src/executor/index.ts:20` governs the Telegram
+text line. It does not. Traced through the source:
 
-```
-/no_think
-You are a helpful voice assistant. Keep answers under 2 sentences.
-Be concise and natural. Do not use markdown.
-```
+- `VOICE_SYSTEM_PROMPT` (`src/executor/index.ts:19-20`) feeds only the
+  **local-LLM lane**, reached through `dispatchCommand` from the mic, stdin, or
+  dictation. Text never reaches it.
+- The Telegram line goes `onChat` → `runOperatorChatTurn` (`src/daemon.ts:135`)
+  → `deps.brain.send`, i.e. the configured brain.
 
-`src/brain/ollama.ts:35` has its own one-line default. Neither is composed, and
-the same instruction governs the Telegram text line, where "under 2 sentences"
-and "no markdown" are actively wrong — a text reply *should* be able to use a
-code block.
+So voice and text do **not** share a prompt in the way described.
 
-## What upstream does
+## The real, much smaller issue
 
-Two prompt modules assembled in a fixed order:
+The *brain* has no notion of which surface it is answering. A brain that owns a
+system prompt uses the same one for both — `src/brain/ollama.ts:35` defaults to
+"You are Cicero, a voice-controlled terminal assistant. Keep responses concise."
+and that governs Telegram replies too. It is operator-overridable
+(`config.systemPrompt`), so the impact is mild.
 
-```
-lead  →  session prompt  →  tool descriptions  →  tail
-```
+For CLI brains (Claude Code, ACP) it does not apply at all — they own their own
+prompts and Cicero does not inject one.
 
-The ordering is deliberate: strongest constraints go **last**, closest to the
-generation boundary. The voice module carries rules for spoken output
-(no markdown, no lists, spell out symbols, keep it short enough to listen to);
-the text module drops those and allows structure.
+## Recommendation: do not build this as specified
 
-## Design
+Threading a `surface` field through `BrainTurnOptions` means **every brain
+wrapper must forward it**, which is the same failure mode that killed the
+optional `transcribeStream?()` design in Spec 5: a wrapper that forwards a fixed
+option set silently drops the new field, and the feature appears to work in
+tests while doing nothing in production.
 
-1. New `src/brain/prompt.ts` exporting `assemblePrompt(parts, surface)` where
-   `surface` is `"voice" | "text"`.
-2. Voice and text rule blocks as separate exported constants. Lift upstream's
-   voice rules verbatim where they are good — attribute Apache 2.0 in a header
-   comment.
-3. Thread the surface through. Voice turns come from `src/web-voice/turn.ts` and
-   the host mic path; text turns from the Telegram line. Both currently reach the
-   brain through the same call, so this needs a `surface` field on the turn
-   options rather than a new code path.
-4. `src/executor/index.ts:20` and `src/brain/ollama.ts:35` become callers.
+That cost is not justified by "the ollama brain's default prompt says 'voice'".
 
-## Verification
-
-- `bun:test` over `assemblePrompt`: ordering is stable, the strongest-constraint
-  block is last, a voice surface never emits markdown instructions to a text
-  turn and vice versa.
-- One test asserting the Telegram surface is allowed to produce markdown.
-- No live model needed.
-
-## Risks
-
-Prompt changes are behavioral and not covered by CI. Any change to the *voice*
-rules should be checked by actually speaking a few turns before merge — mocked
-tests do not prove a voice prompt is good.
-
----
+If it is ever picked up, the honest scope is: a required discriminated field on
+the turn options (not optional), forwarded explicitly by every wrapper, with a
+test asserting each wrapper preserves it. Upstream's assembly order
+(lead → session prompt → tools → tail, strongest constraints last) and their
+voice rules are still worth lifting for whichever prompt does get built.
 
 # Spec 2 — Background history compaction
 
