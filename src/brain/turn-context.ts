@@ -15,6 +15,13 @@ export const MAX_SYSTEM_CONTEXT_CHARS = 2_048;
 const COMPACTION_OVERRUN_FACTOR = 2;
 /** Turns handed to the compactor when the cap is crossed — the older half. */
 const COMPACT_BATCH_TURNS = Math.floor(MAX_HISTORY_TURNS / 2);
+/**
+ * Character budget for one batch. A turn is only retired if it actually fit in
+ * the request, so a batch that would overflow the prompt is made smaller rather
+ * than sent truncated — retiring a turn whose text never reached the summarizer
+ * would delete exactly the content this feature exists to preserve.
+ */
+export const MAX_COMPACT_BATCH_CHARS = 20_000;
 /** Bound on the returned summary; it is model output being retained. */
 export const MAX_SUMMARY_CHARS = 4_000;
 /** Absolute deadline for one compaction. */
@@ -101,6 +108,12 @@ export class BrainTurnContext {
   private compacting: Promise<void> | null = null;
   /** Bumped by clear(); a compaction that started under an older one is stale. */
   private generation = 0;
+  private readonly compactionTimeoutMs: number;
+
+  /** `compactionTimeoutMs` is injectable so the deadline path is testable without a 30s test. */
+  constructor(options?: { compactionTimeoutMs?: number }) {
+    this.compactionTimeoutMs = options?.compactionTimeoutMs ?? COMPACTION_TIMEOUT_MS;
+  }
 
   /**
    * Enable background compaction. Without this the context evicts exactly as it
@@ -157,11 +170,25 @@ export class BrainTurnContext {
     // the transcript is allowed to overrun until it lands. Without one, or once
     // the overrun ceiling is reached, the oldest turns are dropped as before.
     if (this.activeCompactor && this.overCap()) this.beginCompaction();
+    this.enforceLimits();
+  }
+
+  /** Drop the oldest turns until the transcript is back under its ceiling. */
+  private enforceLimits(): void {
     const turnLimit = this.limit(MAX_HISTORY_TURNS);
     const charLimit = this.limit(MAX_HISTORY_CHARS);
     if (this.history.length > turnLimit) this.history = this.history.slice(-turnLimit);
-    const chars = () => this.history.reduce((n, turn) => n + turn.user.length + turn.assistant.length, 0);
-    while (chars() > charLimit && this.history.length > 1) this.history.shift();
+    while (this.retainedChars() > charLimit && this.history.length > 1) this.history.shift();
+  }
+
+  /**
+   * Everything this context would replay: the verbatim turns plus the running
+   * summary. The summary counts, or the documented ceiling would be a lie by
+   * however large the summary happens to be.
+   */
+  private retainedChars(): number {
+    const turns = this.history.reduce((n, turn) => n + turn.user.length + turn.assistant.length, 0);
+    return turns + (this.summary?.length ?? 0);
   }
 
   /** The effective ceiling: relaxed only while a compaction is actually running. */
@@ -171,7 +198,7 @@ export class BrainTurnContext {
 
   private overCap(): boolean {
     if (this.history.length > MAX_HISTORY_TURNS) return true;
-    return this.history.reduce((n, turn) => n + turn.user.length + turn.assistant.length, 0) > MAX_HISTORY_CHARS;
+    return this.retainedChars() > MAX_HISTORY_CHARS;
   }
 
   private beginCompaction(): void {
@@ -180,16 +207,37 @@ export class BrainTurnContext {
     if (!compactor) return;
     // Capture the exact turn OBJECTS being retired. Indices are not safe: new
     // turns arrive while this runs, and the hard ceiling may evict underneath.
-    const batch = this.history.slice(0, Math.min(COMPACT_BATCH_TURNS, this.history.length - 1));
+    const candidates = this.history.slice(0, Math.min(COMPACT_BATCH_TURNS, this.history.length - 1));
+    const batch: HistoryTurn[] = [];
+    let budget = MAX_COMPACT_BATCH_CHARS;
+    for (const turn of candidates) {
+      const cost = turn.user.length + turn.assistant.length;
+      // Always take the first turn: per-turn text is already capped well under
+      // the budget, and a batch of zero would make no progress at all.
+      if (batch.length > 0 && cost > budget) break;
+      batch.push(turn);
+      budget -= cost;
+    }
     if (batch.length === 0) return;
     const previousSummary = this.summary;
     const generation = this.generation;
 
     const run = async (): Promise<void> => {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), COMPACTION_TIMEOUT_MS);
+      let expire!: (reason: Error) => void;
+      const deadline = new Promise<never>((_resolve, reject) => { expire = reject; });
+      const timer = setTimeout(() => {
+        controller.abort();
+        // Aborting only asks. A compactor that ignores its signal would other-
+        // wise hold the single-flight latch — and the relaxed ceiling — forever,
+        // so stop waiting on it here rather than trusting it to cooperate.
+        expire(new Error(`compaction exceeded ${this.compactionTimeoutMs}ms`));
+      }, this.compactionTimeoutMs);
       try {
-        const result = await compactor({ turns: batch, previousSummary }, controller.signal);
+        const result = await Promise.race([
+          compactor({ turns: batch, previousSummary }, controller.signal),
+          deadline,
+        ]);
         const summary = result.trim();
         if (!summary) throw new Error("compactor returned nothing");
         if (generation !== this.generation) return; // cleared while we were running
@@ -208,6 +256,11 @@ export class BrainTurnContext {
     // never clear and only the FIRST compaction would ever run.
     const tracked: Promise<void> = run().finally(() => {
       if (this.compacting === tracked) this.compacting = null;
+      // Only now, with the latch cleared, does limit() report the normal
+      // ceiling again. Trim here so a failed compaction lands back at the
+      // documented bound immediately instead of sitting at 2x until the next
+      // turn happens to arrive.
+      this.enforceLimits();
     });
     this.compacting = tracked;
     // Observed by settled(); never left as an unhandled rejection.

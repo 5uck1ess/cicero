@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHistoryCompactor, createSummarizerComplete } from "../../src/brain/history-compactor";
-import { BrainTurnContext, setDefaultHistoryCompactor } from "../../src/brain/turn-context";
+import {
+  BrainTurnContext,
+  MAX_COMPACT_BATCH_CHARS,
+  MAX_SUMMARY_CHARS,
+  setDefaultHistoryCompactor,
+} from "../../src/brain/turn-context";
 
 const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -82,8 +87,10 @@ describe("history compactor", () => {
       { turns: [{ user: "x".repeat(100_000), assistant: "y".repeat(100_000) }], previousSummary: null },
       new AbortController().signal,
     );
+    // The guard is derived from the caller's own bounds; a well-formed batch
+    // never reaches it, but an unbounded caller must still be cut off.
     const prompt: string = requests[0]!.body.messages[0].content;
-    expect(prompt.length).toBeLessThan(25_000);
+    expect(prompt.length).toBeLessThan(MAX_COMPACT_BATCH_CHARS + MAX_SUMMARY_CHARS + 4_100);
     expect(prompt).toContain("[excerpt truncated]");
   });
 

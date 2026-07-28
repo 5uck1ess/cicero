@@ -159,14 +159,22 @@ history holds one running summary rather than a growing stack.
 The bounds matter more than the feature:
 
 - One compaction at a time. A second trigger while one is in flight is a no-op.
-- 30-second absolute deadline; the summary itself is capped at 4,000 characters.
+- A turn is only retired if its text actually fit in the request. A batch that
+  would overflow is made smaller rather than sent truncated, so compaction never
+  deletes something it did not summarize.
+- The summarizer request times out after 15 seconds, and the compaction as a
+  whole is abandoned after 30 whether or not the summarizer honors the
+  cancellation. The retained summary is capped at 4,000 characters and counts
+  toward the transcript's own character ceiling.
 - History may overrun to twice its normal cap while a compaction runs, and no
-  further — a summarizer that never answers cannot grow the transcript.
+  further — a summarizer that never answers cannot grow the transcript. It is
+  trimmed back to the normal cap as soon as the compaction settles.
 - Any failure (timeout, endpoint down, empty response) falls back to today's
   eviction and logs why. It is retried on the next crossing, so recovery does
   not need a restart.
 - `restart()` discards a compaction already in flight rather than letting it
-  attach a summary of the conversation you just cleared.
+  attach a summary of the conversation you just cleared, and daemon shutdown
+  cancels one that is still in the air.
 
 Because it runs in the background, a compaction never adds latency to a turn.
 

@@ -1,5 +1,5 @@
 import { discardResponseBody, providerSignal, readBoundedJson, PROVIDER_TIMEOUT_MS } from "../backends/http-transfer";
-import type { HistoryCompactor } from "./turn-context";
+import { MAX_COMPACT_BATCH_CHARS, MAX_SUMMARY_CHARS, type HistoryCompactor } from "./turn-context";
 
 /** One small-model completion against an OpenAI-compatible endpoint. */
 export type SummarizerComplete = (prompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string>;
@@ -47,8 +47,14 @@ export function createSummarizerComplete(config: SummarizerEndpoint | undefined)
 
 /** Tokens allowed for one compaction. Roughly tracks MAX_SUMMARY_CHARS. */
 const COMPACTION_MAX_TOKENS = 700;
-/** Bound on what is sent up: this is conversation text, and the endpoint is small. */
-const MAX_PROMPT_CHARS = 24_000;
+/**
+ * Defensive ceiling on the request body. Derived from the caller's own bounds
+ * rather than picked: the turn context sizes each batch to
+ * MAX_COMPACT_BATCH_CHARS and carries at most MAX_SUMMARY_CHARS forward, so a
+ * well-formed call always fits and this never truncates. It exists only so a
+ * caller passing something unbounded cannot post an unbounded body.
+ */
+const MAX_PROMPT_CHARS = MAX_COMPACT_BATCH_CHARS + MAX_SUMMARY_CHARS + 4_000;
 
 function buildPrompt(turns: readonly { user: string; assistant: string }[], previousSummary: string | null): string {
   const transcript = turns

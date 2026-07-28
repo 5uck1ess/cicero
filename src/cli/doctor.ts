@@ -45,6 +45,7 @@ import {
   supportedBackendsForRole,
 } from "../backends/supported-backends";
 import { createBrain } from "../brain";
+import { redactSnapshotSecrets } from "../operational-state";
 import { detectTerminal } from "../terminal/detect";
 import {
   WEB_VOICE_TOKEN_GENERATION_HINT,
@@ -975,9 +976,10 @@ export async function collectChecks(
     }
     const sum = wv.tldr?.summarizer_url;
     if (sum) {
+      const shownSum = redactSnapshotSecrets(sum);
       checks.push((await probe(`${sum.replace(/\/$/, "")}/models`))
-        ? { name: "tldr summarizer", level: "ok", detail: sum }
-        : { name: "tldr summarizer", level: "warn", detail: `${sum} not responding — TLDR codas fall back to a generic line`, hint: "start the summarizer endpoint or remove web_voice.tldr" });
+        ? { name: "tldr summarizer", level: "ok", detail: shownSum }
+        : { name: "tldr summarizer", level: "warn", detail: `${shownSum} not responding — TLDR codas fall back to a generic line`, hint: "start the summarizer endpoint or remove web_voice.tldr" });
     }
   }
 
@@ -993,12 +995,14 @@ export async function collectChecks(
         hint: "set brain.history_compaction.summarizer_url (or web_voice.tldr.summarizer_url)",
       });
     } else {
+      // The URL may carry userinfo or a query token; never echo it raw.
+      const shown = redactSnapshotSecrets(url);
       checks.push((await probe(`${url.replace(/\/$/, "")}/models`))
-        ? { name: "history compaction", level: "ok", detail: url }
+        ? { name: "history compaction", level: "ok", detail: shown }
         : {
             name: "history compaction",
             level: "warn",
-            detail: `${url} not responding — long conversations fall back to dropping their oldest turns`,
+            detail: `${shown} not responding — long conversations fall back to dropping their oldest turns`,
             hint: "start the summarizer endpoint or set brain.history_compaction.enabled: false",
           });
     }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { BrainTurnContext, MAX_SUMMARY_CHARS, type HistoryCompactor } from "../../src/brain/turn-context";
+import { BrainTurnContext, MAX_COMPACT_BATCH_CHARS, MAX_SUMMARY_CHARS, type HistoryCompactor } from "../../src/brain/turn-context";
 
 /** Fill the context past its 12-turn cap. */
 function fill(ctx: BrainTurnContext, count: number, prefix = "q"): void {
@@ -201,5 +201,80 @@ describe("history compaction", () => {
     fill(ctx, 20);
     await ctx.settled();
     expect(prompt(ctx)).not.toContain("Summary of earlier conversation");
+  });
+
+  // Regressions for defects found in review.
+
+  // Retiring a turn whose text never reached the summarizer deletes exactly the
+  // content compaction exists to preserve.
+  test("a batch is sized so every turn it retires actually fit in the request", async () => {
+    let sent: readonly { user: string; assistant: string }[] = [];
+    const ctx = new BrainTurnContext();
+    ctx.setCompactor(async ({ turns }) => { sent = turns; return "summary"; });
+    // Each turn is capped at 4k user + 8k assistant, so these are near-maximal.
+    for (let i = 0; i < 13; i += 1) ctx.remember(`u${i}`.padEnd(4_000, "x"), `a${i}`.padEnd(8_000, "y"));
+    await ctx.settled();
+
+    const sentChars = sent.reduce((n, t) => n + t.user.length + t.assistant.length, 0);
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sentChars).toBeLessThanOrEqual(MAX_COMPACT_BATCH_CHARS);
+    // Nothing that was dropped from the transcript is missing from the batch:
+    // every turn still present, plus every turn sent, accounts for all of them.
+    const text = ctx.buildTextPrompt("now", true);
+    for (const turn of sent) expect(text).not.toContain(turn.assistant);
+  });
+
+  // A failure must land back at the normal ceiling, not sit at the relaxed one.
+  test("a failed compaction trims back to the normal cap without waiting for another turn", async () => {
+    const ctx = new BrainTurnContext();
+    ctx.setCompactor(async () => { throw new Error("summarizer down"); });
+    for (let i = 0; i < 24; i += 1) {
+      ctx.remember(`q${i}`, `a${i}`);
+      await ctx.settled();
+    }
+    const turns = (ctx.buildTextPrompt("now", true).match(/User: /g) ?? []).length;
+    expect(turns).toBeLessThanOrEqual(12);
+  });
+
+  // Aborting only asks. A compactor that ignores its signal must not hold the
+  // single-flight latch, and the relaxed ceiling, forever.
+  test("a compactor that ignores its abort signal still releases the latch at the deadline", async () => {
+    let calls = 0;
+    let sawAbort = false;
+    const ctx = new BrainTurnContext({ compactionTimeoutMs: 20 });
+    ctx.setCompactor((_input, signal) => {
+      calls += 1;
+      signal.addEventListener("abort", () => { sawAbort = true; });
+      return new Promise<string>(() => { /* never settles, ignores abort */ });
+    });
+
+    for (let i = 0; i < 13; i += 1) ctx.remember(`q${i}`, `a${i}`);
+    expect(calls).toBe(1);
+    await ctx.settled();          // returns once the deadline fires, not never
+    expect(sawAbort).toBe(true);
+
+    // The latch is free, so a later crossing can compact again...
+    ctx.setCompactor(async () => "recovered");
+    for (let i = 0; i < 13; i += 1) ctx.remember(`later${i}`, `reply${i}`);
+    await ctx.settled();
+    expect(ctx.buildTextPrompt("now", true)).toContain("recovered");
+    // ...and the relaxed ceiling was given back.
+    const turns = (ctx.buildTextPrompt("now", true).match(/User: /g) ?? []).length;
+    expect(turns).toBeLessThanOrEqual(12);
+  });
+
+  // The documented 2x ceiling has to count everything that gets replayed.
+  test("the running summary counts toward the character ceiling", async () => {
+    const ctx = new BrainTurnContext();
+    ctx.setCompactor(async () => "S".repeat(MAX_SUMMARY_CHARS));
+    for (let i = 0; i < 13; i += 1) ctx.remember(`u${i}`.padEnd(1_500, "x"), `a${i}`.padEnd(1_500, "y"));
+    await ctx.settled();
+    // Push well past the cap with the summary now in place.
+    for (let i = 0; i < 20; i += 1) {
+      ctx.remember(`later${i}`.padEnd(1_500, "x"), `reply${i}`.padEnd(1_500, "y"));
+      await ctx.settled();
+    }
+    const state = ctx as unknown as { retainedChars: () => number };
+    expect(state.retainedChars()).toBeLessThanOrEqual(32_000);
   });
 });
