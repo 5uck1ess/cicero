@@ -66,6 +66,18 @@ export interface CiceroConfig {
   clap?: ClapConfig; // double-clap to activate voice mode (default on)
   vad?: VadConfig; // streaming voice-activity end-of-turn (default on)
   earcons?: boolean; // play activate/ready/thinking/success/error beeps (default true)
+  // "Was that addressed to me?" veto over captured speech. Needs a configured
+  // `classifier` model. Off by default; see docs/intent-judge.md.
+  intent_judge?: IntentJudgeConfig;
+}
+
+/** LLM veto on whether captured speech was addressed to Cicero at all. */
+export interface IntentJudgeConfig {
+  enabled?: boolean;          // default false
+  hot_window_ms?: number;     // follow-ups this soon after Cicero speaks skip the judge (default 15000)
+  min_confidence?: number;    // an undirected verdict below this does not decline the turn (default 0.6)
+  context_turns?: number;     // earlier utterances and assistant lines shown (default 4)
+  timeout_ms?: number;        // absolute deadline for one verdict (default 1500)
 }
 
 /** Browser audio client: capture mic + play TTS in the browser, talk to a headless box. */

@@ -250,7 +250,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     "voice_ref_text", "barge_in_enabled", "full_duplex", "aec", "silence_duration",
     "silence_threshold", "phonetic_aliases", "brain", "servers", "actions", "deployment", "stt",
     "stt_fallback", "tts", "tts_fallback", "llm", "classifier", "compute", "sidecar", "dashboard", "web_voice",
-    "notify", "headless", "turn", "tone", "clap", "vad", "earcons",
+    "notify", "headless", "turn", "tone", "clap", "vad", "earcons", "intent_judge",
   ], issues);
 
   checkBoolean(config.tts_enabled, "tts_enabled", issues);
@@ -535,7 +535,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     if (config[key] !== undefined) checkBoolean(config[key], key, issues);
   }
 
-  for (const name of ["dashboard", "web_voice", "turn", "tone", "clap", "vad"] as const) {
+  for (const name of ["dashboard", "web_voice", "turn", "tone", "clap", "vad", "intent_judge"] as const) {
     const section = config[name];
     if (section === undefined) continue;
     if (!checkRecord(section, name, issues)) continue;
@@ -577,6 +577,19 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     checkKnownKeys(config.vad, "vad", [
       "enabled", "hangover_ms", "open_factor", "min_speech_ms", "calibration_ms", "preroll_ms",
     ], issues);
+  }
+  if (isRecord(config.intent_judge)) {
+    checkKnownKeys(config.intent_judge, "intent_judge", [
+      "enabled", "hot_window_ms", "min_confidence", "context_turns", "timeout_ms",
+    ], issues);
+    checkOptionalBoolean(config.intent_judge, "enabled", "intent_judge", issues);
+    checkOptionalInteger(config.intent_judge, "hot_window_ms", "intent_judge", issues, { min: 0 });
+    checkOptionalNumber(config.intent_judge, "min_confidence", "intent_judge", issues, { min: 0, max: 1 });
+    checkOptionalInteger(config.intent_judge, "context_turns", "intent_judge", issues, { min: 0, max: 20 });
+    checkOptionalInteger(config.intent_judge, "timeout_ms", "intent_judge", issues, {
+      min: 1,
+      max: MAX_PROVIDER_TIMEOUT_MS,
+    });
   }
 
   if (isRecord(config.web_voice)) {

@@ -5,6 +5,7 @@ import type { RuntimeConfig } from "./config";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
 import { log, logStep, logError } from "./logger";
 import { createListener, createConversationalListener } from "./listener";
+import { createIntentJudge } from "./listener/intent-judge";
 import { createRouter } from "./router";
 import { createBrain, summarizerClassifier } from "./brain";
 import {
@@ -1699,6 +1700,26 @@ export class CiceroDaemon {
     // Initialize conversational listener (activated via "voice" command)
     this.conversational = createConversationalListener(this.config, this.providers.stt, audioRecorder, audioPlayer, this.turnDetector ?? undefined, this.aecHub ?? undefined);
     this.conversational.onCommand((text) => this.dispatchCommand(text));
+    // "Was that addressed to me?" veto, off unless switched on AND a classifier
+    // is configured. It can only ever decline an utterance the listener would
+    // have taken, never cause one to be taken -- so a missing or broken judge
+    // leaves behavior exactly as it is today.
+    const judgeCfg = this.config.intentJudge;
+    if (judgeCfg.enabled) {
+      const judge = createIntentJudge(this.providers.classifier, {
+        hotWindowMs: judgeCfg.hotWindowMs,
+        minConfidence: judgeCfg.minConfidence,
+        contextTurns: judgeCfg.contextTurns,
+        timeoutMs: judgeCfg.timeoutMs,
+      });
+      if (judge) {
+        this.conversational.setIntentJudge(judge);
+        log("info", "Intent judge on: utterances are checked against the classifier before they become commands");
+      } else {
+        // Never silently borrow the reply model for a per-utterance decision.
+        log("warn", "intent_judge.enabled is set but no `classifier` backend is configured — every utterance will be accepted as before; see docs/intent-judge.md");
+      }
+    }
     // Lifecycle cleanup belongs to voice-mode deactivation itself, not to the
     // optional clap feature. This runs for dashboard/hotkey/spoken shutdown and
     // recorder failures alike, and does not restart clap during daemon shutdown.

@@ -991,6 +991,19 @@ export async function collectChecks(
     }
   }
 
+  // -- intent judge ---------------------------------------------------------
+  // Enabled without a classifier is the case worth reporting: the daemon starts
+  // fine and every utterance is accepted, so the feature looks on and does
+  // nothing. Silence would leave that undiagnosable.
+  if (config.intentJudge.enabled && !config.classifierBackend) {
+    checks.push({
+      name: "intent judge",
+      level: "warn",
+      detail: "intent_judge.enabled is set but no classifier backend is configured — every utterance is accepted, as before",
+      hint: "configure a `classifier` backend (see docs/classifier.md) or set intent_judge.enabled: false",
+    });
+  }
+
   // -- input-side tone (speech emotion) -------------------------------------
   const tone = config.tone;
   if (tone.enabled) {

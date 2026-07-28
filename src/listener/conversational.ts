@@ -6,6 +6,7 @@ import { join, dirname } from "path";
 import { statSync, unlinkSync } from "fs";
 import { ciceroPath } from "../platform/paths";
 import { isSelfEcho } from "./echo";
+import type { IntentJudge } from "./intent-judge";
 import type { TurnDetector, TurnPrediction } from "../backends/turn/provider";
 import { decideEndOfTurn } from "../backends/turn/policy";
 import { decodeWavFile } from "../platform/wav";
@@ -13,6 +14,15 @@ import { VadRecorder, type VadRecorderOptions } from "./vad-recorder";
 import type { AecAudioHub } from "../platform/aec-hub";
 import { terminateDirectChild } from "../process/direct-child";
 import { ensurePrivateDirectorySync } from "../platform/secure-storage";
+
+/** Rolling context for the intent judge. Captured room audio must not accumulate. */
+const MAX_INTENT_CONTEXT_LINES = 6;
+const MAX_INTENT_CONTEXT_CHARS = 300;
+
+function pushBounded(ring: string[], line: string): void {
+  ring.push(line.length <= MAX_INTENT_CONTEXT_CHARS ? line : line.slice(0, MAX_INTENT_CONTEXT_CHARS));
+  if (ring.length > MAX_INTENT_CONTEXT_LINES) ring.splice(0, ring.length - MAX_INTENT_CONTEXT_LINES);
+}
 
 /** Optional semantic end-of-turn wiring for the conversational listener. */
 export interface TurnOptions {
@@ -154,6 +164,14 @@ export class ConversationalListener implements Listener {
   private clapDeactivateEnabled = false;
   // Text Cicero last spoke — guards the next transcript against self-echo.
   private lastSpoken: string | null = null;
+  // Optional "was that addressed to me?" veto. Null unless a classifier is
+  // configured and the feature is switched on; see listener/intent-judge.ts.
+  private intentJudge: IntentJudge | null = null;
+  // Rolling context for that judge. Bounded ring buffers, not a transcript log:
+  // this is captured room audio and must not accumulate.
+  private recentUtterances: string[] = [];
+  private recentAssistantSpeech: string[] = [];
+  private lastSpokeAtMs: number | null = null;
   // Returns what Cicero is speaking *right now* (live) so a barge-in candidate can
   // be checked against it for self-echo. Set by the daemon from the streaming
   // speaker's snapshot; absent → no live echo reference (only lastSpoken is used).
@@ -278,6 +296,19 @@ export class ConversationalListener implements Listener {
    */
   noteSpoken(text: string): void {
     this.lastSpoken = text?.trim() || null;
+    if (this.lastSpoken) {
+      this.lastSpokeAtMs = Date.now();
+      pushBounded(this.recentAssistantSpeech, this.lastSpoken);
+    }
+  }
+
+  /**
+   * Enable the intent judge. Off unless the daemon sets one, and even then it
+   * is only ever a veto — it can decline an utterance the listener would have
+   * taken, never cause one to be taken that it would not have.
+   */
+  setIntentJudge(judge: IntentJudge | null): void {
+    this.intentJudge = judge;
   }
 
   /**
@@ -559,6 +590,24 @@ export class ConversationalListener implements Listener {
         if (this.isDeactivationPhrase(lower)) {
           this.deactivate();
           break;
+        }
+
+        // Was that addressed to Cicero at all? Asked after the deactivation
+        // check so "stop listening" always works even if the judge disagrees,
+        // and after self-echo so we never spend a model call on our own voice.
+        if (this.intentJudge) {
+          const decision = await this.intentJudge.decide({
+            utterance: transcript,
+            recentUtterances: this.recentUtterances,
+            recentAssistantSpeech: this.recentAssistantSpeech,
+            msSinceAssistantSpoke: this.lastSpokeAtMs === null ? null : Date.now() - this.lastSpokeAtMs,
+          });
+          pushBounded(this.recentUtterances, transcript);
+          if (!decision.accept) {
+            // A false negative is invisible and infuriating, so say so plainly.
+            log("info", `🙉 Not addressed to me (${decision.confidence.toFixed(2)}), ignoring: "${transcript}"`);
+            continue;
+          }
         }
 
         // Fire callback (handleCommand logs "Heard:" — no need to duplicate here)
