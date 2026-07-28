@@ -579,46 +579,52 @@ test("a refusal landing AFTER adoption re-runs the turn instead of dropping the 
   expect(sttCalls).toEqual([]);            // adopted transcript stands; no re-STT
 });
 
-test("a refusal that lands after PARKING still dials, through the parked delivery", async () => {
-  // The daemon enables speculation and parking on the SAME turn. The park race
-  // already prefers a refusal that arrives before the deadline; when the
-  // deadline wins, the turn is acknowledged and closed, streamReply returns
-  // successfully, and the caller's retry never runs — so the refusal used to be
-  // swallowed by the background .catch() and the phone never rang.
+test("an adopted speculation never parks, so a cancellable refusal still dials", async () => {
+  // Parking an adopted stream was broken for EVERY turn, not just dial-backs:
+  // the caller's finally calls spec.abort() as soon as streamReply returns —
+  // including the parked return — cancelling the pump the "detached" consumer is
+  // still draining. For a dial-back that also killed the semantic classifier
+  // mid-decision, and the abort reason is NOT SpeculativeSideEffectError, so no
+  // handler could recognise it. The brain below is signal-aware like the real
+  // classifier: abort makes it reject with the abort reason, never the refusal.
   const rings: string[] = [];
-  const refuse = deferred();
   const brain = {
     send: async (m: string) => { rings.push(m); return "Ringing you now."; },
-    sendStream: (_m: string, o?: { speculative?: boolean }) => (async function* (): AsyncGenerator<string> {
+    sendStream: (_m: string, o?: { speculative?: boolean; signal?: AbortSignal }) => (async function* (): AsyncGenerator<string> {
       if (o?.speculative) {
-        await refuse.promise;
+        await new Promise<void>((resolve, reject) => {
+          const t = setTimeout(resolve, 50);
+          o.signal?.addEventListener("abort", () => {
+            clearTimeout(t);
+            reject(o.signal?.reason ?? new Error("aborted"));
+          }, { once: true });
+        });
         throw new SpeculativeSideEffectError();
       }
-      yield "unused";
+      rings.push(_m);
+      yield "Ringing you now.";
     })(),
   };
   const { deps: sd } = deps({ transcript: "phone me now", brain });
   const turn = makeSpeculator(sd)(pcm(1000), 16_000, 1000, 0.95)!;
   const delivered: string[] = [];
-  const background: Promise<void>[] = [];
   const sttCalls: string[] = [];
   const { sink, calls } = capturingSink();
-  const running = streamWebTurn(wavOf(1000), {
+
+  // park.afterMs well below the refusal: previously this parked, aborted the
+  // classifier, and lost the call entirely.
+  await streamWebTurn(wavOf(1000), {
     ...turnDeps(sttCalls),
     brain,
     park: { afterMs: 10, line: "Still on it.", onParked: (reply) => { delivered.push(reply); } },
-    trackBackground: (task) => { background.push(task); return true; },
+    trackBackground: () => true,
   }, sink, turn);
 
-  await Bun.sleep(60); // let the 10ms park deadline win the race
-  refuse.resolve();
-  await running;
-  await Promise.all(background);
-
-  expect(calls.sentence).toEqual(["Still on it."]); // parked hand-back, as before
+  expect(delivered).toEqual([]);                     // never parked
+  expect(calls.sentence).toEqual(["Ringing you now."]); // no hand-back line either
+  expect(rings).toEqual(["phone me now"]);           // dialed on the retry
   expect(calls.done).toBe(1);
-  expect(rings).toEqual(["phone me now"]);          // dialed on the normal path
-  expect(delivered).toEqual(["Ringing you now."]);  // and the ack was delivered
+  expect(calls.error).toEqual([]);
 });
 
 test("any error from an adopted stream surfaces instead of ending the turn cleanly", async () => {
