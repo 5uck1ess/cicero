@@ -3166,21 +3166,35 @@ export class CiceroDaemon {
       try {
         await filler.discardPrepared();
       } catch (error) {
-        log("warn", `filler bank invalidation after swap failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (!signal.aborted) {
+          log("warn", `filler bank invalidation after swap failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
         return;
       }
       if (signal.aborted) return;
       try {
         const n = await filler.prime();
+        if (signal.aborted) return;
         log("ok", `filler bank re-primed after swap (${n} clips)`);
       } catch (err: unknown) {
-        log("info", `filler re-prime skipped: ${err instanceof Error ? err.message : String(err)}`);
+        if (!signal.aborted) {
+          log("info", `filler re-prime skipped: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
       for (const v of laneVoices) {
         if (signal.aborted) return;
         try { await filler.primeVoice(v); }
-        catch (err: unknown) { log("info", `lane filler re-prime skipped (${v}): ${err instanceof Error ? err.message : String(err)}`); }
+        catch (err: unknown) {
+          if (!signal.aborted) {
+            log("info", `lane filler re-prime skipped (${v}): ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
       }
+    }, {
+      // FillerBank cannot abort a synthesis already inside generateAudio().
+      // Joining this best-effort cache refill would put sequential provider
+      // deadlines in front of authoritative provider teardown.
+      drainOnShutdown: false,
     });
   }
 
@@ -3397,7 +3411,6 @@ export class CiceroDaemon {
     };
 
     let shutdownCompleted = false;
-    let providerReleaseUnconfirmed = false;
     let providerReleaseFailure: unknown = null;
     try {
       // Quiesce every scheduler/timer synchronously, then drain the briefing's
@@ -3529,14 +3542,10 @@ export class CiceroDaemon {
           // Release was not confirmed. The slots keep the unreaped generations so
           // a later stop() can retry them, so do NOT clear the slot references
           // below — dropping them here would strand the child for good.
-          providerReleaseUnconfirmed = true;
           providerReleaseFailure = error;
           log("warn", `provider teardown was not confirmed: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-      const pidLease = this.pidLease;
-      this.pidLease = null;
-      await cleanup("PID file", () => pidLease?.release() ?? Promise.resolve());
       // Everything else is torn down, but a dictation listener whose release was
       // unconfirmed still owns a live recorder holding the microphone, or a
       // helper still typing. Logging that best-effort and reporting a clean stop
@@ -3552,19 +3561,34 @@ export class CiceroDaemon {
           { cause: dictationFailure },
         );
       }
-      // Round 9 (Codex): an unconfirmed provider release was logged and shutdown
-      // reported success. The slots are kept so a later stop() can retry the
-      // unreaped generation — but the signal path calls stop() exactly once and
-      // exits when it resolves, so that retry was never reached in production and
-      // the child outlived the only process holding its handle.
-      //
-      // So: do not claim a clean stop — but DO finish the bookkeeping below.
-      // Reaching `idle` with the slots retained is exactly what lets the next
-      // start() retry those handles and refuse by name while the child is still
-      // alive; staying in `stopping` instead would replace that with a generic
-      // "cannot start while stopping" and strand recovery. The failure is thrown
-      // after the state settles.
-      if (!providerReleaseFailure) log("ok", "Cicero stopped.");
+      if (providerReleaseFailure) {
+        // The marker is the cross-process ownership fence. Releasing it while a
+        // provider may still own the configured port lets another daemon adopt
+        // that server as unmanaged, after which this owner's retry can stop the
+        // replacement daemon's dependency. Stay stopping and keep the lease
+        // until the exact retained slot confirms release on a later stop().
+        //
+        // This deliberately reverses an earlier round, which reached `idle` and
+        // released the marker so the next start() could retry the retained
+        // handles and refuse by name. That reasoning does not survive the
+        // cross-process case: the retained handles live in THIS process, so once
+        // it exits they are gone and nothing refuses by name anyway — while the
+        // released marker has already let a second daemon adopt the child. The
+        // recovery it was protecting still exists, via stop() rather than
+        // start(): a later stop() retries the same slot and completes shutdown
+        // when it confirms, and a process that exits instead leaves a marker the
+        // next start verifies as stale and replaces. So this is not a latch.
+        throw new Error(
+          `provider teardown is unconfirmed, so shutdown is not complete: ${
+            providerReleaseFailure instanceof Error ? providerReleaseFailure.message : String(providerReleaseFailure)
+          }`,
+          { cause: providerReleaseFailure },
+        );
+      }
+      const pidLease = this.pidLease;
+      this.pidLease = null;
+      await cleanup("PID file", () => pidLease?.release() ?? Promise.resolve());
+      log("ok", "Cicero stopped.");
       shutdownCompleted = true;
     } finally {
       if (shutdownCompleted) {
@@ -3586,13 +3610,11 @@ export class CiceroDaemon {
         this.dashboard = null;
         this.webFillerBank = undefined;
         this.runtimeControl = null;
-        // Keep the slots when a provider would not confirm release: they hold the
-        // retry state for the unreaped generation. Clearing them would drop the
-        // only remaining reference and require a machine-level kill to recover.
-        if (!providerReleaseUnconfirmed) {
-          this.sttSlot = null;
-          this.ttsSlot = null;
-        }
+        // Reaching this block means provider release was confirmed. A failed
+        // release leaves shutdown incomplete and retains these exact owners for
+        // the next stop() attempt.
+        this.sttSlot = null;
+        this.ttsSlot = null;
         this.voiceSwapRunning = false;
         this.webVoiceTunnelOwner = null;
         this.webVoiceTunnel = null;
@@ -3604,16 +3626,6 @@ export class CiceroDaemon {
         this.lifecycle = "idle";
         this.stopPromise = null;
       }
-    }
-    // State has settled (see above): report the unconfirmed release now, so the
-    // caller exits non-zero instead of believing the daemon shut down cleanly.
-    if (providerReleaseFailure) {
-      throw new Error(
-        `provider teardown is unconfirmed, so shutdown is not complete: ${
-          providerReleaseFailure instanceof Error ? providerReleaseFailure.message : String(providerReleaseFailure)
-        }`,
-        { cause: providerReleaseFailure },
-      );
     }
   }
 }

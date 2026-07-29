@@ -202,7 +202,15 @@ export class ProviderSlot<T extends SwappableProvider> {
     try {
       try {
         try {
-          await this.cleanupRetired();
+          // stop() can quarantine this candidate while the swap is still
+          // draining an older generation. Do not make that cleanup wait on the
+          // candidate's own `started` barrier: this stack is what resolves it.
+          await this.cleanupRetired(owning);
+          // A shutdown that landed during the retired drain owns the candidate
+          // now. Refuse before start(), because managed adapters create their
+          // startup cancellation scope only inside start() and a pre-start
+          // cancel/stop cannot release a process launched afterwards.
+          if (this.closed) throw new Error("provider slot is shutting down");
           await candidate.start?.();
           await candidate.warmup?.();
         } finally {
@@ -380,7 +388,7 @@ export class ProviderSlot<T extends SwappableProvider> {
   }
 
   /** Do not accumulate unconfirmed owners across successive cutovers. */
-  private async cleanupRetired(): Promise<void> {
+  private async cleanupRetired(preparing?: PreparingCandidate<T>): Promise<void> {
     for (const generation of this.retired) {
       await within(
         this.beginGenerationCleanup(generation),
@@ -389,6 +397,9 @@ export class ProviderSlot<T extends SwappableProvider> {
       );
     }
     for (const [provider, startup] of this.quarantined) {
+      if (preparing && provider === preparing.provider && startup === preparing.started) {
+        continue;
+      }
       await this.stopQuarantined(provider, startup);
     }
   }

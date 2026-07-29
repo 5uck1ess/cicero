@@ -529,6 +529,39 @@ describe("turn-length generation pins", () => {
     expect(next.reaped).toBe(1);
     expect(next.managed).toBe(false);
   });
+
+  test("shutdown cannot let a pre-start candidate launch after retired cleanup", async () => {
+    const first = new FakeVoiceProvider("tts-first");
+    const owner = new ProviderSlot<TTSProvider>(first, { cleanupTimeoutMs: 25 });
+    const firstLease = owner.acquire();
+    const second = new FakeVoiceProvider("tts-second");
+
+    // Commit one cutover while its leased predecessor remains retired. Once the
+    // bounded drain reports that state, a later swap begins by retrying it.
+    const firstSwap = settle(owner.swap(second, () => {}));
+    while (owner.providerName !== "tts-second") await Bun.sleep(1);
+    expect((await firstSwap)?.message).toMatch(/old provider cleanup was not confirmed/);
+
+    const candidate = new FakeVoiceProvider("tts-candidate") as FakeVoiceProvider & {
+      cancelStartup(): void;
+    };
+    // Match the real managed adapters: cancellation before start() has created
+    // its controller is not sticky, and stop() before start publishes a process
+    // has nothing to reap.
+    candidate.cancelStartup = () => {};
+    const secondSwap = settle(owner.swap(candidate, () => {}));
+    await Bun.sleep(5);
+
+    const stopping = owner.stop();
+    // Let the retired cleanup finish only after shutdown has claimed the
+    // candidate. The swap must not then wait on its own startup barrier or
+    // proceed into start() after the slot is closed.
+    firstLease.release();
+    await stopping;
+    expect((await secondSwap)?.message).toMatch(/shutting down/);
+    expect(candidate.starts).toBe(0);
+    expect(candidate.managed).toBe(false);
+  });
 });
 
 // Round 3 (Codex): the cutover publishes the replacement synchronously, but
