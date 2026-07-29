@@ -94,6 +94,11 @@ export class OllamaProvider implements LLMProvider {
       name: "ollama",
       port: this.port,
       command: ["ollama", "serve"],
+      // `ollama serve` has no port flag: it binds OLLAMA_HOST, defaulting to
+      // 127.0.0.1:11434. Without this, a second Ollama role configured on its
+      // own port spawns a server on the FIRST role's port, which is already
+      // taken — the child exits and that role is silently unavailable.
+      env: { OLLAMA_HOST: `${this.host}:${this.port}` },
       healthUrl: `${httpBase(this.host, this.port)}/api/tags`,
       timeoutMs: 30000,
     });

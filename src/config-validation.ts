@@ -526,11 +526,17 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     };
     const section = (key: string): Record<string, unknown> | null =>
       isRecord(config[key]) ? config[key] as Record<string, unknown> : null;
-    /** A listener only occupies a port when it is actually enabled. */
+    /** An opt-in listener only occupies a port when it is switched on. */
     const enabledPort = (key: string, fallback: number): Endpoint | null => {
       const value = section(key);
       if (value?.enabled !== true) return null;
       return { host: hostOf(value.host), port: portOf(value.port) ?? fallback };
+    };
+    /** A default-ON listener holds its port unless explicitly switched off. */
+    const defaultOnPort = (key: string, fallback: number): Endpoint | null => {
+      const value = section(key);
+      if (value?.enabled === false) return null;
+      return { host: hostOf(value?.host), port: portOf(value?.port) ?? fallback };
     };
     // Round 5 (Codex): comparing the literal config values only sees the
     // collisions an operator spelled out. Every one of these roles binds a
@@ -607,6 +613,9 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     // peer binds nothing here, so its port is not in the way.
     if (classifierEndpoint.port !== undefined && isLocal(classifierEndpoint.host)) {
       const others: Array<[string, Endpoint | null]> = [
+        // The dashboard is default-ON and starts before any provider, so it is
+        // holding 8086 in every config that does not switch it off.
+        ["dashboard", defaultOnPort("dashboard", 8086)],
         ["web_voice", enabledPort("web_voice", 8090)],
         ["tone", enabledPort("tone", 8091)],
         ["turn", enabledPort("turn", 8087)],

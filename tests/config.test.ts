@@ -491,6 +491,44 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
   });
 
+  // Round 6 (Codex): the dashboard is default-ON and starts BEFORE any
+  // provider, so it holds 8086 in every config that does not switch it off —
+  // and it answers 404 on /health, so the classifier's probe does not adopt it
+  // either; llama-server then cannot bind and the role is silently unavailable.
+  test("the default-on dashboard holds its port against a classifier", () => {
+    expect(loadYaml([
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8086",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8086 is already used by dashboard/);
+
+    // Explicitly on, non-default port: still held.
+    expect(loadYaml([
+      "dashboard:",
+      "  enabled: true",
+      "  port: 8099",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8099",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8099 is already used by dashboard/);
+  });
+
+  test("a dashboard switched off frees its port", () => {
+    expect(() => loadYaml([
+      "dashboard:",
+      "  enabled: false",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8086",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
   // A listener that is off binds nothing, so it is not in the way.
   test("a disabled listener does not reserve its default port", () => {
     expect(() => loadYaml([
