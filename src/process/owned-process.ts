@@ -224,14 +224,16 @@ async function terminateWindowsTree(
 ): Promise<void> {
   // Enumerate the tree before killing the root. Once the root disappears,
   // Windows cannot rediscover arbitrary descendants without a Job Object.
-  const graceful = graceMs > 0 ? await runWindowsTaskkill(proc.pid, false) : "failed";
-  if (graceful === "targeted") {
+  const graceful = graceMs > 0
+    ? await runWindowsTaskkill(proc.pid, false)
+    : { outcome: "failed" as const, code: null };
+  if (graceful.outcome === "targeted") {
     const gracefulExit = await processExitWithin(proc.exited, graceMs);
     if (gracefulExit.kind === "exited") return;
   }
 
   const forced = await runWindowsTaskkill(proc.pid, true);
-  if (forced === "failed") {
+  if (forced.outcome === "failed") {
     try { proc.kill("SIGKILL"); } catch { /* already exited */ }
   }
   const finalExit = await processExitWithin(proc.exited, reapTimeoutMs);
@@ -245,8 +247,15 @@ async function terminateWindowsTree(
   if (finalExit.kind === "timeout") {
     throw new OwnedProcessReapError(proc.pid, "leader did not reap after forced tree termination");
   }
-  if (!windowsTreeAccountedFor(graceful, forced)) {
-    throw new OwnedProcessReapError(proc.pid, "Windows tree targeting failed; only the leader was reaped");
+  if (!windowsTreeAccountedFor(graceful.outcome, forced.outcome)) {
+    // Report what taskkill actually said. "Targeting failed" alone gives an
+    // operator holding a possibly-leaked child nothing to act on, and nothing to
+    // tell apart a missing PID from a refused kill.
+    throw new OwnedProcessReapError(
+      proc.pid,
+      "Windows tree targeting failed; only the leader was reaped "
+      + `(graceful taskkill ${describeTaskkill(graceful)}, forced ${describeTaskkill(forced)})`,
+    );
   }
 }
 
@@ -313,7 +322,18 @@ export type WindowsTaskkillOutcome = "targeted" | "absent" | "failed";
 /** taskkill's exit code when no process carries the requested PID. */
 const WINDOWS_TASKKILL_NOT_FOUND = 128;
 
-async function runWindowsTaskkill(pid: number, force: boolean): Promise<WindowsTaskkillOutcome> {
+/** The outcome plus the exit code it was derived from, for diagnostics. */
+export interface WindowsTaskkillResult {
+  outcome: WindowsTaskkillOutcome;
+  /** taskkill's exit code, or null when it could not be run at all. */
+  code: number | null;
+}
+
+function describeTaskkill(result: WindowsTaskkillResult): string {
+  return result.code === null ? `${result.outcome} (not run)` : `${result.outcome} (exit ${result.code})`;
+}
+
+async function runWindowsTaskkill(pid: number, force: boolean): Promise<WindowsTaskkillResult> {
   const args = ["taskkill", "/PID", String(pid), "/T", ...(force ? ["/F"] : [])];
   try {
     const helper = Bun.spawn(args, {
@@ -325,13 +345,13 @@ async function runWindowsTaskkill(pid: number, force: boolean): Promise<WindowsT
       windowsHide: true,
     });
     const code = await helper.exited;
-    if (code === 0) return "targeted";
+    if (code === 0) return { outcome: "targeted", code };
     // Matched on the exit code rather than the message: taskkill's "not found"
     // text is localized, so parsing stderr would silently stop recognizing it
     // on a non-English Windows.
-    return code === WINDOWS_TASKKILL_NOT_FOUND ? "absent" : "failed";
+    return { outcome: code === WINDOWS_TASKKILL_NOT_FOUND ? "absent" : "failed", code };
   } catch {
-    return "failed";
+    return { outcome: "failed", code: null };
   }
 }
 
