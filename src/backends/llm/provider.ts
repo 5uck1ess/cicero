@@ -8,6 +8,22 @@ export const LLM_DEFAULT_MODEL = {
   "llama-cpp": "local",
 } as const;
 
+/**
+ * Port a local LLM backend binds when config names none. Validation resolves
+ * endpoints through the same map the providers do, so a collision cannot hide
+ * behind an omitted port. OpenAI-compatible backends are deliberately absent:
+ * they address a base URL, not a local seat.
+ */
+export const LLM_DEFAULT_PORTS: Readonly<Record<string, number>> = Object.freeze({
+  "mlx-lm": 8081,
+  ollama: 11434,
+  "llama-cpp": 8080, // llama-server default
+});
+
+export function llmDefaultPort(backend: string | undefined): number | undefined {
+  return backend ? LLM_DEFAULT_PORTS[backend] : undefined;
+}
+
 /** The one shared normalization: trimmed config value, or the backend default. */
 export function normalizedLlmModel(model: string | undefined, fallback: string): string {
   return model?.trim() || fallback;

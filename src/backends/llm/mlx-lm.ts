@@ -1,3 +1,4 @@
+import { LLM_DEFAULT_PORTS } from "./provider";
 import type { LLMProvider, LLMProviderConfig, ChatMessage, LLMCompletionOpts } from "./provider";
 import { startManagedServer, stopManagedServer, type ManagedProcess } from "../managed-server";
 import { httpBase, isLocalHost } from "../net";
@@ -26,7 +27,7 @@ export class MlxLmProvider implements LLMProvider {
 
   constructor(config: LLMProviderConfig) {
     this.host = config.host;
-    this.port = config.port ?? 8081;
+    this.port = config.port ?? LLM_DEFAULT_PORTS["mlx-lm"]!;
     this.model = config.model ?? "mlx-community/Qwen3.5-0.8B-MLX-4bit";
     this.extra = config.extra;
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.llm);

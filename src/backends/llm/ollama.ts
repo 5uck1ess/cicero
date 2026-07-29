@@ -1,4 +1,4 @@
-import { LLM_DEFAULT_MODEL, normalizedLlmModel } from "./provider";
+import { LLM_DEFAULT_MODEL, normalizedLlmModel, LLM_DEFAULT_PORTS } from "./provider";
 import type { LLMProvider, LLMProviderConfig, ChatMessage, LLMCompletionOpts } from "./provider";
 import { startManagedServer, stopManagedServer, type ManagedProcess } from "../managed-server";
 import { httpBase, isLocalHost } from "../net";
@@ -21,7 +21,7 @@ export class OllamaProvider implements LLMProvider {
 
   constructor(config: LLMProviderConfig) {
     this.host = config.host;
-    this.port = config.port ?? 11434;
+    this.port = config.port ?? LLM_DEFAULT_PORTS.ollama!;
     // Doctor applies the same normalization before checking /api/tags. Keep
     // launch/request identity exact so diagnostics cannot verify another model.
     this.model = normalizedLlmModel(config.model, LLM_DEFAULT_MODEL.ollama);

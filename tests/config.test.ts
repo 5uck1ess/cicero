@@ -376,7 +376,7 @@ describe("Config — fail-fast validation", () => {
       "  port: 8080",
       "  model: small-classifier-model",
       "",
-    ].join("\n"))).toThrow(/classifier resolves to the same endpoint as llm but names a different model/);
+    ].join("\n"))).toThrow(/classifier resolves to the same endpoint as llm \(127\.0\.0\.1:8080\) but names a different model/);
   });
 
   test("deliberately sharing one server for both roles stays allowed", () => {
@@ -393,6 +393,21 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))()).not.toThrow();
   });
 
+  // The refusal tells the operator to drop classifier.model; that has to be a
+  // config this check then accepts.
+  test("the remediation the error names is itself accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
   test("a classifier port already used by another local listener is refused", () => {
     expect(loadYaml([
       "web_voice:",
@@ -405,7 +420,7 @@ describe("Config — fail-fast validation", () => {
       "  port: 8090",
       "  model: small-classifier-model",
       "",
-    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice\.port/);
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
   });
 
   test("a remote classifier is not compared against local ports", () => {
@@ -421,6 +436,108 @@ describe("Config — fail-fast validation", () => {
       "  model: small-classifier-model",
       "",
     ].join("\n"))()).not.toThrow();
+  });
+
+  // Round 5 (Codex): every one of these roles binds a DEFAULT when its port —
+  // or its whole section — is omitted, and validation was comparing only the
+  // literal config values. So the collisions it caught were exactly the ones an
+  // operator had already written down, and the silent ones went through.
+  test("an omitted llm section still occupies the reply model's default seat", () => {
+    // No `llm:` at all — RuntimeConfig synthesizes mlx-lm on servers.router.port.
+    expect(loadYaml([
+      "classifier:",
+      "  backend: mlx-lm",
+      "  port: 8081",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm \(127\.0\.0\.1:8081\)/);
+  });
+
+  test("an omitted port still occupies its backend's default seat", () => {
+    // Neither role names a port; both llama-cpp providers bind 8080.
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm \(127\.0\.0\.1:8080\)/);
+
+    // ...and the mixed case: one spelled out, one defaulted.
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm/);
+  });
+
+  test("an enabled listener with no port still holds its default port", () => {
+    expect(loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8090",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
+  });
+
+  // A listener that is off binds nothing, so it is not in the way.
+  test("a disabled listener does not reserve its default port", () => {
+    expect(() => loadYaml([
+      "tone:",
+      "  enabled: false",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8091",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Round 5 (Codex): a REMOTE peer starts no local process, so its port is not
+  // occupied on this box — refusing that config blocked a legitimate setup.
+  test("a local classifier may reuse the port number of a remote llm", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  host: 192.0.2.10",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  host: 127.0.0.1",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // But the same REMOTE seat shared by both roles is still one server with one
+  // model loaded, wherever it runs.
+  test("two roles sharing one remote server with different models is refused", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  host: 192.0.2.10",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  host: 192.0.2.10",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm \(192\.0\.2\.10:8080\)/);
   });
 
   test("rejects unknown built-in keys with actionable suggestions", () => {
