@@ -175,6 +175,34 @@ llm:
 #   brain: { backend: codex }                              # Codex CLI
 #   brain: { backend: ollama, ollama_model: qwen3.5:4b }   # fully local
 #   brain: { backend: openai-compatible, base_url: http://127.0.0.1:8080/v1, model: your-model, timeout_ms: 120000 }
+# "Was that addressed to me?" -- an LLM veto over captured speech, for rooms with
+# other people talking or a podcast playing. Needs the `classifier` model below;
+# enabled without one, every utterance is accepted as before and doctor says so.
+# It can only ever DECLINE an utterance the listener would have taken, never
+# cause one to be taken, so every failure path lands on today's behavior.
+# intent_judge:
+#   enabled: true
+#   hot_window_ms: 15000   # follow-ups this soon after Cicero speaks skip the judge
+#   min_confidence: 0.6    # an unsure "not for me" does not decline the turn
+#   context_turns: 4
+#   timeout_ms: 1500
+
+# Optional classification-only model, held apart from the reply model above.
+# Per-utterance decisions (see docs/classifier.md) need a small warm model; the
+# reply model is far too expensive to run on every utterance. Same shape as an
+# `llm:` section. There is no default and no fallback: leave this out and the
+# features that need it stay off and log why.
+# It needs its OWN port: a local server that is already healthy on a port is
+# reused as-is, so pointing this at the reply model's port (or web_voice's, or
+# any other listener above) silently runs classification on whatever is already
+# there — or fails to bind. Cicero refuses that configuration rather than
+# pretending the model loaded.
+# classifier:
+#   backend: llama-cpp
+#   host: 127.0.0.1
+#   port: 8093
+#   model: your-small-model
+
 brain:
   backend: acp
   binary: hermes                # install/auth this ACP agent, or replace it; see docs/brains.md

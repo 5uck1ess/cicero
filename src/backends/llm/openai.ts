@@ -75,6 +75,14 @@ export const OPENAI_COMPATIBLE_BACKENDS = Object.keys(PRESETS);
  * `baseUrl` for anything else. No local server is launched; auth is a Bearer key
  * from `config.apiKey` or the preset's env var.
  */
+/**
+ * What an OpenAI-compatible role requests when the operator names no model.
+ * Exported because config validation has to reason about it: this is a HOSTED
+ * model name, and pointing a role with no model at a server that serves
+ * something else means every request fails.
+ */
+export const OPENAI_DEFAULT_MODEL = "gpt-4o-mini";
+
 export class OpenAiProvider implements LLMProvider {
   readonly name: string;
   private baseUrl: string;
@@ -94,7 +102,7 @@ export class OpenAiProvider implements LLMProvider {
     this.baseUrl = target.baseUrl;
     this.apiKeyEnv = target.apiKeyEnv;
     this.apiKey = config.apiKey ?? process.env[this.apiKeyEnv] ?? "";
-    this.model = config.model ?? "gpt-4o-mini";
+    this.model = config.model ?? OPENAI_DEFAULT_MODEL;
     this.extraHeaders = config.extraHeaders ?? {};
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.llm);
     let host: string | undefined;

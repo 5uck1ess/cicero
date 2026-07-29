@@ -3,8 +3,11 @@ import { join, dirname } from "path";
 import { homedir } from "node:os";
 import type { RuntimeConfig } from "./config";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
+import { registerKnownSecrets, clearKnownSecrets } from "./redact";
 import { log, logStep, logError } from "./logger";
 import { createListener, createConversationalListener, createDictationListener } from "./listener";
+import { createIntentJudge } from "./listener/intent-judge";
+import type { IntentJudge } from "./listener/intent-judge";
 import type { DictationListener } from "./listener/dictation";
 import { createRouter } from "./router";
 import { createBrain, summarizerClassifier } from "./brain";
@@ -518,6 +521,7 @@ export class CiceroDaemon {
     };
     addUrlCredentials(this.config.brain?.base_url);
     addUrlCredentials(this.config.llmBackend?.baseUrl);
+    addUrlCredentials(this.config.classifierBackend?.baseUrl);
 
     // Lane agents receive their configured env maps verbatim (brain.lanes.*.env
     // and each fallback's env) — an ANTHROPIC_API_KEY placed there reaches the
@@ -536,6 +540,14 @@ export class CiceroDaemon {
       addEnv(resolveOpenAiTarget(llm).apiKeyEnv);
     }
     addHeaderValues(llm?.extraHeaders);
+    // The classifier takes the same credential fields as the reply model, so it
+    // needs the same inventory — a key here is no less a key.
+    const classifier = this.config.classifierBackend;
+    add(classifier?.apiKey);
+    if (classifier && OPENAI_COMPATIBLE_BACKENDS.includes(classifier.backend ?? "")) {
+      addEnv(resolveOpenAiTarget(classifier).apiKeyEnv);
+    }
+    addHeaderValues(classifier?.extraHeaders);
     add(this.config.ttsBackend?.apiKey);
     add(this.config.ttsFallbackBackend?.apiKey);
     // ElevenLabs resolves its key from ELEVENLABS_API_KEY when no inline key is
@@ -604,6 +616,17 @@ export class CiceroDaemon {
     return await this.providers.tts.generateAudio(speakable(spoken), laneVoice);
   }
   private pendingRecovery: { spoken: string[] } | null = null;
+  /** The addressed-to-me veto, when configured. Shared by the host mic and the browser. */
+  private intentJudge: IntentJudge | null = null;
+  /**
+   * Rolling context for the browser's turns, kept apart from the host
+   * listener's: the two are different rooms, and a web deployment is usually
+   * headless, where the listener's rings are never filled at all. Bounded --
+   * this is captured room audio and must not accumulate.
+   */
+  private readonly webRecentUtterances: string[] = [];
+  private readonly webRecentAssistantSpeech: string[] = [];
+
   private activeLocalTurn: AbortController | null = null;
   /** Every local mic/dashboard command, including superseded turns winding down. */
   private localTurnTasks = new Set<Promise<void>>();
@@ -655,6 +678,10 @@ export class CiceroDaemon {
     this.lifecycle = "starting";
     this.stopRequested = false;
     this.lifecycleAbort = new AbortController();
+    // Before anything can log. A remote endpoint routinely quotes the key it
+    // just rejected, and a configured key is often an ordinary-looking string
+    // no shape rule can recognise — the configured VALUE is what identifies it.
+    registerKnownSecrets(this.snapshotKnownSecrets());
     const starting = this.startWithRollback();
     this.startPromise = starting;
     try {
@@ -1050,11 +1077,45 @@ export class CiceroDaemon {
           .chatCompletion([{ role: "user" as const, content: "hi" }], { max_tokens: 1, signal })
           .then(() => { if (!signal.aborted) log("ok", "LLM model warmed"); }));
       }
+      // The classifier role promises a model that is already warm, but startup
+      // only ever probed its health — and a health probe does not load a model.
+      // On ollama it is GET /api/tags, which lists what is AVAILABLE; the model
+      // loads on the first generate/chat request. On an adopted llama-server the
+      // probe says nothing about which model is resident either. So warm it the
+      // same way as the reply model: with a real completion, in the background,
+      // best-effort. A classifier that cannot answer this is not fatal — every
+      // caller of it already falls back.
+      const classifier = this.providers.classifier;
+      if (classifier && !this.startupPolicies.classifier?.skipReason) {
+        this.runBackground("classifier warmup", (signal) => classifier
+          .chatCompletion([{ role: "user" as const, content: "hi" }], { max_tokens: 1, signal })
+          .then(() => { if (!signal.aborted) log("ok", "Classifier model warmed"); }));
+      }
     }
 
     // Step 3b: Web voice server (browser audio client). For a headless box with no
     // mic/speakers, the browser is the audio I/O. Off by default. Reuses the
     // STT → brain → TTS pipeline at the provider level (see processWebTurn).
+    // Built BEFORE the web server binds. The browser accepts turns the moment
+    // the port opens, and a judge constructed later leaves every turn in that
+    // window unjudged -- which is indistinguishable, to an operator, from the
+    // feature not working.
+    const judgeCfg = this.config.intentJudge;
+    if (judgeCfg.enabled) {
+      const judge = createIntentJudge(this.providers.classifier, {
+        hotWindowMs: judgeCfg.hotWindowMs,
+        minConfidence: judgeCfg.minConfidence,
+        contextTurns: judgeCfg.contextTurns,
+        timeoutMs: judgeCfg.timeoutMs,
+      });
+      if (judge) {
+        this.intentJudge = judge;
+        log("info", "Intent judge on: utterances are checked against the classifier before they become commands");
+      } else {
+        // Never silently borrow the reply model for a per-utterance decision.
+        log("warn", "intent_judge.enabled is set but no `classifier` backend is configured — every utterance will be accepted as before; see docs/intent-judge.md");
+      }
+    }
     const wv = this.config.web_voice;
     if (wv?.enabled) {
       const webHost = wv.host ?? "0.0.0.0";
@@ -1152,7 +1213,13 @@ export class CiceroDaemon {
       let pendingDetail: string | null = null;
       let lastSpokenReply: string | null = null;
       const lastReply = {
-        store: (spokenReply: string) => { lastSpokenReply = spokenReply; },
+        store: (spokenReply: string) => {
+          lastSpokenReply = spokenReply;
+          // The browser heard this, so the next verdict is judged against it --
+          // a reply to Cicero's own question is what a judge most easily gets
+          // wrong, and this is what opens the hot window on the web path.
+          this.noteWebSpoken(spokenReply);
+        },
         pending: () => lastSpokenReply,
       };
       const tldrCfg = wv.tldr;
@@ -1176,7 +1243,14 @@ export class CiceroDaemon {
       // later should be a fresh question, not a séance.
       let interruptedTail: { text: string; at: number } | null = null;
       const recover = {
-        store: (spokenPrefix: string) => { interruptedTail = { text: spokenPrefix, at: Date.now() }; },
+        store: (spokenPrefix: string) => {
+          interruptedTail = { text: spokenPrefix, at: Date.now() };
+          // The room heard this much before cutting in, so the next verdict is
+          // judged against it. Without it, "yes" answering an interrupted
+          // "Should I deploy staging?" is judged with no question in view and
+          // can be declined as undirected.
+          this.noteWebSpoken(spokenPrefix);
+        },
         pending: () => {
           if (!interruptedTail || Date.now() - interruptedTail.at > 5 * 60 * 1000) return null;
           const t = interruptedTail.text;
@@ -1339,7 +1413,19 @@ export class CiceroDaemon {
             "Set web_voice.speculative.allow_tool_brains: true to accept that.",
         );
       }
-      const speculator = specCfg?.enabled && this.config.turn.enabled && this.brain.sendStream && specSideEffectsAllowed
+      // Speculation starts the brain on the probe TAIL -- before a final
+      // transcript exists, so before there is anything to judge. A confident
+      // veto therefore lands after the brain has already recorded the exchange
+      // and, where tool brains are permitted, possibly acted; aborting the
+      // stream cannot reverse either. Stopping ambient speech from doing
+      // exactly that is the whole point of the veto, so the veto wins and
+      // speculation stands down. Read from CONFIG rather than the constructed
+      // judge because the web server is built before the judge is.
+      const judgeWillRun = this.config.intentJudge.enabled && this.config.classifierBackend !== null;
+      if (judgeWillRun && specCfg?.enabled) {
+        log("info", "Speculation off while the intent judge is on: speculation would reach the brain before the veto could decline the turn");
+      }
+      const speculator = specCfg?.enabled && !judgeWillRun && this.config.turn.enabled && this.brain.sendStream && specSideEffectsAllowed
         ? makeSpeculator({
             stt: this.providers.stt,
             brain: this.brain,
@@ -1387,7 +1473,11 @@ export class CiceroDaemon {
         // switchboard has an employee pinned, that lane's TTS voice override
         // applies (resolved per sentence, so the pin ack already sounds like
         // the employee). Notifications stay in Cicero's own voice.
-        onTurn: (wav, options) => processWebTurn(wav, {
+        onTurn: async (wav, options) => {
+          const turn = await processWebTurn(wav, {
+          // Same veto as the streaming path. Adding the option without wiring
+          // it here is what left this entry point open the first time round.
+          judge: this.webIntentGate(),
           stt: this.providers.stt,
           brain: this.brain,
           tts: laneTts,
@@ -1397,7 +1487,14 @@ export class CiceroDaemon {
           signal: options?.signal,
           trackBackground: options?.trackBackground,
           operationalContext: (signal) => this.operationalContext(signal),
-        }),
+          });
+          // Context for the next verdict -- but only what the client could
+          // actually hear. A reply of "**" is non-empty text that synthesizes
+          // to an empty clip, and recording it would tell the judge Cicero said
+          // something the room never heard.
+          if (turn.audio.byteLength > 0) this.noteWebSpoken(turn.reply);
+          return turn;
+        },
         // Semantic end-of-turn probes (see probe.ts): the client asks mid-pause
         // whether the speaker sounds done. this.turnDetector is read lazily —
         // it's created later in startup; probes before then return null and the
@@ -1425,7 +1522,7 @@ export class CiceroDaemon {
         // than a beat of silence).
         onStreamTurn: async (wav, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), tone, signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTurn(wav, deps, sink, options.spec);
               return;
@@ -1763,6 +1860,13 @@ export class CiceroDaemon {
     // Initialize conversational listener (activated via "voice" command)
     this.conversational = createConversationalListener(this.config, this.providers.stt, audioRecorder, audioPlayer, this.turnDetector ?? undefined, this.aecHub ?? undefined);
     this.conversational.onCommand((text) => this.dispatchCommand(text));
+    // "Was that addressed to me?" veto, off unless switched on AND a classifier
+    // is configured. It can only ever decline an utterance the listener would
+    // have taken, never cause one to be taken -- so a missing or broken judge
+    // leaves behavior exactly as it is today.
+    // Constructed before the web server bound; hand it to the host listener now
+    // that the listener exists.
+    if (this.intentJudge) this.conversational.setIntentJudge(this.intentJudge);
     // Lifecycle cleanup belongs to voice-mode deactivation itself, not to the
     // optional clap feature. This runs for dashboard/hotkey/spoken shutdown and
     // recorder failures alike, and does not restart clap during daemon shutdown.
@@ -1778,6 +1882,11 @@ export class CiceroDaemon {
       });
       // A bare "stop" interrupts without a follow-up command, so discard the
       // recovery snapshot — otherwise it would wrongly attach to the next turn.
+      // A vetoed barge-in produces no replacement turn, so the snapshot taken at
+      // the interrupt has nothing to attach to — same reasoning as a bare "stop".
+      this.conversational.onBargeInDiscarded(() => {
+        this.pendingRecovery = null;
+      });
       this.conversational.onStopCommand(() => {
         this.pendingRecovery = null;
         this.activeLocalTurn?.abort("stop command");
@@ -1908,9 +2017,60 @@ export class CiceroDaemon {
     }
   }
 
+  /** Bounded ring push. Mirrors the listener's own limits on captured speech. */
+  private static pushWebContext(ring: string[], line: string): void {
+    const bounded = line.length <= 300 ? line : line.slice(0, 300);
+    ring.push(bounded);
+    if (ring.length > 6) ring.splice(0, ring.length - 6);
+  }
+
+  /** What the browser just heard Cicero say — context for the next verdict. */
+  private noteWebSpoken(text: string): void {
+    const spoken = text.trim();
+    if (!spoken) return;
+    CiceroDaemon.pushWebContext(this.webRecentAssistantSpeech, spoken);
+  }
+
+  /**
+   * The browser's half of the addressed-to-me veto. Undefined when no judge is
+   * configured, which leaves every transcript dispatched exactly as before.
+   */
+  private webIntentGate(): ((transcript: string, signal?: AbortSignal) => Promise<boolean>) | undefined {
+    const judge = this.intentJudge;
+    if (!judge) return undefined;
+    return async (transcript: string, signal?: AbortSignal): Promise<boolean> => {
+      const decision = await judge.decide({
+        utterance: transcript,
+        recentUtterances: this.webRecentUtterances,
+        recentAssistantSpeech: this.webRecentAssistantSpeech,
+        // No hot window on this path, deliberately. It is defined as "moments
+        // after Cicero FINISHED speaking", and the server cannot observe that:
+        // the browser keeps playing queued audio long after the turn is marked
+        // done, and a replacement turn on the same socket closes the previous
+        // one early. Every attempt to track it opened the window at the wrong
+        // instant, which SKIPS the classifier -- the one failure this feature
+        // cannot afford. So the browser always asks. The judge still gets
+        // recentAssistantSpeech, which is what actually lets it recognise "yes"
+        // as an answer to Cicero's own question.
+        msSinceAssistantSpoke: null,
+      }, signal);
+      // Room speech is context whether or not it was for us.
+      CiceroDaemon.pushWebContext(this.webRecentUtterances, transcript);
+      if (decision.accept) return true;
+      log("info", `🙉 Web voice: not addressed to me (${decision.confidence.toFixed(2)}), ignoring the turn`);
+      return false;
+    };
+  }
+
   private handleLocalBargeIn(): void {
     if (!this.streamingSpeaker) return;
-    this.pendingRecovery = { spoken: this.streamingSpeaker.getSnapshot().spoken };
+    const spoken = this.streamingSpeaker.getSnapshot().spoken;
+    this.pendingRecovery = { spoken };
+    // The room heard this much of the reply before it was cut. Hand it to the
+    // listener so the next verdict is judged against what Cicero was actually
+    // mid-way through saying; the live speaking-text provider goes empty the
+    // moment the speaker is interrupted below.
+    this.conversational?.noteInterrupted(spoken.join(" "));
     this.activeLocalTurn?.abort("barge-in");
     this.streamingSpeaker.interrupt();
   }
@@ -2109,7 +2269,12 @@ export class CiceroDaemon {
             } else {
               await this.speaker.speak(textToSpeak);
             }
-            this.conversational?.noteSpoken(textToSpeak);
+            // Streaming and non-streaming both land here; noted once for both.
+            // Not when the turn was interrupted, though: barge-in aborts the
+            // signal and stops the speaker mid-sentence, so recording it as
+            // fully spoken opens a hot window for speech the room never heard
+            // the end of -- and the hot window SKIPS the judge.
+            if (!signal.aborted) this.conversational?.noteSpoken(textToSpeak);
           }
         }
       }
@@ -2120,7 +2285,7 @@ export class CiceroDaemon {
         this.conversational.playSound("error");
       }
       if (this.config.ttsEnabled) {
-        await this.speaker.speak("That command failed. Check the log for details.");
+        await this.speakAndNote("That command failed. Check the log for details.");
       }
     }
   }
@@ -2165,14 +2330,14 @@ export class CiceroDaemon {
         const refusal =
           "Computer use is connected to a cloud model. Enable compute dot allow cloud in the config if you want file and command observations sent there.";
         log("warn", "Computer-use request refused: configured LLM is public/cloud and compute.allow_cloud is false");
-        if (this.config.ttsEnabled) await this.speaker.speak(refusal);
+        if (this.config.ttsEnabled) await this.speakAndNote(refusal);
         return;
       }
       const result = await runVoiceAction(goal, {
         llm: this.providers.llm,
         speak: async (text) => {
           signal.throwIfAborted();
-          await this.speaker.speak(text);
+          await this.speakAndNote(text);
           signal.throwIfAborted();
         },
         listenOnce: async () => {
@@ -2201,14 +2366,14 @@ export class CiceroDaemon {
       }
       if (this.config.ttsEnabled && result.summary) {
         log("speak", "Speaking action result...");
-        await this.speaker.speak(result.summary);
+        await this.speakAndNote(result.summary);
       }
     } catch (err: unknown) {
       if (signal.aborted) return;
       logError("Computer-use failed", err instanceof Error ? err : new Error(String(err)));
       if (this.conversational?.isActive()) this.conversational.playSound("error");
       if (this.config.ttsEnabled) {
-        await this.speaker.speak("That action failed. Check the log for details.");
+        await this.speakAndNote("That action failed. Check the log for details.");
       }
     }
   }
@@ -2266,13 +2431,13 @@ export class CiceroDaemon {
       const tabName = result.params.tab.replace(/\s*\btab\b\s*$/i, "").trim();
       if (isVagueTabName(tabName)) {
         if (this.config.ttsEnabled) {
-          await this.speaker.speak("Which tab? Say the tab name, like 'switch to sales'.");
+          await this.speakAndNote("Which tab? Say the tab name, like 'switch to sales'.");
         }
         return true;
       }
       this.brain.switchTab(tabName);
       if (this.config.ttsEnabled) {
-        await this.speaker.speak(`Switched brain to ${tabName} tab.`);
+        await this.speakAndNote(`Switched brain to ${tabName} tab.`);
       }
       return true;
     }
@@ -2283,7 +2448,7 @@ export class CiceroDaemon {
       const tabName = (result.params.tab || "").replace(/\s*\btab\b\s*$/i, "").trim();
       if (!tabName || isVagueTabName(tabName)) {
         if (this.config.ttsEnabled) {
-          await this.speaker.speak("Which tab? Say the tab name.");
+          await this.speakAndNote("Which tab? Say the tab name.");
         }
         return true;
       }
@@ -2298,7 +2463,7 @@ export class CiceroDaemon {
         // Simple switch
         this.brain.switchTab(tabName);
         if (this.config.ttsEnabled) {
-          await this.speaker.speak(`Switched brain to ${tabName} tab.`);
+          await this.speakAndNote(`Switched brain to ${tabName} tab.`);
         }
       }
       return true;
@@ -2611,6 +2776,19 @@ export class CiceroDaemon {
     dashBus.setVoiceActive(conversational.isActive());
   }
 
+  /**
+   * Speak, and tell the listener what was said.
+   *
+   * Everything Cicero says is context for "was that addressed to me?" and opens
+   * the intent judge's hot window. Call sites that spoke directly through
+   * `this.speaker` were invisible to both, so the next utterance could be judged
+   * without the speech it was answering.
+   */
+  private async speakAndNote(text: string): Promise<void> {
+    await this.speaker.speak(text);
+    this.conversational?.noteSpoken(text);
+  }
+
   async stop(): Promise<void> {
     // Revoke voice ownership before the first await. In particular, AEC stop is
     // invoked synchronously through beginVoiceInputHandoff so a pending helper
@@ -2880,6 +3058,9 @@ export class CiceroDaemon {
       shutdownCompleted = true;
     } finally {
       if (shutdownCompleted) {
+        // Process-wide state: a daemon that stopped must not leave its
+        // credentials registered for whatever runs next in this process.
+        clearKnownSecrets();
         this.briefingScheduler = null;
         this.briefingStatusStore = null;
         this.promptScheduler = null;

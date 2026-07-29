@@ -8,6 +8,34 @@ export const LLM_DEFAULT_MODEL = {
   "llama-cpp": "local",
 } as const;
 
+/**
+ * Backends whose server SELECTS a model per request rather than serving the one
+ * it loaded. It matters when two roles share a server: on llama-cpp the model
+ * field is informational, so leaving a second role's model unset genuinely
+ * shares whatever is loaded — while on Ollama an unset model is not "whatever is
+ * loaded", it is this backend's own default above, i.e. a DIFFERENT model the
+ * shared server may not have pulled at all.
+ */
+export function backendRoutesByModel(backend: string | undefined): boolean {
+  return backend === "ollama";
+}
+
+/**
+ * Port a local LLM backend binds when config names none. Validation resolves
+ * endpoints through the same map the providers do, so a collision cannot hide
+ * behind an omitted port. OpenAI-compatible backends are deliberately absent:
+ * they address a base URL, not a local seat.
+ */
+export const LLM_DEFAULT_PORTS: Readonly<Record<string, number>> = Object.freeze({
+  "mlx-lm": 8081,
+  ollama: 11434,
+  "llama-cpp": 8080, // llama-server default
+});
+
+export function llmDefaultPort(backend: string | undefined): number | undefined {
+  return backend ? LLM_DEFAULT_PORTS[backend] : undefined;
+}
+
 /** The one shared normalization: trimmed config value, or the backend default. */
 export function normalizedLlmModel(model: string | undefined, fallback: string): string {
   return model?.trim() || fallback;

@@ -29,6 +29,10 @@ export interface CiceroConfig {
   tts?: TTSBackendConfig;
   tts_fallback?: TTSBackendConfig; // hot-standby engine used when the primary fails a generation
   llm?: LLMBackendConfig;
+  // Optional small model held apart from the reply model, for per-utterance
+  // classification (see docs/classifier.md). Same shape as `llm`. There is no
+  // default and no fallback to `llm`: features that need it stay off and say so.
+  classifier?: LLMBackendConfig;
   compute?: {
     /** Permit computer-use goals, file observations, and command output to reach a public/cloud LLM. */
     allow_cloud?: boolean;
@@ -62,6 +66,18 @@ export interface CiceroConfig {
   vad?: VadConfig; // streaming voice-activity end-of-turn (default on)
   earcons?: boolean; // play activate/ready/thinking/success/error beeps (default true)
   tts_coalesce?: TTSCoalesceConfig; // merge already-available sentences into fewer TTS calls (default off)
+  // "Was that addressed to me?" veto over captured speech. Needs a configured
+  // `classifier` model. Off by default; see docs/intent-judge.md.
+  intent_judge?: IntentJudgeConfig;
+}
+
+/** LLM veto on whether captured speech was addressed to Cicero at all. */
+export interface IntentJudgeConfig {
+  enabled?: boolean;          // default false
+  hot_window_ms?: number;     // follow-ups this soon after Cicero speaks skip the judge (default 15000)
+  min_confidence?: number;    // an undirected verdict below this does not decline the turn (default 0.6)
+  context_turns?: number;     // earlier utterances and assistant lines shown (default 4)
+  timeout_ms?: number;        // absolute deadline for one verdict (default 1500)
 }
 
 /**

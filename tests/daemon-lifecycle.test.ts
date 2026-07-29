@@ -1083,4 +1083,76 @@ describe("CiceroDaemon lifecycle", () => {
       throw new Error(`optional warmup test failed: ${(error as Error).message}`, { cause: error });
     }
   });
+
+  // The classifier role exists to answer fast, and its docs promise a model that
+  // is already warm. Startup only ever probed its health — which does not load a
+  // model on any backend: ollama's /api/tags lists what is available, and an
+  // adopted llama-server says nothing about which model is resident. The first
+  // real classification would therefore pay the cold load the role exists to
+  // avoid, so a configured classifier gets a real completion at startup.
+  test("a configured classifier is warmed with a completion, not just health-probed", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-classifier-warmup-test-"));
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.dashboard = { enabled: false };
+    config.raw.classifier = { backend: "company-llm-plugin", port: 8093, model: "small-classifier" };
+    // Headless has no local mic or speakers, so a client has to be reachable.
+    config.raw.web_voice = {
+      enabled: true,
+      port: 0,
+      token: "test-token-that-is-long-enough",
+      tls: { enabled: false },
+    };
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+    };
+    const completions: string[] = [];
+    const health: string[] = [];
+    const daemon = new CiceroDaemon(config, {
+      pidFile: join(home, "cicero.pid"),
+      webVoiceServerStarter: () => ({
+        scheme: "http",
+        port: 18_444,
+        clientCount: () => 0,
+        notify: () => Promise.resolve(null),
+        stop: () => Promise.resolve(),
+      }),
+      providerFactory: () => ({
+        stt: {
+          name: "company-stt-plugin",
+          transcribe: () => Promise.resolve(null),
+          health: () => Promise.resolve(true),
+        },
+        tts: {
+          name: "company-tts-plugin",
+          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+          health: () => Promise.resolve(true),
+        },
+        llm: {
+          name: "company-llm-plugin",
+          chatCompletion: () => { completions.push("llm"); return Promise.resolve("ok"); },
+          health: () => Promise.resolve(true),
+        },
+        classifier: {
+          name: "company-classifier-plugin",
+          chatCompletion: () => { completions.push("classifier"); return Promise.resolve("ok"); },
+          health: () => { health.push("classifier"); return Promise.resolve(true); },
+        },
+      }),
+    });
+
+    try {
+      await daemon.start();
+      await Bun.sleep(20);
+      expect(health).toContain("classifier");
+      expect(completions).toContain("classifier");
+    } finally {
+      await daemon.stop().catch(() => {});
+    }
+  });
 });
