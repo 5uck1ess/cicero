@@ -303,6 +303,26 @@ export function dictationRunnable(config: RuntimeConfig): boolean {
 const DEFAULT_DAEMON_SHUTDOWN_DRAIN_TIMEOUT_MS = 95_000;
 /** Bounded retries when the loopback allocator repeats a port already staged. */
 const STAGING_PORT_ATTEMPTS = 8;
+/**
+ * Backends that serve ONE fixed model and never read a configured one.
+ *
+ * Round 12 (Codex): a swap carried `request.model` into the persisted selection
+ * for every backend, so `cicero swap tts kokoro acme/OtherKokoro` warmed,
+ * persisted, and reported that model as active while the server went on serving
+ * hexgrad/Kokoro-82M — the launch command has no model argument and the sidecar
+ * hard-codes it. Reporting a model that is not loaded is worse than refusing:
+ * the operator has no way to see it did not take.
+ *
+ * A DENYLIST, not an allowlist, on purpose. These three are known to ignore the
+ * field (verified against their launch commands and request bodies). A backend
+ * this daemon does not ship — a company plugin — may well honour a model, and
+ * refusing it on a guess would break a supported extension path for no evidence.
+ */
+const FIXED_MODEL_BACKENDS: Readonly<Record<SwapRole, ReadonlySet<string>>> = {
+  stt: new Set(["wyoming"]),
+  tts: new Set(["kokoro", "pocket-tts", "wyoming"]),
+};
+
 const MANAGED_STT_BACKENDS = new Set(["mlx-whisper", "faster-whisper", "audiocpp"]);
 const MANAGED_TTS_BACKENDS = new Set(["mlx-audio", "kokoro", "audiocpp", "pocket-tts", "vibevoice"]);
 
@@ -340,6 +360,13 @@ export async function planVoiceProviderSwap(
   request: SwapRequest,
   allocatePort: () => Promise<number> = availableLoopbackPort,
 ): Promise<VoiceProviderSwapPlan> {
+  if (request.model !== undefined && FIXED_MODEL_BACKENDS[request.role].has(request.backend)) {
+    throw new Error(
+      `the ${request.backend} ${request.role} backend serves one fixed model and ignores a configured one, `
+      + `so '${request.model}' would be persisted and reported active without ever being loaded. `
+      + `Swap without a model, or use a backend that selects one.`,
+    );
+  }
   const explicitSelection = request.role === "stt" ? config.raw.stt : config.raw.tts;
   const currentSelection = explicitSelection
     ?? (request.role === "stt" ? config.sttBackend : config.ttsBackend);

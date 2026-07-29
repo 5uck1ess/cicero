@@ -39,18 +39,23 @@ afterEach(() => {
 });
 
 for (const role of ["stt", "tts"] as const) {
-  describe(`${role.toUpperCase()} daemon swap transaction`, () => {
+  // The backend here is not incidental: it must be one that actually SELECTS a
+// model, because a swap naming a model for a fixed-model backend (kokoro,
+// pocket-tts, wyoming) is now refused rather than persisted and reported active.
+// These tests assert the swap transaction's model propagation, so they need a
+// backend where propagating a model means something.
+describe(`${role.toUpperCase()} daemon swap transaction`, () => {
     test("persists only after candidate readiness and keeps the fallback configured", async () => {
       root = mkdtempSync(join(tmpdir(), `cicero-${role}-swap-`));
       const configPath = join(root, "config.yaml");
       const initial = role === "stt"
         ? {
-            stt: { backend: "wyoming", host: "old.example.test", port: 10300, model: "old-model" },
-            stt_fallback: { backend: "wyoming", host: "fallback.example.test", port: 10301 },
+            stt: { backend: "audiocpp", host: "old.example.test", port: 10300, model: "old-model" },
+            stt_fallback: { backend: "audiocpp", host: "fallback.example.test", port: 10301 },
           }
         : {
-            tts: { backend: "wyoming", host: "old.example.test", port: 10200, model: "old-model" },
-            tts_fallback: { backend: "wyoming", host: "fallback.example.test", port: 10201 },
+            tts: { backend: "audiocpp", host: "old.example.test", port: 10200, model: "old-model" },
+            tts_fallback: { backend: "audiocpp", host: "fallback.example.test", port: 10201 },
           };
       updateConfigFields(initial, configPath);
       const config = loadConfig({}, { home: root });
@@ -68,20 +73,20 @@ for (const role of ["stt", "tts"] as const) {
       state.sttSlot = new ProviderSlot<STTProvider>(old);
       state.ttsSlot = new ProviderSlot<TTSProvider>(old);
 
-      const result = await state.swapVoiceProvider({ role, backend: "wyoming", model: "new-model" });
+      const result = await state.swapVoiceProvider({ role, backend: "audiocpp", model: "new-model" });
       const persisted = loadConfig({}, { home: root });
 
-      expect(result).toEqual({ role, backend: "wyoming", model: "new-model", status: "active" });
+      expect(result).toEqual({ role, backend: "audiocpp", model: "new-model", status: "active" });
       expect(candidate.starts).toBe(1);
       expect(candidate.warmups).toBe(1);
       expect(old.stops).toBe(1);
       expect((persisted.raw[role] as { model?: string }).model).toBe("new-model");
       const fallback = role === "stt" ? persisted.sttFallbackBackend : persisted.ttsFallbackBackend;
-      expect(fallback).toMatchObject({ backend: "wyoming", host: "fallback.example.test" });
+      expect(fallback).toMatchObject({ backend: "audiocpp", host: "fallback.example.test" });
       const candidateFallback = role === "stt"
         ? candidateConfig!.sttFallbackBackend
         : candidateConfig!.ttsFallbackBackend;
-      expect(candidateFallback).toMatchObject({ backend: "wyoming", host: "fallback.example.test" });
+      expect(candidateFallback).toMatchObject({ backend: "audiocpp", host: "fallback.example.test" });
       await state.sttSlot.stop();
       await state.ttsSlot.stop();
     });
@@ -90,8 +95,8 @@ for (const role of ["stt", "tts"] as const) {
       root = mkdtempSync(join(tmpdir(), `cicero-${role}-rollback-`));
       const configPath = join(root, "config.yaml");
       const initial = role === "stt"
-        ? { stt: { backend: "wyoming", host: "old.example.test", model: "old-model" } }
-        : { tts: { backend: "wyoming", host: "old.example.test", model: "old-model" } };
+        ? { stt: { backend: "audiocpp", host: "old.example.test", model: "old-model" } }
+        : { tts: { backend: "audiocpp", host: "old.example.test", model: "old-model" } };
       updateConfigFields(initial, configPath);
       const config = loadConfig({}, { home: root });
       const old = new FakeVoiceProvider(`${role}-old`);
@@ -108,7 +113,7 @@ for (const role of ["stt", "tts"] as const) {
       state.sttSlot = new ProviderSlot<STTProvider>(old);
       state.ttsSlot = new ProviderSlot<TTSProvider>(old);
 
-      await expect(state.swapVoiceProvider({ role, backend: "wyoming", model: "bad-model" })).rejects.toThrow(
+      await expect(state.swapVoiceProvider({ role, backend: "audiocpp", model: "bad-model" })).rejects.toThrow(
         "active provider and config retained",
       );
       const persisted = loadConfig({}, { home: root });

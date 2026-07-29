@@ -218,4 +218,48 @@ describe("a managed server shared by both roles", () => {
     const plan = await planVoiceProviderSwap(config, { role: "tts", backend: "kokoro" });
     expect(plan.selection.backend).toBe("kokoro");
   });
+
+});
+
+describe("a backend that ignores a configured model", () => {
+  // Reporting a model that was never loaded is worse than refusing the swap:
+  // it is persisted and returned as active, and the operator has no way to see
+  // it did not take. kokoro's launch command has no model argument at all and
+  // its sidecar hard-codes hexgrad/Kokoro-82M.
+  const fixedModel: Array<["stt" | "tts", string]> = [
+    ["tts", "kokoro"],
+    ["tts", "pocket-tts"],
+    ["tts", "wyoming"],
+    ["stt", "wyoming"],
+  ];
+  for (const [role, backend] of fixedModel) {
+    test(`naming a model for the ${backend} ${role} backend is refused, not reported active`, async () => {
+      const config = runtimeConfig(() => {});
+      await expect(planVoiceProviderSwap(
+        config,
+        { role, backend, model: "acme/OtherModel" },
+        () => Promise.resolve(29_000),
+      )).rejects.toThrow(/serves one fixed model/);
+    });
+
+    test(`swapping to ${backend} ${role} without a model is still allowed`, async () => {
+      const config = runtimeConfig(() => {});
+      await expect(planVoiceProviderSwap(
+        config,
+        { role, backend },
+        () => Promise.resolve(29_000),
+      )).resolves.toBeDefined();
+    });
+  }
+
+  // The refusal must not spread to backends that DO select a model.
+  test("a backend that selects a model still accepts one", async () => {
+    const config = runtimeConfig(() => {});
+    const plan = await planVoiceProviderSwap(
+      config,
+      { role: "stt", backend: "faster-whisper", model: "large-v3-turbo" },
+      () => Promise.resolve(29_001),
+    );
+    expect(plan.selection).toMatchObject({ backend: "faster-whisper", model: "large-v3-turbo" });
+  });
 });

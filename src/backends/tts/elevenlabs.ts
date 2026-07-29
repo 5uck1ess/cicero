@@ -25,8 +25,21 @@ const MAX_MODEL_ID_CHARS = 64;
  * each id (and the count) before any of it is echoed. Matching still compares
  * the RAW value: this bounds what is DISPLAYED, never what is checked.
  */
-function safeModelId(value: string): string {
-  const stripped = value.replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ").trim();
+/**
+ * Round 12 (Codex): the same body is REFLECTIVE. This provider sends its key in
+ * `xi-api-key`, and a remote (or spoofed) endpoint answering with that key as a
+ * `model_id` had it quoted back verbatim into the rejection — which travels out
+ * through the swap path to the operator's terminal and dashboard history.
+ * Shape rules cannot help here; a key is whatever the operator configured. The
+ * provider knows its own credential, so it removes that value by literal match.
+ * `secret` is passed separately rather than read from a field so this stays a
+ * pure function, and a blank key disables the check instead of matching "".
+ */
+function safeModelId(value: string, secret?: string): string {
+  const withoutSecret = secret && secret.length > 0 && value.includes(secret)
+    ? value.split(secret).join("<redacted>")
+    : value;
+  const stripped = withoutSecret.replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ").trim();
   return stripped.length > MAX_MODEL_ID_CHARS
     ? `${stripped.slice(0, MAX_MODEL_ID_CHARS)}…`
     : stripped;
@@ -107,9 +120,11 @@ export class ElevenLabsProvider implements TTSProvider {
         ? [(entry as { model_id: string }).model_id]
         : []);
     if (!known.includes(this.model)) {
-      const quoted = known.slice(0, MAX_QUOTED_MODEL_IDS).map(safeModelId).filter((id) => id.length > 0);
+      const quoted = known.slice(0, MAX_QUOTED_MODEL_IDS)
+        .map((id) => safeModelId(id, this.apiKey))
+        .filter((id) => id.length > 0);
       throw new Error(
-        `ElevenLabs does not offer model '${safeModelId(this.model)}'`
+        `ElevenLabs does not offer model '${safeModelId(this.model, this.apiKey)}'`
         + (quoted.length > 0 ? ` — available: ${quoted.join(", ")}` : "")
         + (known.length > quoted.length ? ` (+${known.length - quoted.length} more)` : ""),
       );

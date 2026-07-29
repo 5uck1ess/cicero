@@ -203,3 +203,40 @@ test("a model list that is not a list is refused, not parsed loosely", async () 
   });
   await expect(provider.warmup()).rejects.toThrow(/was not a list/);
 });
+
+// Round 12 (Codex): the model list is REFLECTIVE. This provider sends its key in
+// xi-api-key, and an endpoint answering with that key as a model_id had it
+// quoted back into the rejection — which travels out through the swap path to
+// the operator's terminal and dashboard history. The marker below is synthetic.
+test("warmup never quotes the configured api key back out of a model id", async () => {
+  const key = ["sk", "synthetic", "secret"].join("-");
+  captureFetch(JSON.stringify([{ model_id: key }, { model_id: "safe-model" }]));
+  const provider = new ElevenLabsProvider({
+    backend: "elevenlabs",
+    voice: "voice/id",
+    apiKey: key,
+    model: "missing",
+  });
+
+  const failure = await provider.warmup().then(() => null, (error: unknown) => error as Error);
+  expect(failure).not.toBeNull();
+  expect(failure!.message).not.toContain(key);
+  expect(failure!.message).toContain("<redacted>");
+  // The diagnosis survives the redaction.
+  expect(failure!.message).toContain("safe-model");
+});
+
+// A key embedded in a longer id must not survive by hiding inside it.
+test("warmup redacts an api key embedded in a longer model id", async () => {
+  const key = ["sk", "synthetic", "secret"].join("-");
+  captureFetch(JSON.stringify([{ model_id: `prefix-${key}-suffix` }]));
+  const provider = new ElevenLabsProvider({
+    backend: "elevenlabs",
+    voice: "voice/id",
+    apiKey: key,
+    model: "missing",
+  });
+
+  const failure = await provider.warmup().then(() => null, (error: unknown) => error as Error);
+  expect(failure!.message).not.toContain(key);
+});
