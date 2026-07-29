@@ -310,6 +310,13 @@ export class CiceroDaemon {
   private lastFiller?: string; // last thinking-filler spoken, so the next one varies
   private aecHub: AecAudioHub | null = null;
   private voiceDesiredActive = false;
+  /**
+   * Dictation is holding the local microphone for a capture. Clap must not
+   * re-arm underneath it and voice mode must not claim the device from under
+   * it — on an exclusive capture device two recorders is a broken stream, not a
+   * shared one.
+   */
+  private dictationHoldsMicrophone = false;
   private voiceTransition: Promise<void> = Promise.resolve();
   // Includes conversational recorder release, AEC direct-child reap, and any
   // conditional clap re-arm. Shutdown drains this exact barrier before touching
@@ -951,7 +958,10 @@ export class CiceroDaemon {
     // keystrokes (Wayland, or Linux without xdotool) learns at startup instead
     // of pressing the hotkey and watching nothing happen.
     if (this.config.dictation.enabled) {
-      const built = createDictationListener(this.config, this.providers.stt, audioRecorder);
+      const built = createDictationListener(this.config, this.providers.stt, audioRecorder, {
+        acquire: () => this.acquireDictationMicrophone(),
+        release: () => this.releaseDictationMicrophone(),
+      });
       if ("listener" in built) {
         this.dictation = built.listener;
         // The "cicero" target delivers through this callback. Without it the
@@ -2354,12 +2364,14 @@ export class CiceroDaemon {
 
     const handoff = Promise.all([prior.catch(() => {}), captureRelease, aecRelease]).then(async () => {
       // Raw clap and the AEC/conversational paths are mutually exclusive. Re-arm
-      // only while the daemon still wants the idle voice state.
-      if (!this.running || this.stopRequested || this.voiceDesiredActive) return;
+      // only while the daemon still wants the idle voice state — and never while
+      // dictation is holding the device for a capture.
+      if (!this.running || this.stopRequested || this.voiceDesiredActive || this.dictationHoldsMicrophone) return;
       await this.clapListener?.start();
-      // stop() or a new activation may arrive while clap startup is waiting on a
-      // prior recorder reap. Undo that stale commit before the handoff settles.
-      if (!this.running || this.stopRequested || this.voiceDesiredActive) {
+      // stop(), a new activation, or a dictation press may arrive while clap
+      // startup is waiting on a prior recorder reap. Undo that stale commit
+      // before the handoff settles.
+      if (!this.running || this.stopRequested || this.voiceDesiredActive || this.dictationHoldsMicrophone) {
         await this.clapListener?.stop();
       }
     });
@@ -2368,6 +2380,45 @@ export class CiceroDaemon {
       log("info", `Voice-input handoff cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
     });
     return handoff;
+  }
+
+  /**
+   * Hand the local microphone to a dictation capture.
+   *
+   * Dictation used to spawn its recorder directly, while clap detection held a
+   * raw `rec` process (it is on by default whenever voice mode is off). On an
+   * exclusive ALSA capture device that is two processes competing for one
+   * stream. Ownership now moves through the same handoff barrier voice
+   * activation uses, and `dictationHoldsMicrophone` keeps clap from re-arming
+   * underneath the capture.
+   *
+   * Throwing refuses the capture. Voice mode is refused rather than pre-empted:
+   * it is the same mutual exclusion clap already has with the conversational
+   * path, and pre-empting a live conversation for a hotkey press is worse.
+   */
+  private async acquireDictationMicrophone(): Promise<void> {
+    if (this.voiceDesiredActive || this.conversational?.isActive()) {
+      throw new Error("voice mode is holding the microphone — turn it off before dictating");
+    }
+    this.dictationHoldsMicrophone = true;
+    try {
+      await this.beginVoiceInputHandoff();
+      // The handoff deliberately skips the clap re-arm above; clap may still be
+      // armed from before, so stop it explicitly and confirm that release.
+      await this.clapListener?.stop();
+    } catch (error: unknown) {
+      // Fail closed: an unconfirmed release means something may still own the
+      // device, so dictation must not add a second recorder on top of it.
+      this.dictationHoldsMicrophone = false;
+      void this.beginVoiceInputHandoff();
+      throw error;
+    }
+  }
+
+  /** Give it back, so clap re-arms if the daemon is still idle. */
+  private async releaseDictationMicrophone(): Promise<void> {
+    this.dictationHoldsMicrophone = false;
+    await this.beginVoiceInputHandoff();
   }
 
   /**
@@ -2427,6 +2478,15 @@ export class CiceroDaemon {
     }
 
     if (this.voiceDesiredActive && !conversational.isActive()) {
+      if (this.dictationHoldsMicrophone) {
+        // Symmetric with the refusal in acquireDictationMicrophone: whoever has
+        // the device keeps it until they are done. Starting AEC or raw capture
+        // here would put a second recorder on a live dictation.
+        this.voiceDesiredActive = false;
+        dashBus.setVoiceActive(false);
+        log("warn", "Dictation is holding the microphone — voice mode stays off until the capture ends");
+        return;
+      }
       try {
         await this.voiceInputHandoff;
       } catch (err: unknown) {

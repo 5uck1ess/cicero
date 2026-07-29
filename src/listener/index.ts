@@ -24,6 +24,8 @@ export function createDictationListener(
   config: RuntimeConfig,
   sttProvider: STTProvider,
   recorder: AudioRecorder,
+  /** Microphone handoff, so a capture never competes with clap or voice capture. */
+  microphone?: { acquire: () => Promise<void>; release: () => Promise<void> },
 ): { listener: DictationListener } | { unavailable: string } {
   const dictation = config.dictation;
   const target = dictation.target ?? "focused-app";
@@ -38,6 +40,9 @@ export function createDictationListener(
         // so it stays available on sessions that cannot synthesize keystrokes.
         typeText: target === "focused-app" ? createTextInjector() : undefined,
         ...(maxSeconds ? { maxRecordingMs: maxSeconds * 1000 } : {}),
+        ...(microphone
+          ? { acquireMicrophone: microphone.acquire, releaseMicrophone: microphone.release }
+          : {}),
       }),
     };
   } catch (error: unknown) {

@@ -1,0 +1,117 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { createTextInjector, TextInjectionUnavailableError } from "../../src/platform/text-inject-run";
+import type { TextInjectionSpec } from "../../src/platform/text-inject";
+
+const savedSessionType = process.env.XDG_SESSION_TYPE;
+const savedWaylandDisplay = process.env.WAYLAND_DISPLAY;
+afterEach(() => {
+  restore("XDG_SESSION_TYPE", savedSessionType);
+  restore("WAYLAND_DISPLAY", savedWaylandDisplay);
+});
+
+function restore(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+/** A helper process whose exit the test controls, like a real xdotool/osascript. */
+function fakeHelper() {
+  let exit!: (code: number) => void;
+  const exited = new Promise<number>((resolve) => { exit = resolve; });
+  const proc = {
+    exited,
+    stderr: null,
+    kills: 0,
+    kill(): void { proc.kills += 1; },
+  };
+  return { proc, finish: (code = 0) => exit(code) };
+}
+
+// Codex: production called the resolver with only `hasBinary`, so the Wayland
+// branch was unreachable outside tests. On a Wayland session dictation reported
+// xdotool as supported — it reaches XWayland clients only, so typing would have
+// worked in some windows and silently done nothing in others.
+describe("session detection in production shape", () => {
+  test("a Wayland session is refused when nothing is passed explicitly", () => {
+    process.env.XDG_SESSION_TYPE = "wayland";
+    delete process.env.WAYLAND_DISPLAY;
+    expect(() => createTextInjector({ platform: "linux", hasBinary: () => true }))
+      .toThrow(TextInjectionUnavailableError);
+  });
+
+  test("WAYLAND_DISPLAY alone is enough — a session type of x11 does not override it", () => {
+    process.env.XDG_SESSION_TYPE = "x11";
+    process.env.WAYLAND_DISPLAY = "wayland-0";
+    expect(() => createTextInjector({ platform: "linux", hasBinary: () => true }))
+      .toThrow(/Wayland blocks synthetic keyboard input/);
+  });
+
+  test("an X11 session still resolves to xdotool", () => {
+    process.env.XDG_SESSION_TYPE = "x11";
+    delete process.env.WAYLAND_DISPLAY;
+    expect(() => createTextInjector({ platform: "linux", hasBinary: () => true })).not.toThrow();
+  });
+
+  test("an explicit environment still wins over the process environment", () => {
+    process.env.XDG_SESSION_TYPE = "wayland";
+    expect(() => createTextInjector({ platform: "linux", sessionType: "x11", hasBinary: () => true }))
+      .not.toThrow();
+  });
+});
+
+// Codex: the timeout killed the helper but never confirmed it died, so a helper
+// that ignored termination stayed alive typing into the focused field — and the
+// next dictation spawned a second one on top of it.
+describe("a typing helper that ignores its kill", () => {
+  test("the failure says the helper is still alive, and it is not forgotten", async () => {
+    const helpers: ReturnType<typeof fakeHelper>[] = [];
+    const spawn = (_spec: TextInjectionSpec) => {
+      const helper = fakeHelper();
+      helpers.push(helper);
+      return helper.proc as unknown as ReturnType<typeof Bun.spawn>;
+    };
+    const type = createTextInjector(
+      { platform: "linux", sessionType: "x11", hasBinary: () => true },
+      spawn,
+      { injectMs: 20, reapMs: 20 },
+    );
+
+    await expect(type("hello")).rejects.toThrow(/did not exit when killed/);
+    expect(helpers.length).toBe(1);
+    expect(helpers[0]!.proc.kills).toBe(1);
+
+    // The second press must not put a competing keyboard on the same field.
+    await expect(type("world")).rejects.toThrow(/has not exited; refusing to type over it/);
+    expect(helpers.length).toBe(1);
+
+    // Retryable, not latched: once it goes away, dictation types again.
+    helpers[0]!.finish(0);
+    const third = type("third");
+    await Bun.sleep(0);
+    helpers[1]?.finish(0);
+    await third;
+    expect(helpers.length).toBe(2);
+  }, 15_000);
+
+  test("a helper that exits on its kill is not retained", async () => {
+    const helpers: ReturnType<typeof fakeHelper>[] = [];
+    const spawn = (_spec: TextInjectionSpec) => {
+      const helper = fakeHelper();
+      helpers.push(helper);
+      // Honours termination, just too late for the deadline.
+      setTimeout(() => helper.finish(0), 5);
+      return helper.proc as unknown as ReturnType<typeof Bun.spawn>;
+    };
+    const type = createTextInjector(
+      { platform: "linux", sessionType: "x11", hasBinary: () => true },
+      spawn,
+      { injectMs: 1, reapMs: 500 },
+    );
+
+    await expect(type("hello")).rejects.toThrow(/did not finish typing within 1ms$/);
+    // Nothing retained: the next injection actually spawns rather than being
+    // refused, which is what distinguishes this from the case above.
+    await expect(type("world")).rejects.not.toThrow(/refusing to type over it/);
+    expect(helpers.length).toBe(2);
+  }, 15_000);
+});

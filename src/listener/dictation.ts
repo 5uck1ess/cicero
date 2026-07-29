@@ -40,6 +40,19 @@ export interface DictationDeps {
   drainTimeoutMs?: number;
   /** Bound on waiting for the recorder process to exit after a kill. */
   recorderExitTimeoutMs?: number;
+  /**
+   * Take exclusive ownership of the local microphone for one capture.
+   *
+   * Dictation is not the only microphone owner: clap detection holds a raw
+   * recorder whenever voice mode is off, and conversational/AEC capture holds it
+   * when voice mode is on. On an exclusive capture device a second recorder gets
+   * a broken stream or none at all, so the daemon hands ownership over here
+   * before anything is spawned. Rejecting refuses the capture — competing for
+   * the device is never the better outcome.
+   */
+  acquireMicrophone?: () => Promise<void>;
+  /** Hand the microphone back. Only called once the recorder is confirmed gone. */
+  releaseMicrophone?: () => Promise<void>;
   /** Injectable for tests. */
   now?: () => number;
 }
@@ -60,6 +73,21 @@ interface Capture {
   stopped: Promise<void>;
   finish: () => void;
   settled: boolean;
+  /** True only once the recorder process is observed to have exited. */
+  confirmed: boolean;
+}
+
+/** Wait, bounded, for a process to actually exit. True only when confirmed gone. */
+async function confirmExit(proc: ReturnType<typeof Bun.spawn>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      proc.exited.then(() => true, () => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export class DictationListener implements Listener {
@@ -69,6 +97,22 @@ export class DictationListener implements Listener {
   private pending: Promise<void> | null = null;
   private callback: ((text: string) => void) | undefined;
   private running = false;
+  /**
+   * A capture whose recorder ignored its kill. It may still be writing the file
+   * and it still owns the microphone, so no new capture is admitted and the file
+   * is not deleted until its exit is confirmed. Retried on the next toggle or
+   * stop rather than latched, so recovery needs no daemon restart.
+   */
+  private unreaped: Capture | null = null;
+  private micHeld = false;
+  /**
+   * The in-flight transcription's abandonment flag. A transcription the shutdown
+   * drain gave up on still settles eventually, and used to deliver whenever that
+   * happened — typing into whatever the operator was doing minutes later, or
+   * dispatching a command to a stopped daemon. Work the drain DOES complete
+   * still delivers; that is what the drain is for.
+   */
+  private pendingToken: { abandoned: boolean } | null = null;
   private readonly target: DictationTarget;
   private readonly maxRecordingMs: number;
   private readonly audioDir: string;
@@ -104,17 +148,28 @@ export class DictationListener implements Listener {
     const capture = this.capture;
     this.capture = null;
     if (capture) {
-      await this.releaseCapture(capture);
-      await this.discardCaptureFile(capture.file);
+      const released = await this.releaseCapture(capture);
+      // Deleting a file a live recorder is still writing does not stop it, and
+      // the recorder keeps the microphone. releaseCapture has retained it; a
+      // later stop() retries the reap.
+      if (released) await this.discardCaptureFile(capture.file);
     }
+    // A recorder retained by an earlier failed reap gets another chance here, so
+    // an unconfirmed release is recoverable without restarting the daemon.
+    await this.reapStuckRecorder();
     // A capture that already reached transcription is owned work, not new work.
     // Drain it so its typing cannot land after shutdown reports done, but bound
     // the wait so a wedged STT provider cannot hold the daemon open.
     const pending = this.pending;
+    const token = this.pendingToken;
     if (pending) {
       await Promise.race([
         pending,
         Bun.sleep(this.drainTimeoutMs).then(() => {
+          // Abandoning it means exactly that: whenever this transcription does
+          // settle, it must not deliver. Without the flag, "abandoned" only
+          // meant "no longer waited for", and the text still arrived later.
+          if (token) token.abandoned = true;
           log("warn", "Dictation did not finish transcribing within its shutdown drain — abandoning it");
         }),
       ]).catch(() => { /* finishRecording already logged */ });
@@ -145,7 +200,26 @@ export class DictationListener implements Listener {
       await this.trackFinish();
       return;
     }
-    this.beginRecording();
+    if (!await this.reapStuckRecorder()) {
+      log("warn", "Dictation cannot start: the previous recorder has not exited and still holds the microphone");
+      return;
+    }
+    await this.beginRecording();
+  }
+
+  /**
+   * Re-check a retained recorder. Returns true when nothing is outstanding —
+   * either there never was, or it has finally exited and its file is cleaned up.
+   */
+  private async reapStuckRecorder(): Promise<boolean> {
+    const stuck = this.unreaped;
+    if (!stuck) return true;
+    if (!await confirmExit(stuck.proc, this.recorderExitTimeoutMs)) return false;
+    this.unreaped = null;
+    stuck.confirmed = true;
+    await this.discardCaptureFile(stuck.file);
+    await this.handBackMicrophone();
+    return true;
   }
 
   /**
@@ -156,30 +230,45 @@ export class DictationListener implements Listener {
    * latch would never clear and stop() would keep awaiting a stale task.
    */
   private trackFinish(): Promise<void> {
-    const tracked: Promise<void> = this.finishRecording().finally(() => {
-      if (this.pending === tracked) this.pending = null;
+    const token = { abandoned: false };
+    this.pendingToken = token;
+    const tracked: Promise<void> = this.finishRecording(token).finally(() => {
+      if (this.pending === tracked) {
+        this.pending = null;
+        this.pendingToken = null;
+      }
     });
     this.pending = tracked;
     return tracked;
   }
 
-  private beginRecording(): void {
+  private async beginRecording(): Promise<void> {
+    // Take the microphone off whoever holds it before spawning anything.
+    if (!await this.takeMicrophone()) return;
+    // A shutdown can land while the handoff was in flight; that handoff is the
+    // only await between the hotkey and the spawn.
+    if (!this.running) {
+      await this.handBackMicrophone();
+      return;
+    }
     const file = join(this.audioDir, `dictation-${this.now()}.wav`);
     let proc: ReturnType<typeof Bun.spawn>;
     try {
       proc = this.deps.recorder.record(file, {
         // No silence-based auto-stop: the operator decides when a dictation ends.
         // A ceiling still applies so a forgotten session cannot record forever.
+        stopOnSilence: false,
         maxDuration: Math.ceil(this.maxRecordingMs / 1000),
       });
     } catch (error: unknown) {
       log("error", `Dictation could not start recording: ${detail(error)}`);
+      await this.handBackMicrophone();
       return;
     }
 
     let finish!: () => void;
     const stopped = new Promise<void>((resolve) => { finish = resolve; });
-    const capture: Capture = { file, proc, timer: undefined, stopped, finish, settled: false };
+    const capture: Capture = { file, proc, timer: undefined, stopped, finish, settled: false, confirmed: false };
     capture.timer = setTimeout(() => {
       log("warn", `Dictation hit its ${Math.round(this.maxRecordingMs / 1000)}s ceiling — stopping`);
       void this.trackFinish().catch((error: unknown) => {
@@ -192,26 +281,58 @@ export class DictationListener implements Listener {
     log("info", "Dictation recording — press the hotkey again to stop");
   }
 
-  private async finishRecording(): Promise<void> {
+  private async finishRecording(token: { abandoned: boolean }): Promise<void> {
     const capture = this.capture;
     if (!capture) return;
     this.capture = null;
     this.state = "transcribing";
 
     try {
-      await this.releaseCapture(capture);
+      if (!await this.releaseCapture(capture)) {
+        // The recorder is still running: the file may still be growing and the
+        // microphone is not free. Transcribing a partial capture and returning
+        // to idle is how a second recorder got admitted on top of a live one.
+        log("warn", "Dictation abandoned a capture whose recorder would not exit");
+        return;
+      }
+      await this.handBackMicrophone();
       const transcript = (await this.deps.stt.transcribe(capture.file))?.trim() ?? "";
       if (!transcript) {
         log("warn", "Dictation produced no transcript");
         return;
       }
-      await this.deliver(transcript);
+      await this.deliver(transcript, token);
     } catch (error: unknown) {
       // A dictation failure must never take the daemon down with it.
       log("error", `Dictation failed: ${detail(error)}`);
     } finally {
-      await this.discardCaptureFile(capture.file);
+      // Leave a retained capture's file alone — its recorder may still write it.
+      if (this.unreaped !== capture) await this.discardCaptureFile(capture.file);
       this.state = "idle";
+    }
+  }
+
+  /** Acquire microphone ownership, reporting whether the capture may proceed. */
+  private async takeMicrophone(): Promise<boolean> {
+    if (!this.deps.acquireMicrophone || this.micHeld) return true;
+    try {
+      await this.deps.acquireMicrophone();
+      this.micHeld = true;
+      return true;
+    } catch (error: unknown) {
+      log("error", `Dictation could not take the microphone: ${detail(error)}`);
+      return false;
+    }
+  }
+
+  /** Hand it back so the daemon can re-arm whatever owned it before. */
+  private async handBackMicrophone(): Promise<void> {
+    if (!this.micHeld) return;
+    this.micHeld = false;
+    try {
+      await this.deps.releaseMicrophone?.();
+    } catch (error: unknown) {
+      log("warn", `Dictation could not hand the microphone back: ${detail(error)}`);
     }
   }
 
@@ -219,12 +340,18 @@ export class DictationListener implements Listener {
    * Stop the recorder and wait for the file to be complete. Safe to call twice.
    *
    * The wait for exit is BOUNDED: a recorder that ignores its kill must not
-   * wedge the toggle or hold up daemon shutdown. On timeout the capture is
-   * abandoned — the file may be short or absent, and transcription of it will
-   * simply produce nothing.
+   * wedge the toggle or hold up daemon shutdown. It is NOT forgotten on timeout,
+   * though — reporting a clean release while the process still held the
+   * microphone is what let a second recorder start on top of it. It is retained
+   * instead, and the caller is told the release is unconfirmed.
+   *
+   * Returns true only when the recorder is observed to have exited.
    */
-  private async releaseCapture(capture: Capture): Promise<void> {
-    if (capture.settled) return capture.stopped;
+  private async releaseCapture(capture: Capture): Promise<boolean> {
+    if (capture.settled) {
+      await capture.stopped;
+      return capture.confirmed;
+    }
     capture.settled = true;
     if (capture.timer !== undefined) {
       clearTimeout(capture.timer);
@@ -235,22 +362,13 @@ export class DictationListener implements Listener {
     } catch {
       // Already gone (hit its own ceiling, or the recorder died) — still await exit.
     }
-    const exited = capture.proc.exited.catch(() => { /* exit status is not interesting here */ });
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        exited,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(() => {
-            log("warn", `Dictation recorder did not exit within ${this.recorderExitTimeoutMs}ms — abandoning the capture`);
-            resolve();
-          }, this.recorderExitTimeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
+    capture.confirmed = await confirmExit(capture.proc, this.recorderExitTimeoutMs);
+    if (!capture.confirmed) {
+      log("warn", `Dictation recorder did not exit within ${this.recorderExitTimeoutMs}ms — it still holds the microphone`);
+      this.unreaped = capture;
     }
     capture.finish();
+    return capture.confirmed;
   }
 
   /** Remove a capture file, reporting the path when it cannot be cleaned up. */
@@ -264,7 +382,14 @@ export class DictationListener implements Listener {
     }
   }
 
-  private async deliver(transcript: string): Promise<void> {
+  private async deliver(transcript: string, token: { abandoned: boolean }): Promise<void> {
+    // A transcription the shutdown drain gave up on still settles eventually.
+    // Typing it lands text in whatever the operator is doing minutes later, and
+    // the "cicero" callback reaches command dispatch on a stopped daemon.
+    if (token.abandoned) {
+      log("info", "Dictation discarded a transcript that arrived after its session ended");
+      return;
+    }
     if (this.target === "cicero") {
       if (!this.callback) {
         log("warn", "Dictation has no command handler attached — dropping the transcript");

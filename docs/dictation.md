@@ -78,8 +78,21 @@ logs the reason at startup rather than failing on the first hotkey press.
 - **The clipboard is never touched.** Every platform drives a synthetic
   keyboard directly. The previous integration polled the clipboard and did not
   restore what it overwrote.
+- **Pauses do not end a dictation.** The capture runs without the silence-based
+  auto-stop a conversational turn uses, so thinking mid-sentence never cuts the
+  recording short. Only the hotkey or `max_recording_seconds` ends it.
+- **Dictation and voice mode are mutually exclusive.** They share one
+  microphone, and on an exclusive capture device two recorders is a broken
+  stream rather than a shared one. A dictation press takes the device from clap
+  detection and hands it back when the capture ends; while voice mode is on, a
+  press is refused instead of pre-empting the conversation.
 - **Shutdown discards an in-flight capture** rather than transcribing it: the
-  recorder is killed and the temp file removed.
+  recorder is killed and the temp file removed. A transcription already under
+  way is drained first, but one that misses the drain deadline is discarded
+  rather than typed later.
+- **A recorder that ignores its kill blocks the next capture** instead of being
+  forgotten — it still holds the microphone. Dictation retries the reap on the
+  next press and recovers on its own once the process exits.
 
 ## What this replaced
 

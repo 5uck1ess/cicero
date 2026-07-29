@@ -14,6 +14,16 @@ export interface RecordOpts {
   silenceDuration?: string;
   silenceThreshold?: string;
   maxDuration?: number;
+  /**
+   * Whether the recorder ends the capture itself once the speaker goes quiet.
+   *
+   * True (the default) is what a conversational turn wants. Dictation must set
+   * it false: the operator decides when a dictation ends, and the SoX `silence`
+   * effect would otherwise cut the file at the first pause longer than
+   * `silenceDuration` — every word spoken after thinking for two seconds was
+   * silently lost.
+   */
+  stopOnSilence?: boolean;
 }
 
 export interface AudioRecorder {

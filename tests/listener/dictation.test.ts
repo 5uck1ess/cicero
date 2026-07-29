@@ -320,3 +320,186 @@ test("the in-flight latch clears between captures", async () => {
   await dict.stop();
   expect(Date.now() - started).toBeLessThan(200);
 });
+
+// Finding 1 (Codex): dictation called the recorder directly while clap detection
+// held a raw `rec` process. On an exclusive capture device that is two owners of
+// one stream, so the capture now goes through an explicit microphone handoff.
+describe("microphone ownership", () => {
+  test("the microphone is taken before the recorder spawns and handed back after", async () => {
+    const events: string[] = [];
+    const { dict, recorder } = listener({
+      acquireMicrophone: async () => { events.push("acquire"); },
+      releaseMicrophone: async () => { events.push("release"); },
+    });
+    const spawned = recorder.record.bind(recorder);
+    (recorder as { record: unknown }).record = (path: string, opts: unknown) => {
+      events.push("record");
+      return spawned(path, opts as never);
+    };
+
+    await dict.start();
+    await dict.toggle();
+    expect(events).toEqual(["acquire", "record"]);
+
+    await dict.toggle();
+    // Released once the recorder is confirmed stopped — not left held across the
+    // transcription, which needs no microphone.
+    expect(events).toEqual(["acquire", "record", "release"]);
+  });
+
+  test("a refused handoff aborts the capture instead of competing for the device", async () => {
+    const { dict, recorder } = listener({
+      acquireMicrophone: async () => { throw new Error("voice mode is holding the microphone"); },
+    });
+    await dict.start();
+    await dict.toggle();
+
+    expect(recorder.started.length).toBe(0);
+    expect(dict.getState()).toBe("idle");
+  });
+
+  test("a capture that never spawns still hands the microphone back", async () => {
+    const events: string[] = [];
+    const exploding = { record: () => { throw new Error("rec is not installed"); } };
+    const { dict } = listener({
+      recorder: exploding as never,
+      acquireMicrophone: async () => { events.push("acquire"); },
+      releaseMicrophone: async () => { events.push("release"); },
+    });
+    await dict.start();
+    await dict.toggle();
+    expect(events).toEqual(["acquire", "release"]);
+    expect(dict.getState()).toBe("idle");
+  });
+});
+
+// Finding 2 (Codex): the recorders append the SoX `silence` effect by default, so
+// a dictation was cut at the first pause longer than 1.5s and every word after it
+// was lost. Dictation must opt out.
+test("the dictation capture disables silence-based auto-stop", async () => {
+  let opts: unknown;
+  const capturing = {
+    started: [] as string[],
+    record(outPath: string, options: unknown) {
+      capturing.started.push(outPath);
+      opts = options;
+      return {
+        exited: Promise.resolve(0),
+        kill: () => { void Bun.write(outPath, "RIFFfake"); },
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    },
+  };
+  const { dict } = listener({ recorder: capturing as never });
+  await dict.start();
+  await dict.toggle();
+  expect(opts).toMatchObject({ stopOnSilence: false });
+});
+
+// Finding 4 (Codex): stop() gave up on a wedged transcription but nothing stopped
+// it from delivering when it eventually settled — typing into whatever the
+// operator was doing minutes later, or dispatching a command to a dead daemon.
+test("a transcription abandoned at the drain does not type when it finally settles", async () => {
+  let releaseStt!: (text: string) => void;
+  const { dict, typed } = listener({
+    stt: { transcribe: () => new Promise<string>((resolve) => { releaseStt = resolve; }) },
+    drainTimeoutMs: 20,
+  });
+  await dict.start();
+  await dict.toggle();
+  const finishing = dict.toggle();
+  await Bun.sleep(5);
+
+  await dict.stop(); // gives up on the transcription at the 20ms bound
+  expect(typed).toEqual([]);
+
+  // The provider comes back long after shutdown reported done.
+  releaseStt("late text");
+  await finishing;
+  expect(typed).toEqual([]);
+});
+
+test("the same abandonment applies to the cicero target's command dispatch", async () => {
+  let releaseStt!: (text: string) => void;
+  const commands: string[] = [];
+  const { dict } = listener({
+    target: "cicero",
+    stt: { transcribe: () => new Promise<string>((resolve) => { releaseStt = resolve; }) },
+    drainTimeoutMs: 20,
+  });
+  dict.onCommand((text) => commands.push(text));
+  await dict.start();
+  await dict.toggle();
+  const finishing = dict.toggle();
+  await Bun.sleep(5);
+
+  await dict.stop();
+  releaseStt("late command");
+  await finishing;
+  expect(commands).toEqual([]);
+});
+
+// Finding 5 (Codex): a recorder that ignored its kill was forgotten and the
+// listener returned to idle, so the very next press started a second recorder
+// while the first was still holding the microphone.
+describe("a recorder that will not exit", () => {
+  function stubbornRecorder() {
+    let exit!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => { exit = resolve; });
+    const state = {
+      started: [] as string[],
+      release: () => exit(0),
+      record(outPath: string) {
+        state.started.push(outPath);
+        return { exited, kill: () => { /* ignores it */ } } as unknown as ReturnType<typeof Bun.spawn>;
+      },
+    };
+    return state;
+  }
+
+  test("no second capture is admitted while it is still alive", async () => {
+    const stubborn = stubbornRecorder();
+    const { dict, typed } = listener({ recorder: stubborn as never, recorderExitTimeoutMs: 20 });
+    await dict.start();
+    await dict.toggle();
+    await dict.toggle(); // release is unconfirmed
+
+    expect(dict.getState()).toBe("idle");
+    expect(typed).toEqual([]); // a partial file is not transcribed
+    await dict.toggle();
+    expect(stubborn.started.length).toBe(1); // refused, not stacked on the live one
+  });
+
+  test("dictation recovers on its own once the recorder finally exits", async () => {
+    const stubborn = stubbornRecorder();
+    const { dict } = listener({ recorder: stubborn as never, recorderExitTimeoutMs: 20 });
+    await dict.start();
+    await dict.toggle();
+    await dict.toggle();
+    expect(stubborn.started.length).toBe(1);
+
+    stubborn.release(); // the process goes away
+    await dict.toggle();
+    expect(stubborn.started.length).toBe(2); // no daemon restart needed
+  });
+
+  test("the microphone is not handed back while the recorder still holds it", async () => {
+    const stubborn = stubbornRecorder();
+    const events: string[] = [];
+    const { dict } = listener({
+      recorder: stubborn as never,
+      recorderExitTimeoutMs: 20,
+      acquireMicrophone: async () => { events.push("acquire"); },
+      releaseMicrophone: async () => { events.push("release"); },
+    });
+    await dict.start();
+    await dict.toggle();
+    await dict.toggle();
+    // Telling the daemon the device is free would let clap re-arm on top of the
+    // recorder that is still running.
+    expect(events).toEqual(["acquire"]);
+
+    stubborn.release();
+    await dict.toggle(); // the reap succeeds, and only now is it handed back
+    expect(events).toEqual(["acquire", "release", "acquire"]);
+  });
+});
