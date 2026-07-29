@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../src/config";
+import { DEFAULT_CONFIG, RuntimeConfig, loadConfig } from "../src/config";
 import { CiceroDaemon, runOperatorChatTurn } from "../src/daemon";
 import { ContextStore } from "../src/brain/context-store";
 import { ActionExecutor } from "../src/executor";
@@ -795,4 +795,38 @@ test("a Telegram/shell health log lands in the daemon store and is visible to th
   expect((await daemon.healthStore!.recent(1))[0]?.value).toBe(82.4);
   // ...and is immediately visible to the snapshot, which reads the store fresh.
   expect(await daemon.operationalContext()).toContain("weight 82.4");
+});
+
+// The classifier takes the same credential fields as the reply model. A key
+// configured there is no less a key, and must never reach a log, a runtime
+// error, or a dashboard event.
+test("daemon secret inventory covers classifier credentials", () => {
+  const inlineKey = "sk-test-CLASSIFIER-INLINE-000000000000";
+  const envKey = "sk-test-CLASSIFIER-ENV-1111111111111111";
+  const headerValue = "Bearer test-CLASSIFIER-HEADER-2222222222";
+  const urlPassword = "test-CLASSIFIER-URLPASS-333333333333";
+  process.env.CICERO_TEST_CLASSIFIER_KEY = envKey;
+  try {
+    // A real RuntimeConfig: classifierBackend is a getter, so a plain object
+    // would silently resolve to undefined and the test would prove nothing.
+    const config = new RuntimeConfig({
+      ...structuredClone(DEFAULT_CONFIG),
+      classifier: {
+        backend: "openai",
+        baseUrl: `https://user:${urlPassword}@classifier.example.test/v1`,
+        apiKey: inlineKey,
+        apiKeyEnv: "CICERO_TEST_CLASSIFIER_KEY",
+        extraHeaders: { Authorization: headerValue },
+      },
+    });
+    const daemon = new CiceroDaemon(config) as unknown as OperationalDaemonHarness;
+
+    const secrets = daemon.snapshotKnownSecrets();
+    expect(secrets).toContain(inlineKey);
+    expect(secrets).toContain(envKey);
+    expect(secrets).toContain(headerValue);
+    expect(secrets).toContain(urlPassword);
+  } finally {
+    delete process.env.CICERO_TEST_CLASSIFIER_KEY;
+  }
 });

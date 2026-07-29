@@ -1,4 +1,4 @@
-import { LLM_DEFAULT_MODEL, normalizedLlmModel } from "./provider";
+import { LLM_DEFAULT_MODEL, normalizedLlmModel, LLM_DEFAULT_PORTS } from "./provider";
 import type { LLMProvider, LLMProviderConfig, ChatMessage, LLMCompletionOpts } from "./provider";
 import { startManagedServer, stopManagedServer, type ManagedProcess } from "../managed-server";
 import { httpBase, isLocalHost } from "../net";
@@ -24,7 +24,7 @@ export class LlamaCppProvider implements LLMProvider {
 
   constructor(config: LLMProviderConfig) {
     this.host = config.host;
-    this.port = config.port ?? 8080; // llama-server default port
+    this.port = config.port ?? LLM_DEFAULT_PORTS["llama-cpp"]!;
     // llama-server serves whatever GGUF it loaded; the request model field is
     // informational. A concrete value is used as the -m path when auto-launching.
     // Doctor applies the same normalization before checking local launch

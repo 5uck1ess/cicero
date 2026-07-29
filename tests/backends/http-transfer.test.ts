@@ -312,3 +312,13 @@ test("silent STT, TTS, tone, and turn peers all stop at their configured deadlin
     }
   }
 });
+
+// The bounded body is copied straight into the thrown Error, so redacting only
+// at the logger would still leave the secret in the error object itself.
+test("readErrorDetail redacts a credential the endpoint reflected back", async () => {
+  const body = '{"error":"invalid api key sk-TEST-NOT-A-REAL-KEY-000"}';
+  const detail = await readErrorDetail(new Response(body, { status: 401 }));
+  expect(detail).not.toContain("sk-TEST-NOT-A-REAL-KEY-000");
+  expect(detail).toContain("<redacted>");
+  expect(detail).toContain("invalid api key");
+});

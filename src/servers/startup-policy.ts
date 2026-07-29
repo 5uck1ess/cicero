@@ -3,11 +3,12 @@ import { isLocalHost } from "../backends/net";
 import {
   SUPPORTED_STT_BACKENDS,
   SUPPORTED_TTS_BACKENDS,
+  SUPPORTED_LLM_BACKENDS,
   supportedBackendHint,
 } from "../backends/supported-backends";
 import { MLX_MIN_MACOS_MAJOR, supportsCurrentMlx } from "../platform/python";
 
-export type BackendRole = "stt" | "tts" | "llm";
+export type BackendRole = "stt" | "tts" | "llm" | "classifier";
 
 export interface BackendStartupPolicy {
   /** Explicit STT and enabled TTS primaries must be usable before startup commits. */
@@ -40,6 +41,7 @@ export function createBackendStartupPolicies(
   const stt = config.sttBackend;
   const tts = config.ttsBackend;
   const llm = config.llmBackend;
+  const classifier = config.classifierBackend;
 
   return {
     stt: createPolicy({
@@ -77,6 +79,25 @@ export function createBackendStartupPolicies(
       builtInProviders,
       options,
     }),
+    // Only present when configured. Not required: the classifier is optional,
+    // and a daemon that can still answer must not refuse to start because a
+    // per-utterance helper is down.
+    ...(classifier
+      ? {
+          classifier: createPolicy({
+            role: "classifier" as const,
+            configKey: "classifier.backend",
+            backend: classifier.backend,
+            host: classifier.host,
+            explicit: true,
+            required: false,
+            hasConfiguredFallback: false,
+            validValues: builtInProviders ? SUPPORTED_LLM_BACKENDS : undefined,
+            builtInProviders,
+            options,
+          }),
+        }
+      : {}),
   };
 }
 

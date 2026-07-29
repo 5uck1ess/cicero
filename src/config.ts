@@ -392,6 +392,28 @@ export class RuntimeConfig {
     };
   }
 
+  /**
+   * Resolved intent-judge settings. `enabled` alone is not enough to turn it on:
+   * the daemon also needs a configured `classifier` model, and says so when one
+   * is missing rather than borrowing the reply model.
+   */
+  get intentJudge(): {
+    enabled: boolean;
+    hotWindowMs: number;
+    minConfidence: number;
+    contextTurns: number;
+    timeoutMs: number;
+  } {
+    const j = this.config.intent_judge ?? {};
+    return {
+      enabled: j.enabled ?? false,
+      hotWindowMs: j.hot_window_ms ?? 15_000,
+      minConfidence: j.min_confidence ?? 0.6,
+      contextTurns: j.context_turns ?? 4,
+      timeoutMs: j.timeout_ms ?? 1_500,
+    };
+  }
+
   /** Resolved streaming-VAD end-of-turn settings with defaults applied. */
   get vad(): {
     enabled: boolean;
@@ -474,6 +496,15 @@ export class RuntimeConfig {
       port: this.config.servers.router.port,
       model: this.config.servers.router.model,
     };
+  }
+
+  /**
+   * Optional classification-only model. Unlike llmBackend there is no implicit
+   * default: an absent section means the role is unconfigured, which callers
+   * must treat as "off", never as "borrow the reply model".
+   */
+  get classifierBackend(): LLMProviderConfig | null {
+    return (this.config.classifier as LLMProviderConfig | undefined) ?? null;
   }
 }
 

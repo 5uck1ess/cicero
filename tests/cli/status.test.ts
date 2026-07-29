@@ -74,6 +74,47 @@ describe("configured CLI status", () => {
     expect(lines.some((line) => line.name === "Phone pairing")).toBe(false);
   });
 
+  // The role is optional, so a row on every operator's status would be noise.
+  test("omits the classifier row when the role is unconfigured", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.headless = true;
+      raw.brain = { backend: "acp", mode: "subprocess", binary: "hermes" };
+    });
+    const lines = await collectStatus(config, {
+      inspectDaemon: () => Promise.resolve({ kind: "absent" }),
+      probe: () => Promise.resolve(true),
+      which: () => "/mock/binary",
+      readPairingState: () => null,
+    });
+    expect(lines.some((line) => line.name === "Classifier")).toBe(false);
+  });
+
+  test("reports the classifier as its own row, probed separately from the reply model", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.headless = true;
+      raw.brain = { backend: "acp", mode: "subprocess", binary: "hermes" };
+      raw.llm = { backend: "llama-cpp", host: "reply-box.test", port: 9200, model: "big" };
+      raw.classifier = { backend: "llama-cpp", host: "classifier-box.test", port: 9300, model: "tiny" };
+    });
+    const requests: StatusProbeRequest[] = [];
+    const lines = await collectStatus(config, {
+      inspectDaemon: () => Promise.resolve({ kind: "absent" }),
+      probe: (request) => { requests.push(request); return Promise.resolve(true); },
+      which: () => "/mock/binary",
+      readPairingState: () => null,
+    });
+
+    const names = lines.map((line) => line.name);
+    expect(names).toContain("Classifier");
+    // It sits next to the reply model, not in place of it.
+    expect(names.indexOf("Classifier")).toBe(names.indexOf("LLM") + 1);
+    // Two distinct endpoints were probed, so the row cannot be reporting the
+    // reply model's health under a different name.
+    const urls = requests.map((r) => r.url).join(" ");
+    expect(urls).toContain("classifier-box.test:9300");
+    expect(urls).toContain("reply-box.test:9200");
+  });
+
   test("reports resolved remote backends and skips irrelevant terminal and hotkey checks", async () => {
     const config = runtimeConfig((raw) => {
       raw.headless = true;

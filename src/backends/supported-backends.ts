@@ -30,12 +30,12 @@ export function supportedBackendsForRole(
 ): readonly string[] | undefined {
   if (role === "stt" || role === "stt_fallback") return SUPPORTED_STT_BACKENDS;
   if (role === "tts" || role === "tts_fallback") return SUPPORTED_TTS_BACKENDS;
-  if (role === "llm") return SUPPORTED_LLM_BACKENDS;
+  if (role === "llm" || role === "classifier") return SUPPORTED_LLM_BACKENDS;
   return undefined;
 }
 
 export function backendConfigKey(role: string): string | undefined {
-  if (role === "stt" || role === "stt_fallback" || role === "tts" || role === "tts_fallback" || role === "llm") {
+  if (role === "stt" || role === "stt_fallback" || role === "tts" || role === "tts_fallback" || role === "llm" || role === "classifier") {
     return `${role}.backend`;
   }
   return undefined;

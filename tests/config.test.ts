@@ -326,6 +326,669 @@ describe("Config — fail-fast validation", () => {
     expect(() => loadYaml(yaml)()).not.toThrow();
   });
 
+  // Round 4 (Codex): the classifier block ships COMMENTED OUT, so schema
+  // validation never saw it — and it shipped on web_voice's port, which any
+  // operator following the instructions would have copied verbatim.
+  test("every commented example block is valid once uncommented in place", () => {
+    const yaml = readFileSync(join(import.meta.dir, "..", "config.yaml.example"), "utf8");
+    const lines = yaml.split("\n");
+    // Find each commented-out top-level block: a "# key:" line plus the
+    // indented "#   ..." lines under it.
+    const blocks: Array<{ start: number; end: number; key: string }> = [];
+    let current: { start: number; end: number; key: string } | null = null;
+    for (const [index, line] of lines.entries()) {
+      const opener = /^# {0,2}([a-z_]+):\s*$/.exec(line);
+      if (opener) {
+        current = { start: index, end: index, key: opener[1]! };
+        blocks.push(current);
+        continue;
+      }
+      if (current && /^# {3,}\S/.test(line)) {
+        current.end = index;
+        continue;
+      }
+      current = null;
+    }
+    expect(blocks.map((block) => block.key)).toContain("classifier");
+
+    // Uncommenting one IN PLACE is what an operator actually does, so validate
+    // it against the rest of the shipped file — a block that is fine alone can
+    // still collide with an active listener's port.
+    for (const block of blocks) {
+      const merged = lines.map((line, index) =>
+        index >= block.start && index <= block.end ? line.replace(/^# ?/, "") : line);
+      expect(() => loadYaml(merged.join("\n"))(), `uncommenting ${block.key}:`).not.toThrow();
+    }
+  });
+
+  // Round 4 (Codex): startManagedServer() adopts a server already healthy on a
+  // port instead of starting one, and a chat request's `model` is informational
+  // to llama-server — so a classifier pointed at another listener's port never
+  // loads its model, classifies on whatever is there, and reports healthy.
+  test("a classifier sharing the reply model's endpoint with a different model is refused", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier resolves to the same endpoint as llm \(127\.0\.0\.1:8080\) but names a different model/);
+  });
+
+  test("deliberately sharing one server for both roles stays allowed", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: one-model-for-both",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: one-model-for-both",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // The refusal tells the operator to drop classifier.model; that has to be a
+  // config this check then accepts.
+  test("the remediation the error names is itself accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  test("a classifier port already used by another local listener is refused", () => {
+    expect(loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  host: 127.0.0.1",
+      "  port: 8090",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
+  });
+
+  // Round 10 (Codex): a wildcard bind takes the port on every interface, so it
+  // contends with an interface-specific listener even though neither host
+  // string matches the other. The classifier wins the race (providers start
+  // before the web server), web voice then fails its bind and startup aborts.
+  test("a wildcard classifier collides with an interface-specific web bind", () => {
+    expect(loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  host: 192.168.1.5",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: ollama",
+      "  host: 0.0.0.0",
+      "  port: 8090",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
+  });
+
+  // The mirror image: an interface-specific classifier against the wildcard
+  // bind web voice takes by default.
+  test("an interface-specific classifier collides with a wildcard web bind", () => {
+    expect(loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  host: 0.0.0.0",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: ollama",
+      "  host: 127.0.0.1",
+      "  port: 8090",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
+  });
+
+  // Uses a backend that actually connects to host/port. It previously named
+  // openai-compatible, which ignores both -- so the config it asserted as valid
+  // would have sent every utterance to api.openai.com (see the refusal below).
+  test("a remote classifier is not compared against local ports", () => {
+    expect(() => loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: ollama",
+      "  host: classifier.example",
+      "  port: 8090",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // The OpenAI-compatible family connects to baseUrl and ignores host/port,
+  // defaulting to the preset's CLOUD endpoint. An operator who wrote an
+  // internal hostname has said plainly that is not where captured speech
+  // should go, so this is refused rather than silently redirected.
+  test("an OpenAI-compatible classifier aimed at a host with no baseUrl is refused", () => {
+    expect(loadYaml([
+      "classifier:",
+      "  backend: openai-compatible",
+      "  host: classifier.internal",
+      "  port: 8093",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/ignores them and connects to classifier\.baseUrl/);
+  });
+
+  test("the same classifier with a baseUrl is accepted", () => {
+    expect(() => loadYaml([
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://classifier.internal:8093/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Both models omitted means both roles request the same documented default,
+  // which a server exposing that alias serves. Refusing it was guessing.
+  test("a shared OpenAI-compatible endpoint with neither model named is accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Round 5 (Codex): every one of these roles binds a DEFAULT when its port —
+  // or its whole section — is omitted, and validation was comparing only the
+  // literal config values. So the collisions it caught were exactly the ones an
+  // operator had already written down, and the silent ones went through.
+  test("an omitted llm section still occupies the reply model's default seat", () => {
+    // No `llm:` at all — RuntimeConfig synthesizes mlx-lm on servers.router.port.
+    expect(loadYaml([
+      "classifier:",
+      "  backend: mlx-lm",
+      "  port: 8081",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm \(127\.0\.0\.1:8081\)/);
+  });
+
+  test("an omitted port still occupies its backend's default seat", () => {
+    // Neither role names a port; both llama-cpp providers bind 8080.
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm \(127\.0\.0\.1:8080\)/);
+
+    // ...and the mixed case: one spelled out, one defaulted.
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm/);
+  });
+
+  test("an enabled listener with no port still holds its default port", () => {
+    expect(loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8090",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
+  });
+
+  // Round 6 (Codex): the dashboard is default-ON and starts BEFORE any
+  // provider, so it holds 8086 in every config that does not switch it off —
+  // and it answers 404 on /health, so the classifier's probe does not adopt it
+  // either; llama-server then cannot bind and the role is silently unavailable.
+  test("the default-on dashboard holds its port against a classifier", () => {
+    expect(loadYaml([
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8086",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8086 is already used by dashboard/);
+
+    // Explicitly on, non-default port: still held.
+    expect(loadYaml([
+      "dashboard:",
+      "  enabled: true",
+      "  port: 8099",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8099",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8099 is already used by dashboard/);
+  });
+
+  test("a dashboard switched off frees its port", () => {
+    expect(() => loadYaml([
+      "dashboard:",
+      "  enabled: false",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8086",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Round 7 (Codex): an OpenAI-compatible backend addresses a URL and has no
+  // default port, so a classifier configured only with baseUrl resolved to no
+  // port at all and skipped every comparison — while pointing at the reply
+  // server's socket and adopting the reply model, exactly as a bare port would.
+  test("a classifier baseUrl aimed at the reply server is refused", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8080/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm \(127\.0\.0\.1:8080\)/);
+  });
+
+  test("a classifier baseUrl colliding with another local listener is refused", () => {
+    expect(loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://localhost:8090/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
+  });
+
+  // The reverse pairing too: the reply model behind a URL, the classifier on a
+  // bare port. One seat, named two ways.
+  test("an llm baseUrl is resolved to the same seat as a classifier port", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8080/v1",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm \(127\.0\.0\.1:8080\)/);
+  });
+
+  // A genuinely remote URL still binds nothing here.
+  test("a remote classifier baseUrl is not compared against local ports", () => {
+    expect(() => loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: https://classifier.example/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Round 8 (Codex): only the OpenAI-compatible family reads baseUrl. LlamaCpp
+  // selects host/port and ignores it, so a classifier carrying baseUrl was
+  // validated against an endpoint the runtime never contacts — it actually
+  // targeted 8080 and adopted the reply server. Refusing the key beats
+  // mirroring a setting that silently does nothing.
+  test("a baseUrl on a backend that ignores it is refused, not silently honoured", () => {
+    expect(loadYaml([
+      "classifier:",
+      "  backend: llama-cpp",
+      "  baseUrl: http://127.0.0.1:8093/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.baseUrl is set but the 'llama-cpp' backend ignores it/);
+  });
+
+  test("the same key on an OpenAI-compatible backend stays valid", () => {
+    expect(() => loadYaml([
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8093/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Round 8 (Codex): a shared endpoint only forces one model when it is one
+  // model server. A cloud API multiplexes, and a cheap classifier beside an
+  // expensive reply model on the same API is the ordinary way to run this.
+  test("two cloud roles on one API with different models is allowed", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: openai",
+      "  baseUrl: https://api.openai.com/v1",
+      "  model: gpt-4.1",
+      "classifier:",
+      "  backend: openai",
+      "  baseUrl: https://api.openai.com/v1",
+      "  model: gpt-4.1-mini",
+      "",
+    ].join("\n"))()).not.toThrow();
+
+    // And with the URLs left implicit, which resolves to the same endpoint.
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: openai",
+      "  model: gpt-4.1",
+      "classifier:",
+      "  backend: openai",
+      "  model: gpt-4.1-mini",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Round 10 (Codex): an ollama server SELECTS a model per request, so two
+  // roles sharing one is not a conflict at all -- it is how you run a small
+  // classifier beside a large reply model on one server. Refusing it was wrong,
+  // including the plainest case of all: neither role naming a model, both
+  // resolving to the same default.
+  test("sharing an ollama server without naming the classifier model is accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: ollama",
+      "  port: 11434",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: ollama",
+      "  port: 11434",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  test("two ollama roles that both take the default model are accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: ollama",
+      "  port: 11434",
+      "classifier:",
+      "  backend: ollama",
+      "  port: 11434",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // A local vLLM or llama-swap multiplexes by model exactly like a cloud API
+  // does. Treating loopback as single-model on its own rejected a setup this
+  // repo explicitly supports.
+  test("a local OpenAI-compatible server may serve both roles with different models", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Bracketed IPv6 is the same host unbracketed: runtime networking strips the
+  // brackets before building the URL, so [::1] and ::1 reach one server.
+  test("a bracketed IPv6 loopback is the same seat as the bare form", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      '  host: "::1"',
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      '  host: "[::1]"',
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/it serves one model/);
+  });
+
+  // Round 12 (Codex): sharedEndpoint compared host strings literally, so
+  // localhost:8080 and 127.0.0.1:8080 read as two different endpoints -- the
+  // deliberate share went unrecognised and the collision check then reported
+  // the config as clashing with llm. They are one seat: the classifier's health
+  // probe adopts the server llama.cpp already launched there.
+  test("loopback aliases are one endpoint, not a collision", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  host: localhost",
+      "  port: 8080",
+      "  model: one-model-for-both",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  host: 127.0.0.1",
+      "  port: 8080",
+      "  model: one-model-for-both",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // The alias must be recognised for refusals too, not just for permission.
+  test("a loopback-alias share still refuses a second model", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  host: localhost",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  host: 127.0.0.1",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/it serves one model/);
+  });
+
+  // Round 12 (Codex): sharing an endpoint with no classifier model is harmless
+  // on ollama, whose default is a small model it loads locally. It is NOT
+  // harmless on an OpenAI-compatible backend, whose default is a hosted name a
+  // local server has never heard of -- every classification then fails, and the
+  // judge fails OPEN, so the classifier reports healthy and vetoes nothing.
+  test("a shared OpenAI-compatible endpoint with no classifier model is refused", () => {
+    const failure = loadYaml([
+      "llm:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "  model: reply-model",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "",
+    ].join("\n"));
+    expect(failure).toThrow(/would request 'gpt-4o-mini'/);
+    // It names the model that endpoint actually serves, so the fix is obvious.
+    expect(failure).toThrow(/reply-model/);
+  });
+
+  test("naming the shared OpenAI-compatible model is accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "  model: reply-model",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "  model: reply-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // The refusal is about a PROVABLE mismatch, which only the shared case gives.
+  // A standalone endpoint may be a proxy that does serve the default.
+  test("a standalone OpenAI-compatible classifier with no model is left alone", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // A single-model server is still a single-model server: llama-server loads
+  // one model and the request's `model` field is informational.
+  test("a shared llama-cpp server naming a second model is still refused", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/it serves one model/);
+  });
+
+  // One port, two DIFFERENT servers this daemon launches: whichever loses the
+  // race is adopted by the other, which then speaks the wrong protocol to it.
+  test("a shared port with a launched server on one side and a different backend is refused", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 11434",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: ollama",
+      "  port: 11434",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/names a different backend/);
+  });
+
+  test("naming the shared ollama model explicitly is accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: ollama",
+      "  port: 11434",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: ollama",
+      "  port: 11434",
+      "  model: big-reply-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // llama-cpp serves the one model it loaded and treats the field as
+  // informational, so dropping it there really does share — that remediation is
+  // unchanged, and the message must not start recommending the ollama one.
+  test("the llama-cpp remediation still says to drop the model", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/drop classifier\.model to share the reply model/);
+  });
+
+  // A listener that is off binds nothing, so it is not in the way.
+  test("a disabled listener does not reserve its default port", () => {
+    expect(() => loadYaml([
+      "tone:",
+      "  enabled: false",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8091",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Round 5 (Codex): a REMOTE peer starts no local process, so its port is not
+  // occupied on this box — refusing that config blocked a legitimate setup.
+  test("a local classifier may reuse the port number of a remote llm", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  host: 192.0.2.10",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  host: 127.0.0.1",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // But the same REMOTE seat shared by both roles is still one server with one
+  // model loaded, wherever it runs.
+  test("two roles sharing one remote server with different models is refused", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  host: 192.0.2.10",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  host: 192.0.2.10",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm \(192\.0\.2\.10:8080\)/);
+  });
+
   test("rejects unknown built-in keys with actionable suggestions", () => {
     expect(loadYaml([
       "headles: true",

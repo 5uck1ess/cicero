@@ -2,7 +2,7 @@ import type { RuntimeConfig } from "../config";
 import { sttEndpointKey, type STTProvider, type STTProviderConfig } from "./stt/provider";
 import { wrapSTTWithTap } from "./stt/tap";
 import type { TTSProvider, TTSProviderConfig } from "./tts/provider";
-import type { LLMProvider } from "./llm/provider";
+import type { LLMProvider, LLMProviderConfig } from "./llm/provider";
 import { MlxWhisperProvider } from "./stt/mlx-whisper";
 import { FasterWhisperProvider } from "./stt/faster-whisper";
 import { AudioCppSTTProvider } from "./stt/audiocpp";
@@ -31,16 +31,25 @@ export interface BackendProviders {
   stt: STTProvider;
   tts: TTSProvider;
   llm: LLMProvider;
+  /**
+   * Optional classification-only model, absent unless `classifier` is
+   * configured. Callers must treat absence as "the feature is off" — never as
+   * a reason to borrow {@link BackendProviders.llm}, which is sized for writing
+   * replies and far too expensive to run per utterance.
+   */
+  classifier?: LLMProvider;
 }
 
 /** A mode may need only part of the stack (for example sidecars need no STT). */
 export type BackendProviderSet = Partial<BackendProviders>;
 
 export function createProviders(config: RuntimeConfig): BackendProviders {
+  const classifier = createClassifierProvider(config);
   return {
     stt: createSTTProvider(config),
     tts: createTTSProvider(config),
     llm: createLLMProvider(config),
+    ...(classifier ? { classifier } : {}),
   };
 }
 
@@ -150,7 +159,24 @@ function buildVoiceTTSProvider(contract: VoiceProviderContract, config: TTSProvi
 }
 
 export function createLLMProvider(config: RuntimeConfig): LLMProvider {
-  const llmConfig = config.llmBackend;
+  return buildLLMProvider(config.llmBackend, "llm");
+}
+
+/**
+ * The classification-only model, or null when `classifier` is unconfigured.
+ *
+ * A configured-but-unsupported backend is an error, exactly as it is for `llm`.
+ * Silently falling back to the reply model would make an unaffordable
+ * per-utterance cost look like a working feature.
+ */
+export function createClassifierProvider(config: RuntimeConfig): LLMProvider | null {
+  const classifierConfig = config.classifierBackend;
+  if (!classifierConfig) return null;
+  return buildLLMProvider(classifierConfig, "classifier");
+}
+
+/** Shared LLM construction. `role` names the config key an error should blame. */
+function buildLLMProvider(llmConfig: LLMProviderConfig, role: "llm" | "classifier"): LLMProvider {
   // Cloud / paid / remote OpenAI-compatible brains (OpenAI, OpenRouter, Groq,
   // DeepSeek, Qwen/DashScope, Moonshot/Kimi, Zhipu/GLM, MiniMax, …).
   if (OPENAI_COMPATIBLE_BACKENDS.includes(llmConfig.backend ?? "")) {
@@ -164,8 +190,8 @@ export function createLLMProvider(config: RuntimeConfig): LLMProvider {
     case "llama-cpp":
       return new LlamaCppProvider(llmConfig);
     case "claude-api":
-      throw new Error(`LLM backend 'claude-api' is not implemented — for a cloud brain use 'openai' (or any OpenAI-compatible preset: deepseek, dashscope, moonshot, zhipu, openrouter, groq); for local use 'mlx-lm'/'ollama'/'llama-cpp'`);
+      throw new Error(`${role} backend 'claude-api' is not implemented — for a cloud brain use 'openai' (or any OpenAI-compatible preset: deepseek, dashscope, moonshot, zhipu, openrouter, groq); for local use 'mlx-lm'/'ollama'/'llama-cpp'`);
     default:
-      throw new Error(`Unknown LLM backend '${llmConfig.backend}'`);
+      throw new Error(`Unknown ${role} backend '${llmConfig.backend}'`);
   }
 }

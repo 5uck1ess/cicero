@@ -112,3 +112,14 @@ the server binds to loopback only, and a control request must carry an
 `X-Cicero-Dashboard` header (which a cross-origin page cannot set without a CORS
 preflight the server never approves), a loopback `Host`, and a loopback `Origin`
 when one is present. The dashboard remains read-only over WebSocket for activity.
+
+## Deciding what was meant for Cicero
+
+Activation decides *when* Cicero is listening. It does not decide whether a
+given utterance was aimed at Cicero — once active, every intelligible non-echo
+utterance becomes a command.
+
+In a room with other people talking or a podcast playing, the optional
+[intent judge](intent-judge.md) adds a per-utterance veto over that. It is off
+by default, needs a [classifier model](classifier.md), and can only ever decline
+an utterance — never cause one to be taken.
