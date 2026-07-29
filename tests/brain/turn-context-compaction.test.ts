@@ -334,3 +334,41 @@ test("a failing compactor is not retried in a loop by the follow-up pass", async
   expect(calls).toBe(afterFirst);
   expect(calls).toBeLessThan(5);
 });
+
+// Round 3 (Codex): a brain restart calls clear() while a compaction is in
+// flight. That run is discarded on generation mismatch — which is a SUCCESS
+// whose result no longer applies, not a failure — but it was counted as a
+// failure, so no follow-up pass ran and the trim evicted fresh turns that had
+// never been summarized.
+test("a compaction discarded by clear() still hands off to a follow-up pass", async () => {
+  const sent: string[] = [];
+  let releaseStale!: () => void;
+  const stale = new Promise<void>((resolve) => { releaseStale = resolve; });
+  let runs = 0;
+
+  const ctx = new BrainTurnContext();
+  ctx.setCompactor(async ({ turns }) => {
+    runs += 1;
+    for (const turn of turns) sent.push(turn.user);
+    if (runs === 1) await stale;
+    return `summary ${runs}`;
+  });
+
+  // A conversation that trips compaction, then a restart mid-flight.
+  for (let i = 0; i < 13; i += 1) ctx.remember(`old${i}`, `a${i}`);
+  ctx.clear();
+
+  // Fresh turns pile up past the cap while the stale request is still open.
+  for (let i = 0; i < 13; i += 1) ctx.remember(`fresh${i}`, `b${i}`);
+  releaseStale();
+  await ctx.settled();
+
+  // fresh0 must be accounted for: summarized, or still in the transcript.
+  const text = prompt(ctx);
+  const retained = text.includes("fresh0");
+  const summarized = sent.includes("fresh0");
+  expect({ retained, summarized, accountedFor: retained || summarized })
+    .toEqual({ retained, summarized, accountedFor: true });
+  // And the stale summary never reattached to the new conversation.
+  expect(text).not.toContain("summary 1");
+});
