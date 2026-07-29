@@ -321,3 +321,71 @@ describe("turn-length generation pins", () => {
     expect(next.stops).toBe(2);
   });
 });
+
+// Round 3 (Codex): the cutover publishes the replacement synchronously, but
+// swap() keeps running while it drains the retired generation — for up to the
+// cleanup deadline. Callers that must invalidate state derived from the old
+// provider (the web filler bank primes its clips through it) were doing so only
+// after swap() resolved, so every turn admitted in that window ran on the new
+// provider with the old provider's cached audio.
+describe("cutover notification", () => {
+  test("fires before any caller can acquire the replacement", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    const owner = new ProviderSlot<TTSProvider>(old);
+    const next = new FakeVoiceProvider("tts-next");
+    // Hold the retired generation's cleanup open, which is the window the
+    // finding is about.
+    const lease = owner.acquire();
+
+    let providerAtCutover: string | undefined;
+    const swapping = owner.swap(next, () => {}, {
+      onCutover: () => { providerAtCutover = owner.currentProvider().name; },
+    });
+    await Bun.sleep(5);
+
+    // The replacement is already live, and the hook saw exactly that instant.
+    expect(providerAtCutover).toBe("tts-next");
+    expect(owner.currentProvider()).toBe(next);
+    lease.release();
+    await swapping;
+  });
+
+  test("fires even when the retired generation misses its cleanup deadline", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    const owner = new ProviderSlot<TTSProvider>(old, { cleanupTimeoutMs: 20 });
+    const next = new FakeVoiceProvider("tts-next");
+    const lease = owner.acquire(); // never released: the drain cannot complete
+
+    let cutOver = false;
+    // swap() rejects on the drain, but the cutover DID commit — a caller that
+    // keyed its invalidation off swap() resolving kept stale state forever.
+    await expect(owner.swap(next, () => {}, { onCutover: () => { cutOver = true; } }))
+      .rejects.toThrow(/cleanup was not confirmed/);
+    expect(cutOver).toBe(true);
+    expect(owner.currentProvider()).toBe(next);
+    lease.release();
+  });
+
+  test("a throwing hook does not corrupt the slot", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    const owner = new ProviderSlot<TTSProvider>(old);
+    const next = new FakeVoiceProvider("tts-next");
+
+    await owner.swap(next, () => {}, { onCutover: () => { throw new Error("hook exploded"); } });
+
+    expect(owner.currentProvider()).toBe(next);
+    expect(old.stops).toBe(1);
+  });
+
+  test("it does not fire when the swap is refused before the cutover", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    const owner = new ProviderSlot<TTSProvider>(old);
+    const next = new FakeVoiceProvider("tts-bad");
+    next.healthy = false;
+
+    let cutOver = false;
+    await expect(owner.swap(next, () => {}, { onCutover: () => { cutOver = true; } })).rejects.toThrow();
+    expect(cutOver).toBe(false);
+    expect(owner.currentProvider()).toBe(old);
+  });
+});

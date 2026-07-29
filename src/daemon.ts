@@ -330,6 +330,27 @@ export async function planVoiceProviderSwap(
   const selection: STTProviderConfig | TTSProviderConfig = currentSelection?.backend === request.backend
     ? { ...currentSelection, ...(request.model ? { model: request.model } : {}) }
     : { backend: request.backend, ...(request.model ? { model: request.model } : {}) };
+  // The provider being retired may OWN a managed server the other role is only
+  // borrowing — one audio.cpp process serving both STT and TTS on a single port
+  // is a supported and common single-seat setup. Retiring it stops that
+  // process, and the untouched role is left pointing at a dead port while still
+  // reporting itself active. Nothing here can transfer that ownership, so the
+  // swap is refused rather than silently breaking the other half of the voice
+  // stack. Give the operator the two ways out.
+  const retiringEndpoint = currentSelection ? managedVoiceEndpoint(request.role, currentSelection) : null;
+  if (retiringEndpoint) {
+    const otherRole: SwapRole = request.role === "stt" ? "tts" : "stt";
+    const otherProvider = otherRole === "stt" ? config.sttBackend : config.ttsBackend;
+    const otherEndpoint = otherProvider ? managedVoiceEndpoint(otherRole, otherProvider) : null;
+    if (otherEndpoint === retiringEndpoint) {
+      throw new Error(
+        `${request.role.toUpperCase()} shares one managed ${currentSelection!.backend} server with `
+        + `${otherRole.toUpperCase()}, so swapping it would stop the process ${otherRole.toUpperCase()} is still using. `
+        + `Give ${otherRole} its own port first, or swap both roles by editing config and restarting.`,
+      );
+    }
+  }
+
   const fallback = request.role === "stt" ? config.sttFallbackBackend : config.ttsFallbackBackend;
   const occupied = new Set<string>();
   for (const [role, provider] of [
@@ -1997,31 +2018,56 @@ export class CiceroDaemon {
         const slot = this.ttsSlot;
         if (!slot) throw new Error("TTS provider slot is unavailable");
         const candidate = (this.options.ttsProviderFactory ?? createTTSProvider)(candidateConfig);
-        await slot.swap(candidate, () => {
-          updateConfigFields(
-            {
-              tts: selection as TTSProviderConfig,
-              ...(plan.fallback ? { tts_fallback: plan.fallback as TTSProviderConfig } : {}),
+        // The filler bank primed its clips through the provider that is being
+        // retired. Web turns emit those cached bytes directly, so leaving them
+        // in place plays the old provider's "let me check" and then the new
+        // provider's reply inside one turn. Dropping them AFTER swap() resolves
+        // was too late: the cutover publishes the replacement synchronously and
+        // swap() then drains the retired generation for up to the cleanup
+        // deadline, and every turn admitted in that window (the server runs up
+        // to eight concurrently) pinned the new provider and took an old-voice
+        // clip. Invalidate at the cutover instead.
+        let cutOver = false;
+        try {
+          await slot.swap(candidate, () => {
+            updateConfigFields(
+              {
+                tts: selection as TTSProviderConfig,
+                ...(plan.fallback ? { tts_fallback: plan.fallback as TTSProviderConfig } : {}),
+              },
+              this.options.configPath,
+              { replaceTopLevel: plan.fallback ? ["tts", "tts_fallback"] : ["tts"] },
+            );
+            this.config.setVoiceBackend("tts", selection);
+            if (plan.fallback) this.config.setVoiceFallback("tts", plan.fallback);
+          }, {
+            ...options,
+            onCutover: () => {
+              cutOver = true;
+              // Queued, not awaited: the cutover must stay synchronous. Once
+              // enqueued, pick() can only return a clip the bank still holds,
+              // and an empty bank simply means a turn skips its filler.
+              void this.webFillerBank?.discardPrepared().catch((error: unknown) => {
+                log("warn", `filler bank invalidation at cutover failed: ${error instanceof Error ? error.message : String(error)}`);
+              });
             },
-            this.options.configPath,
-            { replaceTopLevel: plan.fallback ? ["tts", "tts_fallback"] : ["tts"] },
-          );
-          this.config.setVoiceBackend("tts", selection);
-          if (plan.fallback) this.config.setVoiceFallback("tts", plan.fallback);
-        }, options);
-        dashBus.setConfig({
-          brain: this.config.brain.backend,
-          model: this.config.raw.llm?.model ?? this.config.servers.router.model,
-          ttsVoice: this.config.raw.tts?.voice ?? this.config.voice,
-          ttsBackend: request.backend,
-        });
-        // The filler bank primed its clips through the provider that just retired.
-        // Web turns emit those cached bytes directly, so leaving them in place plays
-        // the old provider's "let me check" and then the new provider's reply inside
-        // one turn. Drop them immediately — pick() returning undefined just means a
-        // turn skips its filler, which is the same as before the bank was primed —
-        // then re-prime in the background on the replacement.
-        await this.refillFillerBankAfterSwap();
+          });
+        } finally {
+          // A cutover that committed and then failed to confirm the retired
+          // generation's cleanup still left the new provider live. Skipping the
+          // re-prime there meant stale-voice clips until a restart or another
+          // successful swap, so the refill is tied to the cutover, not to
+          // swap() resolving.
+          if (cutOver) {
+            dashBus.setConfig({
+              brain: this.config.brain.backend,
+              model: this.config.raw.llm?.model ?? this.config.servers.router.model,
+              ttsVoice: this.config.raw.tts?.voice ?? this.config.voice,
+              ttsBackend: request.backend,
+            });
+            await this.refillFillerBankAfterSwap();
+          }
+        }
       }
       log("ok", `${request.role.toUpperCase()} swapped live to ${request.backend}${request.model ? ` (${request.model})` : ""}`);
       return { ...request, status: "active" };

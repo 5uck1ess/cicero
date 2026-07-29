@@ -139,7 +139,7 @@ export class ProviderSlot<T extends SwappableProvider> {
   async swap(
     candidate: T,
     persist: () => void | Promise<void>,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; onCutover?: () => void } = {},
   ): Promise<void> {
     if (this.closed) {
       await this.stopProvider(candidate, "rejected candidate cleanup");
@@ -214,6 +214,20 @@ export class ProviderSlot<T extends SwappableProvider> {
       // Synchronous with the check above: the candidate is a generation now, so
       // ownership passes to the generation sets a stop() already snapshots.
       owning.owned = false;
+      // New callers acquire the replacement from this instant, but swap() has
+      // not returned — it still drains the retired generation, for up to the
+      // cleanup deadline. Anything a caller must invalidate at the cutover has
+      // to happen HERE, not after the await, or turns in that window run on the
+      // new provider with state derived from the old one. Kept synchronous so
+      // no turn can slip between the publish and the notification, and its
+      // failure is contained so a hook cannot corrupt the slot.
+      if (options.onCutover) {
+        try {
+          options.onCutover();
+        } catch {
+          // The cutover itself is committed; a hook's failure is the caller's.
+        }
+      }
       previous.retired = true;
       this.retired.add(previous);
       if (previous.leases === 0) previous.resolveDrain();

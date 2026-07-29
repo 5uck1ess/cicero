@@ -97,3 +97,53 @@ describe("live provider swap planning", () => {
     });
   });
 });
+
+// Round 3 (Codex): with `stt: audiocpp:8092` and `tts: audiocpp:8092`, startup
+// gives TTS the spawned process and STT a borrower handle on the same port.
+// Swapping TTS retired the owner, stopping the process STT was still using —
+// STT then reported itself active while pointing at a dead port. Nothing here
+// can transfer that ownership, so the swap is refused instead.
+describe("a managed server shared by both roles", () => {
+  function shared(): RuntimeConfig {
+    return runtimeConfig((raw) => {
+      raw.stt = { backend: "audiocpp", port: 8092 } as never;
+      raw.tts = { backend: "audiocpp", port: 8092 } as never;
+    });
+  }
+
+  test("swapping either role away is refused, naming the other one", async () => {
+    await expect(planVoiceProviderSwap(shared(), { role: "tts", backend: "kokoro" }))
+      .rejects.toThrow(/TTS shares one managed audiocpp server with STT/);
+    await expect(planVoiceProviderSwap(shared(), { role: "stt", backend: "wyoming" }))
+      .rejects.toThrow(/STT shares one managed audiocpp server with TTS/);
+  });
+
+  test("the refusal says how to get out of it", async () => {
+    const failure = await planVoiceProviderSwap(shared(), { role: "tts", backend: "kokoro" })
+      .then(() => null, (error: unknown) => error as Error);
+    expect(failure!.message).toMatch(/own port/);
+    expect(failure!.message).toMatch(/restarting/);
+  });
+
+  // Same backend on DIFFERENT ports is two processes, so neither owns the
+  // other's — that swap must still work.
+  test("separate ports are not shared, and swap freely", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.stt = { backend: "audiocpp", port: 8092 } as never;
+      raw.tts = { backend: "audiocpp", port: 8093 } as never;
+    });
+    const plan = await planVoiceProviderSwap(config, { role: "tts", backend: "kokoro" });
+    expect(plan.selection.backend).toBe("kokoro");
+  });
+
+  // A remote seat is not a process this daemon owns, so there is nothing to
+  // stop and nothing to refuse.
+  test("a shared REMOTE endpoint is not refused — no local process is owned", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.stt = { backend: "audiocpp", host: "192.0.2.10", port: 8092 } as never;
+      raw.tts = { backend: "audiocpp", host: "192.0.2.10", port: 8092 } as never;
+    });
+    const plan = await planVoiceProviderSwap(config, { role: "tts", backend: "kokoro" });
+    expect(plan.selection.backend).toBe("kokoro");
+  });
+});

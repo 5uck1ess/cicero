@@ -46,6 +46,16 @@ current provider and config were retained. A rare post-cutover cleanup failure
 instead reports that cutover committed but old-provider cleanup is unconfirmed;
 the daemon does not lie about rolling back after ownership became uncertain.
 
+**One managed server shared by both roles cannot be swapped.** If STT and TTS
+name the same local backend on the same port — a single audio.cpp process
+serving both is a common single-seat setup — one role owns that process and the
+other borrows it. Retiring the owner would stop the process the other role is
+still using, and nothing transfers that ownership at runtime, so the swap is
+refused with a message naming the other role. Give one role its own port to
+swap them independently, or change both in config and restart. A shared
+*remote* endpoint is unaffected: no local process is owned, so there is nothing
+to stop.
+
 The CLI reaches the daemon through a loopback-only authenticated control socket.
 Its short-lived descriptor is private under `~/.cicero/` and is removed during
 clean shutdown. If the descriptor is absent, the CLI reports that runtime
