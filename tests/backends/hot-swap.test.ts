@@ -394,6 +394,39 @@ describe("turn-length generation pins", () => {
     await owner.stop();
     expect(next.reaped).toBe(1);
   });
+
+  // Round 5 (Codex): the retry took the quarantined path, which stopped the
+  // provider immediately. A candidate quarantined BECAUSE its startup had not
+  // settled is exactly the one that cannot be stopped yet, so the retry reaped
+  // nothing — and then deleted the entry, dropping the last handle on a child
+  // that was about to exist. Managed startups legitimately run for minutes.
+  test("a retry keeps waiting for a startup that has still not settled", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    const owner = new ProviderSlot<TTSProvider>(old, { cleanupTimeoutMs: 25 });
+    const next = new FakeVoiceProvider("tts-next");
+
+    let releaseStart!: () => void;
+    next.startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+    const swapping = settle(owner.swap(next, () => {}));
+    await Bun.sleep(5);
+
+    // First attempt: the startup outruns the deadline and is reported.
+    const first = await settle(owner.stop()) as AggregateError | null;
+    expect(first?.errors.map(String).join("\n")).toMatch(/candidate startup did not finish/);
+
+    // Second attempt, with the start STILL pending. Stopping now would reap
+    // nothing, so this must report unconfirmed too rather than quietly forget it.
+    const second = await settle(owner.stop()) as AggregateError | null;
+    expect(second?.errors.map(String).join("\n")).toMatch(/candidate startup did not finish/);
+    expect(next.reaped).toBe(0);
+
+    // And once the startup finally lands, the next attempt does reap the child.
+    releaseStart();
+    expect((await swapping)?.message).toMatch(/shutting down/);
+    await owner.stop();
+    expect(next.reaped).toBe(1);
+    expect(next.managed).toBe(false);
+  });
 });
 
 // Round 3 (Codex): the cutover publishes the replacement synchronously, but

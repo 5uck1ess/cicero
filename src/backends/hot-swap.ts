@@ -89,7 +89,16 @@ async function within<T>(work: Promise<T>, timeoutMs: number, label: string): Pr
 export class ProviderSlot<T extends SwappableProvider> {
   private current: Generation<T>;
   private readonly retired = new Set<Generation<T>>();
-  private readonly quarantined = new Set<T>();
+  /**
+   * Providers whose release is unconfirmed, mapped to the startup barrier that
+   * must be awaited before stopping them again (undefined once startup is known
+   * to have settled). Carrying the barrier is the point: a candidate quarantined
+   * because its start had not finished is still not stoppable on the retry —
+   * managed adapters publish the process they own only when startup succeeds —
+   * so a retry that skipped straight to stop() reaped nothing and then dropped
+   * the entry, leaking the child it was holding on behalf of.
+   */
+  private readonly quarantined = new Map<T, Promise<void> | undefined>();
   private swapRunning = false;
   private closed = false;
   private readonly cleanupTimeoutMs: number;
@@ -204,7 +213,7 @@ export class ProviderSlot<T extends SwappableProvider> {
           // not be able to snapshot `quarantined` before the failed candidate
           // has been put there.
           const disposal = this.stopProvider(candidate, "candidate cleanup").catch((failure: unknown) => {
-            this.quarantined.add(candidate);
+            this.quarantined.set(candidate, owning.started);
             cleanupError = failure;
           });
           owning.disposal = disposal;
@@ -267,7 +276,7 @@ export class ProviderSlot<T extends SwappableProvider> {
         // still running, and dropping the error left it owned by nobody. In
         // quarantine, stop() — including a later retry — will try it again.
         const disposal = this.stopProvider(candidate, "candidate cleanup").catch(() => {
-          this.quarantined.add(candidate);
+          this.quarantined.set(candidate, owning.started);
         });
         owning.disposal = disposal;
         await disposal;
@@ -297,9 +306,10 @@ export class ProviderSlot<T extends SwappableProvider> {
     // snapshot below. Deliberately NOT a wait on the whole swap — only on the
     // claimed candidate's start, and only for the cleanup deadline.
     const disposals: Promise<unknown>[] = [];
-    const claimed: PreparingCandidate<T>[] = [];
     for (const entry of this.preparing) {
-      if (this.claimCandidate(entry)) claimed.push(entry);
+      // Quarantine carries the startup barrier with it, so THIS attempt and every
+      // later retry both wait for the start before trying to reap the child.
+      if (this.claimCandidate(entry)) this.quarantined.set(entry.provider, entry.started);
       else if (entry.disposal) disposals.push(entry.disposal.catch(() => {}));
     }
     if (disposals.length > 0) await Promise.all(disposals);
@@ -314,26 +324,7 @@ export class ProviderSlot<T extends SwappableProvider> {
         this.cleanupTimeoutMs,
         `${generation.provider.name} generation cleanup`,
       )),
-      ...claimed.map(async (entry) => {
-        // A managed provider only publishes the process it owns once startup
-        // succeeds, and its stop() is a no-op until then — so reaping a
-        // candidate that is still inside start() reaps nothing, and the child it
-        // spawns a moment later outlives the daemon. Wait for the start to
-        // settle first, bounded like every other release here. If the wait times
-        // out, the candidate stays quarantined so a later stop() retries it and
-        // this shutdown reports the release as unconfirmed rather than clean.
-        try {
-          await within(entry.started, this.cleanupTimeoutMs, `${entry.provider.name} candidate startup`);
-          await this.stopProvider(entry.provider, "candidate cleanup");
-        } catch (error) {
-          this.quarantined.add(entry.provider);
-          throw error;
-        }
-      }),
-      ...[...this.quarantined].map(async (provider) => {
-        await this.stopProvider(provider, "quarantined candidate cleanup");
-        this.quarantined.delete(provider);
-      }),
+      ...[...this.quarantined].map(([provider, startup]) => this.stopQuarantined(provider, startup)),
     ]);
     const failures = outcomes.flatMap((outcome) => outcome.status === "rejected" ? [outcome.reason] : []);
     if (failures.length > 0) throw new AggregateError(failures, "one or more provider generations failed to stop");
@@ -371,10 +362,27 @@ export class ProviderSlot<T extends SwappableProvider> {
         `${generation.provider.name} retired generation cleanup`,
       );
     }
-    for (const provider of this.quarantined) {
-      await this.stopProvider(provider, "quarantined candidate cleanup");
-      this.quarantined.delete(provider);
+    for (const [provider, startup] of this.quarantined) {
+      await this.stopQuarantined(provider, startup);
     }
+  }
+
+  /**
+   * Reap one quarantined provider, waiting out its startup first when that has
+   * not settled. Managed adapters publish the process they own only once startup
+   * succeeds and their stop() is a no-op before that, so skipping the barrier
+   * reaps nothing — and dropping the entry afterwards would leak the child. The
+   * entry therefore survives any failure here, including a startup that is still
+   * pending, so the next attempt tries again.
+   */
+  private async stopQuarantined(provider: T, startup: Promise<void> | undefined): Promise<void> {
+    if (startup) {
+      await within(startup, this.cleanupTimeoutMs, `${provider.name} candidate startup`);
+      // Settled now, so a later retry has nothing left to wait for.
+      this.quarantined.set(provider, undefined);
+    }
+    await this.stopProvider(provider, "quarantined candidate cleanup");
+    this.quarantined.delete(provider);
   }
 
   private async stopProvider(provider: T, label: string): Promise<void> {

@@ -20,7 +20,7 @@ import {
 import { sendWebVoiceNotification } from "./cli/notify";
 import { commandText } from "./cli/text-input";
 import { unlink } from "node:fs/promises";
-import { requestRuntimeSwap, type SwapRole } from "./runtime-control";
+import { controlTimeoutMs, requestRuntimeSwap, type SwapRole } from "./runtime-control";
 import { SUPPORTED_STT_BACKENDS, SUPPORTED_TTS_BACKENDS } from "./backends/supported-backends";
 import {
   MAX_NOTIFY_JSON_BYTES,
@@ -219,7 +219,21 @@ program
       if (!supported.includes(backend)) {
         throw new Error(`unsupported ${role.toUpperCase()} backend '${backend}'. Valid: ${supported.join(", ")}`);
       }
-      const result = await requestRuntimeSwap({ role, backend, ...(model ? { model } : {}) });
+      // The daemon warms the candidate under the CONFIGURED provider deadline, so
+      // the client has to wait at least that long — an abort here prints a
+      // failure for a swap that goes on to commit.
+      const raw = loadConfig().raw;
+      const result = await requestRuntimeSwap(
+        { role, backend, ...(model ? { model } : {}) },
+        {
+          timeoutMs: controlTimeoutMs([
+            raw.stt?.timeout_ms,
+            raw.stt_fallback?.timeout_ms,
+            raw.tts?.timeout_ms,
+            raw.tts_fallback?.timeout_ms,
+          ].filter((value): value is number => typeof value === "number")),
+        },
+      );
       console.log(`${result.role.toUpperCase()} active: ${result.backend}${result.model ? ` (${result.model})` : ""}. Config persisted.`);
     } catch (error) {
       console.error(`[cicero] swap failed: ${error instanceof Error ? error.message : String(error)}`);

@@ -25,12 +25,31 @@ const MAX_CONTROL_BODY_BYTES = 4_096;
  * this way is the point: the previous value was this constant plus a guessed 30s,
  * which a 290s start + 35s warmup + 2s health + 5s drain already overran.
  */
-const SWAP_WARMUP_TIMEOUT_MS = Math.max(PROVIDER_TIMEOUT_MS.tts, PROVIDER_TIMEOUT_MS.stt);
-export const CONTROL_TIMEOUT_MS = MANAGED_STARTUP_TIMEOUT_MS
-  + SWAP_WARMUP_TIMEOUT_MS
-  + PROVIDER_TIMEOUT_MS.health
-  + DEFAULT_CLEANUP_TIMEOUT_MS
-  + 30_000;
+/**
+ * `timeout_ms` is configurable per provider (up to 15 minutes), and a
+ * same-backend swap carries the current selection's value onto the candidate —
+ * so the warmup phase is bounded by the OPERATOR's number, not by the built-in
+ * default. Computing the deadline from defaults alone meant a warmup that is
+ * entirely legal under their own config (a remote vibevoice with
+ * `timeout_ms: 600000` answering after 450s) outlived the client, which then
+ * printed a failure for a swap that went on to commit — the exact lie this
+ * deadline is derived to avoid. Callers that know the config pass its provider
+ * timeouts in; the export below is the floor for callers that do not.
+ */
+export function controlTimeoutMs(configuredProviderTimeoutsMs: readonly number[] = []): number {
+  const warmup = Math.max(
+    PROVIDER_TIMEOUT_MS.tts,
+    PROVIDER_TIMEOUT_MS.stt,
+    ...configuredProviderTimeoutsMs.filter((value) => Number.isFinite(value) && value > 0),
+  );
+  return MANAGED_STARTUP_TIMEOUT_MS
+    + warmup
+    + PROVIDER_TIMEOUT_MS.health
+    + DEFAULT_CLEANUP_TIMEOUT_MS
+    + 30_000;
+}
+
+export const CONTROL_TIMEOUT_MS = controlTimeoutMs();
 const MAX_CONTROL_ERROR_CHARS = 500;
 
 /**

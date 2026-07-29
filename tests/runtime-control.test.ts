@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CLEANUP_TIMEOUT_MS } from "../src/backends/hot-swap";
 import { MANAGED_STARTUP_TIMEOUT_MS, PROVIDER_TIMEOUT_MS } from "../src/backends/http-transfer";
-import { CONTROL_TIMEOUT_MS, requestRuntimeSwap, startRuntimeControl, type RuntimeControlHandle } from "../src/runtime-control";
+import { CONTROL_TIMEOUT_MS, controlTimeoutMs, requestRuntimeSwap, startRuntimeControl, type RuntimeControlHandle } from "../src/runtime-control";
 
 let handle: RuntimeControlHandle | null = null;
 let dir = "";
@@ -71,6 +71,30 @@ describe("runtime swap control", () => {
       + PROVIDER_TIMEOUT_MS.health
       + DEFAULT_CLEANUP_TIMEOUT_MS;
     expect(CONTROL_TIMEOUT_MS).toBeGreaterThan(worstCaseTransactionMs);
+  });
+
+  // Round 5 (Codex): the deadline was computed from the BUILT-IN provider
+  // defaults, but `timeout_ms` is configurable per provider up to 15 minutes and
+  // a same-backend swap carries the current selection's value onto the
+  // candidate. A remote vibevoice with `timeout_ms: 600000` whose warmup answers
+  // after 450s is entirely legal, and outlived the 440s client deadline — so the
+  // CLI printed a failure for a swap that went on to commit.
+  test("the deadline follows the configured provider timeout, not just the default", () => {
+    const configured = 600_000;
+    const withConfigured = controlTimeoutMs([configured]);
+
+    expect(withConfigured).toBeGreaterThan(configured + MANAGED_STARTUP_TIMEOUT_MS);
+    expect(withConfigured).toBeGreaterThan(CONTROL_TIMEOUT_MS);
+    // A warmup that answers just inside the operator's own budget still fits.
+    expect(withConfigured).toBeGreaterThan(MANAGED_STARTUP_TIMEOUT_MS + 450_000);
+  });
+
+  test("a configured timeout below the defaults never shortens the deadline", () => {
+    // The floor is the built-in budget: a small per-provider timeout on one role
+    // says nothing about the role this swap actually warms.
+    expect(controlTimeoutMs([1_000])).toBe(CONTROL_TIMEOUT_MS);
+    expect(controlTimeoutMs([])).toBe(CONTROL_TIMEOUT_MS);
+    expect(controlTimeoutMs([Number.NaN, -5])).toBe(CONTROL_TIMEOUT_MS);
   });
 
   test("propagates actionable rollback errors", async () => {
