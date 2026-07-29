@@ -26,6 +26,17 @@ audio.cpp is vendored as a git submodule (`vendor/audio.cpp`, pinned in
 `.gitmodules`). A fresh clone gets it with `git submodule update --init
 --recursive`; `provision-audiocpp.sh` does that and compiles the CUDA binary.
 
+The provisioner builds with `--deployment-build`, which compiles audio.cpp's
+`model_specs/` catalog into the binary. That matters: a model directory holds
+weights only, so without an embedded catalog the server looks for a spec file on
+disk — under the model directory, its parent's `model_specs/`, and `model_specs/`
+in the ancestors of whatever directory it was started from — and none of those is
+`vendor/audio.cpp/model_specs/`. It then exits with `model contract spec not
+found for family 'pocket_tts'`. **If you build audio.cpp yourself** rather than
+through the provisioner, either pass `--deployment-build` too, or give the server
+`--model-spec-override vendor/audio.cpp/model_specs/pocket_tts.json`. The same
+applies to a server you run on a remote host.
+
 ```json
 // servers/audiocpp_server.local.json (machine-local, untracked)
 {

@@ -1,3 +1,4 @@
+import { redactSecrets } from "../redact";
 /** Absolute deadlines for the realtime provider pipeline. */
 export const PROVIDER_TIMEOUT_MS = {
   health: 5_000,
@@ -145,7 +146,16 @@ export async function readBoundedJson<T>(
   label = "provider JSON response",
 ): Promise<T> {
   const bytes = await readBoundedBytes(response, maxBytes, label);
-  return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  } catch {
+    // The runtime's own parse error quotes the offending token, so a 200 that is
+    // not JSON at all — an HTML error page, a captive-portal notice, a proxy
+    // echoing a credential — lands verbatim inside an Error that callers log to
+    // the console and publish to the dashboard. Provider bodies are untrusted
+    // input: report the failure, never the content.
+    throw new Error(`${label} was not valid JSON`);
+  }
 }
 
 /** Read bounded binary output and return an exact-size ArrayBuffer. */
@@ -211,7 +221,10 @@ export async function readErrorDetail(
     output.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  const detail = new TextDecoder().decode(output).trim();
+  // Sanitize here, not only at the logger: this string is copied verbatim into
+  // the thrown Error, and a 401 body routinely quotes the credential it just
+  // rejected. Redacting at the read keeps the secret out of the error itself.
+  const detail = redactSecrets(new TextDecoder().decode(output).trim());
   return detail && truncated ? `${detail}…` : detail;
 }
 

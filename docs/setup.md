@@ -370,6 +370,9 @@ cicero doctor                        # check every configured backend, print fix
 cicero pair                          # print the phone URL and credential-bearing QR
 cicero pair --no-token-in-qr         # scan the URL, then type the token separately
 
+# Dictation (opt-in; see docs/dictation.md)
+cicero dictate                       # toggle: press once to start, again to stop
+
 # Utility
 cicero speak "Hello from Cicero"     # speak arbitrary text
 echo "build done" | cicero speak     # pipe-friendly

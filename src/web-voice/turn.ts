@@ -7,6 +7,7 @@ import { newTurnTimer } from "../timing";
 import { log } from "../logger";
 import type { PreparedFiller } from "../speaker/filler-bank";
 import type { SpeculativeTurn } from "./speculative";
+import { SpeculativeSideEffectError } from "../call-intent";
 import { beginOwnedTone, settleTone, type OwnedTone, type ToneOptions } from "./tone";
 import { writeSecureTempAudio } from "../platform/secure-temp-audio";
 import {
@@ -22,6 +23,12 @@ import {
  * narrowed to the one method each so the turn logic is trivially testable.
  */
 export interface WebTurnDeps {
+  /**
+   * Optional "was that addressed to me?" veto — see {@link WebStreamDeps.judge}.
+   * The non-streaming POST path needs it for the same reason the streaming one
+   * does: it is browser-captured audio either way.
+   */
+  judge?: (transcript: string, signal?: AbortSignal) => Promise<boolean>;
   stt: Pick<STTProvider, "transcribe">;
   brain: Pick<Brain, "send"> & { wasControlTurn?: Brain["wasControlTurn"] };
   tts: Pick<TTSProvider, "generateAudio">;
@@ -92,6 +99,18 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     const transcript = (await deps.stt.transcribe(tmpFile))?.trim() ?? "";
     throwIfTurnAborted(deps.signal);
     if (!transcript) return { transcript: "", reply: "", audio: EMPTY };
+    // Same veto the streaming path runs: this is browser-captured audio too,
+    // and on a headless box it is the only capture path there is.
+    // Reported as nothing heard, not as a heard-but-unanswered turn: the caller
+    // persists what it is told, and a vetoed utterance recorded as conversation
+    // is replayed into the brain later. Same reasoning as the streaming path.
+    if (!(await dispatchAllowed(transcript, deps))) return { transcript: "", reply: "", audio: EMPTY };
+    // The judge resolves as ACCEPT when it is cancelled -- failing open is the
+    // whole design -- so acceptance says nothing about whether the turn is
+    // still wanted. Without this, an aborted turn walks straight into the TLDR
+    // fast path below and starts a TTS request nobody is waiting for, holding
+    // the server's lease until it finishes.
+    throwIfTurnAborted(deps.signal);
 
     // Expand request: speak the gated remainder of the previous reply, no brain turn.
     if (deps.tldr?.pending && isExpandRequest(transcript)) {
@@ -186,6 +205,17 @@ export interface WebStreamDeps {
   park?: LongTurnOptions;
   /** Optional input-side tone tag — see {@link ToneOptions}. Omit for untagged turns. */
   tone?: ToneOptions;
+  /**
+   * Optional "was that addressed to me?" veto, the same gate the host mic path
+   * runs. Returns true to dispatch. Omit (the default) to dispatch every
+   * transcript, which is the behaviour before this existed.
+   *
+   * Applied to SPOKEN turns only. A browser capturing hands-free is exactly the
+   * ambient-speech case this exists for, and in headless deployments it is the
+   * only capture path there is — the judged host listener never starts. Typed
+   * text is left alone: someone who types a sentence has already addressed it.
+   */
+  judge?: (transcript: string, signal?: AbortSignal) => Promise<boolean>;
   /** Cancels the transport-owned turn and its brain invocation. */
   signal?: AbortSignal;
   /** Register work intentionally detached after long-turn parking. */
@@ -705,21 +735,26 @@ async function* abortable(
       finalization = Promise.reject(error);
     }
     if (drainSource) {
+      // NO `return` here. A `return` inside `finally` DISCARDS the exception
+      // the generator body is currently throwing, so every error raised by an
+      // adopted speculative stream — a wrapper's side-effect refusal, a buffer
+      // limit, a brain failure — was silently converted into a clean
+      // end-of-stream, and the consumer read it as a completed turn.
       try {
         await finalization;
       } catch (error: unknown) {
         log("warn", `speculative token finalization failed: ${error instanceof Error ? error.message : String(error)}`);
         throw error;
       }
-      return;
-    }
-    const observedFinalization = finalization.catch((error: unknown) => {
-      log("warn", `brain token finalization failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
-    if (trackFinalization && !trackFinalization(observedFinalization)) {
-      await observedFinalization;
-    } else if (!trackFinalization) {
-      void observedFinalization;
+    } else {
+      const observedFinalization = finalization.catch((error: unknown) => {
+        log("warn", `brain token finalization failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      if (trackFinalization && !trackFinalization(observedFinalization)) {
+        await observedFinalization;
+      } else if (!trackFinalization) {
+        void observedFinalization;
+      }
     }
   }
 }
@@ -752,11 +787,37 @@ export async function streamWebTurn(
       }
       if (transcript) {
         timer.mark("stt");
+        // Same ordering as the normal path: nothing is announced, and so
+        // nothing is persisted, until the turn has passed the veto.
+        if (!(await dispatchAllowed(transcript, deps))) {
+          await spec.abort();
+          sink.done();
+          return;
+        }
         sink.transcript(transcript);
+        if (deps.signal?.aborted || sink.aborted()) {
+          await spec.abort();
+          return;
+        }
         try {
           await streamReply(transcript, deps, sink, timer, spec.tokens() ?? undefined);
         } catch (err: unknown) {
-          sink.error(err instanceof Error ? err.message : String(err));
+          // A wrapper refused mid-flight, AFTER we adopted its stream — the
+          // semantic dial-back classifier can resolve well after transcript()
+          // settles. Nothing was spoken, and treating the ended stream as a
+          // finished turn would swallow the request silently: the user asked to
+          // be phoned and the phone would never ring. Re-run the utterance on
+          // the normal path, where the side effect is allowed to happen.
+          if (err instanceof SpeculativeSideEffectError) {
+            log("info", "web voice: speculation refused after adoption — re-running the turn on the normal path");
+            try {
+              await streamReply(transcript, deps, sink, timer);
+            } catch (retryErr: unknown) {
+              sink.error(retryErr instanceof Error ? retryErr.message : String(retryErr));
+            }
+          } else {
+            sink.error(err instanceof Error ? err.message : String(err));
+          }
         } finally {
           // Token exhaustion is not the whole speculative lifetime: the probe
           // tone classifier (and third-party provider work) may still be live.
@@ -781,8 +842,16 @@ export async function streamWebTurn(
     const transcript = (await deps.stt.transcribe(tmpFile))?.trim() ?? "";
     if (deps.signal?.aborted || sink.aborted()) return;
     timer.mark("stt");
+    if (!transcript) { sink.transcript(transcript); sink.done(); return; }
+    // Judged BEFORE the transcript is emitted. The recording wrapper treats any
+    // transcript as a completed conversation, so a vetoed utterance announced
+    // here is persisted to history and replayed into the brain on the next
+    // resume -- the ambient speech reaches the brain after all, just later.
+    if (!(await dispatchAllowed(transcript, deps))) { sink.done(); return; }
     sink.transcript(transcript);
-    if (!transcript) { sink.done(); return; }
+    // Cancellation resolves the judge as ACCEPT, so re-check before spending
+    // anything on a turn that is already gone.
+    if (deps.signal?.aborted || sink.aborted()) return;
     const tag = await settleTone(tonePending?.result ?? null, deps.tone?.graceMs);
     await streamReply(transcript, deps, sink, timer, undefined, tag);
   } catch (err: unknown) {
@@ -791,6 +860,25 @@ export async function streamWebTurn(
     timer.report("web-turn");
     await retainOwnedTone(tonePending, deps.trackBackground, deps.signal);
     if (tmpFile) await unlink(tmpFile).catch(() => { /* best-effort cleanup */ });
+  }
+}
+
+/**
+ * Run the optional addressed-to-me veto. Absent judge, or any failure inside
+ * it, dispatches — this can only ever decline a turn, never cause one.
+ */
+async function dispatchAllowed(
+  transcript: string,
+  deps: Pick<WebStreamDeps, "judge" | "signal">,
+): Promise<boolean> {
+  if (!deps.judge) return true;
+  try {
+    // The transport's signal, so a stalled classifier dies with the turn rather
+    // than outliving it and holding up the web server's shutdown drain.
+    return await deps.judge(transcript, deps.signal);
+  } catch (err: unknown) {
+    log("info", `web voice: intent judge failed, taking the turn: ${err instanceof Error ? err.message : String(err)}`);
+    return true;
   }
 }
 
@@ -1018,7 +1106,17 @@ async function streamReply(
       }
     })();
 
-    if (deps.park) {
+    // Parking is deliberately NOT available to an adopted speculative stream.
+    // The caller's finally calls spec.abort() as soon as streamReply returns —
+    // including the parked return — which cancels the pump the "detached"
+    // consumer is still draining, so the parked reply was truncated to whatever
+    // happened to be buffered. For a turn whose brain has produced nothing yet
+    // (the only state that parks) that is nothing at all, and any error still
+    // pending — a wrapper's side-effect refusal, a cancelled classifier — was
+    // swallowed by the background handler after the turn had already been
+    // acknowledged. Letting these turns run to completion keeps exactly one
+    // termination path for an adopted stream: the caller's, which can retry.
+    if (deps.park && pretokens === undefined) {
       const parkCfg = deps.park;
       const outcome = await new Promise<"park" | "done">((resolve) => {
         const watchdog = setTimeout(() => resolve("park"), parkCfg.afterMs);

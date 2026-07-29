@@ -42,12 +42,15 @@ function shellQuote(value: string): string {
 type JsonObject = Record<string, unknown>;
 type CapturedCall = { path: string; body: JsonObject };
 
-async function waitFor(condition: () => boolean): Promise<void> {
-  for (let i = 0; i < 100; i++) {
-    if (condition()) return;
-    await Bun.sleep(1);
+// Wall-clock bound rather than 100 iterations of Bun.sleep(1): that is only a
+// ~100ms budget, and a contended CI runner blows through it while the awaited work
+// is still progressing. Matches kanban-watch.test.ts.
+async function waitFor(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error("condition was not reached before timeout");
+    await Bun.sleep(5);
   }
-  throw new Error("condition was not reached");
 }
 
 function jsonObject(value: unknown): JsonObject {

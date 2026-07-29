@@ -15,7 +15,6 @@ deployment: local-cpu     # CPU only
 
 ```yaml
 tts_enabled: true
-wake_word_enabled: false # legacy name: enables the macOS Wispr Flow listener, not acoustic wake-word detection
 hotkey: "ctrl+shift+space" # the current macOS helper supports only this fixed chord
 terminal: auto            # auto-detect; or kitty | tmux | wezterm | none
 voice: default
@@ -43,6 +42,11 @@ llm:
   model: qwen3.5:0.8b
   timeout_ms: 120000
 ```
+
+An optional `classifier:` section takes the same shape as `llm:` and holds a
+small model apart from the reply model for per-utterance decisions. It is off by
+default; absence means the features that need it stay off, never that they
+borrow the reply model. See [the classifier backend](classifier.md).
 
 Computer-use file tools default to the daemon's working directory, and public
 LLMs are refused unless data egress is explicitly enabled:
@@ -88,7 +92,8 @@ the configured backend as `llama-cpp`: Cicero launches `llama-server` with its
 Hugging Face GGUF model ID (or an explicit `.gguf` path), and does not route
 through Ollama. Install llama.cpp's `llama-server` on `PATH`; repository models
 download on first launch. TTS alternatives (cloning engines, fallback chains)
-are in [voice cloning](voice-cloning.md); brain backends in [brains](brains.md).
+are in [voice cloning](voice-cloning.md); brain backends in [brains](brains.md);
+the optional classification model in [classifier](classifier.md).
 
 ## Quick intents — your own zero-latency phrases
 

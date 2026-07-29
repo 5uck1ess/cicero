@@ -30,7 +30,7 @@ function writeFixtureWav(path: string): void {
 
 async function cli(home: string, ...args: string[]): Promise<{ code: number; out: string; err: string }> {
   const proc = Bun.spawn(["bun", INDEX, "voice", ...args], {
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, HOME: home, USERPROFILE: home },
     stdout: "pipe",
     stderr: "pipe",
   });

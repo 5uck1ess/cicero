@@ -1,4 +1,5 @@
 import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
+import { describeTextInjection } from "../platform/text-inject-run";
 import { join, dirname } from "node:path";
 import { loadConfig, type RuntimeConfig } from "../config";
 import { ciceroHome } from "../platform/paths";
@@ -45,6 +46,7 @@ import {
   supportedBackendsForRole,
 } from "../backends/supported-backends";
 import { createBrain } from "../brain";
+import { redactSnapshotSecrets } from "../operational-state";
 import { detectTerminal } from "../terminal/detect";
 import {
   WEB_VOICE_TOKEN_GENERATION_HINT,
@@ -295,7 +297,9 @@ async function checkEngine(
   }
   const sttRole = role.startsWith("stt");
   const ttsRole = role.startsWith("tts");
-  const llmRole = role === "llm";
+  // The classifier is an LLM in every respect that matters here: same ports,
+  // same defaults, same probes. Only its config key differs.
+  const llmRole = role === "llm" || role === "classifier";
   const voiceContract = role.startsWith("tts")
     ? voiceProviderContractForBackend(cfg.backend)
     : null;
@@ -501,15 +505,16 @@ async function checkLlm(
   checks: Check[],
   options: DoctorCheckOptions,
   implicitDefault: boolean,
+  role: "llm" | "classifier" = "llm",
 ): Promise<void> {
   const backend = cfg.backend ?? "unknown";
-  const validValues = supportedBackendsForRole("llm") ?? [];
+  const validValues = supportedBackendsForRole(role) ?? [];
   if (backend === "mlx-lm" || !validValues.includes(backend)) {
-    await checkEngine("llm", cfg, checks, options, implicitDefault);
+    await checkEngine(role, cfg, checks, options, implicitDefault);
     return;
   }
 
-  const label = `llm (${backend})`;
+  const label = `${role} (${backend})`;
   const record = (check: Omit<Check, "name">): void => {
     if (check.level === "ok") {
       checks.push({ name: label, ...check });
@@ -518,8 +523,8 @@ async function checkLlm(
     checks.push({
       name: label,
       ...check,
-      detail: `${implicitDefault ? "implicit " : ""}llm.backend='${backend}': ${check.detail}`,
-      hint: `${check.hint ? `${check.hint}; ` : ""}${supportedBackendHint("llm.backend", validValues)}`,
+      detail: `${implicitDefault ? "implicit " : ""}${role}.backend='${backend}': ${check.detail}`,
+      hint: `${check.hint ? `${check.hint}; ` : ""}${supportedBackendHint(`${role}.backend`, validValues)}`,
     });
   };
   const timeoutMs = options.cloudProbeTimeoutMs ?? DOCTOR_HTTP_TIMEOUT_MS;
@@ -537,7 +542,7 @@ async function checkLlm(
         record({
           level: "fail",
           detail: `remote Ollama endpoint ${endpoint} is not responding with a valid model list`,
-          hint: `start Ollama on ${cfg.host} or fix llm.host/llm.port`,
+          hint: `start Ollama on ${cfg.host} or fix ${role}.host/${role}.port`,
         });
       } else if (!hasOllamaModel(models, model)) {
         record({
@@ -593,7 +598,7 @@ async function checkLlm(
         : {
             level: "fail",
             detail: `remote llama-server ${endpoint} is not responding`,
-            hint: `start llama-server on ${cfg.host} or fix llm.host/llm.port`,
+            hint: `start llama-server on ${cfg.host} or fix ${role}.host/${role}.port`,
           });
       return;
     }
@@ -603,12 +608,12 @@ async function checkLlm(
     const missing: string[] = [];
     if (!binary) missing.push("'llama-server' is not on PATH");
     if (model === LLM_DEFAULT_MODEL["llama-cpp"]) {
-      missing.push("llm.model must name a GGUF file or Hugging Face GGUF repo");
+      missing.push(`${role}.model must name a GGUF file or Hugging Face GGUF repo`);
     } else if (model.toLowerCase().endsWith(".gguf")) {
       const problem = localGgufProblem(model);
       if (problem) missing.push(problem);
     } else if (!isHuggingFaceGgufRepo(model)) {
-      missing.push(`llm.model is not a valid Hugging Face GGUF repo (expected owner/repo[:quant]): ${model}`);
+      missing.push(`${role}.model is not a valid Hugging Face GGUF repo (expected owner/repo[:quant]): ${model}`);
     }
     if (missing.length > 0) {
       record({
@@ -616,7 +621,7 @@ async function checkLlm(
         detail: up
           ? `local llama-server is healthy, but Cicero cannot relaunch it (${missing.join("; ")})`
           : `local llama.cpp launch prerequisites are incomplete (${missing.join("; ")})`,
-        hint: "install llama.cpp's llama-server on PATH and set llm.model to a readable .gguf path or owner/repo[:quant]",
+        hint: `install llama.cpp's llama-server on PATH and set ${role}.model to a readable .gguf path or owner/repo[:quant]`,
       });
     } else {
       record(up
@@ -635,7 +640,7 @@ async function checkLlm(
       record({
         level: "fail",
         detail: "the configured OpenAI-compatible base URL is invalid",
-        hint: "set llm.baseUrl to an http:// or https:// API base ending in /v1",
+        hint: `set ${role}.baseUrl to an http:// or https:// API base ending in /v1`,
       });
       return;
     }
@@ -643,7 +648,7 @@ async function checkLlm(
       record({
         level: "fail",
         detail: `unsupported OpenAI-compatible URL scheme '${parsed.protocol}'`,
-        hint: "set llm.baseUrl to an http:// or https:// API base ending in /v1",
+        hint: `set ${role}.baseUrl to an http:// or https:// API base ending in /v1`,
       });
       return;
     }
@@ -652,7 +657,7 @@ async function checkLlm(
       record({
         level: "fail",
         detail: `OpenAI-compatible endpoint ${displayBase} embeds URL credentials, which the provider does not support`,
-        hint: "remove URL userinfo and configure llm.apiKey or llm.apiKeyEnv instead",
+        hint: `remove URL userinfo and configure ${role}.apiKey or ${role}.apiKeyEnv instead`,
       });
       return;
     }
@@ -660,7 +665,7 @@ async function checkLlm(
       record({
         level: "fail",
         detail: `OpenAI-compatible endpoint ${displayBase} contains a query string or fragment, which cannot be used as an API base`,
-        hint: "remove the query/fragment and set llm.baseUrl to the API base ending in /v1",
+        hint: `remove the query/fragment and set ${role}.baseUrl to the API base ending in /v1`,
       });
       return;
     }
@@ -673,7 +678,7 @@ async function checkLlm(
       record({
         level: "fail",
         detail: `${target.apiKeyEnv} is not set, so ${displayBase} cannot authenticate`,
-        hint: `export ${target.apiKeyEnv}=<your-key> or set llm.apiKeyEnv to the correct environment variable`,
+        hint: `export ${target.apiKeyEnv}=<your-key> or set ${role}.apiKeyEnv to the correct environment variable`,
       });
       return;
     }
@@ -690,7 +695,7 @@ async function checkLlm(
       : {
           level: "fail",
           detail: `${backend} endpoint ${displayEndpoint} is not responding`,
-          hint: "check llm.baseUrl, network access, and the configured API credential",
+          hint: `check ${role}.baseUrl, network access, and the configured API credential`,
         });
     return;
   }
@@ -772,6 +777,33 @@ export async function collectChecks(
   await checkEngine("tts", config.ttsBackend, checks, options, config.raw.tts === undefined);
   await checkEngine("tts_fallback", config.ttsFallbackBackend ?? undefined, checks, options);
   await checkLlm(config.llmBackend, checks, options, config.raw.llm === undefined);
+  // The classifier is optional, so absence is silent. Configured-but-unreachable
+  // is not: features that depend on it will decline turns, and the operator
+  // should learn that here rather than from a feature that quietly does nothing.
+  const classifierBackend = config.classifierBackend;
+  if (classifierBackend) {
+    await checkLlm(classifierBackend, checks, options, false, "classifier");
+  }
+
+  // -- native dictation ----------------------------------------------------
+  const dictation = config.dictation;
+  if (dictation.enabled) {
+    const target = dictation.target ?? "focused-app";
+    if (target === "cicero") {
+      // This target never synthesizes keystrokes, so it works everywhere.
+      checks.push({ name: "dictation", level: "ok", detail: "enabled, transcripts go to Cicero as commands" });
+    } else {
+      const support = describeTextInjection();
+      checks.push(support.kind === "supported"
+        ? { name: "dictation", level: "ok", detail: `enabled, typing into the focused window via ${support.method}` }
+        : {
+            name: "dictation",
+            level: "fail",
+            detail: `cannot type into other windows: ${support.reason}`,
+            hint: support.fix ?? 'set dictation.target: cicero to hand transcripts to Cicero instead',
+          });
+    }
+  }
 
   // -- semantic end-of-turn sidecar ---------------------------------------
   const turn = config.turn;
@@ -975,10 +1007,49 @@ export async function collectChecks(
     }
     const sum = wv.tldr?.summarizer_url;
     if (sum) {
+      const shownSum = redactSnapshotSecrets(sum);
       checks.push((await probe(`${sum.replace(/\/$/, "")}/models`))
-        ? { name: "tldr summarizer", level: "ok", detail: sum }
-        : { name: "tldr summarizer", level: "warn", detail: `${sum} not responding — TLDR codas fall back to a generic line`, hint: "start the summarizer endpoint or remove web_voice.tldr" });
+        ? { name: "tldr summarizer", level: "ok", detail: shownSum }
+        : { name: "tldr summarizer", level: "warn", detail: `${shownSum} not responding — TLDR codas fall back to a generic line`, hint: "start the summarizer endpoint or remove web_voice.tldr" });
     }
+  }
+
+  // -- background history compaction ----------------------------------------
+  const compaction = config.brain?.history_compaction;
+  if (compaction?.enabled) {
+    const url = compaction.summarizer_url ?? config.web_voice?.tldr?.summarizer_url;
+    if (!url) {
+      checks.push({
+        name: "history compaction",
+        level: "warn",
+        detail: "enabled but no summarizer_url is set — old turns are dropped instead of summarized",
+        hint: "set brain.history_compaction.summarizer_url (or web_voice.tldr.summarizer_url)",
+      });
+    } else {
+      // The URL may carry userinfo or a query token; never echo it raw.
+      const shown = redactSnapshotSecrets(url);
+      checks.push((await probe(`${url.replace(/\/$/, "")}/models`))
+        ? { name: "history compaction", level: "ok", detail: shown }
+        : {
+            name: "history compaction",
+            level: "warn",
+            detail: `${shown} not responding — long conversations fall back to dropping their oldest turns`,
+            hint: "start the summarizer endpoint or set brain.history_compaction.enabled: false",
+          });
+    }
+  }
+
+  // -- intent judge ---------------------------------------------------------
+  // Enabled without a classifier is the case worth reporting: the daemon starts
+  // fine and every utterance is accepted, so the feature looks on and does
+  // nothing. Silence would leave that undiagnosable.
+  if (config.intentJudge.enabled && !config.classifierBackend) {
+    checks.push({
+      name: "intent judge",
+      level: "warn",
+      detail: "intent_judge.enabled is set but no classifier backend is configured — every utterance is accepted, as before",
+      hint: "configure a `classifier` backend (see docs/classifier.md) or set intent_judge.enabled: false",
+    });
   }
 
   // -- input-side tone (speech emotion) -------------------------------------

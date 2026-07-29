@@ -29,6 +29,8 @@ are provenance, not guidance.
 | [Daemon mode & local mic](daemon-mode.md) | Lifecycle, activation, echo cancellation, computer use on the local machine |
 | [Voice activation](voice-activation.md) | Hands-free start, claps, VAD tuning, earcons |
 | [Turn detection](turn-detection.md) | Semantic end-of-turn (Smart-Turn): what it fixes and how to enable it |
+| [The classifier backend](classifier.md) | An optional small model held apart from the reply model for per-utterance decisions |
+| [The intent judge](intent-judge.md) | "Was that addressed to me?" — an opt-in LLM veto over captured speech in a noisy room |
 | [Voice cloning](voice-cloning.md) | Giving Cicero (or a lane) any voice from one reference clip |
 | [Notifications](notifications.md) | Cicero speaking up on its own: Telegram, briefings, schedules, quiet hours |
 | [Telegram calls](https://github.com/5uck1ess/cicero/blob/main/sidecars/telegram-call/README.md) | The phone-call sidecar: talk to your agent from anywhere |

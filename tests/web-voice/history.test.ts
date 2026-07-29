@@ -49,6 +49,24 @@ test("file is trimmed once it exceeds the cap", async () => {
   expect(got[got.length - 1].user).toBe("u1004"); // newest survives
 });
 
+// The cached line count skips a full reread per turn, so it must never let an
+// already-oversized file through: a fresh instance starts with no count and has
+// to resync from disk on its very first append.
+test("an oversized file inherited from a previous run is trimmed on the first append", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cicero-hist-inherited-"));
+  const file = join(dir, "history.jsonl");
+  const existing = Array.from({ length: 1200 }, (_, i) => JSON.stringify({ t: i, user: "old" + i, reply: "r" }));
+  writeFileSync(file, existing.join("\n") + "\n", { mode: 0o600 });
+
+  const h = new TurnHistory(file);
+  await h.append({ t: 9999, user: "new", reply: "r" });
+
+  const got = await h.recent(2000);
+  expect(got.length).toBeLessThanOrEqual(505);
+  expect(got[got.length - 1].user).toBe("new");
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test.skipIf(process.platform === "win32")("history directory and file are private, including existing data", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cicero-hist-mode-"));
   const file = join(dir, "history.jsonl");

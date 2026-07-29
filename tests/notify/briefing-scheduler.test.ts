@@ -23,12 +23,16 @@ function local(hours: number, minutes: number, day = 15): Date {
   return new Date(2026, 6, day, hours, minutes, 5);
 }
 
-async function waitFor(condition: () => boolean): Promise<void> {
-  for (let i = 0; i < 100; i++) {
-    if (condition()) return;
-    await Bun.sleep(1);
+// Bounded by wall-clock, not by iteration count: 100 rounds of Bun.sleep(1) is a
+// ~100ms budget, which a loaded CI runner exhausts while the awaited work is still
+// making progress. Same shape as kanban-watch.test.ts. A satisfied condition still
+// returns immediately, so the longer ceiling only costs time on a real failure.
+async function waitFor(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error("condition was not reached before timeout");
+    await Bun.sleep(5);
   }
-  throw new Error("condition was not reached");
 }
 
 function scheduler(options: {

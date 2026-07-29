@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { redactSecrets } from "./redact";
 import { dashBus } from "./dashboard/bus";
 
 type LogIcon = "mic" | "text" | "brain" | "run" | "result" | "speak" | "error" | "warn" | "info" | "ok";
@@ -20,11 +21,13 @@ function timestamp(): string {
   return new Date().toLocaleTimeString("en-US", { hour12: false });
 }
 
-const QUERY_TOKEN = /([?&]token=)[^&#\s]+/gi;
-
-/** Keep bearer-like URL credentials out of terminal output and dashboard history. */
+/**
+ * Keep credentials out of terminal output and dashboard history. The rules live
+ * in redact.ts because provider error bodies are sanitized where they are read
+ * as well — a reflected key must not survive in the thrown Error either.
+ */
 export function redactLogSecrets(message: string): string {
-  return message.replace(QUERY_TOKEN, "$1<redacted>");
+  return redactSecrets(message);
 }
 
 export function log(icon: LogIcon, message: string): void {

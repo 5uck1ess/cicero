@@ -79,6 +79,15 @@ export function isKeylessHost(host: string | undefined): boolean {
 }
 
 /** Build an http base URL (`http://host:port`), defaulting host to localhost. */
+/**
+ * `host:port` for a server configured with an authority rather than a URL
+ * (`OLLAMA_HOST`). Derived from httpBase so a launch and the probe that follows
+ * it cannot disagree about which endpoint the child was told to bind.
+ */
+export function hostPort(host: string | undefined, port: number): string {
+  return httpBase(host, port).slice("http://".length);
+}
+
 export function httpBase(host: string | undefined, port: number): string {
   const normalized = unbracketHost(host ?? "localhost");
   const literal = addressWithoutZone(normalized);

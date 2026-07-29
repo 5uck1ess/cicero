@@ -14,10 +14,14 @@ conversation until voice mode is *armed*. There are four ways to arm it:
 Say "stop listening", "goodbye", press the hotkey again, or click **Stop
 listening** to turn it back off.
 
-`wake_word_enabled` is a legacy configuration name for the macOS Wispr Flow
-hotkey listener; it is not an acoustic wake-word detector. The daemon accepts a
-`hotkey` label for compatibility, but the current native helper is hardcoded to
-Ctrl+Shift+Space. `cicero status` warns when a different value is configured.
+`wake_word_enabled` and `wispr_hotkey` are retired. They never enabled acoustic
+wake-word detection — their only effect was selecting a listener that drove the
+paid macOS app Wispr Flow. That listener has been replaced by native dictation
+(see [dictation.md](dictation.md)). Both keys are still accepted so an existing
+config keeps starting, and both are ignored with a warning.
+
+The daemon accepts a `hotkey` label for compatibility, but the current native
+helper is hardcoded to Ctrl+Shift+Space. `cicero status` warns when a different value is configured.
 The helper checks System Settings → Privacy & Security → Accessibility; some
 macOS releases may also show an Input Monitoring prompt for the terminal host.
 
@@ -108,3 +112,14 @@ the server binds to loopback only, and a control request must carry an
 `X-Cicero-Dashboard` header (which a cross-origin page cannot set without a CORS
 preflight the server never approves), a loopback `Host`, and a loopback `Origin`
 when one is present. The dashboard remains read-only over WebSocket for activity.
+
+## Deciding what was meant for Cicero
+
+Activation decides *when* Cicero is listening. It does not decide whether a
+given utterance was aimed at Cicero — once active, every intelligible non-echo
+utterance becomes a command.
+
+In a room with other people talking or a podcast playing, the optional
+[intent judge](intent-judge.md) adds a per-utterance veto over that. It is off
+by default, needs a [classifier model](classifier.md), and can only ever decline
+an utterance — never cause one to be taken.
