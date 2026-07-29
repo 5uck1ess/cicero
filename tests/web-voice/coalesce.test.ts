@@ -13,6 +13,9 @@ import { streamWebTurn, type WebStreamDeps, type WebReplySink } from "../../src/
 
 async function* tokens(...parts: string[]) { for (const p of parts) yield p; }
 
+/** Stands in for a hosted engine's per-call latency — see the harness comment. */
+const SYNTH_MS = 25;
+
 /** A real 24 kHz mono WAV — the reply path validates what the provider returns. */
 function tinyWav(samples: number[] = [1], sampleRate = 24_000): ArrayBuffer {
   const buf = new ArrayBuffer(44 + samples.length * 2);
@@ -44,7 +47,11 @@ function harness(over: Partial<WebStreamDeps> = {}) {
       send: async () => "",
       sendStream: () => tokens("One. Two. Three. Four. Five."),
     },
-    tts: { generateAudio: async (t: string) => { synthesized.push(t); return tinyWav(); } },
+    // Coalescing merges only what has ALREADY queued, so a test whose synthesis
+    // returns instantly never gives the rest of the reply a chance to arrive and
+    // silently exercises the one-call-per-sentence path instead. This delay is
+    // the hosted-engine latency that makes merging happen at all.
+    tts: { generateAudio: async (t: string) => { synthesized.push(t); await Bun.sleep(SYNTH_MS); return tinyWav(); } },
     ...over,
   } as unknown as WebStreamDeps;
   return { deps, sink, synthesized, spoken };
@@ -91,6 +98,55 @@ test("a cap that admits no merge still speaks every sentence", async () => {
   });
   await streamWebTurn(new ArrayBuffer(8), deps, sink);
   expect(synthesized).toEqual(["One.", "Two.", "Three.", "Four.", "Five."]);
+});
+
+// A roll call queues one lane voice per SENTENCE, and the daemon's laneTts
+// shifts one off per CALL. A merged chunk therefore speaks two lanes in the
+// first one's voice and leaves the third queued — for the next reply, which
+// answers in a voice nobody asked for. Control turns are never merged.
+test("a control turn is never merged, so the lane voice queue stays in step", async () => {
+  const voices = ["lane-a", "lane-b", "lane-c"];
+  const usedFor: string[] = [];
+  const { deps, sink } = harness({
+    brain: {
+      send: async () => "",
+      sendStream: () => tokens("One. Two. Three."),
+      wasControlTurn: () => true,
+    },
+    // Stands in for laneTts: one queued voice consumed per generateAudio call.
+    tts: { generateAudio: async (t: string) => { usedFor.push(`${voices.shift() ?? "NONE"}:${t}`); await Bun.sleep(SYNTH_MS); return tinyWav(); } },
+    coalesce: { maxChars: 240, passthroughFirst: 0 },
+  } as unknown as Partial<WebStreamDeps>);
+  await streamWebTurn(new ArrayBuffer(8), deps, sink);
+  // One call per sentence, each drawing the lane voice that sentence belongs to.
+  expect(usedFor).toEqual(["lane-a:One.", "lane-b:Two.", "lane-c:Three."]);
+  // Nothing left over to leak into the reply after this one.
+  expect(voices).toEqual([]);
+});
+
+// The TLDR cap counts sentences, so a chunk may not straddle it. Codex's case:
+// cap 4, one passthrough sentence, then a single seven-sentence chunk — which
+// spoke all eight, gated nothing, and emitted no coda.
+test("a merged chunk is split at the TLDR cap instead of crossing it", async () => {
+  const gated: string[] = [];
+  const { deps, sink, synthesized } = harness({
+    brain: {
+      send: async () => "",
+      sendStream: () => tokens("One. Two. Three. Four. Five. Six. Seven. Eight."),
+    },
+    coalesce: { maxChars: 240, passthroughFirst: 1 },
+    tldr: { cap: 4, store: (remainder: string) => { gated.push(remainder); } },
+  } as unknown as Partial<WebStreamDeps>);
+  await streamWebTurn(new ArrayBuffer(8), deps, sink);
+  // Exactly four sentences reach the engine — the same four as with coalescing off.
+  const spokenSentences = synthesized.join(" ");
+  expect(spokenSentences).toContain("One.");
+  expect(spokenSentences).toContain("Four.");
+  expect(spokenSentences).not.toContain("Five.");
+  expect(spokenSentences).not.toContain("Eight.");
+  // And the remainder was gated rather than silently spoken.
+  expect(gated.join(" ")).toContain("Five.");
+  expect(gated.join(" ")).toContain("Eight.");
 });
 
 // The option existing is not the option working. Both previous features in this

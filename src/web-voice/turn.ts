@@ -1107,28 +1107,55 @@ async function streamReply(
         if (!firstSentence) { firstSentence = true; timer.mark("first_sentence"); }
         control ??= deps.brain.wasControlTurn?.() ?? false;
         for (const part of chunk.parts) sink.sentence(part);
-        // Checked once per chunk, before synthesis: the cap means "stop speaking
-        // after N sentences", and a chunk that starts past it is silent whole.
-        if (deps.tldr && !control && spoken >= deps.tldr.cap) {
-          gated.push(...chunk.parts); // pane gets the text; the voice stays quiet
-          continue;
-        }
-        const audio = admitProviderAudio(
-          await deps.tts.generateAudio(chunk.text, undefined, { speed: deps.voice?.state.rate }),
-        );
-        if (sink.aborted() && !parked) break;
-        if (audio.byteLength > 0) {
-          if (!firstAudio) { firstAudio = true; timer.mark("first_audio"); }
-          // Control turns hand the floor between speakers each sentence — give
-          // the next voice a human beat instead of cutting in mid-breath.
-          if (control && spoken > 0) {
-            const beat = silenceWavLike(SPEAKER_BEAT_MS, audio);
-            if (beat.byteLength > 0) sink.audio(beat);
+
+        // How this chunk is actually spoken. Usually one call, but two things
+        // are counted in SENTENCES and would be corrupted by a merged call, so
+        // both are recovered by splitting on the parts the coalescer reported.
+        let calls: Array<{ text: string; parts: string[] }> = control
+          // A roll call queues one lane voice per sentence and laneTts shifts one
+          // off PER CALL. Merging would speak two lanes in the first one's voice
+          // and leave the third queued — for the NEXT reply, which would then
+          // answer in a voice nobody asked for. It also drops the inter-speaker
+          // beat inside the chunk. Control turns are never merged.
+          ? chunk.parts.map((part) => ({ text: part, parts: [part] }))
+          : [{ text: chunk.text, parts: chunk.parts }];
+
+        if (deps.tldr && !control) {
+          // The cap counts sentences, so a chunk may not straddle it: with a cap
+          // of 4 and one passthrough sentence, a seven-sentence chunk would
+          // otherwise speak all eight, gate nothing, and emit no coda.
+          const room = deps.tldr.cap - spoken;
+          if (room <= 0) {
+            gated.push(...chunk.parts); // pane gets the text; the voice stays quiet
+            continue;
           }
-          sink.audio(audio);
-          spoken += chunk.parts.length;
-          spokenTexts.push(...chunk.parts);
+          if (chunk.parts.length > room) {
+            const spoken_ = chunk.parts.slice(0, room);
+            calls = [{ text: spoken_.join(" "), parts: spoken_ }];
+            gated.push(...chunk.parts.slice(room));
+          }
         }
+
+        let stop = false;
+        for (const call of calls) {
+          const audio = admitProviderAudio(
+            await deps.tts.generateAudio(call.text, undefined, { speed: deps.voice?.state.rate }),
+          );
+          if (sink.aborted() && !parked) { stop = true; break; }
+          if (audio.byteLength > 0) {
+            if (!firstAudio) { firstAudio = true; timer.mark("first_audio"); }
+            // Control turns hand the floor between speakers each sentence — give
+            // the next voice a human beat instead of cutting in mid-breath.
+            if (control && spoken > 0) {
+              const beat = silenceWavLike(SPEAKER_BEAT_MS, audio);
+              if (beat.byteLength > 0) sink.audio(beat);
+            }
+            sink.audio(audio);
+            spoken += call.parts.length;
+            spokenTexts.push(...call.parts);
+          }
+        }
+        if (stop) break;
       }
     })();
 
