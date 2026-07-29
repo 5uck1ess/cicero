@@ -232,7 +232,13 @@ async function terminateWindowsTree(
     if (gracefulExit.kind === "exited") return;
   }
 
-  const forced = await runWindowsTaskkill(proc.pid, true);
+  // A graceful pass that found no such PID leaves nothing to force. Windows CI
+  // observed exit 128 (not found) from that pass and then 255 — not 128 — from a
+  // forced pass against the same already-missing PID, so issuing it only
+  // manufactures a code this reaper has to read as a targeting failure.
+  const forced = graceful.outcome === "absent"
+    ? { outcome: "absent" as const, code: graceful.code }
+    : await runWindowsTaskkill(proc.pid, true);
   if (forced.outcome === "failed") {
     try { proc.kill("SIGKILL"); } catch { /* already exited */ }
   }
@@ -273,15 +279,23 @@ export function windowsTreeAccountedFor(
   forced: WindowsTaskkillOutcome,
 ): boolean {
   if (forced === "targeted") return true;
-  // `absent` means the forced pass found no such PID, which only happens once
-  // the leader is already gone — and a leader that outlives the grace window
-  // exits between that timeout and this call often enough to matter. It is only
-  // conclusive together with a graceful pass that DID reach the tree: that pass
-  // signalled every process then in it, so nothing was left unsignalled. Read as
-  // a targeting failure instead, a completed teardown was reported as an
-  // unconfirmed release, and an ordinary abort surfaced a reap error in place of
-  // the caller's own abort reason.
-  return forced === "absent" && graceful === "targeted";
+  if (forced !== "absent") return false;
+  // `absent` means the pass found no such PID, which only happens once the leader
+  // is already gone. Two ways to get there, both accounted for:
+  //
+  //  - after a graceful pass that DID reach the tree: that pass signalled every
+  //    process then in it, so nothing was left unsignalled, and the leader exited
+  //    between the grace timeout and the forced call — often enough to matter.
+  //  - after a graceful pass that also found nothing: the leader was already gone
+  //    before this reaper ran at all. Its descendants were never enumerable —
+  //    Windows cannot rediscover them without a Job Object once the root goes, as
+  //    the caller's comment notes — so no kill this function could issue would
+  //    change the outcome.
+  //
+  // Read either as a targeting failure instead, a completed teardown is reported
+  // as an unconfirmed release, and an ordinary abort surfaces a reap error in
+  // place of the caller's own abort reason.
+  return graceful === "targeted" || graceful === "absent";
 }
 
 function signalPosixTree(proc: OwnedProcess, signal: "SIGTERM" | "SIGKILL"): void {
