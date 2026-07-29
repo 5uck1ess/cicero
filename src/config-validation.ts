@@ -1,4 +1,5 @@
 import type { CiceroConfig } from "./types";
+import { log } from "./logger";
 import { TIER_PRESETS } from "./backends/tiers";
 import { MAX_PROVIDER_TIMEOUT_MS } from "./backends/http-transfer";
 import {
@@ -66,6 +67,9 @@ function suggestedKey(key: string, allowed: readonly string[]): string | undefin
   const threshold = Math.max(1, Math.floor(Math.max(normalized.length, normalizedKey(best.key).length) / 4));
   return best.distance <= threshold ? best.key : undefined;
 }
+
+/** Removed with the Wispr Flow listener; tolerated so old configs still boot. */
+const RETIRED_TOP_LEVEL_KEYS = ["wake_word_enabled", "wispr_hotkey"] as const;
 
 function checkKnownKeys(
   owner: Record<string, unknown>,
@@ -196,18 +200,45 @@ function checkStringRecord(value: unknown, path: string, issues: string[]): void
   }
 }
 
+/**
+ * Validate a provider BASE url.
+ *
+ * Every caller appends a path to this value (`/chat/completions`, `/models`) by
+ * string concatenation, so a query or fragment does not survive: an accepted
+ * `https://api.example/v1?token=abc` becomes
+ * `https://api.example/v1?token=abc/chat/completions`, whose real path is `/v1`
+ * and whose token is `abc/chat/completions`. The intended endpoint is never
+ * requested, and the failure looks like a broken provider rather than a
+ * mis-set URL. Refuse it at config time, where the message can say what to fix.
+ *
+ * The offending value is deliberately never echoed — it is exactly the kind of
+ * URL that carries a credential.
+ */
 function checkHttpUrl(value: unknown, path: string, issues: string[]): void {
   if (typeof value !== "string" || value.trim().length === 0) {
     issues.push(`${path} must be a non-empty HTTP(S) URL`);
     return;
   }
+  let url: URL;
   try {
-    const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      issues.push(`${path} must be a non-empty HTTP(S) URL`);
-    }
+    url = new URL(value);
   } catch {
     issues.push(`${path} must be a non-empty HTTP(S) URL`);
+    return;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    issues.push(`${path} must be a non-empty HTTP(S) URL`);
+    return;
+  }
+  // Test the raw value, not `url.search`/`url.hash`: those are empty strings for
+  // a bare `?` or `#`, so `http://h/v1?` slipped through and still concatenated
+  // into `http://h/v1?/chat/completions`, whose real path is `/v1`. The
+  // delimiter is the problem, with or without anything after it.
+  if (value.includes("?")) {
+    issues.push(`${path} must not carry a query string — Cicero appends a path to it; put credentials in the API key setting instead`);
+  }
+  if (value.includes("#")) {
+    issues.push(`${path} must not carry a fragment — Cicero appends a path to it`);
   }
 }
 
@@ -246,19 +277,37 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
 
   checkKnownKeys(config, "config", [
     "quick_intents", "filler_lines", "tts_enabled", "tts_summary_max_tokens", "tts_local_max_tokens",
-    "wake_word_enabled", "hotkey", "wispr_hotkey", "terminal", "voice", "voice_ref_audio",
+    "hotkey", "dictation", "terminal", "voice", "voice_ref_audio",
+    // Retired with the Wispr Flow listener (see docs/dictation.md). Still
+    // accepted so an existing config keeps starting; both are ignored.
+    ...RETIRED_TOP_LEVEL_KEYS,
     "voice_ref_text", "barge_in_enabled", "full_duplex", "aec", "silence_duration",
     "silence_threshold", "phonetic_aliases", "brain", "servers", "actions", "deployment", "stt",
     "stt_fallback", "tts", "tts_fallback", "llm", "compute", "sidecar", "dashboard", "web_voice",
     "notify", "headless", "turn", "tone", "clap", "vad", "earcons",
   ], issues);
 
+  for (const key of RETIRED_TOP_LEVEL_KEYS) {
+    if (config[key] !== undefined) {
+      // A warning, not an error: refusing to start over a key we removed would
+      // punish the operator for our change.
+      log("warn", `config.${key} is no longer used and is ignored — see docs/dictation.md`);
+    }
+  }
+
+  if (config.dictation !== undefined && checkRecord(config.dictation, "dictation", issues)) {
+    checkKnownKeys(config.dictation, "dictation", ["enabled", "target", "max_recording_seconds"], issues);
+    checkOptionalBoolean(config.dictation, "enabled", "dictation", issues);
+    if (config.dictation.target !== undefined && config.dictation.target !== "focused-app" && config.dictation.target !== "cicero") {
+      issues.push('dictation.target must be "focused-app" or "cicero"');
+    }
+    checkOptionalNumber(config.dictation, "max_recording_seconds", "dictation", issues, { min: 1, max: 3_600 });
+  }
+
   checkBoolean(config.tts_enabled, "tts_enabled", issues);
-  checkBoolean(config.wake_word_enabled, "wake_word_enabled", issues);
   // Cicero uses explicit feature switches rather than empty-string sentinels;
   // hotkey names and voice selections must therefore remain usable values.
   checkString(config.hotkey, "hotkey", issues);
-  checkString(config.wispr_hotkey, "wispr_hotkey", issues);
   checkString(config.voice, "voice", issues);
   for (const key of ["voice_ref_audio", "voice_ref_text"] as const) {
     checkOptionalString(config, key, "config", issues);
@@ -331,6 +380,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     checkKnownKeys(config.brain, "brain", [
       "backend", "mode", "target_tab", "auto_approve_tools", "confirm_tools", "confirm_retry",
       "max_queue_bytes", "max_response_bytes", "max_pending_turns", "escalate", "lanes",
+      "history_compaction",
       "binary", "binary_args", "ollama_port", "ollama_model",
       "base_url", "model", "api_key", "api_key_env", "max_tokens", "timeout_ms", "turn_timeout_ms",
       "headers", "session_header", "narrate_progress", "unset_env", "agent_first", "thinking_filler",
@@ -355,6 +405,14 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
     for (const key of ["auto_approve_tools", "confirm_retry", "narrate_progress", "agent_first", "thinking_filler"]) {
       checkOptionalBoolean(config.brain, key, "brain", issues);
+    }
+    if (config.brain.history_compaction !== undefined
+      && checkRecord(config.brain.history_compaction, "brain.history_compaction", issues)) {
+      const compaction = config.brain.history_compaction;
+      checkKnownKeys(compaction, "brain.history_compaction", ["enabled", "summarizer_url", "summarizer_model"], issues);
+      checkOptionalBoolean(compaction, "enabled", "brain.history_compaction", issues);
+      checkOptionalHttpUrl(compaction, "summarizer_url", "brain.history_compaction", issues);
+      checkOptionalString(compaction, "summarizer_model", "brain.history_compaction", issues);
     }
     if (config.brain.ollama_port !== undefined) {
       checkInteger(config.brain.ollama_port, "brain.ollama_port", issues, { min: 1, max: 65_535 });

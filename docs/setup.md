@@ -372,6 +372,9 @@ cicero pair --no-token-in-qr         # scan the URL, then type the token separat
 cicero swap stt faster-whisper       # replace a live speech provider without restarting
 cicero swap tts kokoro hexgrad/Kokoro-82M   # optional trailing model override
 
+# Dictation (opt-in; see docs/dictation.md)
+cicero dictate                       # toggle: press once to start, again to stop
+
 # Utility
 cicero speak "Hello from Cicero"     # speak arbitrary text
 echo "build done" | cicero speak     # pipe-friendly

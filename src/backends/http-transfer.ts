@@ -155,7 +155,16 @@ export async function readBoundedJson<T>(
   label = "provider JSON response",
 ): Promise<T> {
   const bytes = await readBoundedBytes(response, maxBytes, label);
-  return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  } catch {
+    // The runtime's own parse error quotes the offending token, so a 200 that is
+    // not JSON at all — an HTML error page, a captive-portal notice, a proxy
+    // echoing a credential — lands verbatim inside an Error that callers log to
+    // the console and publish to the dashboard. Provider bodies are untrusted
+    // input: report the failure, never the content.
+    throw new Error(`${label} was not valid JSON`);
+  }
 }
 
 /** Read bounded binary output and return an exact-size ArrayBuffer. */

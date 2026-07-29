@@ -125,6 +125,29 @@ test("bounded JSON reads accept encoded JSON exactly at the cap", async () => {
     .toEqual({ ok: true });
 });
 
+// Codex: a bare JSON.parse here put the body into the error. The runtime quotes
+// the offending token, so an HTML error page, a proxy notice, or a leaked
+// credential arriving as a 200 travelled straight into a message that callers
+// log to the console and publish to the dashboard. Fixed at this one function
+// because every provider path parses through it, not just the cited caller.
+test("a malformed body is reported without any of its content", async () => {
+  const secret = "ghp_SYNTHETIC0000000000000000000000000000";
+  const failure = await readBoundedJson(new Response(secret), 1_024, "provider JSON response")
+    .then(() => null, (error: unknown) => error as Error);
+
+  expect(failure).toBeInstanceOf(Error);
+  expect(failure!.message).toBe("provider JSON response was not valid JSON");
+  expect(failure!.message).not.toContain(secret);
+});
+
+test("the label distinguishes which provider read failed", async () => {
+  const failure = await readBoundedJson(new Response("<html>gateway timeout</html>"), 1_024, "summarizer response")
+    .then(() => null, (error: unknown) => error as Error);
+
+  expect(failure!.message).toBe("summarizer response was not valid JSON");
+  expect(failure!.message).not.toContain("html");
+});
+
 test("error detail captures only a bounded prefix and cancels the peer", async () => {
   let cancelled = false;
   const response = new Response(new ReadableStream<Uint8Array>({

@@ -6,6 +6,7 @@ import { loadConfig } from "../src/config";
 import {
   CiceroDaemon,
   createRecordedWebTurn,
+  dictationRunnable,
   deliverBriefingTelegramChunks,
   injectDeliveredBriefingContext,
   recordParkedBriefingVoiceOutcome,
@@ -15,6 +16,7 @@ import { OvernightStore } from "../src/notify/overnight-store";
 import type { WebReplySink } from "../src/web-voice/turn";
 import type { HistoryTurn } from "../src/web-voice/history";
 import { readPairingState } from "../src/web-voice/pairing-state";
+import { hasDefaultHistoryCompactor } from "../src/brain/turn-context";
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -254,6 +256,101 @@ describe("CiceroDaemon lifecycle", () => {
     } catch (error) {
       await daemon.stop().catch(() => {});
       throw new Error(`successful lifecycle timer test failed: ${(error as Error).message}`, { cause: error });
+    }
+  });
+
+  // The compactor is registered process-wide, so a daemon that fails to start
+  // or is stopped must take it back down with it — otherwise a retired daemon's
+  // summarizer endpoint keeps serving every brain in the process.
+  test("history compaction is registered on start and unregistered on rollback", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-compaction-test-"));
+    const pidFile = join(home, "cicero.pid");
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.web_voice = { ...config.raw.web_voice, enabled: true };
+    config.raw.dashboard = { enabled: false };
+    config.raw.tts_enabled = false;
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+      history_compaction: { enabled: true, summarizer_url: "http://127.0.0.1:1/v1" },
+    };
+    let releaseProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    let signalProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { signalProviderStarted = resolve; });
+    const daemon = new CiceroDaemon(config, {
+      pidFile,
+      providerFactory: () => ({
+        stt: {
+          name: "test-stt",
+          transcribe: () => Promise.resolve(null),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+        tts: {
+          name: "test-tts",
+          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+        llm: {
+          name: "test-llm",
+          chatCompletion: () => Promise.resolve("ok"),
+          health: () => Promise.resolve(true),
+          start: async () => { signalProviderStarted(); await providerGate; },
+          stop: () => Promise.resolve(),
+        },
+      }),
+    });
+
+    expect(hasDefaultHistoryCompactor()).toBe(false);
+    try {
+      const startResult = daemon.start().then(() => null, (error: unknown) => error);
+      await providerStarted;
+      // Registered before the daemon is even fully up.
+      expect(hasDefaultHistoryCompactor()).toBe(true);
+
+      const stopping = daemon.stop();
+      const observedStop = stopping.then(() => undefined, () => undefined);
+      releaseProvider();
+      await startResult;
+      await observedStop;
+      expect(hasDefaultHistoryCompactor()).toBe(false);
+    } catch (error) {
+      releaseProvider();
+      await daemon.stop().catch(() => {});
+      throw new Error(`compaction registration test failed: ${(error as Error).message}`, { cause: error });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // Enabled with nowhere to send the summary must not look like it is working.
+  test("history compaction with no summarizer URL stays unregistered", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-compaction-nourl-test-"));
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.web_voice = { ...config.raw.web_voice, enabled: true };
+    config.raw.dashboard = { enabled: false };
+    config.raw.tts_enabled = false;
+    config.raw.brain = { ...config.raw.brain, history_compaction: { enabled: true } };
+    const daemon = new CiceroDaemon(config, {
+      pidFile: join(home, "cicero.pid"),
+      providerFactory: () => { throw new Error("stop here"); },
+    });
+    try {
+      await expect(daemon.start()).rejects.toThrow(/stop here/);
+      expect(hasDefaultHistoryCompactor()).toBe(false);
+      await daemon.stop();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 
@@ -864,6 +961,75 @@ describe("CiceroDaemon lifecycle", () => {
 
     await expect(daemon.stop()).resolves.toBeUndefined();
     expect(streamingStops).toBe(2);
+    expect(state.lifecycle).toBe("idle");
+  });
+
+  // Round 3, finding 4 (Codex): headless is defined as "no local mic/speakers"
+  // and already skips clap, conversational capture, and the hotkey — but
+  // dictation was built anyway, and its toggle (reachable over the
+  // authenticated control surface) spawns a recorder on this box. Configuration
+  // validation permits both keys, so the daemon has to be the one to refuse.
+  test("headless does not run local dictation, however dictation is configured", () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-headless-dictation-test-"));
+    const withDictation = (headless: boolean) => {
+      const config = loadConfig({}, { home });
+      config.raw.headless = headless;
+      config.raw.dictation = { enabled: true };
+      return config;
+    };
+    expect(dictationRunnable(withDictation(false))).toBe(true);
+    expect(dictationRunnable(withDictation(true))).toBe(false);
+
+    // And headless alone still leaves dictation off, as it is opt-in.
+    const bare = loadConfig({}, { home });
+    bare.raw.headless = true;
+    expect(dictationRunnable(bare)).toBe(false);
+  });
+
+  // Round 3, finding 2 (Codex): a dictation teardown failure is logged
+  // best-effort and the listener is deliberately retained — but shutdown then
+  // reached `idle`, and the idle retry branch stopped every microphone owner
+  // EXCEPT dictation. The retained listener was the only handle on a recorder
+  // still holding the device, or a helper still typing, and nothing ever called
+  // it again.
+  test("a retained dictation listener is retried by the next stop", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-dictation-retry-test-"));
+    const daemon = new CiceroDaemon(loadConfig({}, { home }));
+    let dictationStops = 0;
+    const state = daemon as unknown as {
+      lifecycle: "idle" | "starting" | "running" | "stopping";
+      running: boolean;
+      dictation: { stop: () => Promise<void> } | null;
+      brain: { stop: () => Promise<void> } | null;
+      streamingSpeaker: { stop: () => Promise<void> } | null;
+      speaker: { stop: () => Promise<void> } | null;
+    };
+    state.lifecycle = "running";
+    state.running = true;
+    state.dictation = {
+      stop: () => {
+        dictationStops += 1;
+        return dictationStops === 1
+          ? Promise.reject(new Error("dictation teardown is unconfirmed: the recorder has not exited"))
+          : Promise.resolve();
+      },
+    };
+    state.streamingSpeaker = { stop: () => Promise.resolve() };
+    state.speaker = { stop: () => Promise.resolve() };
+    state.brain = { stop: () => Promise.resolve() };
+
+    // The rest of the shutdown still runs, but it does NOT report success: the
+    // signal path calls stop() exactly once and then drops its handlers, so a
+    // clean resolve here meant the retry the retained listener exists for was
+    // never reached, and the recorder holding the microphone outlived the daemon.
+    await expect(daemon.stop()).rejects.toThrow(/dictation teardown is unconfirmed/);
+    expect(state.lifecycle).toBe("stopping");
+    expect(dictationStops).toBe(1);
+    expect(state.dictation).not.toBeNull(); // retained, on purpose
+
+    await daemon.stop();
+    expect(dictationStops).toBe(2);
+    expect(state.dictation).toBeNull(); // released, so no further retry
     expect(state.lifecycle).toBe("idle");
   });
 
