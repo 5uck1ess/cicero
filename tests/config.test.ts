@@ -423,6 +423,44 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
   });
 
+  // Round 10 (Codex): a wildcard bind takes the port on every interface, so it
+  // contends with an interface-specific listener even though neither host
+  // string matches the other. The classifier wins the race (providers start
+  // before the web server), web voice then fails its bind and startup aborts.
+  test("a wildcard classifier collides with an interface-specific web bind", () => {
+    expect(loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  host: 192.168.1.5",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: ollama",
+      "  host: 0.0.0.0",
+      "  port: 8090",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
+  });
+
+  // The mirror image: an interface-specific classifier against the wildcard
+  // bind web voice takes by default.
+  test("an interface-specific classifier collides with a wildcard web bind", () => {
+    expect(loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  host: 0.0.0.0",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: ollama",
+      "  host: 127.0.0.1",
+      "  port: 8090",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
+  });
+
   test("a remote classifier is not compared against local ports", () => {
     expect(() => loadYaml([
       "web_voice:",
@@ -645,14 +683,13 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))()).not.toThrow();
   });
 
-  // Round 9 (Codex): the remediation this check recommends — drop classifier.model
-  // to share the reply model — is only true where the model field is
-  // informational. Ollama SELECTS a model per request, so an unset one resolves
-  // to that backend's own default (qwen3.5:0.8b), not to the loaded reply model.
-  // Startup would not notice either: the shared server is adopted on a health
-  // probe that never mentions a model.
-  test("sharing an ollama server with no classifier model is refused, not accepted", () => {
-    const failure = loadYaml([
+  // Round 10 (Codex): an ollama server SELECTS a model per request, so two
+  // roles sharing one is not a conflict at all -- it is how you run a small
+  // classifier beside a large reply model on one server. Refusing it was wrong,
+  // including the plainest case of all: neither role naming a model, both
+  // resolving to the same default.
+  test("sharing an ollama server without naming the classifier model is accepted", () => {
+    expect(() => loadYaml([
       "llm:",
       "  backend: ollama",
       "  port: 11434",
@@ -661,11 +698,68 @@ describe("Config — fail-fast validation", () => {
       "  backend: ollama",
       "  port: 11434",
       "",
-    ].join("\n"));
-    expect(failure).toThrow(/selects a model per request/);
-    // And it says exactly what to write, rather than repeating advice that does
-    // not hold for this backend.
-    expect(failure).toThrow(/Set classifier\.model to big-reply-model/);
+    ].join("\n"))()).not.toThrow();
+  });
+
+  test("two ollama roles that both take the default model are accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: ollama",
+      "  port: 11434",
+      "classifier:",
+      "  backend: ollama",
+      "  port: 11434",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // A local vLLM or llama-swap multiplexes by model exactly like a cloud API
+  // does. Treating loopback as single-model on its own rejected a setup this
+  // repo explicitly supports.
+  test("a local OpenAI-compatible server may serve both roles with different models", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // A single-model server is still a single-model server: llama-server loads
+  // one model and the request's `model` field is informational.
+  test("a shared llama-cpp server naming a second model is still refused", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/it serves one model/);
+  });
+
+  // One port, two DIFFERENT servers this daemon launches: whichever loses the
+  // race is adopted by the other, which then speaks the wrong protocol to it.
+  test("a shared port with a launched server on one side and a different backend is refused", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 11434",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: ollama",
+      "  port: 11434",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/names a different backend/);
   });
 
   test("naming the shared ollama model explicitly is accepted", () => {
