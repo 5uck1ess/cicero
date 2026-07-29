@@ -1,0 +1,279 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createClassifierProvider, createProviders } from "../../src/backends/registry";
+import { createBackendStartupPolicies } from "../../src/servers/startup-policy";
+import { ServerManager } from "../../src/servers";
+import { loadConfig as loadConfigRaw } from "../../src/config";
+import { validateRuntimeConfig } from "../../src/config-validation";
+import { DEFAULT_CONFIG, RuntimeConfig } from "../../src/config";
+import { collectChecks } from "../../src/cli/doctor";
+import type { LLMBackendConfig } from "../../src/types";
+
+const NO_CONFIG_HOME = join(tmpdir(), "cicero-test-no-config");
+
+/** A config with the classifier section set (or absent when omitted). */
+function configWith(classifier?: LLMBackendConfig) {
+  const config = loadConfigRaw({}, { home: NO_CONFIG_HOME });
+  if (classifier) config.raw.classifier = classifier;
+  return config;
+}
+
+const originalFetch = globalThis.fetch;
+afterEach(() => { globalThis.fetch = originalFetch; });
+
+describe("classifier backend role", () => {
+  // Absence must mean "the feature is off", never "borrow the reply model" --
+  // a reply-tier model per utterance is exactly the cost this role avoids.
+  test("is absent unless configured, and never falls back to the reply model", () => {
+    const config = configWith();
+    expect(createClassifierProvider(config)).toBeNull();
+
+    const providers = createProviders(config);
+    expect(providers.classifier).toBeUndefined();
+    expect(providers.llm).toBeDefined();
+    // Nothing aliased the reply model into the role.
+    expect(providers.classifier as unknown).not.toBe(providers.llm);
+  });
+
+  test("is constructed when configured, separately from the reply model", () => {
+    const config = configWith({ backend: "llama-cpp", host: "127.0.0.1", port: 8090, model: "small" });
+    const providers = createProviders(config);
+    expect(providers.classifier).toBeDefined();
+    expect(providers.classifier).not.toBe(providers.llm);
+  });
+
+  // AGENTS.md: an explicitly configured unsupported backend is an error.
+  test("an unsupported backend is an error, not a silent fallback", () => {
+    const config = configWith({ backend: "definitely-not-a-backend" });
+    expect(() => createClassifierProvider(config)).toThrow(/Unknown classifier backend 'definitely-not-a-backend'/);
+    // And it blames the classifier, not llm -- the operator has to know which of
+    // the two sections is wrong.
+    expect(() => createClassifierProvider(config)).not.toThrow(/llm backend/);
+  });
+
+  test("claude-api is rejected for the classifier with a classifier-specific message", () => {
+    const config = configWith({ backend: "claude-api" });
+    expect(() => createClassifierProvider(config)).toThrow(/classifier backend 'claude-api' is not implemented/);
+  });
+
+  // Remote-host and local-managed are different code paths and must be
+  // exercised separately (AGENTS.md). The distinction that matters is whether
+  // Cicero manages a local process, not merely which URL it builds.
+  test("remote-host mode talks to the configured host and manages no local process", async () => {
+    let seen = "";
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seen = String(input);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "yes" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const config = configWith({ backend: "llama-cpp", host: "classifier-box.local", port: 9099, model: "tiny" });
+    const provider = createClassifierProvider(config)!;
+    await provider.chatCompletion([{ role: "user", content: "hi" }]);
+    expect(seen).toContain("classifier-box.local");
+    expect(seen).toContain("9099");
+
+    // A remote endpoint is not ours to launch: start() must be a no-op that
+    // spawns nothing, rather than trying to run a server on someone else's box.
+    const spawned: string[] = [];
+    const realSpawn = Bun.spawn;
+    (Bun as unknown as { spawn: unknown }).spawn = ((cmd: string[]) => {
+      spawned.push(cmd.join(" "));
+      return realSpawn(["true"]);
+    }) as unknown as typeof Bun.spawn;
+    try {
+      await provider.start?.();
+      expect(spawned).toEqual([]);
+    } finally {
+      (Bun as unknown as { spawn: unknown }).spawn = realSpawn;
+    }
+  });
+
+  test("local-managed mode targets localhost rather than a remote host", async () => {
+    let seen = "";
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seen = String(input);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "yes" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const config = configWith({ backend: "llama-cpp", port: 8123, model: "tiny" });
+    const provider = createClassifierProvider(config)!;
+    await provider.chatCompletion([{ role: "user", content: "hi" }]);
+    // No host configured, so it is Cicero's own managed endpoint.
+    expect(seen).toMatch(/127\.0\.0\.1|localhost/);
+    expect(seen).toContain("8123");
+    expect(typeof provider.stop).toBe("function");
+  });
+});
+
+describe("classifier startup policy", () => {
+  test("there is no policy at all when the role is unconfigured", () => {
+    const policies = createBackendStartupPolicies(configWith());
+    expect(policies.classifier).toBeUndefined();
+  });
+
+  // A per-utterance helper being down must not stop a daemon that can still
+  // hold a conversation.
+  test("a configured classifier is never a required primary", () => {
+    const policies = createBackendStartupPolicies(
+      configWith({ backend: "llama-cpp", host: "127.0.0.1", port: 8090 }),
+    );
+    expect(policies.classifier).toBeDefined();
+    expect(policies.classifier?.required).toBe(false);
+    expect(policies.classifier?.configKey).toBe("classifier.backend");
+  });
+});
+
+describe("classifier config validation", () => {
+  /** Collect the issues validateRuntimeConfig reports for a classifier section. */
+  function issuesFor(classifier: unknown): string[] {
+    const config = structuredClone(DEFAULT_CONFIG) as Record<string, unknown>;
+    config.classifier = classifier;
+    try {
+      validateRuntimeConfig(config, "test config");
+      return [];
+    } catch (error) {
+      return String((error as Error).message).split("\n");
+    }
+  }
+
+  test("a well-formed classifier section is accepted", () => {
+    expect(issuesFor({ backend: "llama-cpp", host: "127.0.0.1", port: 8090, model: "tiny" })).toEqual([]);
+  });
+
+  // Cicero's validation is fail-fast on unknown keys; the new section must be
+  // held to the same standard rather than silently accepting typos.
+  test("an unknown key inside classifier is rejected", () => {
+    const issues = issuesFor({ backend: "llama-cpp", modle: "typo" });
+    expect(issues.some((i) => i.includes("classifier") && i.includes("modle"))).toBe(true);
+  });
+
+  test("a non-http baseUrl is rejected", () => {
+    expect(issuesFor({ backend: "openai", baseUrl: "ftp://nope" }).some((i) => i.includes("classifier.baseUrl"))).toBe(true);
+  });
+
+  test("an out-of-range port is rejected", () => {
+    expect(issuesFor({ backend: "llama-cpp", port: 99_999 }).some((i) => i.includes("classifier.port"))).toBe(true);
+  });
+});
+
+describe("classifier doctor coverage", () => {
+  function doctorConfig(classifier?: LLMBackendConfig): RuntimeConfig {
+    return new RuntimeConfig({
+      ...structuredClone(DEFAULT_CONFIG),
+      headless: true,
+      classifier,
+    });
+  }
+
+  // Absence is a valid choice, not a problem to report.
+  test("says nothing when the role is unconfigured", async () => {
+    const checks = await collectChecks(doctorConfig(), { which: (b: string) => `/mock/${b}` });
+    expect(checks.some((check) => check.name.startsWith("classifier"))).toBe(false);
+  });
+
+  // Configured-but-unreachable is a problem: features that depend on it will
+  // decline turns, and the operator should learn it here rather than from a
+  // feature that quietly does nothing.
+  test("fails when configured but unreachable, and blames only classifier.*", async () => {
+    globalThis.fetch = (() => Promise.reject(new Error("connection refused"))) as unknown as typeof fetch;
+    const checks = await collectChecks(
+      doctorConfig({ backend: "llama-cpp", host: "127.0.0.1", port: 8090, model: "tiny" }),
+      { which: (b: string) => `/mock/${b}` },
+    );
+    const check = checks.find((c) => c.name.startsWith("classifier"));
+    expect(check).toBeDefined();
+    expect(check!.level).toBe("fail");
+    // The message must blame the right section; llm and classifier are
+    // configured separately and either could be the broken one. Excluding only
+    // llm.backend would let llm.host/llm.port/llm.model guidance slip through.
+    const text = `${check!.detail ?? ""} ${check!.hint ?? ""}`;
+    expect(text).toContain("classifier.");
+    expect(text).not.toMatch(/\bllm\./);
+  });
+
+  // Round 4 (Codex): the OpenAI-compatible branches are the ones that carry
+  // credential remediation, and both hardcoded `llm.` — so a broken classifier
+  // endpoint sent the operator to edit the unrelated reply role. Neither branch
+  // is reachable through a llama-cpp check, which is why the test above missed
+  // it.
+  test("credential remediation names the classifier role, not llm", async () => {
+    const embedded = await collectChecks(
+      doctorConfig({ backend: "openai", baseUrl: "https://user:pass@classifier.example/v1", model: "tiny" }),
+      { which: (b: string) => `/mock/${b}` },
+    );
+    const credentials = embedded.find((c) => c.name.startsWith("classifier"));
+    expect(credentials!.hint).toContain("classifier.apiKey");
+    expect(`${credentials!.detail ?? ""} ${credentials!.hint ?? ""}`).not.toMatch(/\bllm\./);
+    // And the secret itself never reaches the report.
+    expect(`${credentials!.detail ?? ""} ${credentials!.hint ?? ""}`).not.toContain("pass");
+
+    const missingKey = await collectChecks(
+      doctorConfig({ backend: "openai", baseUrl: "https://classifier.example/v1", model: "tiny" }),
+      { which: (b: string) => `/mock/${b}`, env: {} },
+    );
+    const missing = missingKey.find((c) => c.name.startsWith("classifier"));
+    expect(missing!.hint).toContain("classifier.apiKeyEnv");
+    expect(`${missing!.detail ?? ""} ${missing!.hint ?? ""}`).not.toMatch(/\bllm\./);
+  });
+});
+
+describe("classifier lifecycle", () => {
+  /** A provider that records whether it was started and stopped. */
+  function recorder(name: string, log: string[]) {
+    return {
+      name,
+      chatCompletion: () => Promise.resolve("ok"),
+      health: () => Promise.resolve(true),
+      start: () => { log.push(`start:${name}`); return Promise.resolve(); },
+      stop: () => { log.push(`stop:${name}`); return Promise.resolve(); },
+    };
+  }
+
+  // A role wired into start but not stop leaves a model resident after the
+  // daemon says it stopped -- on a VRAM-tight box that is the whole seat.
+  test("a configured classifier is both started and stopped", async () => {
+    const events: string[] = [];
+    const providers = {
+      stt: { name: "stt", transcribe: () => Promise.resolve(null), ...recorder("stt", events) },
+      tts: { name: "tts", generateAudio: () => Promise.resolve(new ArrayBuffer(0)), ...recorder("tts", events) },
+      llm: recorder("llm", events),
+      classifier: recorder("classifier", events),
+    } as never;
+
+    const manager = new ServerManager();
+    await manager.start(providers, {});
+    expect(events).toContain("start:classifier");
+
+    await manager.stop(providers);
+    expect(events).toContain("stop:classifier");
+    // And every other role still stops, so this did not narrow the set.
+    for (const role of ["stt", "tts", "llm"]) expect(events).toContain(`stop:${role}`);
+  });
+
+  test("a classifier that fails to start does not stop the daemon", async () => {
+    const providers = {
+      stt: { name: "stt", transcribe: () => Promise.resolve(null), health: () => Promise.resolve(true) },
+      tts: { name: "tts", generateAudio: () => Promise.resolve(new ArrayBuffer(0)), health: () => Promise.resolve(true) },
+      llm: { name: "llm", chatCompletion: () => Promise.resolve("ok"), health: () => Promise.resolve(true) },
+      classifier: {
+        name: "classifier",
+        chatCompletion: () => Promise.resolve("ok"),
+        health: () => Promise.resolve(false),
+        start: () => Promise.reject(new Error("classifier model failed to load")),
+      },
+    } as never;
+
+    const policies = createBackendStartupPolicies(
+      configWith({ backend: "llama-cpp", host: "127.0.0.1", port: 8090 }),
+    );
+    // Never required, so a failure is a warning rather than a startup abort.
+    await expect(new ServerManager().start(providers, policies)).resolves.toBeUndefined();
+  });
+});

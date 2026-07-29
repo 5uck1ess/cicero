@@ -732,6 +732,11 @@ export async function collectStatus(
     ? probePlan("TTS fallback", ttsPlan(config.ttsFallbackBackend, env), probe, timeoutMs, ttsSkip)
     : null;
   const llm = probePlan("LLM", llmPlan(config.llmBackend, env), probe, timeoutMs);
+  // Only shown when configured — the classifier is optional, and a row saying
+  // "unconfigured" on every operator's status would be noise.
+  const classifier = config.classifierBackend
+    ? probePlan("Classifier", llmPlan(config.classifierBackend, env), probe, timeoutMs)
+    : null;
   const brain = checkBrain(config, env, probe, which, isExecutable, timeoutMs);
 
   const usesTab = config.brain.mode === "tab-inject" && config.brain.backend === "claude-code";
@@ -745,13 +750,14 @@ export async function collectStatus(
     ? null
     : checkHotkey(hotkeyPath, config.hotkey, isExecutable, timeoutMs, platform);
 
-  const [daemonLineResult, sttLine, sttFallbackLine, ttsLine, ttsFallbackLine, llmLine, brainLine, terminalLines, hotkeyLine] = await Promise.all([
+  const [daemonLineResult, sttLine, sttFallbackLine, ttsLine, ttsFallbackLine, llmLine, classifierLine, brainLine, terminalLines, hotkeyLine] = await Promise.all([
     daemon,
     stt,
     sttFallback,
     tts,
     ttsFallback,
     llm,
+    classifier,
     brain,
     terminal,
     hotkey,
@@ -769,6 +775,7 @@ export async function collectStatus(
     ttsLine,
     ...(ttsFallbackLine ? [ttsFallbackLine] : []),
     llmLine,
+    ...(classifierLine ? [classifierLine] : []),
     brainLine,
     ...(terminalLines ?? []),
     ...(hotkeyLine ? [hotkeyLine] : []),

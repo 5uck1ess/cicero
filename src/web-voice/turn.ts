@@ -24,6 +24,12 @@ import {
  * narrowed to the one method each so the turn logic is trivially testable.
  */
 export interface WebTurnDeps {
+  /**
+   * Optional "was that addressed to me?" veto — see {@link WebStreamDeps.judge}.
+   * The non-streaming POST path needs it for the same reason the streaming one
+   * does: it is browser-captured audio either way.
+   */
+  judge?: (transcript: string, signal?: AbortSignal) => Promise<boolean>;
   stt: Pick<STTProvider, "transcribe">;
   brain: Pick<Brain, "send"> & { wasControlTurn?: Brain["wasControlTurn"] };
   tts: Pick<TTSProvider, "generateAudio">;
@@ -105,6 +111,18 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     }
     throwIfTurnAborted(deps.signal);
     if (!transcript) return { transcript: "", reply: "", audio: EMPTY };
+    // Same veto the streaming path runs: this is browser-captured audio too,
+    // and on a headless box it is the only capture path there is.
+    // Reported as nothing heard, not as a heard-but-unanswered turn: the caller
+    // persists what it is told, and a vetoed utterance recorded as conversation
+    // is replayed into the brain later. Same reasoning as the streaming path.
+    if (!(await dispatchAllowed(transcript, deps))) return { transcript: "", reply: "", audio: EMPTY };
+    // The judge resolves as ACCEPT when it is cancelled -- failing open is the
+    // whole design -- so acceptance says nothing about whether the turn is
+    // still wanted. Without this, an aborted turn walks straight into the TLDR
+    // fast path below and starts a TTS request nobody is waiting for, holding
+    // the server's lease until it finishes.
+    throwIfTurnAborted(deps.signal);
 
     // Expand request: speak the gated remainder of the previous reply, no brain turn.
     if (deps.tldr?.pending && isExpandRequest(transcript)) {
@@ -200,6 +218,17 @@ export interface WebStreamDeps {
   park?: LongTurnOptions;
   /** Optional input-side tone tag — see {@link ToneOptions}. Omit for untagged turns. */
   tone?: ToneOptions;
+  /**
+   * Optional "was that addressed to me?" veto, the same gate the host mic path
+   * runs. Returns true to dispatch. Omit (the default) to dispatch every
+   * transcript, which is the behaviour before this existed.
+   *
+   * Applied to SPOKEN turns only. A browser capturing hands-free is exactly the
+   * ambient-speech case this exists for, and in headless deployments it is the
+   * only capture path there is — the judged host listener never starts. Typed
+   * text is left alone: someone who types a sentence has already addressed it.
+   */
+  judge?: (transcript: string, signal?: AbortSignal) => Promise<boolean>;
   /** Cancels the transport-owned turn and its brain invocation. */
   signal?: AbortSignal;
   /** Register work intentionally detached after long-turn parking. */
@@ -771,7 +800,18 @@ export async function streamWebTurn(
       }
       if (transcript) {
         timer.mark("stt");
+        // Same ordering as the normal path: nothing is announced, and so
+        // nothing is persisted, until the turn has passed the veto.
+        if (!(await dispatchAllowed(transcript, deps))) {
+          await spec.abort();
+          sink.done();
+          return;
+        }
         sink.transcript(transcript);
+        if (deps.signal?.aborted || sink.aborted()) {
+          await spec.abort();
+          return;
+        }
         try {
           await streamReply(transcript, deps, sink, timer, spec.tokens() ?? undefined);
         } catch (err: unknown) {
@@ -826,8 +866,16 @@ export async function streamWebTurn(
     }
     if (deps.signal?.aborted || sink.aborted()) return;
     timer.mark("stt");
+    if (!transcript) { sink.transcript(transcript); sink.done(); return; }
+    // Judged BEFORE the transcript is emitted. The recording wrapper treats any
+    // transcript as a completed conversation, so a vetoed utterance announced
+    // here is persisted to history and replayed into the brain on the next
+    // resume -- the ambient speech reaches the brain after all, just later.
+    if (!(await dispatchAllowed(transcript, deps))) { sink.done(); return; }
     sink.transcript(transcript);
-    if (!transcript) { sink.done(); return; }
+    // Cancellation resolves the judge as ACCEPT, so re-check before spending
+    // anything on a turn that is already gone.
+    if (deps.signal?.aborted || sink.aborted()) return;
     const tag = await settleTone(tonePending?.result ?? null, deps.tone?.graceMs);
     await streamReply(transcript, deps, sink, timer, undefined, tag);
   } catch (err: unknown) {
@@ -837,6 +885,25 @@ export async function streamWebTurn(
     timer.report("web-turn");
     await retainOwnedTone(tonePending, deps.trackBackground, deps.signal);
     if (tmpFile) await unlink(tmpFile).catch(() => { /* best-effort cleanup */ });
+  }
+}
+
+/**
+ * Run the optional addressed-to-me veto. Absent judge, or any failure inside
+ * it, dispatches — this can only ever decline a turn, never cause one.
+ */
+async function dispatchAllowed(
+  transcript: string,
+  deps: Pick<WebStreamDeps, "judge" | "signal">,
+): Promise<boolean> {
+  if (!deps.judge) return true;
+  try {
+    // The transport's signal, so a stalled classifier dies with the turn rather
+    // than outliving it and holding up the web server's shutdown drain.
+    return await deps.judge(transcript, deps.signal);
+  } catch (err: unknown) {
+    log("info", `web voice: intent judge failed, taking the turn: ${err instanceof Error ? err.message : String(err)}`);
+    return true;
   }
 }
 

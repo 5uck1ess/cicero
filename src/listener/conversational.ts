@@ -6,6 +6,7 @@ import { join, dirname } from "path";
 import { statSync, unlinkSync } from "fs";
 import { ciceroPath } from "../platform/paths";
 import { isSelfEcho } from "./echo";
+import type { IntentDecision, IntentJudge } from "./intent-judge";
 import type { TurnDetector, TurnPrediction } from "../backends/turn/provider";
 import { decideEndOfTurn } from "../backends/turn/policy";
 import { decodeWavFile } from "../platform/wav";
@@ -14,6 +15,27 @@ import { pinGeneration, type GenerationPin } from "../backends/hot-swap";
 import type { AecAudioHub } from "../platform/aec-hub";
 import { terminateDirectChild } from "../process/direct-child";
 import { ensurePrivateDirectorySync } from "../platform/secure-storage";
+
+/** Rolling context for the intent judge. Captured room audio must not accumulate. */
+const MAX_INTENT_CONTEXT_LINES = 6;
+const MAX_INTENT_CONTEXT_CHARS = 300;
+/**
+ * How long the streaming barge-in path will wait for a verdict before
+ * interrupting anyway. Deliberately far below the judge's own deadline: this
+ * sits between hearing the user and stopping playback, and a classifier having
+ * a slow moment must never be felt as Cicero talking over someone.
+ */
+const BARGE_JUDGE_BUDGET_MS = 400;
+
+/** Transcripts are untrusted input; the log line must not carry an unbounded one. */
+function boundedForLog(line: string): string {
+  return line.length <= MAX_INTENT_CONTEXT_CHARS ? line : `${line.slice(0, MAX_INTENT_CONTEXT_CHARS)}…`;
+}
+
+function pushBounded(ring: string[], line: string): void {
+  ring.push(line.length <= MAX_INTENT_CONTEXT_CHARS ? line : line.slice(0, MAX_INTENT_CONTEXT_CHARS));
+  if (ring.length > MAX_INTENT_CONTEXT_LINES) ring.splice(0, ring.length - MAX_INTENT_CONTEXT_LINES);
+}
 
 /** Optional semantic end-of-turn wiring for the conversational listener. */
 export interface TurnOptions {
@@ -158,6 +180,19 @@ export class ConversationalListener implements Listener {
   private clapDeactivateEnabled = false;
   // Text Cicero last spoke — guards the next transcript against self-echo.
   private lastSpoken: string | null = null;
+  // Optional "was that addressed to me?" veto. Null unless a classifier is
+  // configured and the feature is switched on; see listener/intent-judge.ts.
+  private intentJudge: IntentJudge | null = null;
+  // Rolling context for that judge. Bounded ring buffers, not a transcript log:
+  // this is captured room audio and must not accumulate.
+  private recentUtterances: string[] = [];
+  private recentAssistantSpeech: string[] = [];
+  private lastSpokeAtMs: number | null = null;
+  // Every verdict currently in flight. A remote classifier can be configured
+  // with a deadline in the minutes, and deactivation or shutdown must not leave
+  // its fetch and timer running behind a session that is already gone.
+  private readonly judgeInFlight = new Set<AbortController>();
+  private bargeInDiscardedCallback?: () => void;
   // Returns what Cicero is speaking *right now* (live) so a barge-in candidate can
   // be checked against it for self-echo. Set by the daemon from the streaming
   // speaker's snapshot; absent → no live echo reference (only lastSpoken is used).
@@ -249,8 +284,10 @@ export class ConversationalListener implements Listener {
 
   async stop(): Promise<void> {
     this.deactivate();
-    // stop() is also valid before activation, so explicitly request release even
-    // when deactivate() was an idempotent no-op.
+    // stop() is also valid before activation, and deactivate() returns early
+    // when voice mode was never on — so release is requested explicitly here
+    // rather than relying on that no-op path having done it.
+    this.cancelIntentJudges();
     const recordingStop = this.requestAudioCaptureStop();
     // Recorder/helper cleanup is expected to be immediate, but never let a
     // broken platform process hang daemon shutdown.
@@ -282,6 +319,106 @@ export class ConversationalListener implements Listener {
    */
   noteSpoken(text: string): void {
     this.lastSpoken = text?.trim() || null;
+    if (this.lastSpoken) {
+      this.lastSpokeAtMs = Date.now();
+      pushBounded(this.recentAssistantSpeech, this.lastSpoken);
+    }
+  }
+
+  /**
+   * Record speech that was cut off mid-delivery by a barge-in. The room heard
+   * it, so it belongs in the judge's context — but this deliberately does not
+   * restart the hot window the way noteSpoken() does. The hot window skips the
+   * judge entirely, and a barge-in is exactly when the judge must run.
+   */
+  noteInterrupted(text: string): void {
+    const spoken = text?.trim();
+    if (!spoken) return;
+    this.lastSpoken = spoken;
+    pushBounded(this.recentAssistantSpeech, spoken);
+  }
+
+  /** Abort every verdict still in flight. Cheap, idempotent, and safe to call
+   *  when none are: each call site removes its own controller as it settles. */
+  private cancelIntentJudges(): void {
+    for (const controller of this.judgeInFlight) controller.abort();
+  }
+
+  /**
+   * Enable the intent judge. Off unless the daemon sets one, and even then it
+   * is only ever a veto — it can decline an utterance the listener would have
+   * taken, never cause one to be taken that it would not have.
+   */
+  setIntentJudge(judge: IntentJudge | null): void {
+    this.intentJudge = judge;
+  }
+
+  /**
+   * The single gate every captured utterance passes through before it becomes a
+   * command — the idle loop and both barge-in paths alike. Routing them all
+   * through here is the point: full-duplex is exactly the noisy-room case this
+   * feature exists for, so a barge-in path that skipped it would miss the
+   * utterances that matter most.
+   *
+   * Returns true to dispatch. It is a veto only: with no judge, or on any
+   * judge failure, this returns true and behavior is unchanged.
+   */
+  private async addressedToMe(
+    transcript: string,
+    epoch: number,
+    opts: { budgetMs?: number; interrupting?: boolean } = {},
+  ): Promise<boolean> {
+    if (!this.intentJudge) return true;
+    // What Cicero is mid-way through saying is the reference the judge needs
+    // most on a barge-in — "yeah, do that" is a reply to the sentence being
+    // spoken, not to the last completed turn. It is appended rather than
+    // recorded so an in-progress reply never becomes permanent context.
+    const speaking = this.currentlySpeaking().trim();
+    const assistantSpeech = speaking && speaking !== this.recentAssistantSpeech.at(-1)
+      ? [...this.recentAssistantSpeech, speaking.slice(0, MAX_INTENT_CONTEXT_CHARS)]
+      : this.recentAssistantSpeech;
+    const controller = new AbortController();
+    this.judgeInFlight.add(controller);
+    // A caller-supplied budget is tighter than the judge's own deadline and
+    // exists for the barge-in path, where a slow verdict must lose to
+    // interrupting promptly. Aborting resolves as "unavailable", i.e. accept.
+    const budget = opts.budgetMs === undefined
+      ? undefined
+      : setTimeout(() => controller.abort(), opts.budgetMs);
+    // The hot window skips the judge outright for a follow-up moments after
+    // Cicero finished speaking. An utterance captured WHILE it is speaking is
+    // not that: it is an interruption, and the timestamp it would be measured
+    // against belongs to some earlier, already-finished reply. Left in, a
+    // podcast talking over reply B within the window of reply A bypasses the
+    // judge entirely and dispatches -- on exactly the path this feature exists
+    // for. Withholding the timestamp says what is true: this is not a follow-up.
+    const msSinceAssistantSpoke = opts.interrupting || this.lastSpokeAtMs === null
+      ? null
+      : Date.now() - this.lastSpokeAtMs;
+    let decision: IntentDecision;
+    try {
+      decision = await this.intentJudge.decide({
+        utterance: transcript,
+        recentUtterances: this.recentUtterances,
+        recentAssistantSpeech: assistantSpeech,
+        msSinceAssistantSpoke,
+      }, controller.signal);
+    } finally {
+      if (budget !== undefined) clearTimeout(budget);
+      this.judgeInFlight.delete(controller);
+    }
+    // Room speech is context whether or not it was for us.
+    pushBounded(this.recentUtterances, transcript);
+    // Deciding takes a model call, and voice mode can be deactivated or
+    // superseded across it. Every other await in this loop re-checks the epoch
+    // before acting; this one must too, or a stale utterance dispatches into a
+    // session that has moved on.
+    if (!this.isCurrentActivation(epoch)) return false;
+    if (decision.accept) return true;
+    // A false negative is invisible and infuriating, so say so plainly --
+    // bounded, because a transcript is untrusted input.
+    log("info", `🙉 Not addressed to me (${decision.confidence.toFixed(2)}), ignoring: "${boundedForLog(transcript)}"`);
+    return false;
   }
 
   /**
@@ -289,6 +426,16 @@ export class ConversationalListener implements Listener {
    */
   onBargeIn(callback: () => void): void {
     this.bargeInCallback = callback;
+  }
+
+  /**
+   * Called when a reply was already interrupted but the interrupting utterance
+   * was then vetoed. No replacement turn follows, so whatever recovery snapshot
+   * the daemon took at the interrupt must be dropped instead of attaching to
+   * some later, unrelated turn.
+   */
+  onBargeInDiscarded(callback: () => void): void {
+    this.bargeInDiscardedCallback = callback;
   }
 
   /**
@@ -389,6 +536,7 @@ export class ConversationalListener implements Listener {
     this.activationEpoch++;
     this.listening = false;
     this.detectingBargeIn = false;
+    this.cancelIntentJudges();
     void this.requestAudioCaptureStop();
     this.playSound("deactivate");
     log("ok", "Conversational mode deactivated");
@@ -564,6 +712,11 @@ export class ConversationalListener implements Listener {
           this.deactivate();
           break;
         }
+
+        // Was that addressed to Cicero at all? Asked after the deactivation
+        // check so "stop listening" always works even if the judge disagrees,
+        // and after self-echo so we never spend a model call on our own voice.
+        if (!(await this.addressedToMe(transcript, epoch))) continue;
 
         // Fire callback (handleCommand logs "Heard:" — no need to duplicate here)
         if (this.callback) {
@@ -1083,6 +1236,18 @@ export class ConversationalListener implements Listener {
         return;
       }
       if (bargeTranscript && this.isCurrentActivation(epoch)) {
+        // Full duplex is the noisy-room case: background speech captured over
+        // Cicero's own reply has to face the same veto as anything else.
+        //
+        // This detector interrupts on energy alone, before any transcript
+        // exists (above), so unlike the streaming path below the veto cannot
+        // come first — the reply is already cut by the time there is anything
+        // to judge. What it can do is stop the interrupted partial from
+        // attaching to whatever turn happens to come next.
+        if (!(await this.addressedToMe(bargeTranscript, epoch, { interrupting: true }))) {
+          this.bargeInDiscardedCallback?.();
+          continue;
+        }
         // The replacement turn owns the interruption window now. Keep the mic
         // armed around its reply instead of waiting for it with no detector.
         done = this.fireCallback(bargeTranscript).then(() => "done" as const);
@@ -1149,15 +1314,34 @@ export class ConversationalListener implements Listener {
         continue;
       }
 
+      if (cls === "stop") {
+        // Never judged: stopping is the safety valve, and it must work even
+        // when the judge disagrees — the same rule the idle loop follows.
+        log("info", "Barge-in detected — interrupting TTS");
+        this.bargeInCallback!();
+        if (!this.isCurrentActivation(epoch)) return;
+        this.stopCallback?.();
+        return;
+      }
+
+      // The transcript already exists on this path, so the veto runs BEFORE the
+      // interrupt rather than after it. That ordering is the whole point: an
+      // interrupt cannot be undone — the turn is aborted and the speaker
+      // flushed — so judging afterwards means a podcast still cuts Cicero off
+      // mid-sentence and merely fails to also issue a command. Judging first
+      // leaves the reply playing untouched. The budget bounds what this can
+      // cost: a verdict slower than that loses and the interrupt proceeds, so
+      // barge-in latency degrades to today's behavior instead of stalling.
+      if (!(await this.addressedToMe(
+        bargeTranscript,
+        epoch,
+        { budgetMs: BARGE_JUDGE_BUDGET_MS, interrupting: true },
+      ))) continue;
+
       // Genuine user speech — interrupt the current reply immediately.
       log("info", "Barge-in detected — interrupting TTS");
       this.bargeInCallback!();
       if (!this.isCurrentActivation(epoch)) return;
-
-      if (cls === "stop") {
-        this.stopCallback?.();
-        return;
-      }
 
       // Process the interrupting utterance as a fresh turn and transfer this
       // same detector loop to it. Awaiting the callback here would leave the

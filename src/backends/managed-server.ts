@@ -55,6 +55,12 @@ interface StartOpts {
    * child on the way out, so the process cannot outlive the daemon.
    */
   signal?: AbortSignal;
+  /**
+   * Extra environment for the child. Some servers take no port flag and are
+   * steered only by their environment (`ollama serve` binds OLLAMA_HOST), so
+   * without this the configured port is silently ignored.
+   */
+  env?: Record<string, string>;
 }
 
 const REVIVE_BACKOFF_MS = [1000, 5000, 15000];
@@ -159,7 +165,7 @@ async function runSupervisor(
       const next = spawnOwnedProcess(opts.command, {
         stdout: "ignore",
         stderr: "pipe",
-        env: { ...process.env },
+        env: { ...process.env, ...opts.env },
         windowsHide: true,
       });
       // Publish ownership in the same synchronous turn as spawn. stop() can
@@ -461,7 +467,7 @@ export async function startManagedServer(opts: StartOpts): Promise<ManagedProces
   }
 
   const proc = spawnOwnedProcess(command, {
-    stdout: "ignore", stderr: "pipe", env: { ...process.env },
+    stdout: "ignore", stderr: "pipe", env: { ...process.env, ...opts.env },
   });
   const stderrTail = collectStderrTail(proc);
 

@@ -1,3 +1,4 @@
+import { redactSecrets } from "../redact";
 /** Absolute deadlines for the realtime provider pipeline. */
 export const PROVIDER_TIMEOUT_MS = {
   health: 5_000,
@@ -230,7 +231,10 @@ export async function readErrorDetail(
     output.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  const detail = new TextDecoder().decode(output).trim();
+  // Sanitize here, not only at the logger: this string is copied verbatim into
+  // the thrown Error, and a 401 body routinely quotes the credential it just
+  // rejected. Redacting at the read keeps the secret out of the error itself.
+  const detail = redactSecrets(new TextDecoder().decode(output).trim());
   return detail && truncated ? `${detail}…` : detail;
 }
 

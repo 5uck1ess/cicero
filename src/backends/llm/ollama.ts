@@ -1,7 +1,7 @@
-import { LLM_DEFAULT_MODEL, normalizedLlmModel } from "./provider";
+import { LLM_DEFAULT_MODEL, normalizedLlmModel, LLM_DEFAULT_PORTS } from "./provider";
 import type { LLMProvider, LLMProviderConfig, ChatMessage, LLMCompletionOpts } from "./provider";
 import { startManagedServer, stopManagedServer, type ManagedProcess } from "../managed-server";
-import { httpBase, isLocalHost } from "../net";
+import { httpBase, isLocalHost, hostPort } from "../net";
 import {
   PROVIDER_TIMEOUT_MS,
   providerSignal,
@@ -42,7 +42,7 @@ export class OllamaProvider implements LLMProvider {
 
   constructor(config: LLMProviderConfig) {
     this.host = config.host;
-    this.port = config.port ?? 11434;
+    this.port = config.port ?? LLM_DEFAULT_PORTS.ollama!;
     // Doctor applies the same normalization before checking /api/tags. Keep
     // launch/request identity exact so diagnostics cannot verify another model.
     this.model = normalizedLlmModel(config.model, LLM_DEFAULT_MODEL.ollama);
@@ -66,7 +66,15 @@ export class OllamaProvider implements LLMProvider {
     };
 
     if (opts?.responseFormat?.json_schema) {
-      body.format = opts.responseFormat.json_schema;
+      // Callers describe a schema the OpenAI way -- {name, strict, schema} --
+      // because that is what every other backend here takes. Ollama's native
+      // /api/chat wants the BARE schema in `format`, so handing it the envelope
+      // sends a document whose only top-level keys are name/strict/schema: the
+      // constraint the caller asked for is silently not applied. Unwrap it,
+      // while still accepting a bare schema for a caller that passes one.
+      const envelope = opts.responseFormat.json_schema as Record<string, unknown>;
+      const inner = envelope.schema;
+      body.format = inner && typeof inner === "object" ? inner : envelope;
     } else if (opts?.responseFormat) {
       body.format = "json";
     }
@@ -116,6 +124,16 @@ export class OllamaProvider implements LLMProvider {
       name: "ollama",
       port: this.port,
       command: ["ollama", "serve"],
+      // `ollama serve` has no port flag: it binds OLLAMA_HOST, defaulting to
+      // 127.0.0.1:11434. Without this, a second Ollama role configured on its
+      // own port spawns a server on the FIRST role's port, which is already
+      // taken — the child exits and that role is silently unavailable.
+      //
+      // Built from the same expression as healthUrl below. An omitted host is
+      // the common case (every tier preset leaves it out), and interpolating it
+      // raw produced the literal `undefined:11434` — a hostname Ollama tries to
+      // bind rather than its localhost default.
+      env: { OLLAMA_HOST: hostPort(this.host, this.port) },
       healthUrl: `${httpBase(this.host, this.port)}/api/tags`,
       timeoutMs: 30000,
     });
