@@ -28,6 +28,7 @@ const KEEP_LINES = 500;   // … rewrite keeping this many
 export class TurnHistory {
   private pending: Promise<void> = Promise.resolve();
   private available = true;
+  private lineCount: number | null = null;
 
   constructor(private file: string) {
     try {
@@ -71,9 +72,25 @@ export class TurnHistory {
     }
   }
 
+  /**
+   * Trim without rereading the whole log after every turn. The cached count is
+   * only sound while this instance is the file's sole writer — the daemon
+   * therefore shares ONE TurnHistory across Telegram, warmup, and web voice
+   * rather than opening one per surface. A writer outside this process would
+   * make the count read low and let the file overshoot MAX_LINES until our own
+   * appends cross the threshold; the reread below then resyncs it. Every miss
+   * (first append, threshold crossed, failed write) falls back to the count on
+   * disk, so the cache can only ever delay a trim, never skip one.
+   */
   private async trimIfNeeded(): Promise<void> {
+    if (this.lineCount !== null) {
+      this.lineCount += 1;
+      if (this.lineCount <= MAX_LINES) return;
+    }
     const lines = (await readFile(this.file, "utf8")).split("\n").filter(Boolean);
-    if (lines.length <= MAX_LINES) return;
+    this.lineCount = lines.length;
+    if (this.lineCount <= MAX_LINES) return;
     await writeFile(this.file, lines.slice(-KEEP_LINES).join("\n") + "\n", { mode: PRIVATE_FILE_MODE });
+    this.lineCount = KEEP_LINES;
   }
 }

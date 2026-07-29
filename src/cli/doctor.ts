@@ -1,4 +1,5 @@
 import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
+import { describeTextInjection } from "../platform/text-inject-run";
 import { join, dirname } from "node:path";
 import { loadConfig, type RuntimeConfig } from "../config";
 import { ciceroHome } from "../platform/paths";
@@ -45,6 +46,7 @@ import {
   supportedBackendsForRole,
 } from "../backends/supported-backends";
 import { createBrain } from "../brain";
+import { redactSnapshotSecrets } from "../operational-state";
 import { detectTerminal } from "../terminal/detect";
 import {
   WEB_VOICE_TOKEN_GENERATION_HINT,
@@ -783,6 +785,26 @@ export async function collectChecks(
     await checkLlm(classifierBackend, checks, options, false, "classifier");
   }
 
+  // -- native dictation ----------------------------------------------------
+  const dictation = config.dictation;
+  if (dictation.enabled) {
+    const target = dictation.target ?? "focused-app";
+    if (target === "cicero") {
+      // This target never synthesizes keystrokes, so it works everywhere.
+      checks.push({ name: "dictation", level: "ok", detail: "enabled, transcripts go to Cicero as commands" });
+    } else {
+      const support = describeTextInjection();
+      checks.push(support.kind === "supported"
+        ? { name: "dictation", level: "ok", detail: `enabled, typing into the focused window via ${support.method}` }
+        : {
+            name: "dictation",
+            level: "fail",
+            detail: `cannot type into other windows: ${support.reason}`,
+            hint: support.fix ?? 'set dictation.target: cicero to hand transcripts to Cicero instead',
+          });
+    }
+  }
+
   // -- semantic end-of-turn sidecar ---------------------------------------
   const turn = config.turn;
   if (turn.enabled) {
@@ -985,9 +1007,35 @@ export async function collectChecks(
     }
     const sum = wv.tldr?.summarizer_url;
     if (sum) {
+      const shownSum = redactSnapshotSecrets(sum);
       checks.push((await probe(`${sum.replace(/\/$/, "")}/models`))
-        ? { name: "tldr summarizer", level: "ok", detail: sum }
-        : { name: "tldr summarizer", level: "warn", detail: `${sum} not responding — TLDR codas fall back to a generic line`, hint: "start the summarizer endpoint or remove web_voice.tldr" });
+        ? { name: "tldr summarizer", level: "ok", detail: shownSum }
+        : { name: "tldr summarizer", level: "warn", detail: `${shownSum} not responding — TLDR codas fall back to a generic line`, hint: "start the summarizer endpoint or remove web_voice.tldr" });
+    }
+  }
+
+  // -- background history compaction ----------------------------------------
+  const compaction = config.brain?.history_compaction;
+  if (compaction?.enabled) {
+    const url = compaction.summarizer_url ?? config.web_voice?.tldr?.summarizer_url;
+    if (!url) {
+      checks.push({
+        name: "history compaction",
+        level: "warn",
+        detail: "enabled but no summarizer_url is set — old turns are dropped instead of summarized",
+        hint: "set brain.history_compaction.summarizer_url (or web_voice.tldr.summarizer_url)",
+      });
+    } else {
+      // The URL may carry userinfo or a query token; never echo it raw.
+      const shown = redactSnapshotSecrets(url);
+      checks.push((await probe(`${url.replace(/\/$/, "")}/models`))
+        ? { name: "history compaction", level: "ok", detail: shown }
+        : {
+            name: "history compaction",
+            level: "warn",
+            detail: `${shown} not responding — long conversations fall back to dropping their oldest turns`,
+            hint: "start the summarizer endpoint or set brain.history_compaction.enabled: false",
+          });
     }
   }
 

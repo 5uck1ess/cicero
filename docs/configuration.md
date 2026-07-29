@@ -15,7 +15,6 @@ deployment: local-cpu     # CPU only
 
 ```yaml
 tts_enabled: true
-wake_word_enabled: false # legacy name: enables the macOS Wispr Flow listener, not acoustic wake-word detection
 hotkey: "ctrl+shift+space" # the current macOS helper supports only this fixed chord
 terminal: auto            # auto-detect; or kitty | tmux | wezterm | none
 voice: default

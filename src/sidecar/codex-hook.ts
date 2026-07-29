@@ -39,11 +39,14 @@ async function readHookBody(
 ): Promise<string> {
   const reader = input.getReader();
   const chunks: Uint8Array[] = [];
-  const signal = AbortSignal.timeout(timeoutMs);
+  const controller = new AbortController();
+  const deadline = setTimeout(() => {
+    controller.abort(new DOMException("Codex hook input timed out", "TimeoutError"));
+  }, timeoutMs);
   let total = 0;
   try {
     while (true) {
-      const result = await readBeforeDeadline(reader, signal);
+      const result = await readBeforeDeadline(reader, controller.signal);
       if (result.done) break;
       const value = result.value;
       if (!value || value.byteLength === 0) continue;
@@ -67,6 +70,7 @@ async function readHookBody(
     });
     throw error;
   } finally {
+    clearTimeout(deadline);
     reader.releaseLock();
   }
 }

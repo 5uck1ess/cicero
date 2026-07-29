@@ -8,9 +8,8 @@ export interface CiceroConfig {
   tts_enabled: boolean;
   tts_summary_max_tokens?: number; // max tokens for brain response TLDR (default 100)
   tts_local_max_tokens?: number;   // max tokens for local-llm responses (default 150)
-  wake_word_enabled: boolean;
   hotkey: string;
-  wispr_hotkey: string; // hotkey to activate Wispr Flow (e.g. "option+space")
+  dictation?: DictationConfig;
   terminal: "auto" | "kitty" | "wezterm" | "tmux" | "none";
   voice: string;
   voice_ref_audio?: string; // path to reference audio for voice cloning
@@ -123,6 +122,14 @@ export interface WebVoiceConfig {
   speculative?: {
     enabled?: boolean;         // default false
     min_probability?: number;  // end-of-turn confidence required to speculate (default 0.85)
+    // Speculation starts a turn before the user has finished speaking. A brain
+    // that only returns text loses nothing on a wrong guess — the tokens are
+    // dropped. A brain that runs tools may already have written files or run
+    // commands by the time the guess is retracted, so it does not speculate
+    // unless this is set. See `brainExecutesTools` for the classification,
+    // which fails closed on anything it cannot prove is text-only.
+    // Default false.
+    allow_tool_brains?: boolean;
   };
   // Long-turn parking: when a reply's FIRST sentence hasn't arrived within
   // park_after_s (deep tool loop, slow delegate), the turn speaks a short
@@ -275,6 +282,15 @@ export interface BrainConfig {
   max_queue_bytes?: number; // acp: maximum unread streamed UTF-8 text retained in memory (default 256 KiB)
   max_response_bytes?: number; // acp: maximum UTF-8 text accumulated by send(); streaming stays incremental (default 2 MiB)
   max_pending_turns?: number; // acp: maximum active + queued turns admitted to one session (default 32)
+  // Background history compaction: when the replayed transcript crosses its cap,
+  // summarize the older half through a small local model instead of dropping it.
+  // Off by default. Without a summarizer_url here it falls back to the one under
+  // web_voice.tldr; with neither, compaction stays off and eviction applies.
+  history_compaction?: {
+    enabled?: boolean;
+    summarizer_url?: string;   // e.g. http://127.0.0.1:8080/v1
+    summarizer_model?: string;
+  };
   // Think lane (acp backend): a second, heavier ACP agent that handles turns
   // containing a trigger phrase ("think hard about…"). Separate conversation —
   // suits one-shot deep questions.
@@ -391,6 +407,23 @@ export interface ComponentHealth {
 }
 
 // Component interfaces
+/**
+ * Native dictation: record on a hotkey, transcribe with Cicero's own STT, and
+ * deliver the transcript. Replaces the previous integration that drove a paid
+ * third-party macOS dictation app and polled the clipboard for its output.
+ */
+export interface DictationConfig {
+  /** Off by default — dictation types into other applications, so it is opt-in. */
+  enabled?: boolean;
+  /**
+   * "focused-app" types the transcript into whatever window has focus (the
+   * dictation-app replacement). "cicero" hands it to Cicero as a spoken command.
+   */
+  target?: "focused-app" | "cicero";
+  /** Hard ceiling on one capture, so a forgotten dictation cannot record forever. */
+  max_recording_seconds?: number;
+}
+
 export interface Listener {
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -406,6 +439,14 @@ export interface Router {
 export interface BrainTurnOptions {
   /** Cancels this turn only. Adapters should stop their underlying work promptly. */
   signal?: AbortSignal;
+  /**
+   * This turn runs on speech the user has NOT finished saying, and may be
+   * discarded. Generated text is safe — it is buffered and dropped if the
+   * guess was wrong. Anything a wrapper cannot take back is not: it must
+   * refuse the turn (throw) rather than act, so the utterance falls through
+   * to the normal path and acts on the final audio instead.
+   */
+  speculative?: boolean;
   /**
    * Immutable host-produced context for this invocation only. Adapters must
    * forward it unchanged and must never retain it as conversation memory.
