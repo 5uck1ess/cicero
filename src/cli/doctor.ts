@@ -655,7 +655,7 @@ async function checkLlm(
       record({
         level: "fail",
         detail: `OpenAI-compatible endpoint ${displayBase} embeds URL credentials, which the provider does not support`,
-        hint: "remove URL userinfo and configure llm.apiKey or llm.apiKeyEnv instead",
+        hint: `remove URL userinfo and configure ${role}.apiKey or ${role}.apiKeyEnv instead`,
       });
       return;
     }
@@ -676,7 +676,7 @@ async function checkLlm(
       record({
         level: "fail",
         detail: `${target.apiKeyEnv} is not set, so ${displayBase} cannot authenticate`,
-        hint: `export ${target.apiKeyEnv}=<your-key> or set llm.apiKeyEnv to the correct environment variable`,
+        hint: `export ${target.apiKeyEnv}=<your-key> or set ${role}.apiKeyEnv to the correct environment variable`,
       });
       return;
     }

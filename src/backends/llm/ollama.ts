@@ -1,7 +1,7 @@
-import { LLM_DEFAULT_MODEL, normalizedLlmModel } from "./provider";
+import { LLM_DEFAULT_MODEL, normalizedLlmModel, LLM_DEFAULT_PORTS } from "./provider";
 import type { LLMProvider, LLMProviderConfig, ChatMessage, LLMCompletionOpts } from "./provider";
 import { startManagedServer, stopManagedServer, type ManagedProcess } from "../managed-server";
-import { httpBase, isLocalHost } from "../net";
+import { httpBase, isLocalHost, hostPort } from "../net";
 import {
   PROVIDER_TIMEOUT_MS,
   providerSignal,
@@ -21,7 +21,7 @@ export class OllamaProvider implements LLMProvider {
 
   constructor(config: LLMProviderConfig) {
     this.host = config.host;
-    this.port = config.port ?? 11434;
+    this.port = config.port ?? LLM_DEFAULT_PORTS.ollama!;
     // Doctor applies the same normalization before checking /api/tags. Keep
     // launch/request identity exact so diagnostics cannot verify another model.
     this.model = normalizedLlmModel(config.model, LLM_DEFAULT_MODEL.ollama);
@@ -94,6 +94,16 @@ export class OllamaProvider implements LLMProvider {
       name: "ollama",
       port: this.port,
       command: ["ollama", "serve"],
+      // `ollama serve` has no port flag: it binds OLLAMA_HOST, defaulting to
+      // 127.0.0.1:11434. Without this, a second Ollama role configured on its
+      // own port spawns a server on the FIRST role's port, which is already
+      // taken — the child exits and that role is silently unavailable.
+      //
+      // Built from the same expression as healthUrl below. An omitted host is
+      // the common case (every tier preset leaves it out), and interpolating it
+      // raw produced the literal `undefined:11434` — a hostname Ollama tries to
+      // bind rather than its localhost default.
+      env: { OLLAMA_HOST: hostPort(this.host, this.port) },
       healthUrl: `${httpBase(this.host, this.port)}/api/tags`,
       timeoutMs: 30000,
     });
