@@ -634,6 +634,55 @@ describe("Config — fail-fast validation", () => {
     );
   });
 
+  // Codex: every consumer appends a path to a base URL by concatenation, so
+  // `https://api.example/v1?token=abc` became
+  // `https://api.example/v1?token=abc/chat/completions` — real path `/v1`, token
+  // `abc/chat/completions`. The intended endpoint was never requested, and it
+  // read like a broken provider rather than a mis-set URL.
+  test("rejects a base URL carrying a query string or fragment", () => {
+    expect(loadYaml([
+      "brain:",
+      "  backend: openai-compatible",
+      "  base_url: https://api.example/v1?token=abc",
+      "",
+    ].join("\n"))).toThrow(/brain\.base_url must not carry a query string/);
+
+    expect(loadYaml([
+      "brain:",
+      "  backend: openai-compatible",
+      "  base_url: https://api.example/v1#frag",
+      "",
+    ].join("\n"))).toThrow(/brain\.base_url must not carry a fragment/);
+  });
+
+  // The same validator guards every base URL, so the fix holds for all of them
+  // rather than only the summarizer the finding happened to cite.
+  test("the query rejection covers every configured base URL", () => {
+    expect(loadYaml([
+      "brain:",
+      "  history_compaction:",
+      "    summarizer_url: http://x:1/v1?token=abc",
+      "web_voice:",
+      "  tldr:",
+      "    summarizer_url: http://x:1/v1?key=abc",
+      "",
+    ].join("\n"))).toThrow(
+      /brain\.history_compaction\.summarizer_url must not carry a query string[\s\S]*web_voice\.tldr\.summarizer_url must not carry a query string/,
+    );
+  });
+
+  // The offending value is exactly the kind of URL that carries a credential.
+  test("the rejection never echoes the URL it refused", () => {
+    const failure = loadYaml([
+      "brain:",
+      "  backend: openai-compatible",
+      "  base_url: https://api.example/v1?token=SYNTHETIC_SECRET_VALUE",
+      "",
+    ].join("\n"));
+    expect(failure).toThrow(/must not carry a query string/);
+    expect(failure).not.toThrow(/SYNTHETIC_SECRET_VALUE/);
+  });
+
   test("validates audio detector thresholds and timing relationships", () => {
     expect(loadYaml([
       "turn: { threshold: -0.1, grace_attempts: 1.5, grace_max_duration: 0 }",

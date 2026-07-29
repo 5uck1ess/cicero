@@ -157,6 +157,18 @@ brain:
   max_response_bytes: 2097152
   max_pending_turns: 32
 
+  # Background history compaction (off by default). Cicero replays a bounded
+  # transcript to the brain; past the cap the oldest turns are simply dropped and
+  # the conversation quietly forgets its beginning. Enabled, the older half is
+  # summarized by a small local model in the background instead, and the full
+  # turns keep serving prompts until that summary lands. If the summarizer is
+  # slow or down it falls back to dropping them, so this can never stall a turn.
+  # Omit the URL here to reuse web_voice.tldr.summarizer_url.
+  # history_compaction:
+  #   enabled: true
+  #   summarizer_url: http://127.0.0.1:8080/v1
+  #   summarizer_model: your-small-model
+
   # Optional: "think hard about …" escalates that one turn to a heavier agent.
   escalate:
     binary: hermes

@@ -196,18 +196,45 @@ function checkStringRecord(value: unknown, path: string, issues: string[]): void
   }
 }
 
+/**
+ * Validate a provider BASE url.
+ *
+ * Every caller appends a path to this value (`/chat/completions`, `/models`) by
+ * string concatenation, so a query or fragment does not survive: an accepted
+ * `https://api.example/v1?token=abc` becomes
+ * `https://api.example/v1?token=abc/chat/completions`, whose real path is `/v1`
+ * and whose token is `abc/chat/completions`. The intended endpoint is never
+ * requested, and the failure looks like a broken provider rather than a
+ * mis-set URL. Refuse it at config time, where the message can say what to fix.
+ *
+ * The offending value is deliberately never echoed — it is exactly the kind of
+ * URL that carries a credential.
+ */
 function checkHttpUrl(value: unknown, path: string, issues: string[]): void {
   if (typeof value !== "string" || value.trim().length === 0) {
     issues.push(`${path} must be a non-empty HTTP(S) URL`);
     return;
   }
+  let url: URL;
   try {
-    const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      issues.push(`${path} must be a non-empty HTTP(S) URL`);
-    }
+    url = new URL(value);
   } catch {
     issues.push(`${path} must be a non-empty HTTP(S) URL`);
+    return;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    issues.push(`${path} must be a non-empty HTTP(S) URL`);
+    return;
+  }
+  // Test the raw value, not `url.search`/`url.hash`: those are empty strings for
+  // a bare `?` or `#`, so `http://h/v1?` slipped through and still concatenated
+  // into `http://h/v1?/chat/completions`, whose real path is `/v1`. The
+  // delimiter is the problem, with or without anything after it.
+  if (value.includes("?")) {
+    issues.push(`${path} must not carry a query string — Cicero appends a path to it; put credentials in the API key setting instead`);
+  }
+  if (value.includes("#")) {
+    issues.push(`${path} must not carry a fragment — Cicero appends a path to it`);
   }
 }
 
@@ -331,6 +358,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     checkKnownKeys(config.brain, "brain", [
       "backend", "mode", "target_tab", "auto_approve_tools", "confirm_tools", "confirm_retry",
       "max_queue_bytes", "max_response_bytes", "max_pending_turns", "escalate", "lanes",
+      "history_compaction",
       "binary", "binary_args", "ollama_port", "ollama_model",
       "base_url", "model", "api_key", "api_key_env", "max_tokens", "timeout_ms", "turn_timeout_ms",
       "headers", "session_header", "narrate_progress", "unset_env", "agent_first", "thinking_filler",
@@ -355,6 +383,14 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
     for (const key of ["auto_approve_tools", "confirm_retry", "narrate_progress", "agent_first", "thinking_filler"]) {
       checkOptionalBoolean(config.brain, key, "brain", issues);
+    }
+    if (config.brain.history_compaction !== undefined
+      && checkRecord(config.brain.history_compaction, "brain.history_compaction", issues)) {
+      const compaction = config.brain.history_compaction;
+      checkKnownKeys(compaction, "brain.history_compaction", ["enabled", "summarizer_url", "summarizer_model"], issues);
+      checkOptionalBoolean(compaction, "enabled", "brain.history_compaction", issues);
+      checkOptionalHttpUrl(compaction, "summarizer_url", "brain.history_compaction", issues);
+      checkOptionalString(compaction, "summarizer_model", "brain.history_compaction", issues);
     }
     if (config.brain.ollama_port !== undefined) {
       checkInteger(config.brain.ollama_port, "brain.ollama_port", issues, { min: 1, max: 65_535 });

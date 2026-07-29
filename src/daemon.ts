@@ -7,6 +7,8 @@ import { log, logStep, logError } from "./logger";
 import { createListener, createConversationalListener } from "./listener";
 import { createRouter } from "./router";
 import { createBrain, summarizerClassifier } from "./brain";
+import { createHistoryCompactor, createSummarizerComplete } from "./brain/history-compactor";
+import { setDefaultHistoryCompactor } from "./brain/turn-context";
 import {
   waitForBrainReadiness,
   type BrainReadinessOptions,
@@ -710,6 +712,9 @@ export class CiceroDaemon {
     }
   }
 
+  /** Releases the daemon-wide history compactor; null when compaction is off. */
+  private releaseCompactor: (() => void) | null = null;
+
   private async startComponents(): Promise<void> {
     const totalSteps = 5;
 
@@ -728,6 +733,31 @@ export class CiceroDaemon {
       builtInProviders: this.options.providerFactory === undefined
         || this.options.providerFactory === createProviders,
     });
+    // Background history compaction (opt-in). Every brain adapter builds its own
+    // private BrainTurnContext, so the compactor is registered process-wide here
+    // rather than threaded through eight constructors and every brain wrapper.
+    // Without it the transcript evicts its oldest turns exactly as it always has.
+    const compaction = this.config.brain.history_compaction;
+    if (compaction?.enabled) {
+      const compactor = createHistoryCompactor({
+        summarizer_url: compaction.summarizer_url ?? this.config.web_voice?.tldr?.summarizer_url,
+        summarizer_model: compaction.summarizer_model ?? this.config.web_voice?.tldr?.summarizer_model,
+      });
+      if (compactor) {
+        // Shutdown must be able to cancel a compaction that is already in the
+        // air, not just stop new ones from starting. This controller is the
+        // daemon's handle on every request the registered compactor makes.
+        const abort = new AbortController();
+        const unregister = setDefaultHistoryCompactor((input, signal) =>
+          compactor(input, AbortSignal.any([signal, abort.signal])));
+        this.releaseCompactor = () => {
+          unregister();
+          abort.abort();
+        };
+      }
+      else log("warn", "brain.history_compaction is enabled but no summarizer_url is configured — history will evict its oldest turns instead");
+    }
+
     const audioPlayer = createAudioPlayer();
     const audioRecorder = createAudioRecorder();
 
@@ -1082,38 +1112,9 @@ export class CiceroDaemon {
         pending: () => lastSpokenReply,
       };
       const tldrCfg = wv.tldr;
-      const summarizerUrl = tldrCfg?.summarizer_url;
       // One small-model completion helper, shared by the TLDR gate and the
       // call-minutes writer — same local summarizer endpoint for both.
-      const summarizerComplete = summarizerUrl
-        ? async (prompt: string, maxTokens: number): Promise<string> => {
-            try {
-              const res = await fetch(`${summarizerUrl.replace(/\/$/, "")}/chat/completions`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  model: tldrCfg?.summarizer_model ?? "",
-                  max_tokens: maxTokens,
-                  reasoning_effort: "none",
-                  messages: [{ role: "user", content: prompt }],
-                }),
-                signal: providerSignal(PROVIDER_TIMEOUT_MS.summarizer),
-              });
-              if (!res.ok) {
-                await discardResponseBody(res);
-                throw new Error(`summarizer ${res.status}`);
-              }
-              const data = await readBoundedJson<{
-                choices?: Array<{ message?: { content?: string } }>;
-              }>(res);
-              const line = data.choices?.[0]?.message?.content?.trim();
-              if (!line) throw new Error("summarizer returned nothing");
-              return line;
-            } catch (err: unknown) {
-              throw err;
-            }
-          }
-        : undefined;
+      const summarizerComplete = createSummarizerComplete(tldrCfg);
       const tldr = (tldrCfg?.enabled ?? true)
         ? {
             cap: tldrCfg?.spoken_sentences ?? 4,
@@ -2625,6 +2626,11 @@ export class CiceroDaemon {
     try {
       // Quiesce every scheduler/timer synchronously, then drain the briefing's
       // exact owned run before dependencies are released.
+      // Unregister before anything else so a brain that keeps running past this
+      // point (a drain, a rollback) cannot start a fresh compaction against an
+      // endpoint we are done with. In-flight ones are drained below.
+      this.releaseCompactor?.();
+      this.releaseCompactor = null;
       const briefingStop = this.briefingScheduler?.stop();
       this.promptScheduler?.stop();
       this.promptScheduler = null;

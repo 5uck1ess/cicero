@@ -267,6 +267,15 @@ export interface BrainConfig {
   max_queue_bytes?: number; // acp: maximum unread streamed UTF-8 text retained in memory (default 256 KiB)
   max_response_bytes?: number; // acp: maximum UTF-8 text accumulated by send(); streaming stays incremental (default 2 MiB)
   max_pending_turns?: number; // acp: maximum active + queued turns admitted to one session (default 32)
+  // Background history compaction: when the replayed transcript crosses its cap,
+  // summarize the older half through a small local model instead of dropping it.
+  // Off by default. Without a summarizer_url here it falls back to the one under
+  // web_voice.tldr; with neither, compaction stays off and eviction applies.
+  history_compaction?: {
+    enabled?: boolean;
+    summarizer_url?: string;   // e.g. http://127.0.0.1:8080/v1
+    summarizer_model?: string;
+  };
   // Think lane (acp backend): a second, heavier ACP agent that handles turns
   // containing a trigger phrase ("think hard about…"). Separate conversation —
   // suits one-shot deep questions.
