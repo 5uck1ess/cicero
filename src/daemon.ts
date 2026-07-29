@@ -287,6 +287,8 @@ export interface DaemonOptions {
 }
 
 const DEFAULT_DAEMON_SHUTDOWN_DRAIN_TIMEOUT_MS = 95_000;
+/** Bounded retries when the loopback allocator repeats a port already staged. */
+const STAGING_PORT_ATTEMPTS = 8;
 const MANAGED_STT_BACKENDS = new Set(["mlx-whisper", "faster-whisper", "audiocpp"]);
 const MANAGED_TTS_BACKENDS = new Set(["mlx-audio", "kokoro", "audiocpp", "pocket-tts", "vibevoice"]);
 
@@ -379,7 +381,19 @@ export async function planVoiceProviderSwap(
   const stage = async <T extends STTProviderConfig | TTSProviderConfig>(role: SwapRole, value: T): Promise<T> => {
     const staged = { ...value };
     let endpoint = managedVoiceEndpoint(role, staged);
-    if (endpoint && occupied.has(endpoint)) {
+    // The allocator binds a port, reads it, and closes again, so two calls can
+    // legitimately hand back the SAME port — nothing is holding it in between.
+    // Staging the selection and its fallback onto one endpoint puts two managed
+    // servers on one port: STT rejects that outright, and TTS starts both
+    // engines concurrently on it. Keep asking until the answer is actually free,
+    // and refuse rather than stage a collision if it never is.
+    for (let attempt = 0; endpoint && occupied.has(endpoint); attempt += 1) {
+      if (attempt >= STAGING_PORT_ATTEMPTS) {
+        throw new Error(
+          `could not stage ${role.toUpperCase()} on a free loopback port after ${STAGING_PORT_ATTEMPTS} attempts; `
+          + "the active provider and config are unchanged.",
+        );
+      }
       staged.port = await allocatePort();
       endpoint = managedVoiceEndpoint(role, staged);
     }
@@ -2078,7 +2092,7 @@ export class CiceroDaemon {
               ttsVoice: this.config.raw.tts?.voice ?? this.config.voice,
               ttsBackend: request.backend,
             });
-            await this.refillFillerBankAfterSwap();
+            this.refillFillerBankAfterSwap();
           }
         }
       }
@@ -2786,21 +2800,33 @@ export class CiceroDaemon {
    * for the same reason startup's chain is (two cold clone preps landing together
    * make a large transient GPU allocation that can abort the TTS server).
    */
-  private async refillFillerBankAfterSwap(): Promise<void> {
+  /**
+   * Rebuild the filler bank on the provider that just went live.
+   *
+   * Deliberately NOT awaited by the swap request. discardPrepared() queues
+   * behind any prime still running, and a prime is a whole bank of sequential
+   * synthesis — eight clips at a minute each is longer than the control client's
+   * entire deadline. Waiting for it inside a swap that has already persisted and
+   * cut over made the CLI abort and report a failure for a swap that was live,
+   * which is the one outcome this command must never produce. Nothing stale can
+   * be served meanwhile: the cutover closed the bank synchronously.
+   */
+  private refillFillerBankAfterSwap(): void {
     const filler = this.webFillerBank;
     if (!filler) return;
-    try {
-      await filler.discardPrepared();
-    } catch (error) {
-      log("warn", `filler bank invalidation after swap failed: ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
     const laneVoices = [...new Set(
       Object.values(this.config.brain.lanes ?? {})
         .map((l) => l.voice)
         .filter((v): v is string => !!v),
     )];
     this.runBackground("filler re-prime after swap", async (signal) => {
+      try {
+        await filler.discardPrepared();
+      } catch (error) {
+        log("warn", `filler bank invalidation after swap failed: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      if (signal.aborted) return;
       try {
         const n = await filler.prime();
         log("ok", `filler bank re-primed after swap (${n} clips)`);
@@ -2815,7 +2841,24 @@ export class CiceroDaemon {
     });
   }
 
+  /**
+   * Retry every provider release a previous shutdown could not confirm, and
+   * REFUSE to start while any of them is still unconfirmed.
+   *
+   * Starting anyway was the hazard: the fresh provider is built on the same
+   * configured port, and startManagedServer() adopts a server that is already
+   * healthy there as unmanaged — so the new generation would run on the old
+   * child's process, and the next retry of the old owner would then stop the
+   * server the running daemon depends on. There is no ownership transfer that
+   * makes that safe, so the daemon does not start a second provider on top of a
+   * child it could not prove is gone.
+   *
+   * Retryable, not latched: whatever is still unconfirmed stays retained, and
+   * the next start (or stop) tries again. Recovery is another `cicero start`,
+   * not a code change.
+   */
   private async retryUnconfirmedProviderRelease(): Promise<void> {
+    const unconfirmed: Array<{ role: string; error: unknown }> = [];
     if (this.servers && this.providers && (this.sttSlot || this.ttsSlot)) {
       try {
         await this.servers.stop(this.providers);
@@ -2823,6 +2866,7 @@ export class CiceroDaemon {
         this.ttsSlot = null;
       } catch (error) {
         log("warn", `retained provider teardown is still unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
+        unconfirmed.push({ role: "retained voice providers", error });
       }
     }
     // Retry the graveyard too, and put back whatever still will not confirm.
@@ -2834,7 +2878,16 @@ export class CiceroDaemon {
       } catch (error) {
         log("warn", `${entry.role} provider teardown is still unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
         this.unreleasedSlots.push(entry);
+        unconfirmed.push({ role: entry.role.toUpperCase(), error });
       }
+    }
+    if (unconfirmed.length > 0) {
+      throw new AggregateError(
+        unconfirmed.map((entry) => entry.error),
+        `cannot start: a previous ${unconfirmed.map((entry) => entry.role).join(" and ")} release is still unconfirmed, `
+        + "so its process may still own the configured port. Stop that process (check the port with `cicero doctor`) "
+        + "and start again.",
+      );
     }
   }
 

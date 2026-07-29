@@ -61,6 +61,12 @@ stops the primary and the fallback together — so a fallback naming the same
 local backend and port as anything the other role uses is the same collision,
 and is refused the same way.
 
+A voice provider whose release could not be confirmed is kept, retried on every
+later `stop()` — and **blocks the next start** until it is confirmed gone. The
+daemon will not build a second provider on the port a child it cannot account
+for may still own, because a healthy server there is adopted rather than
+replaced. The error names the role; stop that process and start again.
+
 The CLI reaches the daemon through a loopback-only authenticated control socket.
 Its short-lived descriptor is private under `~/.cicero/` and is removed during
 clean shutdown. If the descriptor is absent, the CLI reports that runtime

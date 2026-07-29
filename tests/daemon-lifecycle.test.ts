@@ -416,6 +416,112 @@ describe("CiceroDaemon lifecycle", () => {
     }
   });
 
+  // Round 6 (Codex): a provider whose release is unconfirmed may still own the
+  // configured port, and startManagedServer() ADOPTS a server that is already
+  // healthy there as unmanaged. Starting anyway put the new generation on the
+  // old child's process — and the next retry of the old owner would then stop
+  // the server the running daemon depends on.
+  test("a start is refused while a previous provider release is unconfirmed", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-unconfirmed-start-test-"));
+    const pidFile = join(home, "cicero.pid");
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.dashboard = { enabled: false };
+    config.raw.web_voice = { ...config.raw.web_voice, enabled: true, port: 0 };
+    config.raw.tts_enabled = false;
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+    };
+    let ttsWillStop = false;
+    let ttsStopAttempts = 0;
+    const daemon = new CiceroDaemon(config, {
+      pidFile,
+      providerFactory: () => ({
+        stt: {
+          name: "test-stt",
+          transcribe: () => Promise.resolve(null),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+        tts: {
+          name: "test-tts",
+          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => {
+            ttsStopAttempts += 1;
+            return ttsWillStop
+              ? Promise.resolve()
+              : Promise.reject(new Error("tts child is still alive"));
+          },
+        },
+        llm: {
+          name: "test-llm",
+          chatCompletion: () => Promise.resolve("ok"),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+      }),
+    });
+
+    try {
+      await daemon.start();
+      await daemon.stop();
+      expect(ttsStopAttempts).toBe(1);
+
+      // Restarting must NOT install a second provider on the same port. Startup
+      // retries every retained handle first — the live slots and the graveyard
+      // both point at this provider — so the count only has to have grown.
+      await expect(daemon.start()).rejects.toThrow(/release is still unconfirmed/);
+      expect(ttsStopAttempts).toBeGreaterThan(1);
+
+      // Retryable, not latched: once the child is actually gone, start works.
+      const beforeRecovery = ttsStopAttempts;
+      ttsWillStop = true;
+      await daemon.start();
+      expect(ttsStopAttempts).toBeGreaterThan(beforeRecovery);
+    } finally {
+      ttsWillStop = true;
+      await daemon.stop().catch(() => {});
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // Round 6 (Codex): the swap request awaited the post-cutover refill, whose
+  // discard queues behind any prime still running — a whole bank of sequential
+  // synthesis, longer than the control client's entire deadline. The CLI then
+  // aborted and reported a failure for a swap that had already persisted and cut
+  // over. The refill is background work; the cutover already closed the bank.
+  test("the post-swap filler refill never holds the swap request open", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-refill-test-"));
+    const daemon = new CiceroDaemon(loadConfig({}, { home }));
+    let discardStarted = false;
+    const state = daemon as unknown as {
+      webFillerBank: unknown;
+      refillFillerBankAfterSwap: () => unknown;
+    };
+    state.webFillerBank = {
+      // Never settles, like a discard queued behind a full prime.
+      discardPrepared: () => { discardStarted = true; return new Promise<void>(() => {}); },
+      prime: () => Promise.resolve(0),
+      primeVoice: () => Promise.resolve(0),
+    };
+
+    // Returns nothing to await: the swap cannot be made to wait on it.
+    expect(state.refillFillerBankAfterSwap()).toBeUndefined();
+    await Bun.sleep(5);
+    expect(discardStarted).toBe(true);
+
+    rmSync(home, { recursive: true, force: true });
+  });
+
   test("stop cancels in-flight automatic TLS generation instead of waiting for its deadline", async () => {
     const home = mkdtempSync(join(tmpdir(), "cicero-daemon-tls-race-test-"));
     const pidFile = join(home, "cicero.pid");

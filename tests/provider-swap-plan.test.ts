@@ -173,6 +173,41 @@ describe("a managed server shared by both roles", () => {
     expect(plan.selection.backend).toBe("kokoro");
   });
 
+  // Round 6 (Codex): the allocator binds a port, reads it, and closes again, so
+  // two sequential calls can legitimately return the SAME port — nothing holds
+  // it in between. Staging the selection and its fallback onto one endpoint puts
+  // two managed servers on one port: STT construction rejects it outright, and
+  // TTS starts both engines on it concurrently.
+  test("a repeated allocator result is not staged twice", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.stt = { backend: "faster-whisper", port: 8083 } as never;
+      raw.stt_fallback = { backend: "audiocpp", port: 8092 } as never;
+    });
+    const ports = [19001, 19001, 19002];
+
+    const plan = await planVoiceProviderSwap(
+      config,
+      { role: "stt", backend: "faster-whisper", model: "new-model" },
+      () => Promise.resolve(ports.shift()!),
+    );
+
+    expect(plan.selection.port).toBe(19001);
+    expect(plan.fallback?.port).toBe(19002);
+  });
+
+  test("an allocator that never yields a free port is refused, not staged onto a collision", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.stt = { backend: "faster-whisper", port: 8083 } as never;
+      raw.stt_fallback = { backend: "audiocpp", port: 8092 } as never;
+    });
+
+    await expect(planVoiceProviderSwap(
+      config,
+      { role: "stt", backend: "faster-whisper", model: "new-model" },
+      () => Promise.resolve(19001),
+    )).rejects.toThrow(/could not stage STT on a free loopback port/);
+  });
+
   // A remote seat is not a process this daemon owns, so there is nothing to
   // stop and nothing to refuse.
   test("a shared REMOTE endpoint is not refused — no local process is owned", async () => {
