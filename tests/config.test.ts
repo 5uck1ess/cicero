@@ -461,6 +461,9 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
   });
 
+  // Uses a backend that actually connects to host/port. It previously named
+  // openai-compatible, which ignores both -- so the config it asserted as valid
+  // would have sent every utterance to api.openai.com (see the refusal below).
   test("a remote classifier is not compared against local ports", () => {
     expect(() => loadYaml([
       "web_voice:",
@@ -468,10 +471,49 @@ describe("Config — fail-fast validation", () => {
       "  port: 8090",
       "  token: a-token-that-is-long-enough",
       "classifier:",
-      "  backend: openai-compatible",
+      "  backend: ollama",
       "  host: classifier.example",
       "  port: 8090",
       "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // The OpenAI-compatible family connects to baseUrl and ignores host/port,
+  // defaulting to the preset's CLOUD endpoint. An operator who wrote an
+  // internal hostname has said plainly that is not where captured speech
+  // should go, so this is refused rather than silently redirected.
+  test("an OpenAI-compatible classifier aimed at a host with no baseUrl is refused", () => {
+    expect(loadYaml([
+      "classifier:",
+      "  backend: openai-compatible",
+      "  host: classifier.internal",
+      "  port: 8093",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/ignores them and connects to classifier\.baseUrl/);
+  });
+
+  test("the same classifier with a baseUrl is accepted", () => {
+    expect(() => loadYaml([
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://classifier.internal:8093/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Both models omitted means both roles request the same documented default,
+  // which a server exposing that alias serves. Refusing it was guessing.
+  test("a shared OpenAI-compatible endpoint with neither model named is accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
       "",
     ].join("\n"))()).not.toThrow();
   });

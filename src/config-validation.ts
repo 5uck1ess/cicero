@@ -668,6 +668,21 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
         + "backend: openai-compatible if that URL is what you meant.",
       );
     }
+
+    // The mirror image, and the more dangerous one: the OpenAI-compatible
+    // family connects to baseUrl and IGNORES host/port, defaulting to the
+    // preset's cloud endpoint. So a classifier aimed at an internal box by
+    // host/port, with no baseUrl, quietly sends every captured utterance to
+    // api.openai.com instead -- and an operator who wrote an internal hostname
+    // has said plainly that is not what they wanted.
+    if (readsBaseUrl(classifierBackend) && classifier.baseUrl === undefined
+      && (classifier.host !== undefined || classifier.port !== undefined)) {
+      issues.push(
+        `classifier.host/classifier.port are set but the '${String(classifierBackend)}' backend ignores them and `
+        + `connects to classifier.baseUrl, which is unset — so every utterance would go to the backend's default `
+        + "endpoint instead of the host you named. Set classifier.baseUrl to that endpoint's URL.",
+      );
+    }
     const classifierEndpoint: Endpoint = (readsBaseUrl(classifierBackend) ? fromBaseUrl(classifier.baseUrl) : null) ?? {
       host: hostOf(classifier.host),
       port: portOf(classifier.port) ?? llmDefaultPort(classifierBackend),
@@ -755,8 +770,14 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     // what the endpoint serves (the reply model), so the mismatch is provable.
     // A standalone OpenAI-compatible classifier with no model may well point at
     // a proxy that does serve the default, and refusing that would be guessing.
+    // Only when the reply role NAMES a model: that is what makes the mismatch
+    // provable. With both models omitted, both roles request the same
+    // documented default and a server exposing that alias serves them both --
+    // refusing it was guessing, which is the failure this check exists to avoid
+    // committing in the other direction.
     const unsetShareResolvesElsewhere = sharedEndpoint
       && classifier.model === undefined
+      && typeof llm.model === "string"
       && readsBaseUrl(effectiveBackend);
     if (unsetShareResolvesElsewhere) {
       issues.push(

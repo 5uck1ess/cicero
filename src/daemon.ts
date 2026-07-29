@@ -1449,6 +1449,9 @@ export class CiceroDaemon {
         // applies (resolved per sentence, so the pin ack already sounds like
         // the employee). Notifications stay in Cicero's own voice.
         onTurn: (wav, options) => processWebTurn(wav, {
+          // Same veto as the streaming path. Adding the option without wiring
+          // it here is what left this entry point open the first time round.
+          judge: this.webIntentGate(),
           stt: this.providers.stt,
           brain: this.brain,
           tts: laneTts,

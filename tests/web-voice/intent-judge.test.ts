@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { processWebTurn, streamWebTurn, streamWebTextTurn, type WebStreamDeps, type WebReplySink } from "../../src/web-voice/turn";
 
 /**
@@ -130,4 +132,16 @@ test("the transport signal reaches the judge", async () => {
     signal: controller.signal,
   }), sink());
   expect(seen).toBe(controller.signal);
+});
+
+// Both previous rounds shipped a judge option that the daemon never passed at
+// one of its call sites. A test that supplies the judge by hand proves the
+// seam, not the wiring — so this asserts the wiring itself, at the source.
+test("the daemon passes the gate to every browser entry point", () => {
+  const source = readFileSync(join(import.meta.dir, "../../src/daemon.ts"), "utf8");
+  // processWebTurn (POST /api/turn) and streamWebTurn (WebSocket) both take it.
+  const turnCall = source.slice(source.indexOf("onTurn: (wav, options) => processWebTurn(wav, {"));
+  expect(turnCall.slice(0, turnCall.indexOf("})")).includes("judge: this.webIntentGate()")).toBe(true);
+  const streamCall = source.slice(source.indexOf("onStreamTurn: async (wav, sink, options)"));
+  expect(streamCall.slice(0, streamCall.indexOf("onSpeculate")).includes("judge: this.webIntentGate()")).toBe(true);
 });
