@@ -83,6 +83,27 @@ interface Capture {
   confirmed: boolean;
 }
 
+/**
+ * Ask a recorder to exit, then insist. A capture device is held for as long as
+ * its process lives, so a recorder that ignores the polite signal — the exact
+ * case that strands the microphone and outlives the daemon — is escalated
+ * rather than merely reported. Only an unkillable process (uninterruptible
+ * sleep) survives this, and that is genuinely beyond the daemon.
+ *
+ * Returns true only when the process is observed to have exited.
+ */
+async function terminate(proc: ReturnType<typeof Bun.spawn>, timeoutMs: number): Promise<boolean> {
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    try {
+      proc.kill(signal);
+    } catch {
+      // Already gone (hit its own ceiling, or the recorder died) — still await exit.
+    }
+    if (await confirmExit(proc, timeoutMs)) return true;
+  }
+  return false;
+}
+
 /** Wait, bounded, for a process to actually exit. True only when confirmed gone. */
 async function confirmExit(proc: ReturnType<typeof Bun.spawn>, timeoutMs: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -166,13 +187,7 @@ export class DictationListener implements Listener {
     }
     // A recorder retained by an earlier failed reap gets another chance here, so
     // an unconfirmed release is recoverable without restarting the daemon.
-    const reaped = await this.reapStuckRecorder();
-    // Ordinary transcription hands the microphone back; a shutdown that killed
-    // the recorder instead did not, so the daemon stayed convinced dictation
-    // still owned the device and never re-armed clap or conversational capture.
-    // Only once nothing is outstanding — an unconfirmed recorder still holds it,
-    // and reapStuckRecorder hands it back itself when it finally exits.
-    if (reaped) await this.handBackMicrophone();
+    await this.reapStuckRecorder();
     // Whatever the typing helper retained is owned by this listener too, and
     // nothing else can reach it once the daemon drops its reference. Released
     // BEFORE the drain so a helper already typing cannot hold the drain open for
@@ -205,6 +220,19 @@ export class DictationListener implements Listener {
     // supersedes the earlier attempt, so a helper that refused the first kill and
     // died on the second counts as released.
     const typingReleased = await this.releaseTypingHelper();
+    // The recorder is re-checked here for the same reason. finishRecording()
+    // clears `capture` BEFORE it awaits the recorder's release, so a stop() that
+    // lands in that window sees no capture and no retained recorder and computes
+    // "released" — while the release it is racing goes on to time out DURING the
+    // drain and retain one. The pre-drain result is a snapshot of a state the
+    // drain itself can change, so only this one is reported.
+    const reaped = await this.reapStuckRecorder();
+    // Ordinary transcription hands the microphone back; a shutdown that killed
+    // the recorder instead did not, so the daemon stayed convinced dictation
+    // still owned the device and never re-armed clap or conversational capture.
+    // Only once nothing is outstanding — an unconfirmed recorder still holds it,
+    // and reapStuckRecorder hands it back itself when it finally exits.
+    if (reaped) await this.handBackMicrophone();
     this.state = "idle";
     // Report an unconfirmed release rather than swallowing it. stop() used to
     // resolve regardless, and the daemon then cleared its only reference — so a
@@ -293,7 +321,9 @@ export class DictationListener implements Listener {
   private async reapStuckRecorder(): Promise<boolean> {
     const stuck = this.unreaped;
     if (!stuck) return true;
-    if (!await confirmExit(stuck.proc, this.recorderExitTimeoutMs)) return false;
+    // Insist again rather than only re-observing: the first release already
+    // asked politely and this process is still holding the microphone.
+    if (!await terminate(stuck.proc, this.recorderExitTimeoutMs)) return false;
     this.unreaped = null;
     stuck.confirmed = true;
     await this.discardCaptureFile(stuck.file);
@@ -439,12 +469,7 @@ export class DictationListener implements Listener {
       clearTimeout(capture.timer);
       capture.timer = undefined;
     }
-    try {
-      capture.proc.kill();
-    } catch {
-      // Already gone (hit its own ceiling, or the recorder died) — still await exit.
-    }
-    capture.confirmed = await confirmExit(capture.proc, this.recorderExitTimeoutMs);
+    capture.confirmed = await terminate(capture.proc, this.recorderExitTimeoutMs);
     if (!capture.confirmed) {
       log("warn", `Dictation recorder did not exit within ${this.recorderExitTimeoutMs}ms — it still holds the microphone`);
       this.unreaped = capture;

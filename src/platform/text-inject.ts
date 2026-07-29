@@ -87,14 +87,21 @@ export function resolveTextInjection(env: InjectionEnvironment = {}): TextInject
 /**
  * Prepare an STT transcript for a synthetic keyboard.
  *
- * Model output is untrusted, so this normalizes line endings to `\n` (a lone
- * carriage return would sit raw inside an AppleScript string literal and split
- * the statement), drops every other control character, and bounds the length.
- * Tabs and newlines survive because they are legitimate dictated whitespace.
+ * Model output is untrusted, so this folds every whitespace control character to
+ * a space, drops the rest, and bounds the length.
+ *
+ * Newlines and tabs are not characters here, they are KEYSTROKES: a newline is
+ * `keystroke return` on macOS, `{ENTER}` on Windows, `Return` under xdotool. A
+ * transcript containing one submits whatever the focused window is holding — a
+ * shell prompt runs the line, a chat box sends it — and a transcript is a
+ * provider response body, which this project treats as untrusted input. Speech
+ * has no Enter key, so a newline in one is the provider's formatting and never
+ * the operator's intent; tabs are the same class (completion, focus changes).
+ * Both become an ordinary space, so the words still arrive without an action.
  */
 export function boundInjectedText(text: string): { text: string; truncated: boolean } {
   const normalized = text
-    .replace(/\r\n|\r/g, "\n")
+    .replace(/[\r\n\t]+/g, " ")
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]+/g, "");
   if (normalized.length <= MAX_INJECTED_CHARS) return { text: normalized, truncated: false };
   return { text: normalized.slice(0, MAX_INJECTED_CHARS), truncated: true };

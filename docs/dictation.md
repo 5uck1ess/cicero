@@ -86,6 +86,12 @@ startup. Talk to a headless daemon through [web voice](web-voice.md) instead.
   recording and transcribes what it has.
 - **Long transcripts are truncated** at 10,000 characters before typing, with a
   warning. Model output driving a synthetic keyboard is bounded on purpose.
+- **A transcript never presses Enter.** Newlines and tabs in a model's response
+  become spaces before anything is typed. On a synthetic keyboard a newline is
+  Return, so a transcript containing one would *submit* whatever window has
+  focus — run the line at a shell prompt, send the message in a chat box.
+  Speech has no Enter key, so a newline there is the provider's formatting, not
+  something you said. Dictation types words; it does not act.
 - **The clipboard is never touched.** Every platform drives a synthetic
   keyboard directly. The previous integration polled the clipboard and did not
   restore what it overwrote.

@@ -2738,16 +2738,16 @@ export class CiceroDaemon {
       // of a recorder still holding the microphone, or of a typing helper still
       // typing, and clearing the reference here stranded both. A later stop()
       // retries the reap.
-      let dictationReleased = true;
+      let dictationFailure: unknown;
       await cleanup("dictation", async () => {
         try {
           await this.dictation?.stop();
         } catch (error: unknown) {
-          dictationReleased = false;
+          dictationFailure = error;
           throw error;
         }
       });
-      if (dictationReleased) this.dictation = null;
+      if (!dictationFailure) this.dictation = null;
       await cleanup("hotkey helper", () => this.hotkeyProc?.kill());
       this.hotkeyProc = null;
       await cleanup("voice lifecycle", async () => {
@@ -2832,6 +2832,21 @@ export class CiceroDaemon {
       const pidLease = this.pidLease;
       this.pidLease = null;
       await cleanup("PID file", () => pidLease?.release() ?? Promise.resolve());
+      // Everything else is torn down, but a dictation listener whose release was
+      // unconfirmed still owns a live recorder holding the microphone, or a
+      // helper still typing. Logging that best-effort and reporting a clean stop
+      // was the lie: the signal path calls stop() exactly once, so nothing ever
+      // reached the retry the retained listener exists for. Fail closed here
+      // instead — the daemon stays in `stopping` with the listener retained, and
+      // a later stop() runs the reap again.
+      if (dictationFailure) {
+        throw new Error(
+          `dictation teardown is unconfirmed, so shutdown is not complete: ${
+            dictationFailure instanceof Error ? dictationFailure.message : String(dictationFailure)
+          }`,
+          { cause: dictationFailure },
+        );
+      }
       log("ok", "Cicero stopped.");
       shutdownCompleted = true;
     } finally {

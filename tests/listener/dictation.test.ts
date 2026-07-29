@@ -499,6 +499,67 @@ describe("a recorder that will not exit", () => {
     return state;
   }
 
+  // Round 4 (Codex): a recorder that ignores the polite signal holds the capture
+  // device for as long as it lives, and the daemon only ever reported that. It
+  // insists now — the escalation is the difference between "we told the operator
+  // about an orphan" and "there is no orphan".
+  test("a recorder that ignores SIGTERM is escalated to SIGKILL", async () => {
+    const signals: string[] = [];
+    let exit!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => { exit = resolve; });
+    const recorder = {
+      record(outPath: string) {
+        expect(typeof outPath).toBe("string");
+        return {
+          exited,
+          kill: (signal?: string) => {
+            signals.push(signal ?? "default");
+            // Honours SIGKILL, like any process that is not stuck in the kernel.
+            if (signal === "SIGKILL") exit(137);
+          },
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      },
+    };
+    const { dict } = listener({ recorder: recorder as never, recorderExitTimeoutMs: 20 });
+    await dict.start();
+    await dict.toggle();
+    await dict.settled();
+
+    await dict.stop(); // resolves: the recorder IS gone, not merely reported
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  // Round 4 (Codex): finishRecording() clears `capture` BEFORE awaiting the
+  // recorder's release, so a stop() landing in that window sees no capture and no
+  // retained recorder, computes "released", and then reports it — while the
+  // release it raced times out during the drain and retains one.
+  test("a recorder retained during the drain is not reported as released", async () => {
+    const stubborn = stubbornRecorder();
+    let releaseStt!: (text: string) => void;
+    const sttGate = new Promise<string>((resolve) => { releaseStt = resolve; });
+    const { dict } = listener({
+      recorder: stubborn as never,
+      stt: { transcribe: () => sttGate },
+      recorderExitTimeoutMs: 30,
+      drainTimeoutMs: 1_000,
+    });
+    await dict.start();
+    await dict.toggle();
+    await dict.settled();
+
+    // Second press: finishRecording() has taken the capture and is inside
+    // releaseCapture(), which will not confirm.
+    void dict.toggle();
+    await Bun.sleep(0);
+
+    const stopping = dict.stop();
+    // The release times out and retains the recorder while stop() is draining.
+    await Bun.sleep(60);
+    releaseStt("whatever");
+
+    await expect(stopping).rejects.toThrow(/recorder has not exited/);
+  });
+
   test("no second capture is admitted while it is still alive", async () => {
     const stubborn = stubbornRecorder();
     const { dict, typed } = listener({ recorder: stubborn as never, recorderExitTimeoutMs: 20 });

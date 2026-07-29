@@ -742,15 +742,19 @@ describe("CiceroDaemon lifecycle", () => {
     state.speaker = { stop: () => Promise.resolve() };
     state.brain = { stop: () => Promise.resolve() };
 
-    // Best effort: the rest of the shutdown completes and the daemon is idle.
-    await daemon.stop();
-    expect(state.lifecycle).toBe("idle");
+    // The rest of the shutdown still runs, but it does NOT report success: the
+    // signal path calls stop() exactly once and then drops its handlers, so a
+    // clean resolve here meant the retry the retained listener exists for was
+    // never reached, and the recorder holding the microphone outlived the daemon.
+    await expect(daemon.stop()).rejects.toThrow(/dictation teardown is unconfirmed/);
+    expect(state.lifecycle).toBe("stopping");
     expect(dictationStops).toBe(1);
     expect(state.dictation).not.toBeNull(); // retained, on purpose
 
     await daemon.stop();
     expect(dictationStops).toBe(2);
     expect(state.dictation).toBeNull(); // released, so no further retry
+    expect(state.lifecycle).toBe("idle");
   });
 
   test("an ingress drain failure blocks dependency teardown and a later stop retries", async () => {

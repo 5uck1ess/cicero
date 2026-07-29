@@ -72,16 +72,21 @@ describe("bounding untrusted transcript text", () => {
     expect(result.truncated).toBe(true);
   });
 
-  // A lone CR would sit raw inside an AppleScript string literal and split the
-  // statement, so line endings are normalized before any script is generated.
-  test("carriage returns are normalized to newlines", () => {
-    expect(boundInjectedText("a\r\nb\rc").text).toBe("a\nb\nc");
+  // Round 4 (Codex): a newline is not a character on a synthetic keyboard, it is
+  // Return — and a transcript is a provider response body. `{"text":"echo pwned >
+  // cicero-proof\n#"}` typed the command AND submitted it in whatever window had
+  // focus. Speech has no Enter key, so this can only ever be the provider's
+  // formatting. Tabs are the same class and fold the same way.
+  test("newlines and carriage returns become spaces, never Return keystrokes", () => {
+    expect(boundInjectedText("a\r\nb\rc").text).toBe("a b c");
+    expect(boundInjectedText("echo pwned > cicero-proof\n#").text).toBe("echo pwned > cicero-proof #");
+    expect(boundInjectedText("a\n\n\nb").text).toBe("a b");
   });
 
-  test("other control characters are dropped, tabs and newlines survive", () => {
+  test("tabs fold too, and every other control character is still dropped", () => {
     const result = boundInjectedText("safe\u0000\u001b[2J\u0007text\tkept\nkept");
-    expect(result.text).toBe("safe[2Jtext\tkept\nkept");
-    expect(result.text).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/);
+    expect(result.text).toBe("safe[2Jtext kept kept");
+    expect(result.text).not.toMatch(/[\u0000-\u001F\u007F-\u009F]/);
   });
 
   test("a transcript that is only control characters becomes empty", () => {
