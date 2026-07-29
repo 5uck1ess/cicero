@@ -45,6 +45,14 @@
 import { coalesceSentences } from "../src/speaker/coalesce";
 import { segmentSentences } from "../src/speaker/sentence-stream";
 import { inspectWavMetadata } from "../src/platform/wav";
+import {
+  PROVIDER_RESPONSE_LIMIT_BYTES,
+  PROVIDER_TIMEOUT_MS,
+  providerSignal,
+  readBoundedArrayBuffer,
+  readErrorDetail,
+  requestTimeout,
+} from "../src/backends/http-transfer";
 
 interface Args {
   url: string;
@@ -55,6 +63,7 @@ interface Args {
   maxChars: number;
   passthroughFirst: number;
   overheadMs: number;
+  timeoutMs: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -71,6 +80,13 @@ function parseArgs(argv: string[]): Args {
     maxChars: Number(get("--max-chars", "240")),
     passthroughFirst: Number(get("--passthrough-first", "1")),
     overheadMs: Number(get("--overhead-ms", "0")),
+    // Defaults to the production TTS deadline. A benchmark measuring a slow
+    // remote seat may legitimately need longer, so it is a flag rather than a
+    // constant -- but it is never absent.
+    // Resolved through the same helper the providers use, so a garbage value
+    // clamps to the TTS deadline rather than silently landing on the 5s health
+    // default that providerSignal() would otherwise fall back to.
+    timeoutMs: requestTimeout(Number(get("--timeout-ms", "")), PROVIDER_TIMEOUT_MS.tts),
   };
 }
 
@@ -149,6 +165,40 @@ function median(values: number[]): number {
   return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
+/**
+ * One bounded synthesis request.
+ *
+ * Round 2 (Codex): this used an un-signaled fetch and an unrestricted
+ * arrayBuffer(). The docs here recommend pointing the benchmark at a hosted or
+ * network endpoint, so the response is a remote body: a 200 that emits a RIFF
+ * header and never closes left the benchmark stuck in warm-up until it was
+ * killed, and an endless body was read straight into memory. A benchmark that
+ * hangs is worse than one that fails -- it reads as a slow engine.
+ *
+ * Same deadline and size bound the audiocpp provider enforces. Exported so the
+ * bounds are testable; nothing else imported this file before.
+ */
+export function createBenchSpeaker(
+  endpoint: string,
+  payload: Record<string, unknown>,
+  timeoutMs: number,
+  maxBytes: number = PROVIDER_RESPONSE_LIMIT_BYTES.audio,
+): (text: string) => Promise<ArrayBuffer> {
+  return async (text: string): Promise<ArrayBuffer> => {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, input: text }),
+      signal: providerSignal(timeoutMs),
+    });
+    if (!res.ok) {
+      const detail = await readErrorDetail(res).catch(() => "");
+      throw new Error(`TTS ${res.status}${detail ? `: ${detail}` : ""}`);
+    }
+    return readBoundedArrayBuffer(res, maxBytes, "benchmark TTS audio");
+  };
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(Bun.argv.slice(2));
   const endpoint = `${args.url}/v1/audio/speech`;
@@ -161,17 +211,9 @@ async function main(): Promise<void> {
   if (args.voiceRef) payload.voice_ref = args.voiceRef;
   else if (args.voice) payload.voice = args.voice;
 
+  const synthesize = createBenchSpeaker(endpoint, payload, args.timeoutMs);
   const speak = async (text: string): Promise<ArrayBuffer> => {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, input: text }),
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      throw new Error(`TTS ${res.status}: ${detail.slice(0, 200)}`);
-    }
-    const audio = await res.arrayBuffer();
+    const audio = await synthesize(text);
     // Modeled per-call overhead. A local GPU seat has almost none, which is why
     // coalescing barely moves anything against one; a hosted engine pays a
     // network round trip and whatever queue wait it has on EVERY call (less than
@@ -249,4 +291,6 @@ async function main(): Promise<void> {
   );
 }
 
-await main();
+// Guarded so a test can import the bounded helper above without launching a
+// benchmark run against whatever is listening on the default port.
+if (import.meta.main) await main();
