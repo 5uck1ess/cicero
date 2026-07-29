@@ -18,11 +18,12 @@ engine this is measurably free and measurably pointless.
 
 ## Where it applies
 
-Both paths that speak a streaming reply: the local streaming speaker, and web
-voice. That second one is the point — a `headless: true` box has no local
-speaker at all and talks entirely through the browser, so a setting that reached
-only the local path would be inert on the deployment most likely to be pointed
-at a hosted or remote engine.
+The local streaming speaker and every web-voice reply path, including typed
+turns, replay/details fast paths, and the single-WAV `/api/turn` endpoint used by
+the call bridge. That web wiring is the point — a `headless: true` box has no
+local speaker at all and talks entirely through web voice, so a setting that
+reached only the local path would be inert on the deployment most likely to be
+pointed at a hosted or remote engine.
 
 On the web path the merge is a synthesis-call detail and nothing else: the
 transcript pane still receives one entry per sentence, the TLDR cap still counts

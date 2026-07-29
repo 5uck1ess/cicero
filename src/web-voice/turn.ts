@@ -35,6 +35,8 @@ export interface WebTurnDeps {
   tts: Pick<TTSProvider, "generateAudio">;
   /** Optional TLDR gate — see {@link TldrOptions}. Omit to speak every sentence. */
   tldr?: TldrOptions;
+  /** Optional sentence coalescing before synthesis. Omit for one call per sentence. */
+  coalesce?: CoalesceOptions;
   /** Optional input-side tone tag — see {@link ToneOptions}. Omit for untagged turns. */
   tone?: ToneOptions;
   /**
@@ -117,6 +119,21 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     if (deps.tldr?.pending && isExpandRequest(transcript)) {
       const detail = deps.tldr.pending();
       if (detail) {
+        if (deps.coalesce) {
+          const parts = new WavPartsBuilder(
+            maxAudioBytes,
+            retainedWavPartsLimit(maxAudioBytes),
+          );
+          const sentences = nonEmptySentences(segmentSentences(oneChunk(detail)));
+          for await (const chunk of sentenceGroups(sentences, deps.coalesce, deps.signal)) {
+            throwIfTurnAborted(deps.signal);
+            const providerAudio = await deps.tts.generateAudio(chunk.text);
+            throwIfTurnAborted(deps.signal);
+            const part = admitProviderAudio(providerAudio, maxAudioBytes);
+            if (part.byteLength > 0) parts.append(part);
+          }
+          return { transcript, reply: detail, audio: parts.finish() };
+        }
         const providerAudio = await deps.tts.generateAudio(detail);
         throwIfTurnAborted(deps.signal);
         const audio = admitProviderAudio(providerAudio, maxAudioBytes);
@@ -140,9 +157,9 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     if (!reply) return { transcript, reply: "", audio: EMPTY };
 
     // The reply text stays complete (logs, history); only the VOICE is gated.
-    // Rendered sentence-by-sentence like the streaming path, so per-sentence
-    // voice resolution (lane voices, the roll call) works on this path too,
-    // then concatenated into the single WAV this API returns.
+    // Control turns stay sentence-by-sentence so roll-call voices remain
+    // aligned. Ordinary replies may share calls, then every returned clip is
+    // concatenated into the single WAV this API returns.
     const control = deps.brain.wasControlTurn?.() ?? false;
     const spoken = control ? reply : await gateForSpeech(reply, deps.tldr);
     // Validate and budget every provider result before retaining the next one.
@@ -152,11 +169,18 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
       maxAudioBytes,
       retainedWavPartsLimit(maxAudioBytes),
     );
-    for await (const raw of segmentSentences(oneChunk(spoken))) {
+    const sentences = nonEmptySentences(segmentSentences(oneChunk(spoken)));
+    // Control turns can change lane voice at every sentence. Everything else
+    // returns one composed WAV, so sharing a synthesis call changes no delivery
+    // boundary visible to this endpoint.
+    const chunks = sentenceGroups(
+      sentences,
+      control ? undefined : deps.coalesce,
+      deps.signal,
+    );
+    for await (const chunk of chunks) {
       throwIfTurnAborted(deps.signal);
-      const s = raw.trim();
-      if (!s) continue;
-      const providerAudio = await deps.tts.generateAudio(s);
+      const providerAudio = await deps.tts.generateAudio(chunk.text);
       throwIfTurnAborted(deps.signal);
       const part = admitProviderAudio(providerAudio, maxAudioBytes);
       if (part.byteLength > 0) {
@@ -449,6 +473,26 @@ export interface WebReplySink {
 
 async function* oneChunk(text: string): AsyncGenerator<string> {
   yield text;
+}
+
+async function* nonEmptySentences(sentences: AsyncIterable<string>): AsyncGenerator<string> {
+  for await (const raw of sentences) {
+    const sentence = raw.trim();
+    if (sentence) yield sentence;
+  }
+}
+
+function sentenceGroups(
+  sentences: AsyncIterable<string>,
+  coalesce?: CoalesceOptions,
+  cancel?: AbortSignal,
+): AsyncIterable<CoalescedChunk> {
+  if (coalesce) return coalesceSentenceGroups(sentences, coalesce, cancel);
+  return (async function* (): AsyncGenerator<CoalescedChunk> {
+    for await (const sentence of sentences) {
+      yield { text: sentence, parts: [sentence] };
+    }
+  })();
 }
 
 /** Keep a batch brain call lazy so abort polling starts while it is pending. */
@@ -915,18 +959,21 @@ export async function streamWebTextTurn(text: string, deps: WebStreamDeps, sink:
 
 async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink): Promise<string[]> {
   const spokenTexts: string[] = [];
-  for await (const raw of segmentSentences(oneChunk(text))) {
+  const chunks = sentenceGroups(
+    nonEmptySentences(segmentSentences(oneChunk(text))),
+    deps.coalesce,
+    deps.signal,
+  );
+  for await (const chunk of chunks) {
     if (sink.aborted()) break;
-    const s = raw.trim();
-    if (!s) continue;
-    sink.sentence(s);
+    for (const part of chunk.parts) sink.sentence(part);
     const audio = admitProviderAudio(
-      await deps.tts.generateAudio(s, undefined, { speed: deps.voice?.state.rate }),
+      await deps.tts.generateAudio(chunk.text, undefined, { speed: deps.voice?.state.rate }),
     );
     if (sink.aborted()) break;
     if (audio.byteLength > 0) {
       sink.audio(audio);
-      spokenTexts.push(s);
+      spokenTexts.push(...chunk.parts);
     }
   }
   sink.done();
@@ -1095,11 +1142,7 @@ async function streamReply(
       // One chunk per synthesis call, but still one `parts` entry per sentence:
       // the pane, the TLDR count, and barge-in recovery are all per-sentence
       // facts and must not change just because two sentences shared a call.
-      const chunks: AsyncIterable<CoalescedChunk> = deps.coalesce
-        ? coalesceSentenceGroups(trimmed, deps.coalesce, turnAbort?.signal)
-        : (async function* () {
-            for await (const s of trimmed) yield { text: s, parts: [s] };
-          })();
+      const chunks = sentenceGroups(trimmed, deps.coalesce, turnAbort?.signal);
 
       for await (const chunk of chunks) {
         if (parked) { parkedTexts.push(...chunk.parts); continue; }
@@ -1108,40 +1151,12 @@ async function streamReply(
         control ??= deps.brain.wasControlTurn?.() ?? false;
         for (const part of chunk.parts) sink.sentence(part);
 
-        // How this chunk is actually spoken. Usually one call, but two things
-        // are counted in SENTENCES and would be corrupted by a merged call, so
-        // both are recovered by splitting on the parts the coalescer reported.
-        let calls: Array<{ text: string; parts: string[] }> = control
-          // A roll call queues one lane voice per sentence and laneTts shifts one
-          // off PER CALL. Merging would speak two lanes in the first one's voice
-          // and leave the third queued — for the NEXT reply, which would then
-          // answer in a voice nobody asked for. It also drops the inter-speaker
-          // beat inside the chunk. Control turns are never merged.
-          ? chunk.parts.map((part) => ({ text: part, parts: [part] }))
-          : [{ text: chunk.text, parts: chunk.parts }];
-
-        if (deps.tldr && !control) {
-          // The cap counts sentences, so a chunk may not straddle it: with a cap
-          // of 4 and one passthrough sentence, a seven-sentence chunk would
-          // otherwise speak all eight, gate nothing, and emit no coda.
-          const room = deps.tldr.cap - spoken;
-          if (room <= 0) {
-            gated.push(...chunk.parts); // pane gets the text; the voice stays quiet
-            continue;
-          }
-          if (chunk.parts.length > room) {
-            const spoken_ = chunk.parts.slice(0, room);
-            calls = [{ text: spoken_.join(" "), parts: spoken_ }];
-            gated.push(...chunk.parts.slice(room));
-          }
-        }
-
         let stop = false;
-        for (const call of calls) {
+        const render = async (call: { text: string; parts: string[] }): Promise<void> => {
           const audio = admitProviderAudio(
             await deps.tts.generateAudio(call.text, undefined, { speed: deps.voice?.state.rate }),
           );
-          if (sink.aborted() && !parked) { stop = true; break; }
+          if (sink.aborted() && !parked) { stop = true; return; }
           if (audio.byteLength > 0) {
             if (!firstAudio) { firstAudio = true; timer.mark("first_audio"); }
             // Control turns hand the floor between speakers each sentence — give
@@ -1154,6 +1169,38 @@ async function streamReply(
             spoken += call.parts.length;
             spokenTexts.push(...call.parts);
           }
+        };
+
+        if (control) {
+          // A roll call queues one lane voice per sentence and laneTts shifts one
+          // off PER CALL. Merging would speak two lanes in the first one's voice
+          // and leave the third queued — for the NEXT reply, which would then
+          // answer in a voice nobody asked for. It also drops the inter-speaker
+          // beat inside the chunk. Control turns are never merged.
+          for (const part of chunk.parts) {
+            await render({ text: part, parts: [part] });
+            if (stop) break;
+          }
+        } else if (deps.tldr) {
+          // The cap counts audio that was actually emitted. Work through a
+          // straddling chunk one cap-sized slice at a time: an empty render
+          // leaves room for the following slice instead of gating it unheard.
+          let offset = 0;
+          while (offset < chunk.parts.length && !stop) {
+            const room = deps.tldr.cap - spoken;
+            if (room <= 0) {
+              gated.push(...chunk.parts.slice(offset));
+              break;
+            }
+            const parts = chunk.parts.slice(offset, offset + room);
+            const text = offset === 0 && parts.length === chunk.parts.length
+              ? chunk.text
+              : parts.join(" ");
+            offset += parts.length;
+            await render({ text, parts });
+          }
+        } else {
+          await render({ text: chunk.text, parts: chunk.parts });
         }
         if (stop) break;
       }

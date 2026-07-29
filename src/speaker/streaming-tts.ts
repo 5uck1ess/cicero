@@ -94,8 +94,9 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     // starting a raw player on top of a still-speaking system child.
     await this.waitForFallbackOutput();
     if (this.stopped || stale()) return;
-    // Coalescing sits here rather than at each caller so every producer — brain
-    // stream, notifications, web-voice replies — gets one consistent policy.
+    // Coalescing sits here so every local streaming producer gets one policy.
+    // Web voice bypasses the host speaker and applies the same option in its
+    // turn pipeline.
     // It costs barge-in granularity: an interrupted merged chunk reports as one
     // pending item, so getSnapshot() can no longer say which of its sentences
     // were actually heard. That's the trade the config flag buys.

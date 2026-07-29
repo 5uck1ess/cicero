@@ -1482,6 +1482,7 @@ export class CiceroDaemon {
           brain: this.brain,
           tts: laneTts,
           tldr,
+          coalesce: this.config.ttsCoalesce ?? undefined,
           tone,
           maxAudioBytes: MAX_TURN_AUDIO_BYTES,
           signal: options?.signal,

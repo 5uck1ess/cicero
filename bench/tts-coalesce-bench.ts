@@ -183,9 +183,10 @@ export function createBenchSpeaker(
   payload: Record<string, unknown>,
   timeoutMs: number,
   maxBytes: number = PROVIDER_RESPONSE_LIMIT_BYTES.audio,
+  fetcher: typeof fetch = fetch,
 ): (text: string) => Promise<ArrayBuffer> {
   return async (text: string): Promise<ArrayBuffer> => {
-    const res = await fetch(endpoint, {
+    const res = await fetcher(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...payload, input: text }),

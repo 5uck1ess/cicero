@@ -1,7 +1,13 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { streamWebTurn, type WebStreamDeps, type WebReplySink } from "../../src/web-voice/turn";
+import {
+  processWebTurn,
+  streamWebTurn,
+  type WebStreamDeps,
+  type WebReplySink,
+  type WebTurnDeps,
+} from "../../src/web-voice/turn";
 
 /**
  * `tts_coalesce` was configurable and inert on the web path: the coalescer lives
@@ -90,6 +96,62 @@ test("with no coalesce configured every sentence is its own call", async () => {
   expect(spoken).toEqual(["One.", "Two.", "Three.", "Four.", "Five."]);
 });
 
+test("coalescing also applies when details replays a stored remainder", async () => {
+  const { deps, sink, synthesized, spoken } = harness({
+    stt: { transcribe: async () => "details" },
+    brain: {
+      send: async () => { throw new Error("details must not reach the brain"); },
+      sendStream: () => { throw new Error("details must not reach the brain"); },
+    },
+    tldr: { cap: 4, pending: () => "One. Two. Three. Four. Five." },
+    coalesce: { maxChars: 240, passthroughFirst: 1 },
+  });
+  await streamWebTurn(new ArrayBuffer(8), deps, sink);
+  expect(synthesized.length).toBeLessThan(5);
+  expect(synthesized.join(" ")).toBe("One. Two. Three. Four. Five.");
+  expect(spoken).toEqual(["One.", "Two.", "Three.", "Four.", "Five."]);
+});
+
+test("coalescing applies to the single-WAV web turn endpoint", async () => {
+  const synthesized: string[] = [];
+  const deps: WebTurnDeps = {
+    stt: { transcribe: async () => "say five things" },
+    brain: { send: async () => "One. Two. Three. Four. Five." },
+    tts: {
+      generateAudio: async (text: string) => {
+        synthesized.push(text);
+        await Bun.sleep(SYNTH_MS);
+        return tinyWav();
+      },
+    },
+    coalesce: { maxChars: 240, passthroughFirst: 1 },
+  };
+  await processWebTurn(new ArrayBuffer(8), deps);
+  expect(synthesized.length).toBeLessThan(5);
+  expect(synthesized.join(" ")).toBe("One. Two. Three. Four. Five.");
+});
+
+test("single-WAV details replay still respects the configured chunk cap", async () => {
+  const detail = Array.from({ length: 6 }, (_, index) => `Sentence number ${index}.`).join(" ");
+  const synthesized: string[] = [];
+  const deps: WebTurnDeps = {
+    stt: { transcribe: async () => "details" },
+    brain: { send: async () => { throw new Error("details must not reach the brain"); } },
+    tts: {
+      generateAudio: async (text: string) => {
+        synthesized.push(text);
+        return tinyWav();
+      },
+    },
+    tldr: { cap: 4, pending: () => detail },
+    coalesce: { maxChars: 40, passthroughFirst: 1 },
+  };
+  await processWebTurn(new ArrayBuffer(8), deps);
+  expect(synthesized.length).toBeGreaterThan(1);
+  expect(synthesized.every((text) => text.length <= 40)).toBe(true);
+  expect(synthesized.join(" ")).toBe(detail);
+});
+
 // A cap small enough to admit no merge must still emit every sentence exactly
 // once, rather than dropping the ones that would not fit.
 test("a cap that admits no merge still speaks every sentence", async () => {
@@ -149,12 +211,34 @@ test("a merged chunk is split at the TLDR cap instead of crossing it", async () 
   expect(gated.join(" ")).toContain("Eight.");
 });
 
-// The option existing is not the option working. Both previous features in this
-// repo shipped a deps field the daemon never passed at one of its two web-voice
-// call sites, so this asserts the wiring at the source rather than supplying
-// the config by hand.
+test("an empty render does not make the rest of its chunk consume the TLDR cap", async () => {
+  const gated: string[] = [];
+  const { deps, sink, synthesized } = harness({
+    coalesce: { maxChars: 240, passthroughFirst: 1 },
+    tldr: { cap: 2, store: (remainder: string) => { gated.push(remainder); } },
+    tts: {
+      generateAudio: async (text: string) => {
+        synthesized.push(text);
+        await Bun.sleep(SYNTH_MS);
+        return text === "Two." ? new ArrayBuffer(0) : tinyWav();
+      },
+    },
+  });
+  await streamWebTurn(new ArrayBuffer(8), deps, sink);
+  // Empty audio does not count as spoken. The next sentence must get the
+  // remaining slot instead of being gated merely because it shared a chunk.
+  expect(synthesized).toContain("Three.");
+  expect(gated.join(" ")).not.toContain("Three.");
+  expect(gated.join(" ")).toContain("Four.");
+  expect(gated.join(" ")).toContain("Five.");
+});
+
+// A deps field alone is not wiring. Assert every daemon entry point at the
+// source rather than supplying the config by hand.
 test("the daemon passes the configured coalesce to every browser entry point", () => {
   const source = readFileSync(join(import.meta.dir, "../../src/daemon.ts"), "utf8");
+  const singleWavCall = source.slice(source.indexOf("onTurn: async (wav, options)"));
+  expect(singleWavCall.slice(0, singleWavCall.indexOf("onTurnProbe")).includes("coalesce: this.config.ttsCoalesce")).toBe(true);
   const streamCall = source.slice(source.indexOf("onStreamTurn: async (wav, sink, options)"));
   expect(streamCall.slice(0, streamCall.indexOf("onSpeculate")).includes("coalesce: this.config.ttsCoalesce")).toBe(true);
   const textCall = source.slice(source.indexOf("onTextTurn:"));

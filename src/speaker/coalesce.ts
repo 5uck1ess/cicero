@@ -32,7 +32,8 @@ export const DEFAULT_COALESCE_OPTIONS: CoalesceOptions = {
 };
 
 /**
- * How much unspoken text may sit in the queue before the drain stops pulling.
+ * How much unread text the eager stage may retain before the drain stops
+ * pulling, including a batch already handed to the consumer.
  *
  * Reading ahead is the whole point, but it also removes the backpressure the
  * speaker used to apply by pulling exactly one sentence at a time: a brain that
@@ -91,6 +92,11 @@ function eagerQueue(
 } {
   const queued: string[] = [];
   let queuedChars = 0;
+  // take() transfers a batch into the coalescer's generator frame. It remains
+  // live until the consumer asks for the next batch, so dropping it from the
+  // accounting at transfer time would let the drain retain a second full queue
+  // behind the first.
+  let handedChars = 0;
   let done = false;
   // Tracked separately from the value: `throw null` is legal, and treating a
   // falsy failure as a clean end would truncate the reply silently.
@@ -117,7 +123,7 @@ function eagerQueue(
   const drain = (async () => {
     try {
       for (;;) {
-        while (!closed && !cancelled && queuedChars >= maxQueuedChars) {
+        while (!closed && !cancelled && queuedChars + handedChars >= maxQueuedChars) {
           await new Promise<void>((resolve) => { wakeProducer = resolve; });
           wakeProducer = undefined;
         }
@@ -145,6 +151,12 @@ function eagerQueue(
   return {
     /** Everything available now, awaiting only when the queue is empty. */
     async take(): Promise<string[] | null> {
+      // Reaching the next take means the caller finished processing the batch
+      // handed out last time. Only now may the producer reuse that budget.
+      if (handedChars > 0) {
+        handedChars = 0;
+        wakeProducer?.();
+      }
       while (queued.length === 0 && !done && !cancelled) {
         await new Promise<void>((resolve) => { wakeConsumer = resolve; });
         wakeConsumer = undefined;
@@ -157,8 +169,8 @@ function eagerQueue(
         return null;
       }
       const batch = queued.splice(0, queued.length);
+      handedChars = queuedChars;
       queuedChars = 0;
-      wakeProducer?.();
       return batch;
     },
 
@@ -169,15 +181,27 @@ function eagerQueue(
       // we own and can release ourselves.
       wakeProducer?.();
       try {
-        // Closes a generator source, running its finally blocks. Not awaited: if
-        // the drain is mid-next(), this queues behind that read and would inherit
-        // however long the producer takes.
-        void Promise.resolve(iterator.return?.()).catch(() => { /* being abandoned */ });
-        await settleWithin(drain, CLOSE_CONFIRM_MS);
+        // Close the source so its finally blocks run. If the drain is mid-next(),
+        // this queues behind that read; the shared bound below owns both
+        // operations without inheriting however long the producer takes.
+        let sourceClose = Promise.resolve();
+        try {
+          sourceClose = Promise.resolve(iterator.return?.()).then(
+            () => undefined,
+            () => undefined,
+          );
+        } catch {
+          // A hand-rolled iterator may throw before returning a promise. Cleanup
+          // is best-effort and must not replace the producer failure take()
+          // already surfaced.
+        }
+        await settleWithin(
+          Promise.all([drain, sourceClose]).then(() => undefined),
+          CLOSE_CONFIRM_MS,
+        );
       } finally {
-        // In a finally because a hand-rolled iterator can throw synchronously
-        // from return(), and a listener left on a long-lived signal outlives
-        // every turn that follows.
+        // A listener left on a long-lived signal outlives every turn that
+        // follows, including one whose bounded cleanup had to be abandoned.
         cancel?.removeEventListener("abort", onCancel);
       }
     },

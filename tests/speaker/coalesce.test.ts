@@ -140,6 +140,37 @@ test("abandoning the coalescer closes the source and stops the drain", async () 
   expect(produced).toBe(producedAtClose);
 });
 
+test("close owns a source finalizer that can settle within its cleanup bound", async () => {
+  let finalizerStarted!: () => void;
+  const finalizing = new Promise<void>((resolve) => { finalizerStarted = resolve; });
+  let releaseFinalizer!: () => void;
+  const finalizerGate = new Promise<void>((resolve) => { releaseFinalizer = resolve; });
+  let finalized = false;
+  async function* endless(): AsyncGenerator<string> {
+    try {
+      for (;;) yield "x".repeat(1_000);
+    } finally {
+      finalizerStarted();
+      await finalizerGate;
+      finalized = true;
+    }
+  }
+
+  const merged = coalesceSentences(endless(), { maxChars: 240, passthroughFirst: 1 });
+  await merged.next();
+  await Bun.sleep(20); // put the drain on its owned backpressure wait
+  const closed = merged.return(undefined);
+  await finalizing;
+
+  // A promptly-releasable source is still owned by close(); it must not become
+  // detached work merely because the queue drain itself stopped first.
+  expect(await Promise.race([closed.then(() => "closed"), Bun.sleep(20).then(() => "pending")]))
+    .toBe("pending");
+  releaseFinalizer();
+  await closed;
+  expect(finalized).toBe(true);
+});
+
 test("read-ahead stops at the queue cap instead of buffering an unbounded reply", async () => {
   let produced = 0;
   async function* endless(): AsyncGenerator<string> {
@@ -160,6 +191,28 @@ test("read-ahead stops at the queue cap instead of buffering an unbounded reply"
   await merged.return(undefined);
 });
 
+test("a batch handed to the coalescer still counts against the read-ahead cap", async () => {
+  let produced = 0;
+  async function* endless(): AsyncGenerator<string> {
+    for (;;) {
+      produced += 1;
+      yield "x".repeat(1_000);
+    }
+  }
+
+  const merged = coalesceSentences(endless(), { maxChars: 240, passthroughFirst: 1 });
+  await merged.next();
+  await Bun.sleep(20);
+  await merged.next();
+  await Bun.sleep(20);
+
+  // The second next() takes the queued batch and suspends while emitting its
+  // first chunk. That whole batch is still retained by the generator, so the
+  // drain must not refill a second 16k queue behind it.
+  expect(produced * 1_000).toBeLessThanOrEqual(MAX_QUEUED_CHARS + 3_000);
+  await merged.return(undefined);
+});
+
 test("a falsy producer failure still propagates instead of ending the reply", async () => {
   async function* throwsNull(): AsyncGenerator<string> {
     yield "First.";
@@ -172,6 +225,25 @@ test("a falsy producer failure still propagates instead of ending the reply", as
   const first = await merged.next();
   expect(first.value).toBe("First.");
   await expect(merged.next()).rejects.toBeNull();
+});
+
+test("a broken source finalizer does not replace the producer failure", async () => {
+  let reads = 0;
+  const source: AsyncIterable<string> = {
+    [Symbol.asyncIterator]() {
+      return {
+        next(): Promise<IteratorResult<string>> {
+          if (reads++ === 0) return Promise.resolve({ done: false, value: "First." });
+          return Promise.reject(new Error("brain stream died"));
+        },
+        return(): Promise<IteratorResult<string>> {
+          throw new Error("source cleanup failed");
+        },
+      };
+    },
+  };
+
+  await expect(collect(coalesceSentences(source, {}))).rejects.toThrow("brain stream died");
 });
 
 test("closing settles promptly even when the producer is parked mid-read", async () => {
