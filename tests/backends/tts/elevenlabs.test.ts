@@ -127,6 +127,58 @@ test("warmup accepts a model ElevenLabs offers", async () => {
   await expect(provider.warmup()).resolves.toBeUndefined();
 });
 
+// Round 11 (Codex): the previous version of this test put the hostile content in
+// `note`, a field warmup never reads — so it proved nothing about the field that
+// IS read. A model_id reaches the terminal log and dashboard history verbatim,
+// where an OSC sequence executes as a terminal command instead of printing.
+test("warmup never echoes control bytes from a model id", async () => {
+  // OSC 52 (clipboard write) is the payload that makes this more than cosmetic.
+  const hostile = "\u001b]52;c;SGVsbG8=\u0007";
+  captureFetch(JSON.stringify([{ model_id: hostile }, { model_id: "safe-model" }]));
+  const provider = new ElevenLabsProvider({
+    backend: "elevenlabs",
+    voice: "voice/id",
+    apiKey: "secret-key",
+    model: "missing",
+  });
+
+  const failure = await provider.warmup().then(() => null, (error: unknown) => error as Error);
+  expect(failure!.message).not.toContain("\u001b");
+  expect(failure!.message).not.toContain("\u0007");
+  // Still useful: the safe entry is named, and the hostile one is neutralised
+  // rather than dropped silently.
+  expect(failure!.message).toContain("safe-model");
+});
+
+test("warmup bounds an oversized model list instead of retaining it", async () => {
+  const many = Array.from({ length: 500 }, (_, index) => ({ model_id: `m${index}-${"x".repeat(400)}` }));
+  captureFetch(JSON.stringify(many));
+  const provider = new ElevenLabsProvider({
+    backend: "elevenlabs",
+    voice: "voice/id",
+    apiKey: "secret-key",
+    model: "missing",
+  });
+
+  const failure = await provider.warmup().then(() => null, (error: unknown) => error as Error);
+  // The message is logged AND retained in dashboard history, so its size is the
+  // thing being bounded — not just its content.
+  expect(failure!.message.length).toBeLessThan(2_000);
+  expect(failure!.message).toContain("+488 more");
+});
+
+// A legitimate match must still work: sanitizing is for display only.
+test("a model whose id needs no cleaning still matches exactly", async () => {
+  captureFetch(JSON.stringify([{ model_id: "eleven_multilingual_v2" }]));
+  const provider = new ElevenLabsProvider({
+    backend: "elevenlabs",
+    voice: "voice/id",
+    apiKey: "secret-key",
+    model: "eleven_multilingual_v2",
+  });
+  await expect(provider.warmup()).resolves.toBeUndefined();
+});
+
 // Provider bodies are untrusted: read the one field, never echo the rest.
 test("warmup does not surface a hostile model list body", async () => {
   captureFetch(JSON.stringify([{ model_id: "ok", note: "sk-test-NOT-A-REAL-KEY" }]));

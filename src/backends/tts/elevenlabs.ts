@@ -14,6 +14,23 @@ import {
 
 export const ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1";
 const OUTPUT_FORMAT = "pcm_24000";
+/** How many offered models a rejection names, and how much of each it quotes. */
+const MAX_QUOTED_MODEL_IDS = 12;
+const MAX_MODEL_ID_CHARS = 64;
+
+/**
+ * Round 11 (Codex): a model_id is remote input, and quoting it raw put ESC and
+ * BEL bytes into the terminal log and dashboard history — where an OSC sequence
+ * executes as a terminal command rather than printing. Strip C0/C1 and bound
+ * each id (and the count) before any of it is echoed. Matching still compares
+ * the RAW value: this bounds what is DISPLAYED, never what is checked.
+ */
+function safeModelId(value: string): string {
+  const stripped = value.replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ").trim();
+  return stripped.length > MAX_MODEL_ID_CHARS
+    ? `${stripped.slice(0, MAX_MODEL_ID_CHARS)}…`
+    : stripped;
+}
 
 /** ElevenLabs HTTP TTS using raw 24 kHz PCM wrapped into Cicero's WAV contract. */
 export class ElevenLabsProvider implements TTSProvider {
@@ -90,9 +107,11 @@ export class ElevenLabsProvider implements TTSProvider {
         ? [(entry as { model_id: string }).model_id]
         : []);
     if (!known.includes(this.model)) {
+      const quoted = known.slice(0, MAX_QUOTED_MODEL_IDS).map(safeModelId).filter((id) => id.length > 0);
       throw new Error(
-        `ElevenLabs does not offer model '${this.model}'`
-        + (known.length > 0 ? ` — available: ${known.slice(0, 12).join(", ")}` : ""),
+        `ElevenLabs does not offer model '${safeModelId(this.model)}'`
+        + (quoted.length > 0 ? ` — available: ${quoted.join(", ")}` : "")
+        + (known.length > quoted.length ? ` (+${known.length - quoted.length} more)` : ""),
       );
     }
   }
