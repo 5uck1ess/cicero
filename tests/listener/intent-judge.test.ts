@@ -342,7 +342,11 @@ describe("intent judge configuration", () => {
 
 describe("the gate every dispatch path goes through", () => {
   type Gated = {
-    addressedToMe: (transcript: string, epoch: number, budgetMs?: number) => Promise<boolean>;
+    addressedToMe: (
+      transcript: string,
+      epoch: number,
+      opts?: { budgetMs?: number; interrupting?: boolean },
+    ) => Promise<boolean>;
     activationEpoch: number;
     active: boolean;
     recentUtterances: string[];
@@ -437,7 +441,11 @@ describe("the gate every dispatch path goes through", () => {
 
 describe("an in-flight verdict is owned", () => {
   type Gated = {
-    addressedToMe: (transcript: string, epoch: number, budgetMs?: number) => Promise<boolean>;
+    addressedToMe: (
+      transcript: string,
+      epoch: number,
+      opts?: { budgetMs?: number; interrupting?: boolean },
+    ) => Promise<boolean>;
     activationEpoch: number;
     active: boolean;
     judgeInFlight: Set<AbortController>;
@@ -511,7 +519,7 @@ describe("an in-flight verdict is owned", () => {
     const stalled = stalling();
     l.setIntentJudge(createIntentJudge(stalled.provider, { timeoutMs: 900_000 }));
     const started = Date.now();
-    expect(await l.addressedToMe("someone else talking", l.activationEpoch, 30)).toBe(true);
+    expect(await l.addressedToMe("someone else talking", l.activationEpoch, { budgetMs: 30 })).toBe(true);
     expect(Date.now() - started).toBeLessThan(5_000);
     await stalled.aborted;
     expect(l.judgeInFlight.size).toBe(0);
@@ -520,7 +528,11 @@ describe("an in-flight verdict is owned", () => {
 
 describe("what the judge is told about an interrupted reply", () => {
   type Inner = {
-    addressedToMe: (transcript: string, epoch: number, budgetMs?: number) => Promise<boolean>;
+    addressedToMe: (
+      transcript: string,
+      epoch: number,
+      opts?: { budgetMs?: number; interrupting?: boolean },
+    ) => Promise<boolean>;
     activationEpoch: number;
     active: boolean;
     recentAssistantSpeech: string[];
@@ -528,6 +540,7 @@ describe("what the judge is told about an interrupted reply", () => {
     setIntentJudge: (j: unknown) => void;
     setSpeakingTextProvider: (fn: () => string) => void;
     noteInterrupted: (text: string) => void;
+    noteSpoken: (text: string) => void;
   };
 
   function gated(): Inner {
@@ -560,6 +573,31 @@ describe("what the judge is told about an interrupted reply", () => {
     // The hot window SKIPS the judge outright, and a barge-in is exactly when
     // it must run — so an interruption must not start one.
     expect(l.lastSpokeAtMs).toBeNull();
+  });
+
+  // The hot window measures "a follow-up moments after Cicero FINISHED". An
+  // utterance captured while it is still speaking is an interruption, and the
+  // timestamp it would be measured against belongs to an earlier, completed
+  // reply -- so a podcast talking over reply B, within the window opened by
+  // reply A, bypassed the judge entirely and dispatched.
+  test("a stale hot window does not skip the judge during an interruption", async () => {
+    const l = gated();
+    const seen = { messages: [] as ChatMessage[][], opts: [] as (LLMCompletionOpts | undefined)[] };
+    l.setIntentJudge(createIntentJudge(fakeClassifier('{"directed": false, "confidence": 0.95}', seen)));
+    l.noteSpoken("Reply A, which just finished.");   // opens the hot window
+    l.setSpeakingTextProvider(() => "Reply B, which is still being spoken");
+    expect(await l.addressedToMe("send him the files", l.activationEpoch, { interrupting: true })).toBe(false);
+    expect(seen.messages.length).toBe(1); // the classifier was actually asked
+  });
+
+  // The window itself still works where it is meant to: not interrupting.
+  test("an ordinary follow-up still skips the judge", async () => {
+    const l = gated();
+    const seen = { messages: [] as ChatMessage[][], opts: [] as (LLMCompletionOpts | undefined)[] };
+    l.setIntentJudge(createIntentJudge(fakeClassifier('{"directed": false, "confidence": 0.95}', seen)));
+    l.noteSpoken("Reply A, which just finished.");
+    expect(await l.addressedToMe("yes do that", l.activationEpoch)).toBe(true);
+    expect(seen.messages.length).toBe(0);
   });
 
   test("a blank partial is not recorded", () => {

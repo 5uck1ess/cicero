@@ -45,7 +45,15 @@ export class OllamaProvider implements LLMProvider {
     };
 
     if (opts?.responseFormat?.json_schema) {
-      body.format = opts.responseFormat.json_schema;
+      // Callers describe a schema the OpenAI way -- {name, strict, schema} --
+      // because that is what every other backend here takes. Ollama's native
+      // /api/chat wants the BARE schema in `format`, so handing it the envelope
+      // sends a document whose only top-level keys are name/strict/schema: the
+      // constraint the caller asked for is silently not applied. Unwrap it,
+      // while still accepting a bare schema for a caller that passes one.
+      const envelope = opts.responseFormat.json_schema as Record<string, unknown>;
+      const inner = envelope.schema;
+      body.format = inner && typeof inner === "object" ? inner : envelope;
     } else if (opts?.responseFormat) {
       body.format = "json";
     }

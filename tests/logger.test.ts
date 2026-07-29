@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { dashBus } from "../src/dashboard/bus";
 import { log, logError, redactLogSecrets } from "../src/logger";
+import { clearKnownSecrets, registerKnownSecrets } from "../src/redact";
 
 test("redactLogSecrets removes URL query tokens without hiding the endpoint", () => {
   expect(redactLogSecrets("Voice: https://host:8085/?token=super-secret&record=0")).toBe(
@@ -64,4 +65,45 @@ test("redactLogSecrets strips a credential reflected back by a provider", () => 
 test("redactLogSecrets leaves ordinary diagnostics intact", () => {
   const message = "classifier returned 503: upstream model qwen3-4b is loading (attempt 2 of 3)";
   expect(redactLogSecrets(message)).toBe(message);
+});
+
+// Shape rules cannot catch every key. A configured credential is frequently an
+// ordinary-looking string, and a remote 401 routinely quotes the one it just
+// rejected -- so the daemon registers what it was configured with.
+test("a configured credential is redacted even when it looks like ordinary prose", () => {
+  registerKnownSecrets(["correcthorsebattery"]);
+  try {
+    const safe = redactLogSecrets("classifier returned 401: invalid credential correcthorsebattery");
+    expect(safe).not.toContain("correcthorsebattery");
+    expect(safe).toContain("<redacted>");
+    expect(safe).toContain("invalid credential");
+  } finally {
+    clearKnownSecrets();
+  }
+});
+
+test("a registered credential is gone from the console and from dashboard history", () => {
+  registerKnownSecrets(["correcthorsebattery"]);
+  const output: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => { output.push(args.map(String).join(" ")); };
+  try {
+    log("warn", "Intent judge unavailable: openai returned 401: invalid credential correcthorsebattery");
+  } finally {
+    console.log = original;
+    clearKnownSecrets();
+  }
+  const history = dashBus.snapshot().history ?? [];
+  expect(output.join(" ")).not.toContain("correcthorsebattery");
+  expect(JSON.stringify(history)).not.toContain("correcthorsebattery");
+});
+
+// Redacting a two-character "secret" would blank ordinary prose everywhere.
+test("a value too short to be a credential is never registered", () => {
+  registerKnownSecrets(["ok", "a"]);
+  try {
+    expect(redactLogSecrets("the server said ok")).toBe("the server said ok");
+  } finally {
+    clearKnownSecrets();
+  }
 });

@@ -94,3 +94,54 @@ test.skipIf(process.platform === "win32")("an omitted host resolves to localhost
     rmSync(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+// Callers describe a schema the OpenAI way -- {name, strict, schema} -- because
+// every other backend here takes that envelope. Ollama's native /api/chat wants
+// the BARE schema, so passing the envelope through sends a document whose only
+// top-level keys are name/strict/schema: the constraint is silently not applied
+// and the model is free to answer with anything.
+test("a json_schema envelope is unwrapped to the bare schema ollama expects", async () => {
+  const schema = {
+    type: "object",
+    properties: { directed: { type: "boolean" }, confidence: { type: "number" } },
+    required: ["directed", "confidence"],
+  };
+  let sent: Record<string, unknown> | undefined;
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      sent = await request.json() as Record<string, unknown>;
+      return Response.json({ message: { content: '{"directed":true,"confidence":1}' } });
+    },
+  });
+  try {
+    const provider = new OllamaProvider({ backend: "ollama", host: "127.0.0.1", port: server.port });
+    await provider.chatCompletion([{ role: "user", content: "hi" }], {
+      responseFormat: { type: "json_schema", json_schema: { name: "verdict", strict: true, schema } },
+    });
+  } finally {
+    await server.stop(true);
+  }
+  expect(sent?.format).toEqual(schema);
+});
+
+test("a bare schema is still accepted unchanged", async () => {
+  const schema = { type: "object", properties: { ok: { type: "boolean" } } };
+  let sent: Record<string, unknown> | undefined;
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      sent = await request.json() as Record<string, unknown>;
+      return Response.json({ message: { content: "{}" } });
+    },
+  });
+  try {
+    const provider = new OllamaProvider({ backend: "ollama", host: "127.0.0.1", port: server.port });
+    await provider.chatCompletion([{ role: "user", content: "hi" }], {
+      responseFormat: { type: "json_schema", json_schema: schema },
+    });
+  } finally {
+    await server.stop(true);
+  }
+  expect(sent?.format).toEqual(schema);
+});

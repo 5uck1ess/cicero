@@ -3,6 +3,7 @@ import { join, dirname } from "path";
 import { homedir } from "node:os";
 import type { RuntimeConfig } from "./config";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
+import { registerKnownSecrets, clearKnownSecrets } from "./redact";
 import { log, logStep, logError } from "./logger";
 import { createListener, createConversationalListener, createDictationListener } from "./listener";
 import { createIntentJudge } from "./listener/intent-judge";
@@ -665,6 +666,10 @@ export class CiceroDaemon {
     this.lifecycle = "starting";
     this.stopRequested = false;
     this.lifecycleAbort = new AbortController();
+    // Before anything can log. A remote endpoint routinely quotes the key it
+    // just rejected, and a configured key is often an ordinary-looking string
+    // no shape rule can recognise — the configured VALUE is what identifies it.
+    registerKnownSecrets(this.snapshotKnownSecrets());
     const starting = this.startWithRollback();
     this.startPromise = starting;
     try {
@@ -2935,6 +2940,9 @@ export class CiceroDaemon {
       shutdownCompleted = true;
     } finally {
       if (shutdownCompleted) {
+        // Process-wide state: a daemon that stopped must not leave its
+        // credentials registered for whatever runs next in this process.
+        clearKnownSecrets();
         this.briefingScheduler = null;
         this.briefingStatusStore = null;
         this.promptScheduler = null;

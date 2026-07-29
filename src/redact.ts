@@ -32,9 +32,46 @@ const RULES: ReadonlyArray<readonly [RegExp, string]> = [
   ],
 ];
 
+/**
+ * Credentials whose VALUE is known because this daemon was configured with it.
+ *
+ * Shape rules cannot catch every key: a bare `correcthorsebattery` reflected in
+ * a provider's 401 prose looks exactly like an ordinary word, and no pattern
+ * will ever recognise it. The configured value is the one thing that does
+ * identify it, so the daemon hands its credential inventory over at startup and
+ * anything matching is removed by literal value.
+ *
+ * Module-level on purpose: the logger is a process-wide singleton and this is
+ * the only way it can learn config-derived secrets.
+ */
+const known = new Set<string>();
+/**
+ * Short values are refused: a two-character "secret" would blank out ordinary
+ * prose everywhere it happened to appear, which destroys diagnostics without
+ * protecting anything worth protecting.
+ */
+const MIN_KNOWN_SECRET_CHARS = 6;
+
+export function registerKnownSecrets(values: Iterable<string | undefined>): void {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed && trimmed.length >= MIN_KNOWN_SECRET_CHARS) known.add(trimmed);
+  }
+}
+
+/** Forget them — a daemon that stopped must not leak state into the next one. */
+export function clearKnownSecrets(): void {
+  known.clear();
+}
+
 /** Replace credential-shaped substrings. Never throws; input is untrusted. */
 export function redactSecrets(message: string): string {
   let output = message;
+  // Longest first: a credential that contains another registered value must not
+  // be half-replaced, leaving the remainder of the real key in the output.
+  for (const secret of [...known].sort((a, b) => b.length - a.length)) {
+    if (output.includes(secret)) output = output.split(secret).join("<redacted>");
+  }
   for (const [pattern, replacement] of RULES) output = output.replace(pattern, replacement);
   return output;
 }

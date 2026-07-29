@@ -359,7 +359,11 @@ export class ConversationalListener implements Listener {
    * Returns true to dispatch. It is a veto only: with no judge, or on any
    * judge failure, this returns true and behavior is unchanged.
    */
-  private async addressedToMe(transcript: string, epoch: number, budgetMs?: number): Promise<boolean> {
+  private async addressedToMe(
+    transcript: string,
+    epoch: number,
+    opts: { budgetMs?: number; interrupting?: boolean } = {},
+  ): Promise<boolean> {
     if (!this.intentJudge) return true;
     // What Cicero is mid-way through saying is the reference the judge needs
     // most on a barge-in — "yeah, do that" is a reply to the sentence being
@@ -374,14 +378,26 @@ export class ConversationalListener implements Listener {
     // A caller-supplied budget is tighter than the judge's own deadline and
     // exists for the barge-in path, where a slow verdict must lose to
     // interrupting promptly. Aborting resolves as "unavailable", i.e. accept.
-    const budget = budgetMs === undefined ? undefined : setTimeout(() => controller.abort(), budgetMs);
+    const budget = opts.budgetMs === undefined
+      ? undefined
+      : setTimeout(() => controller.abort(), opts.budgetMs);
+    // The hot window skips the judge outright for a follow-up moments after
+    // Cicero finished speaking. An utterance captured WHILE it is speaking is
+    // not that: it is an interruption, and the timestamp it would be measured
+    // against belongs to some earlier, already-finished reply. Left in, a
+    // podcast talking over reply B within the window of reply A bypasses the
+    // judge entirely and dispatches -- on exactly the path this feature exists
+    // for. Withholding the timestamp says what is true: this is not a follow-up.
+    const msSinceAssistantSpoke = opts.interrupting || this.lastSpokeAtMs === null
+      ? null
+      : Date.now() - this.lastSpokeAtMs;
     let decision: IntentDecision;
     try {
       decision = await this.intentJudge.decide({
         utterance: transcript,
         recentUtterances: this.recentUtterances,
         recentAssistantSpeech: assistantSpeech,
-        msSinceAssistantSpoke: this.lastSpokeAtMs === null ? null : Date.now() - this.lastSpokeAtMs,
+        msSinceAssistantSpoke,
       }, controller.signal);
     } finally {
       if (budget !== undefined) clearTimeout(budget);
@@ -1193,7 +1209,7 @@ export class ConversationalListener implements Listener {
         // come first — the reply is already cut by the time there is anything
         // to judge. What it can do is stop the interrupted partial from
         // attaching to whatever turn happens to come next.
-        if (!(await this.addressedToMe(bargeTranscript, epoch))) {
+        if (!(await this.addressedToMe(bargeTranscript, epoch, { interrupting: true }))) {
           this.bargeInDiscardedCallback?.();
           continue;
         }
@@ -1281,7 +1297,11 @@ export class ConversationalListener implements Listener {
       // leaves the reply playing untouched. The budget bounds what this can
       // cost: a verdict slower than that loses and the interrupt proceeds, so
       // barge-in latency degrades to today's behavior instead of stalling.
-      if (!(await this.addressedToMe(bargeTranscript, epoch, BARGE_JUDGE_BUDGET_MS))) continue;
+      if (!(await this.addressedToMe(
+        bargeTranscript,
+        epoch,
+        { budgetMs: BARGE_JUDGE_BUDGET_MS, interrupting: true },
+      ))) continue;
 
       // Genuine user speech — interrupt the current reply immediately.
       log("info", "Barge-in detected — interrupting TTS");
