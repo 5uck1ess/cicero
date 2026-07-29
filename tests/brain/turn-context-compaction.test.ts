@@ -372,3 +372,51 @@ test("a compaction discarded by clear() still hands off to a follow-up pass", as
   // And the stale summary never reattached to the new conversation.
   expect(text).not.toContain("summary 1");
 });
+
+// Round 4 (Codex): the same restart hazard through the FAILURE path. The
+// generation was only checked after a successful summary, so a stale rejection
+// (a delayed HTTP 500 arriving after clear()) counted as a real failure and
+// suppressed the follow-up — evicting fresh post-restart turns unsummarized.
+test("a stale compaction that FAILS still hands off to a follow-up pass", async () => {
+  const sent: string[] = [];
+  let rejectStale!: (error: Error) => void;
+  const stale = new Promise<never>((_resolve, reject) => { rejectStale = reject; });
+  let runs = 0;
+
+  const ctx = new BrainTurnContext();
+  ctx.setCompactor(async ({ turns }) => {
+    runs += 1;
+    for (const turn of turns) sent.push(turn.user);
+    if (runs === 1) await stale; // never resolves; rejects below
+    return `summary ${runs}`;
+  });
+
+  for (let i = 0; i < 13; i += 1) ctx.remember(`old${i}`, `a${i}`);
+  ctx.clear();
+  for (let i = 0; i < 13; i += 1) ctx.remember(`fresh${i}`, `b${i}`);
+
+  // The stale request finally answers — with an error, after the restart.
+  rejectStale(new Error("summarizer 500"));
+  await ctx.settled();
+
+  const text = prompt(ctx);
+  const retained = text.includes("fresh0");
+  const summarized = sent.includes("fresh0");
+  expect({ retained, summarized, accountedFor: retained || summarized })
+    .toEqual({ retained, summarized, accountedFor: true });
+});
+
+// ...but a failure on the CURRENT generation must still stop the chain, or a
+// broken summarizer is retried against the same batch forever.
+test("a live failure still degrades to eviction without retrying in a loop", async () => {
+  let calls = 0;
+  const ctx = new BrainTurnContext();
+  ctx.setCompactor(async () => { calls += 1; throw new Error("summarizer down"); });
+  for (let i = 0; i < 13; i += 1) ctx.remember(`u${i}`.padEnd(4_000, "x"), `a${i}`.padEnd(8_000, "y"));
+  await ctx.settled();
+
+  const afterFirst = calls;
+  await ctx.settled();
+  expect(calls).toBe(afterFirst);
+  expect(calls).toBeLessThan(5);
+});

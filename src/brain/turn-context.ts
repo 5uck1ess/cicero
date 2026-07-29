@@ -275,8 +275,14 @@ export class BrainTurnContext {
         this.applyCompaction(batch, summary);
         outcome = "applied";
       } catch (error: unknown) {
-        // Falling back to eviction is the correct failure mode: the transcript
-        // stays bounded, we just lose the older turns as we always did.
+        // A failure that belongs to a conversation which no longer exists says
+        // nothing about the current one — and the history that replaced it has
+        // never been attempted. Checking the generation only on the success path
+        // left a stale REJECTION suppressing the follow-up, so fresh turns were
+        // evicted unsummarized after a restart.
+        if (generation !== this.generation) outcome = "superseded";
+        // Otherwise, falling back to eviction is the correct failure mode: the
+        // transcript stays bounded, we just lose the older turns as we always did.
         log("info", `History compaction failed, falling back to eviction: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
         clearTimeout(timer);
