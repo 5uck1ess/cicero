@@ -477,4 +477,7 @@ test("keeps the exact voice_ref leased until audio.cpp finishes the request", as
     finishRequest();
   }
   await generation;
-});
+  // The 65 eviction-pressure cycles above are real write + hash + copy work, which
+  // outruns Bun's 5s default on a loaded CI runner. Explicit budget so a true hang
+  // still fails rather than hanging.
+}, 30_000);

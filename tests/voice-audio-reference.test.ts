@@ -330,4 +330,7 @@ test("the process-owned lease cache evicts beyond its exact count bound", async 
   expect(processLeaseDirectories).toHaveLength(1);
   expect(readdirSync(join(root, "leases", processLeaseDirectories[0]!)))
     .toHaveLength(64);
-});
+  // Crossing the count bound costs 65 write + hash + copy cycles, which is real
+  // disk work: fast locally, but past Bun's 5s default on a contended CI runner.
+  // The budget is explicit so a genuine hang still fails instead of hanging.
+}, 30_000);
