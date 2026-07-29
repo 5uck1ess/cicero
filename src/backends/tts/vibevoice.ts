@@ -5,6 +5,7 @@ import { join, dirname } from "node:path";
 import { resolveVenvPython } from "../../platform/python";
 import { requireLibraryReference } from "../../voice/library-resolve";
 import {
+  MANAGED_STARTUP_TIMEOUT_MS,
   PROVIDER_TIMEOUT_MS,
   providerSignal,
   readBoundedArrayBuffer,
@@ -117,7 +118,7 @@ export class VibeVoiceProvider implements TTSProvider {
       command: vibeVoiceServerCommand(python, this.port, this.model),
       healthUrl: `${httpBase(this.host, this.port)}${VIBEVOICE_HEALTH_PATH}`,
       // First launch may fetch and initialize the selected model.
-      timeoutMs: 300000,
+      timeoutMs: MANAGED_STARTUP_TIMEOUT_MS,
     });
   }
 

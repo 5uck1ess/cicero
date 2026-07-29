@@ -382,6 +382,19 @@ export class CiceroDaemon {
   private providers!: BackendProviders;
   private sttSlot: ProviderSlot<STTProvider> | null = null;
   private ttsSlot: ProviderSlot<TTSProvider> | null = null;
+  /**
+   * Slots a shutdown could not confirm release for. A retained slot is the only
+   * remaining handle on an unreaped child, and startup overwrites the two fields
+   * above — so anything still unconfirmed moves here instead of being dropped,
+   * and is retried on every later stop(). ProviderSlot.stop() is idempotent per
+   * generation and clears its memo on failure, so retrying is safe and effective.
+   */
+  private unreleasedSlots: Array<{ role: "stt" | "tts"; stop: () => Promise<void> }> = [];
+  /**
+   * The web-voice filler bank, held so a live TTS swap can invalidate the clips it
+   * primed on the retired provider. Undefined when thinking fillers are disabled.
+   */
+  private webFillerBank: FillerBank | undefined;
   private runtimeControl: RuntimeControlHandle | null = null;
   private voiceSwapRunning = false;
   /** Ready to accept turns; kept separate from the finer-grained lifecycle state. */
@@ -819,6 +832,20 @@ export class CiceroDaemon {
     // Create providers from config. Stable facades keep every long-lived listener,
     // speaker, and web handler pointed at the current generation after a live swap.
     const initialProviders = (this.options.providerFactory ?? createProviders)(this.config);
+    // Assigning the slots below drops whatever they referenced. If a previous
+    // shutdown could not confirm release, that reference is the only handle on a
+    // still-running child, so retry it first and keep anything still unconfirmed
+    // where later stop() calls will keep trying, rather than losing it here.
+    await this.retryUnconfirmedProviderRelease();
+    for (const retained of [
+      { role: "stt" as const, slot: this.sttSlot as { stop: () => Promise<void> } | null },
+      { role: "tts" as const, slot: this.ttsSlot as { stop: () => Promise<void> } | null },
+    ]) {
+      if (retained.slot) {
+        const slot = retained.slot;
+        this.unreleasedSlots.push({ role: retained.role, stop: () => slot.stop() });
+      }
+    }
     this.sttSlot = new ProviderSlot(initialProviders.stt);
     this.ttsSlot = new ProviderSlot(initialProviders.tts);
     this.providers = {
@@ -830,7 +857,7 @@ export class CiceroDaemon {
       token: this.pidLease.record.token,
       pid: this.pidLease.record.pid,
       descriptorPath: this.options.runtimeControlDescriptorPath,
-      onSwap: (request) => this.swapVoiceProvider(request),
+      onSwap: (request, swapOptions) => this.swapVoiceProvider(request, swapOptions),
     });
     this.assertStartupActive();
     this.startupPolicies = createBackendStartupPolicies(this.config, {
@@ -1106,6 +1133,7 @@ export class CiceroDaemon {
       let webFiller: FillerBank | undefined;
       if (this.config.brain.thinking_filler ?? true) {
         webFiller = new FillerBank(this.providers.tts, this.config.raw.filler_lines);
+        this.webFillerBank = webFiller;
       }
       // Prime fillers, THEN warm lane voices — one strictly sequential chain
       // (fire-and-forget as a whole). A cold clone prep makes a large transient
@@ -1930,7 +1958,10 @@ export class CiceroDaemon {
   }
 
   /** Generic STT/TTS swap transaction used by the authenticated local control channel. */
-  private async swapVoiceProvider(request: SwapRequest): Promise<SwapResult> {
+  private async swapVoiceProvider(
+    request: SwapRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SwapResult> {
     if (!this.running || this.stopRequested || this.lifecycle !== "running") {
       throw new Error("Cicero is not ready to swap providers");
     }
@@ -1961,7 +1992,7 @@ export class CiceroDaemon {
           );
           this.config.setVoiceBackend("stt", selection);
           if (plan.fallback) this.config.setVoiceFallback("stt", plan.fallback);
-        });
+        }, options);
       } else {
         const slot = this.ttsSlot;
         if (!slot) throw new Error("TTS provider slot is unavailable");
@@ -1977,13 +2008,20 @@ export class CiceroDaemon {
           );
           this.config.setVoiceBackend("tts", selection);
           if (plan.fallback) this.config.setVoiceFallback("tts", plan.fallback);
-        });
+        }, options);
         dashBus.setConfig({
           brain: this.config.brain.backend,
           model: this.config.raw.llm?.model ?? this.config.servers.router.model,
           ttsVoice: this.config.raw.tts?.voice ?? this.config.voice,
           ttsBackend: request.backend,
         });
+        // The filler bank primed its clips through the provider that just retired.
+        // Web turns emit those cached bytes directly, so leaving them in place plays
+        // the old provider's "let me check" and then the new provider's reply inside
+        // one turn. Drop them immediately — pick() returning undefined just means a
+        // turn skips its filler, which is the same as before the bank was primed —
+        // then re-prime in the background on the replacement.
+        await this.refillFillerBankAfterSwap();
       }
       log("ok", `${request.role.toUpperCase()} swapped live to ${request.backend}${request.model ? ` (${request.model})` : ""}`);
       return { ...request, status: "active" };
@@ -2675,6 +2713,72 @@ export class CiceroDaemon {
     dashBus.setVoiceActive(conversational.isActive());
   }
 
+  /**
+   * Retry release for every provider generation a previous shutdown left
+   * unconfirmed. Reaching `idle` with the slots still populated is exactly that
+   * case: the teardown below keeps them precisely so a later stop() can retry,
+   * but nothing used to do the retrying, so an unreaped child got exactly one
+   * stop attempt and was then stranded when startup replaced the fields.
+   */
+  /**
+   * Invalidate filler clips synthesized on a provider that has just been retired,
+   * then re-prime on the replacement. The discard is awaited so no turn can pick a
+   * stale clip after the swap returns; the re-prime is background work, sequential
+   * for the same reason startup's chain is (two cold clone preps landing together
+   * make a large transient GPU allocation that can abort the TTS server).
+   */
+  private async refillFillerBankAfterSwap(): Promise<void> {
+    const filler = this.webFillerBank;
+    if (!filler) return;
+    try {
+      await filler.discardPrepared();
+    } catch (error) {
+      log("warn", `filler bank invalidation after swap failed: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const laneVoices = [...new Set(
+      Object.values(this.config.brain.lanes ?? {})
+        .map((l) => l.voice)
+        .filter((v): v is string => !!v),
+    )];
+    this.runBackground("filler re-prime after swap", async (signal) => {
+      try {
+        const n = await filler.prime();
+        log("ok", `filler bank re-primed after swap (${n} clips)`);
+      } catch (err: unknown) {
+        log("info", `filler re-prime skipped: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      for (const v of laneVoices) {
+        if (signal.aborted) return;
+        try { await filler.primeVoice(v); }
+        catch (err: unknown) { log("info", `lane filler re-prime skipped (${v}): ${err instanceof Error ? err.message : String(err)}`); }
+      }
+    });
+  }
+
+  private async retryUnconfirmedProviderRelease(): Promise<void> {
+    if (this.servers && this.providers && (this.sttSlot || this.ttsSlot)) {
+      try {
+        await this.servers.stop(this.providers);
+        this.sttSlot = null;
+        this.ttsSlot = null;
+      } catch (error) {
+        log("warn", `retained provider teardown is still unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    // Retry the graveyard too, and put back whatever still will not confirm.
+    const pending = this.unreleasedSlots;
+    this.unreleasedSlots = [];
+    for (const entry of pending) {
+      try {
+        await entry.stop();
+      } catch (error) {
+        log("warn", `${entry.role} provider teardown is still unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
+        this.unreleasedSlots.push(entry);
+      }
+    }
+  }
+
   async stop(): Promise<void> {
     // Revoke voice ownership before the first await. In particular, AEC stop is
     // invoked synchronously through beginVoiceInputHandoff so a pending helper
@@ -2693,6 +2797,9 @@ export class CiceroDaemon {
         conversationalRelease ?? Promise.resolve(),
         aecRelease ?? Promise.resolve(),
       ]);
+      // Providers are owners too: an idle daemon holding retained slots still has
+      // a live child behind a failed release.
+      await this.retryUnconfirmedProviderRelease();
       return;
     }
     if (this.stopPromise) return this.stopPromise;
@@ -2929,6 +3036,7 @@ export class CiceroDaemon {
         this.startupPolicies = {};
         this.serProvider = null;
         this.dashboard = null;
+        this.webFillerBank = undefined;
         this.runtimeControl = null;
         // Keep the slots when a provider would not confirm release: they hold the
         // retry state for the unreaped generation. Clearing them would drop the

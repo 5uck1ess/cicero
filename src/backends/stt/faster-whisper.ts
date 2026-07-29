@@ -11,6 +11,7 @@ import { log } from "../../logger";
 import { join, dirname } from "path";
 import { resolveVenvPython } from "../../platform/python";
 import {
+  MANAGED_STARTUP_TIMEOUT_MS,
   PROVIDER_TIMEOUT_MS,
   discardResponseBody,
   providerSignal,
@@ -141,7 +142,7 @@ export class FasterWhisperProvider implements STTProvider {
         // green; the first GPU pass is slow, and a cold model download slower, so
         // allow generous headroom.
         healthUrl: `${httpBase(this.host, this.port)}/health`,
-        timeoutMs: 300000,
+        timeoutMs: MANAGED_STARTUP_TIMEOUT_MS,
         supervise: true,
       });
       this.active = this.managed !== null;

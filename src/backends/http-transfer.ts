@@ -20,6 +20,16 @@ export const PROVIDER_RESPONSE_LIMIT_BYTES = {
 
 export const MAX_PROVIDER_TIMEOUT_MS = 15 * 60 * 1_000;
 
+/**
+ * Longest a supported managed provider may take to become healthy from cold —
+ * VibeVoice, faster-whisper, and emotion2vec all start on this budget. Anything
+ * that waits on a provider starting must allow at least this much, including the
+ * runtime-control client: a shorter deadline there reports failure for a swap the
+ * daemon is still working on and goes on to commit. Kept here so the two cannot
+ * drift apart again.
+ */
+export const MANAGED_STARTUP_TIMEOUT_MS = 300_000;
+
 /** Invalid values fall back; extreme values stay finite and timer-safe. */
 export function requestTimeout(configured: number | undefined, fallback: number): number {
   const safeFallback = Number.isFinite(fallback) && fallback > 0

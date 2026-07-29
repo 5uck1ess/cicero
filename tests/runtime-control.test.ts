@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { requestRuntimeSwap, startRuntimeControl, type RuntimeControlHandle } from "../src/runtime-control";
+import { MANAGED_STARTUP_TIMEOUT_MS } from "../src/backends/http-transfer";
+import { CONTROL_TIMEOUT_MS, requestRuntimeSwap, startRuntimeControl, type RuntimeControlHandle } from "../src/runtime-control";
 
 let handle: RuntimeControlHandle | null = null;
 let dir = "";
@@ -34,6 +35,34 @@ describe("runtime swap control", () => {
 
     expect(result).toEqual({ role: "tts", backend: "kokoro", model: "model-a", status: "active" });
     expect(requests).toEqual([{ role: "tts", backend: "kokoro", model: "model-a" }]);
+  });
+
+  test("the swap handler receives the request's cancellation signal", async () => {
+    // Without this the daemon could not tell that the client had given up, so a
+    // swap whose CLI had already printed a failure still committed.
+    dir = mkdtempSync(join(tmpdir(), "cicero-control-"));
+    const descriptorPath = join(dir, "runtime-control.json");
+    let observed: AbortSignal | undefined;
+    handle = await startRuntimeControl({
+      token: "test-token",
+      descriptorPath,
+      onSwap: async (request, options) => {
+        observed = options?.signal;
+        return { ...request, status: "active" };
+      },
+    });
+
+    await requestRuntimeSwap({ role: "tts", backend: "kokoro" }, { descriptorPath });
+
+    expect(observed).toBeInstanceOf(AbortSignal);
+    expect(observed?.aborted).toBe(false);
+  });
+
+  test("the client deadline is not shorter than a supported managed cold start", () => {
+    // The original 120s deadline was under the 300s a managed candidate is allowed
+    // to take, which is what let the client abort a swap that then committed. These
+    // two numbers must never drift apart again.
+    expect(CONTROL_TIMEOUT_MS).toBeGreaterThan(MANAGED_STARTUP_TIMEOUT_MS);
   });
 
   test("propagates actionable rollback errors", async () => {

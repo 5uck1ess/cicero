@@ -132,6 +132,24 @@ export class FillerBank {
     });
   }
 
+  /**
+   * Drop every prepared clip. The bank synthesizes through the swappable TTS
+   * facade, so anything primed BEFORE a live swap is still the retired provider's
+   * voice; serving it afterwards puts one voice on the filler and another on the
+   * reply inside a single turn. Queued behind any in-flight prime so it cannot
+   * race a bank that is mid-replacement, and usage is reset with the clips so the
+   * budget does not stay charged for audio that is gone.
+   */
+  discardPrepared(): Promise<void> {
+    return this.enqueuePrime(async () => {
+      this.prepared = new Map();
+      this.preparedUsage = { ...EMPTY_USAGE };
+      this.perVoice = new Map();
+      this.perVoiceUsage = new Map();
+      this.last = undefined;
+    });
+  }
+
   private enqueuePrime<T>(operation: () => Promise<T>): Promise<T> {
     const run = this.priming.then(operation);
     // Keep later replacements moving after an individual caller observes a

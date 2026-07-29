@@ -183,6 +183,46 @@ for (const role of ["stt", "tts"] as const) {
   });
 }
 
+describe("abandoned swap requests", () => {
+  test("a cancelled request does not commit: no persist, no cutover, candidate cleaned up", async () => {
+    // The CLI used to abort at 120s while a supported managed cold start is allowed
+    // 300s, and the server ignored the abort — so it went on to write config and cut
+    // over while the operator was told the swap had failed. persist() is the commit
+    // point, so a request nobody is listening to must be refused before it.
+    const live = new FakeVoiceProvider("tts-live");
+    const candidate = new FakeVoiceProvider("tts-candidate");
+    const owner = new ProviderSlot<TTSProvider>(live);
+    const controller = new AbortController();
+    let persisted = 0;
+
+    // Abort while the candidate is still starting, i.e. before the commit gate.
+    candidate.startGate = Promise.resolve().then(() => { controller.abort(); });
+
+    await expect(
+      owner.swap(candidate, () => { persisted += 1; }, { signal: controller.signal }),
+    ).rejects.toThrow(/cancelled before it was committed/);
+
+    expect(persisted).toBe(0);                       // config untouched
+    expect(owner.providerName).toBe("tts-live");     // no cutover
+    expect(candidate.stops).toBe(1);                 // candidate released, not leaked
+    expect(live.stops).toBe(0);                      // live generation never retired
+  });
+
+  test("an abort that lands after the commit does not undo it", async () => {
+    // Symmetry matters: once persist() has run the swap IS committed, and reporting
+    // or unwinding it as a failure would be the same lie in the other direction.
+    const live = new FakeVoiceProvider("tts-live");
+    const candidate = new FakeVoiceProvider("tts-candidate");
+    const owner = new ProviderSlot<TTSProvider>(live);
+    const controller = new AbortController();
+
+    await owner.swap(candidate, () => { controller.abort(); }, { signal: controller.signal });
+
+    expect(owner.providerName).toBe("tts-candidate");
+    expect(live.stops).toBe(1);
+  });
+});
+
 describe("turn-length generation pins", () => {
   test("a pinned turn stays on its generation across a swap while new turns get the replacement", async () => {
     const old = new FakeVoiceProvider("tts-old");

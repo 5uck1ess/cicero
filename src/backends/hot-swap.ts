@@ -119,7 +119,11 @@ export class ProviderSlot<T extends SwappableProvider> {
    * while the old generation is still active; if it throws, candidate cleanup
    * completes and the live generation is unchanged.
    */
-  async swap(candidate: T, persist: () => void | Promise<void>): Promise<void> {
+  async swap(
+    candidate: T,
+    persist: () => void | Promise<void>,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<void> {
     if (this.closed) {
       await this.stopProvider(candidate, "rejected candidate cleanup");
       throw new Error("provider slot is shutting down");
@@ -143,6 +147,15 @@ export class ProviderSlot<T extends SwappableProvider> {
         // the generations it owns, so anything installed after it ran would never
         // be reaped. Refuse before persisting so config stays truthful too.
         if (this.closed) throw new Error("provider slot is shutting down");
+        // persist() is the commit point, and the same argument applies to the
+        // caller going away as to a shutdown: if the request that asked for this
+        // swap has been abandoned, committing it writes config and cuts over while
+        // the operator is being told the swap failed. Refuse before that, so a
+        // reported failure and an unchanged system always agree. After persist the
+        // swap is committed and a late abort is deliberately ignored.
+        if (options.signal?.aborted) {
+          throw new Error("swap request was cancelled before it was committed");
+        }
         await persist();
       } catch (error) {
         candidateOwned = false;

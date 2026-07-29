@@ -1,11 +1,18 @@
 import { unlink } from "node:fs/promises";
+import { MANAGED_STARTUP_TIMEOUT_MS } from "./backends/http-transfer";
 import { readRequestJsonLimited, RequestBodyTooLargeError } from "./http-request-body";
 import { readPrivateJson, writePrivateJson } from "./platform/private-json";
 import { ciceroPath } from "./platform/paths";
 
 const CONTROL_VERSION = 1 as const;
 const MAX_CONTROL_BODY_BYTES = 4_096;
-const CONTROL_TIMEOUT_MS = 120_000;
+/**
+ * Cold-starting a managed candidate is a supported swap path and may take the full
+ * MANAGED_STARTUP_TIMEOUT_MS, after which the daemon still persists and cuts over.
+ * A 120s client deadline aborted mid-startup and printed a failure for a swap that
+ * then committed, so allow the startup budget plus room for the commit itself.
+ */
+export const CONTROL_TIMEOUT_MS = MANAGED_STARTUP_TIMEOUT_MS + 30_000;
 const MAX_CONTROL_ERROR_CHARS = 500;
 
 /**
@@ -47,7 +54,12 @@ export interface RuntimeControlOptions {
   descriptorPath?: string;
   /** Bound on waiting for an in-flight swap to drain at stop(). Injectable for tests. */
   drainTimeoutMs?: number;
-  onSwap(request: SwapRequest): Promise<SwapResult>;
+  /**
+   * `signal` aborts when the client goes away. A swap must not commit for a
+   * request nobody is listening to, or the operator is told it failed while the
+   * config changed underneath them.
+   */
+  onSwap(request: SwapRequest, options?: { signal?: AbortSignal }): Promise<SwapResult>;
 }
 
 function isSwapRequest(value: unknown): value is SwapRequest {
@@ -101,7 +113,7 @@ export async function startRuntimeControl(options: RuntimeControlOptions): Promi
         }
         swapRunning = true;
         try {
-          const result = await options.onSwap(body);
+          const result = await options.onSwap(body, { signal: request.signal });
           return Response.json({ ok: true, ...result });
         } catch (error) {
           const message = safeControlMessage(error);

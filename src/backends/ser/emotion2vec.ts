@@ -4,6 +4,7 @@ import { httpBase, isLocalHost } from "../net";
 import { startManagedServer, stopManagedServer, type ManagedProcess } from "../managed-server";
 import { findVenvPython } from "../../platform/python";
 import {
+  MANAGED_STARTUP_TIMEOUT_MS,
   PROVIDER_TIMEOUT_MS,
   discardResponseBody,
   providerSignal,
@@ -102,7 +103,7 @@ export class Emotion2vecProvider implements SerProvider {
       ],
       healthUrl: `${httpBase(this.host, this.port)}/health`,
       // Model load is ~12s warm; the first EVER start also downloads ~360MB.
-      timeoutMs: 300000,
+      timeoutMs: MANAGED_STARTUP_TIMEOUT_MS,
       supervise: true,
     });
   }

@@ -342,6 +342,80 @@ describe("CiceroDaemon lifecycle", () => {
     }
   });
 
+  test("a provider that refuses its first stop is retried instead of stranded", async () => {
+    // Teardown keeps the slots when release is unconfirmed, precisely so a later
+    // stop() can retry the unreaped generation. Nothing did the retrying: stop()
+    // from `idle` only revisited microphone owners, and startup then overwrote
+    // both slot fields — the only remaining handle on the live child.
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-stop-retry-test-"));
+    const pidFile = join(home, "cicero.pid");
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.dashboard = { enabled: false };
+    // Ephemeral port: a fixed one races the operator's own daemon.
+    config.raw.web_voice = { ...config.raw.web_voice, enabled: true, port: 0 };
+    config.raw.tts_enabled = false;
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+    };
+    let ttsStopAttempts = 0;
+    const daemon = new CiceroDaemon(config, {
+      pidFile,
+      providerFactory: () => ({
+        stt: {
+          name: "test-stt",
+          transcribe: () => Promise.resolve(null),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+        tts: {
+          name: "test-tts",
+          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          // Refuse the first release only: a genuinely retryable failure latch.
+          stop: () => {
+            ttsStopAttempts += 1;
+            return ttsStopAttempts === 1
+              ? Promise.reject(new Error("tts refused to stop"))
+              : Promise.resolve();
+          },
+        },
+        llm: {
+          name: "test-llm",
+          chatCompletion: () => Promise.resolve("ok"),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+      }),
+    });
+
+    try {
+      await daemon.start();
+      await daemon.stop();
+      expect(ttsStopAttempts).toBe(1);
+
+      // The retry is the whole point: a second stop() must reach the provider
+      // again rather than short-circuit on `idle`.
+      await daemon.stop();
+      expect(ttsStopAttempts).toBe(2);
+
+      // And once it confirms, a third stop() has nothing left to chase.
+      await daemon.stop();
+      expect(ttsStopAttempts).toBe(2);
+    } finally {
+      await daemon.stop().catch(() => {});
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("stop cancels in-flight automatic TLS generation instead of waiting for its deadline", async () => {
     const home = mkdtempSync(join(tmpdir(), "cicero-daemon-tls-race-test-"));
     const pidFile = join(home, "cicero.pid");
