@@ -133,3 +133,29 @@ test("a dial-back leaves a one-shot memo so the brain can answer 'did you call m
   expect(await brain.send("what time is it?")).toBe("brain:what time is it?");
   expect(calls.filter((c) => c.startsWith("context:")).length).toBe(1);
 });
+
+test("a speculative turn never places a call — via the regex OR the semantic classifier", async () => {
+  const calls: string[] = [];
+  // A classifier that calls everything a dial-back request: this is the branch
+  // the "call me" regex misses ("phone me now"), and the one a list of
+  // exclusion phrases can never cover, because it is a model.
+  const brain = new DialBackBrain(inner(calls), async () => "call");
+  const rings: string[] = [];
+  brain.setCallMeHandler(async (who) => { rings.push(who ?? "me"); return "Ringing you now."; });
+
+  // Lexical branch.
+  expect(collect(brain.sendStream("call me", { speculative: true })))
+    .rejects.toThrow(/speculative/);
+  // Semantic branch — the wording the regex does not match.
+  expect(collect(brain.sendStream("phone me now", { speculative: true })))
+    .rejects.toThrow(/speculative/);
+  await Promise.allSettled([
+    collect(brain.sendStream("call me", { speculative: true })),
+    collect(brain.sendStream("phone me now", { speculative: true })),
+  ]);
+  expect(rings).toEqual([]); // nothing was spooled
+
+  // The same utterance on a real (non-speculative) turn still dials.
+  expect(await collect(brain.sendStream("phone me now"))).toEqual(["Ringing you now."]);
+  expect(rings).toEqual(["me"]);
+});

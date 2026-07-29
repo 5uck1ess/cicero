@@ -86,3 +86,22 @@ export async function classifyCallIntent(
 export function dialBackMemo(who?: string): string {
   return `System note: the user asked for a phone call${who ? ` from ${who}` : ""} and their phone was rung moments ago. If they ask whether anyone called them: yes, just now.`;
 }
+
+/**
+ * Thrown instead of dialing when a speculative turn turns out to be a
+ * dial-back request. Placing a call is not retractable, so the speculation is
+ * discarded and the utterance takes the normal path, where it dials on the
+ * final audio.
+ *
+ * Lives beside the dial-back vocabulary because BOTH selectors can raise it:
+ * `DialBackBrain` (the wrapper around ordinary brains) and `SwitchboardBrain`
+ * (which the factory leaves unwrapped, since it exposes its own
+ * `setCallMeHandler`). Any future turn-start side effect should refuse the
+ * same way rather than trying to enumerate dangerous phrasings.
+ */
+export class SpeculativeSideEffectError extends Error {
+  constructor() {
+    super("dial-back refused on a speculative turn");
+    this.name = "SpeculativeSideEffectError";
+  }
+}

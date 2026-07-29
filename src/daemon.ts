@@ -89,7 +89,7 @@ import {
   type BriefingRunResult,
 } from "./notify/briefing-scheduler";
 import { OvernightStore } from "./notify/overnight-store";
-import { sendUnattended } from "./brain/capabilities";
+import { brainExecutesTools, sendUnattended } from "./brain/capabilities";
 import { buildResumePrimer, buildRosterNote } from "./web-voice/resume";
 import { HealthStore, briefLine } from "./health/store";
 import {
@@ -995,13 +995,23 @@ export class CiceroDaemon {
     };
     this.brain.setCallMeHandler?.(dialBack);
 
+    // ONE history for every surface that records a turn. Separate instances
+    // over the same file each keep their own append chain, so one instance's
+    // trim rewrite can drop lines another just appended — and TurnHistory's
+    // cached line count assumes a single writer. Built lazily: a daemon with
+    // neither Telegram nor web voice never touches the file.
+    let conversationHistory: TurnHistory | undefined;
+    const history = () => conversationHistory ??= new TurnHistory(
+      join(homedir(), ".cicero", "web-voice", "history.jsonl"),
+    );
+
     if (this.config.notify?.telegram) {
       // Since Jul 10 the bot is the office's TEXT surface (the tgcall userbot
       // keeps only calls): "log …" hits the health record instantly, "call me"
       // spools a dial-back for the tgcall sidecar, and anything else is a
       // chat turn against the same brain the voice surfaces reach — recorded
       // in the shared history so voice sessions resume with it.
-      const tgHistory = new TurnHistory(join(homedir(), ".cicero", "web-voice", "history.jsonl"));
+      const tgHistory = history();
       // Semantic fallback for dial-back phrasings the lexical pattern misses
       // ("get ada on the horn") — the same small local model the
       // switchboard uses for spoken transfers. Lexical-only without a
@@ -1042,8 +1052,7 @@ export class CiceroDaemon {
       const resumeTurns = this.config.web_voice?.resume_turns ?? 10;
       if (this.config.web_voice?.enabled && resumeTurns > 0) {
         try {
-          const history = new TurnHistory(join(homedir(), ".cicero", "web-voice", "history.jsonl"));
-          const primer = buildResumePrimer(await history.recent(resumeTurns));
+          const primer = buildResumePrimer(await history().recent(resumeTurns));
           if (primer) warmMsg = primer;
         } catch { /* no history — plain warmup */ }
       }
@@ -1163,7 +1172,7 @@ export class CiceroDaemon {
       }
       this.assertStartupActive();
       assertWebTlsPolicy(webHost, tls, tlsExplicitlyDisabled);
-      const webHistory = new TurnHistory(join(homedir(), ".cicero", "web-voice", "history.jsonl"));
+      const webHistory = history();
       // Every spoken sentence funnels through here — the one place to strip
       // Markdown/typography so a voice never says "dash" or glitches on an
       // em-dash. A sentence that is pure markup flattens to nothing and is
@@ -1378,7 +1387,21 @@ export class CiceroDaemon {
       // confident "complete" probe the tail is transcribed and the brain
       // started before the final WAV lands — see speculative.ts for the gates.
       const specCfg = wv.speculative;
-      const speculator = specCfg?.enabled && this.config.turn.enabled && this.brain.sendStream
+      // A speculative turn runs on speech the user has not finished. Tokens
+      // from a wrong guess are discarded; a tool call is not recallable. So a
+      // tool-executing brain stays out of the speculative path unless the
+      // operator has accepted that trade explicitly.
+      const specToolBrain = brainExecutesTools(this.config.brain);
+      const specSideEffectsAllowed = !specToolBrain || specCfg?.allow_tool_brains === true;
+      if (specCfg?.enabled && this.config.turn.enabled && !specSideEffectsAllowed) {
+        log(
+          "warn",
+          `speculative turns are configured but disabled: the "${this.config.brain.backend}" brain runs tools, ` +
+            "and speculation would start them on an unfinished utterance. " +
+            "Set web_voice.speculative.allow_tool_brains: true to accept that.",
+        );
+      }
+      const speculator = specCfg?.enabled && this.config.turn.enabled && this.brain.sendStream && specSideEffectsAllowed
         ? makeSpeculator({
             stt: this.providers.stt,
             brain: this.brain,

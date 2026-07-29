@@ -595,6 +595,17 @@ describe("Config — fail-fast validation", () => {
     expect(loadYaml("terminal: iterm2\n")).toThrow(/terminal must be one of.*kitty.*wezterm.*tmux.*none/);
   });
 
+  test("rejects a non-boolean speculative side-effect opt-in", () => {
+    // A mistyped value fails closed (speculation stays off), so report it
+    // rather than let the operator believe the opt-in took effect.
+    expect(loadYaml([
+      "web_voice:",
+      "  speculative:",
+      "    allow_tool_brains: yes-please",
+      "",
+    ].join("\n"))).toThrow(/allow_tool_brains/);
+  });
+
   test("rejects non-finite and out-of-range web turn controls", () => {
     expect(loadYaml([
       "web_voice:",

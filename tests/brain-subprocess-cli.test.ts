@@ -1,6 +1,14 @@
 import { test, expect } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { chmodSync } from "node:fs";
 import {
   awaitOwnedTurnExit,
+  isBatchShim,
+  pathFromEnv,
+  promptGoesToStdin,
+  resolveCommandBinary,
   SubprocessCLIBrain,
   type TurnProcess,
 } from "../src/brain/subprocess-cli";
@@ -10,6 +18,141 @@ test("SubprocessCLIBrain spawns the configured binary with prompt", async () => 
   await brain.start();
   const out = await brain.send("hello");
   expect(out).toContain("hello");
+});
+
+// The shim lookup itself needs Windows, but its decision logic must not go
+// unexercised on a POSIX CI run — these drive the win32 branch with an
+// injected platform and `which`.
+test("PATH lookup is case-insensitive and the last spelling wins", () => {
+  expect(pathFromEnv({ PATH: "/usr/bin" })).toBe("/usr/bin");
+  expect(pathFromEnv({ Path: "C:\\tools" })).toBe("C:\\tools");
+  // buildEnv() spreads config.env last, so a configured PATH must beat the
+  // inherited one whichever casing each side used.
+  expect(pathFromEnv({ Path: "C:\\inherited", PATH: "C:\\configured" })).toBe("C:\\configured");
+  expect(pathFromEnv({ PATH: "C:\\inherited", Path: "C:\\configured" })).toBe("C:\\configured");
+  expect(pathFromEnv({ HOME: "/root" })).toBeUndefined();
+});
+
+test("command resolution is a no-op off Windows and resolves shims on it", () => {
+  const seen: Array<{ command: string; PATH?: string }> = [];
+  const which = ((command: string, options?: { PATH?: string }) => {
+    seen.push({ command, PATH: options?.PATH });
+    return command === "codex" ? "C:\\shims\\codex.cmd" : null;
+  }) as typeof Bun.which;
+
+  // POSIX spawns already search PATH — the binary must pass through untouched
+  // and cost nothing.
+  expect(resolveCommandBinary("codex", { PATH: "/usr/bin" }, "linux", which)).toBe("codex");
+  expect(seen).toHaveLength(0);
+
+  expect(resolveCommandBinary("codex", { Path: "C:\\shims" }, "win32", which)).toBe("C:\\shims\\codex.cmd");
+  expect(seen).toEqual([{ command: "codex", PATH: "C:\\shims" }]);
+
+  // An unresolvable name falls back to the raw binary so the spawn reports the
+  // failure itself instead of this layer inventing one.
+  expect(resolveCommandBinary("missing", { Path: "C:\\shims" }, "win32", which)).toBe("missing");
+});
+
+test.skipIf(process.platform !== "win32")("a resolved Windows shim is spawned, and the prompt never reaches its command line", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cicero-brain-shim-"));
+  try {
+    // Reports the argv cmd.exe actually parsed, then drains stdin so the write
+    // side never sees a closed pipe. `more` exits 0 whether or not it read
+    // anything, keeping the turn's exit status about the spawn.
+    writeFileSync(join(directory, "cicero-brain-shim.cmd"), "@echo off\r\necho ARGS:%*\r\nmore >nul 2>&1\r\n");
+    class InspectBrain extends SubprocessCLIBrain {
+      spawnExplicit(message: string) {
+        return this.spawnWithArgs(["--stream"], message);
+      }
+    }
+    const brain = new InspectBrain({
+      name: "test",
+      binary: "cicero-brain-shim",
+      args: ["--print"],
+      env: { PATH: `${directory}${delimiter}${process.env.PATH ?? ""}` },
+      rememberTurns: false,
+    });
+
+    // Reaching a shim's command line, `%PATH%` would expand and `&` would start
+    // a second command. Both spawn paths must keep the prompt off it entirely;
+    // that it still arrives intact over stdin is covered on POSIX above, where
+    // CI can actually run it.
+    const prompt = "hello %PATH% & echo INJECTED";
+    const sent = await brain.send(prompt);
+    expect(sent).toContain("ARGS:--print");
+    expect(sent).not.toContain("hello");
+    expect(sent).not.toContain("INJECTED");
+
+    const explicit = brain.spawnExplicit(prompt);
+    const output = await new Response(explicit.stdout).text();
+    expect(await awaitOwnedTurnExit(explicit)).toBe(0);
+    expect(output).toContain("ARGS:--stream");
+    expect(output).not.toContain("hello");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// A Windows `.cmd`/`.bat` shim runs through cmd.exe, which reinterprets argv
+// (CVE-2024-24576). A turn's prompt is untrusted, so it must never be a command
+// -line value on that path. The decision is pure so it is exercised off Windows.
+test("a batch shim is recognized by extension, case-insensitively", () => {
+  expect(isBatchShim("C:\\shims\\codex.cmd")).toBe(true);
+  expect(isBatchShim("C:\\shims\\CODEX.CMD")).toBe(true);
+  expect(isBatchShim("C:\\shims\\run.bat")).toBe(true);
+  // A real executable carries no cmd.exe parsing, and a name that merely
+  // contains "cmd" is not a shim.
+  expect(isBatchShim("codex")).toBe(false);
+  expect(isBatchShim("C:\\bin\\codex.exe")).toBe(false);
+  expect(isBatchShim("/usr/bin/cmdtool")).toBe(false);
+});
+
+test("the prompt is routed to stdin for a Windows shim, and POSIX is left alone", () => {
+  // An explicitly configured stdin brain (qwen/gemini) always pipes.
+  expect(promptGoesToStdin("qwen", true, "linux")).toBe(true);
+  // The argv brains (codex/claude) must switch to stdin once resolution has
+  // handed them a shim.
+  expect(promptGoesToStdin("C:\\shims\\codex.cmd", undefined, "win32")).toBe(true);
+  // A real Windows executable keeps the existing argv path.
+  expect(promptGoesToStdin("C:\\bin\\codex.exe", undefined, "win32")).toBe(false);
+  // POSIX behavior must be unchanged even for an operator who configured a
+  // binary that happens to end in .cmd — there is no cmd.exe to reinterpret it.
+  expect(promptGoesToStdin("/opt/bin/weird.cmd", undefined, "linux")).toBe(false);
+});
+
+/** A probe that reports how it received its argv and stdin. */
+function writeProbe(directory: string, name: string): string {
+  const path = join(directory, name);
+  writeFileSync(path, '#!/bin/sh\necho "ARGS:$*"\necho "STDIN:$(cat)"\n');
+  chmodSync(path, 0o755);
+  return path;
+}
+
+test.skipIf(process.platform === "win32")("spawnWithArgs pipes the prompt instead of putting it in argv", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cicero-stdin-probe-"));
+  try {
+    class InspectBrain extends SubprocessCLIBrain {
+      spawnExplicit(message: string) { return this.spawnWithArgs(["--stream"], message); }
+    }
+    // The progress path ignored promptViaStdin and always appended the prompt to
+    // argv, so a stdin brain still leaked its prompt onto the command line.
+    const brain = new InspectBrain({
+      name: "test",
+      binary: writeProbe(directory, "probe.sh"),
+      args: ["--print"],
+      promptViaStdin: true,
+      rememberTurns: false,
+    });
+
+    const proc = brain.spawnExplicit("secret prompt");
+    const output = await new Response(proc.stdout).text();
+    expect(await awaitOwnedTurnExit(proc)).toBe(0);
+    expect(output).toContain("STDIN:secret prompt");
+    expect(output).toContain("ARGS:--stream");
+    expect(output).not.toContain("ARGS:--stream secret prompt");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("injected context is prepended once and completed turns become bounded history", () => {
