@@ -22,7 +22,7 @@ type Stub = ConversationalListener & {
   activationEpoch: number;
   turnActive: boolean;
   captureTurn: (epoch?: number) => Promise<string | null>;
-  recordUntilSilence: (grace?: number) => Promise<{ status: "ok"; path: string }>;
+  recordUntilSilence: (grace?: number) => Promise<{ status: "ok"; path: string } | { status: "silent" }>;
   predictTurn: (wav: string, epoch: number) => Promise<{ complete: boolean; probability: number }>;
 };
 
@@ -69,5 +69,53 @@ test("a swap between segments cannot mix two providers into one turn", async () 
 
   // And the pin is released with the turn, so the retired generation drains.
   expect(slot.providerName).toBe("next");
+  await slot.stop();
+});
+
+// Round 7 (Codex): VAD is on by default and reports `silent` after 30s without
+// speech, and the capture loop `continue`s on that — so an ARMED BUT IDLE
+// listener sits inside captureTurnSegments for as long as nobody talks. Pinning
+// before the first recording therefore held the retired generation for that
+// whole time: the swap's cutover committed, its post-cutover drain timed out,
+// and `cicero swap` reported failure for a swap that had in fact taken effect.
+// Every later swap then timed out behind the same lease.
+test("an idle listener waiting for speech does not pin any generation", async () => {
+  const old = provider("old");
+  const next = provider("next");
+  // A short deadline so the regression fails fast on the drain timeout instead
+  // of hanging out the default 15s.
+  const slot = new ProviderSlot<STTProvider>(old, { cleanupTimeoutMs: 200 });
+  const facade = new SwappableSTTProvider(slot);
+
+  const listener = new ConversationalListener(
+    facade as never, {} as never, { play: async () => {} } as never,
+    false, "1.0", "3%", undefined, undefined, false, false,
+  ) as Stub;
+  listener.active = true;
+  listener.turnActive = true;
+
+  let idleRounds = 0;
+  let speaking = false;
+  listener.recordUntilSilence = async () => {
+    if (!speaking) {
+      idleRounds += 1;
+      await Bun.sleep(1); // nobody is talking; the loop stays armed
+      return { status: "silent" };
+    }
+    return { status: "ok", path: "/tmp/cicero-test-segment-after-swap.wav" };
+  };
+  listener.predictTurn = async () => ({ complete: true, probability: 0.99 });
+
+  const turn = listener.captureTurn();
+  while (idleRounds < 2) await Bun.sleep(1); // armed, listening, nothing said
+
+  // Nothing is in flight, so there is no generation to hold: this must settle
+  // on its own. Before the fix it rejected on the post-cutover drain deadline.
+  await slot.swap(next, () => {});
+  expect(slot.providerName).toBe("next");
+
+  // And the speech that finally arrives is transcribed by the replacement.
+  speaking = true;
+  expect(await turn).toBe("next:segment-after-swap.wav");
   await slot.stop();
 });

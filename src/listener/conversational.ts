@@ -10,7 +10,7 @@ import type { TurnDetector, TurnPrediction } from "../backends/turn/provider";
 import { decideEndOfTurn } from "../backends/turn/policy";
 import { decodeWavFile } from "../platform/wav";
 import { VadRecorder, type VadRecorderOptions } from "./vad-recorder";
-import { pinGeneration } from "../backends/hot-swap";
+import { pinGeneration, type GenerationPin } from "../backends/hot-swap";
 import type { AecAudioHub } from "../platform/aec-hub";
 import { terminateDirectChild } from "../process/direct-child";
 import { ensurePrivateDirectorySync } from "../platform/secure-storage";
@@ -113,6 +113,9 @@ export function classifyBargeIn(transcript: string | null | undefined, speaking:
  * 5. Waits for processing + TTS to finish, then resumes listening
  * 6. Deactivated via hotkey, "stop listening", or "goodbye"
  */
+/** Lazily-acquired STT generation lease for one turn (see captureTurn). */
+interface TurnPin { held: GenerationPin<STTProvider> | null }
+
 export class ConversationalListener implements Listener {
   private callback?: (text: string) => void;
   private bargeInCallback?: () => void;
@@ -737,11 +740,19 @@ export class ConversationalListener implements Listener {
     // single utterance. The web path already pins for exactly this reason; the
     // pin is released as soon as the turn ends, which is what lets the retired
     // generation drain.
-    const pin = pinGeneration(this.sttProvider);
+    //
+    // Round 7 (Codex): it is taken with the FIRST captured audio, NOT before
+    // recording. An armed-but-idle listener sits in the silence loop for as
+    // long as nobody speaks, so pinning up front held the retired generation
+    // indefinitely — a swap then reported its own committed cutover as a
+    // cleanup failure, and every later swap timed out behind the same lease.
+    // Nothing has been transcribed yet at that point, so there is no
+    // generation worth holding.
+    const pin: TurnPin = { held: null };
     try {
-      return await this.captureTurnSegments(epoch, segments, attempts, pin.provider);
+      return await this.captureTurnSegments(epoch, segments, attempts, pin);
     } finally {
-      pin.release();
+      pin.held?.release();
     }
   }
 
@@ -749,7 +760,7 @@ export class ConversationalListener implements Listener {
     epoch: number,
     segments: string[],
     attempts: number,
-    stt: STTProvider,
+    pin: TurnPin,
   ): Promise<string | null> {
     while (this.isCurrentActivation(epoch)) {
       const isGrace = attempts > 0;
@@ -778,8 +789,11 @@ export class ConversationalListener implements Listener {
       }
 
       const wav = result.path;
+      // The first real audio of the turn fixes the generation that every later
+      // segment — and every grace window between them — will use.
+      pin.held ??= pinGeneration(this.sttProvider);
       const tStt = Date.now();
-      const transcript = await this.transcribeSafe(wav, stt);
+      const transcript = await this.transcribeSafe(wav, pin.held.provider);
       if (!this.isCurrentActivation(epoch)) {
         try { unlinkSync(wav); } catch { /* stale capture cleanup */ }
         return null;
