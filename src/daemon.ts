@@ -1522,7 +1522,7 @@ export class CiceroDaemon {
         // than a beat of silence).
         onStreamTurn: async (wav, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, recover, lastReply, park: makePark(), tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTurn(wav, deps, sink, options.spec);
               return;
@@ -1538,7 +1538,7 @@ export class CiceroDaemon {
         // Typed input (the text box next to the mic): same pipeline minus STT.
         onTextTurn: async (text, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, recover, lastReply, park: makePark(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTextTurn(text, deps, sink);
               return;

@@ -184,21 +184,40 @@ function eagerQueue(
   };
 }
 
-export async function* coalesceSentences(
+/**
+ * One synthesis call's worth of text, plus the sentences that went into it.
+ *
+ * The parts are not decoration. A caller that only shows what it synthesizes can
+ * use `text` alone, but web voice also writes each sentence to the transcript
+ * pane, counts spoken sentences against the TLDR cap, and records them for
+ * barge-in recovery — all of which are per-SENTENCE facts that a merged string
+ * has thrown away. Reporting the grouping lets coalescing change how many calls
+ * the engine gets without changing anything the operator sees or replays.
+ */
+export interface CoalescedChunk {
+  /** Exactly what to hand the TTS engine. */
+  text: string;
+  /** The sentences it was built from, in order. Always at least one. */
+  parts: string[];
+}
+
+export async function* coalesceSentenceGroups(
   sentences: AsyncIterable<string>,
   options: Partial<CoalesceOptions> = {},
   cancel?: AbortSignal,
-): AsyncGenerator<string> {
+): AsyncGenerator<CoalescedChunk> {
   const { maxChars, passthroughFirst } = { ...DEFAULT_COALESCE_OPTIONS, ...options };
   const queue = eagerQueue(sentences, MAX_QUEUED_CHARS, cancel);
   let emitted = 0;
   /** Carried across take() calls so a partial merge is not flushed early. */
   let pending = "";
+  let pendingParts: string[] = [];
 
-  const flush = function* (): Generator<string> {
+  const flush = function* (): Generator<CoalescedChunk> {
     if (pending) {
-      yield pending;
+      yield { text: pending, parts: pendingParts };
       pending = "";
+      pendingParts = [];
       emitted += 1;
     }
   };
@@ -212,12 +231,13 @@ export async function* coalesceSentences(
         // Early sentences go out untouched, and cannot be held back by a pending
         // merge either — nothing may sit in front of first audio.
         if (emitted < passthroughFirst && !pending) {
-          yield sentence;
+          yield { text: sentence, parts: [sentence] };
           emitted += 1;
           continue;
         }
         if (!pending) {
           pending = sentence;
+          pendingParts = [sentence];
           continue;
         }
         const merged = `${pending} ${sentence}`;
@@ -227,9 +247,11 @@ export async function* coalesceSentences(
           // whole, since splitting it is the segmenter's job, not ours.
           yield* flush();
           pending = sentence;
+          pendingParts = [sentence];
           continue;
         }
         pending = merged;
+        pendingParts.push(sentence);
       }
 
       // Nothing more has arrived, so holding `pending` back would be pure added
@@ -243,5 +265,15 @@ export async function* coalesceSentences(
     // matters — when the speaker abandons this generator mid-reply after a
     // barge-in. The drain owns a live iterator; nothing else will stop it.
     await queue.close();
+  }
+}
+
+export async function* coalesceSentences(
+  sentences: AsyncIterable<string>,
+  options: Partial<CoalesceOptions> = {},
+  cancel?: AbortSignal,
+): AsyncGenerator<string> {
+  for await (const chunk of coalesceSentenceGroups(sentences, options, cancel)) {
+    yield chunk.text;
   }
 }

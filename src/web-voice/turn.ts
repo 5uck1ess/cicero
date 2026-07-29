@@ -3,6 +3,7 @@ import type { Brain } from "../types";
 import type { STTProvider } from "../backends/stt/provider";
 import type { TTSProvider } from "../backends/tts/provider";
 import { segmentSentences } from "../speaker/sentence-stream";
+import { coalesceSentenceGroups, type CoalesceOptions, type CoalescedChunk } from "../speaker/coalesce";
 import { newTurnTimer } from "../timing";
 import { log } from "../logger";
 import type { PreparedFiller } from "../speaker/filler-bank";
@@ -197,6 +198,16 @@ export interface WebStreamDeps {
   fillerDelayMs?: number;
   /** Optional TLDR gate — see {@link TldrOptions}. Omit to speak every sentence. */
   tldr?: TldrOptions;
+  /**
+   * Optional sentence coalescing before synthesis — see {@link CoalesceOptions}.
+   *
+   * A headless box speaks entirely through here, never through the local
+   * streaming speaker, so without this `tts_coalesce` would be configurable and
+   * inert on the one deployment that most wants it: web voice pays real
+   * per-call overhead against a hosted or cold engine. Omit for one call per
+   * sentence, which is the default.
+   */
+  coalesce?: CoalesceOptions;
   /** Optional interruption recovery — see {@link InterruptRecovery}. Omit to forget interrupted replies. */
   recover?: InterruptRecovery;
   /** Optional completed-reply replay — see {@link LastReplyOptions}. */
@@ -1068,27 +1079,42 @@ async function streamReply(
     const parkedTexts: string[] = [];
     const stopConsuming = () => deps.signal?.aborted === true || (parked ? Date.now() > parkDeadline : sink.aborted());
     const consumption = (async () => {
-      for await (const raw of segmentSentences(abortable(
-        tokens,
-        stopConsuming,
-        () => turnAbort?.abort(),
-        pretokens !== undefined,
-        deps.trackBackground,
-      ))) {
-        cancelFiller(); // the real reply arrived — an unfired filler stays silent
-        const sentence = raw.trim();
-        if (!sentence) continue;
-        if (parked) { parkedTexts.push(sentence); continue; }
+      const trimmed = (async function* (): AsyncGenerator<string> {
+        for await (const raw of segmentSentences(abortable(
+          tokens,
+          stopConsuming,
+          () => turnAbort?.abort(),
+          pretokens !== undefined,
+          deps.trackBackground,
+        ))) {
+          cancelFiller(); // the real reply arrived — an unfired filler stays silent
+          const sentence = raw.trim();
+          if (sentence) yield sentence;
+        }
+      })();
+      // One chunk per synthesis call, but still one `parts` entry per sentence:
+      // the pane, the TLDR count, and barge-in recovery are all per-sentence
+      // facts and must not change just because two sentences shared a call.
+      const chunks: AsyncIterable<CoalescedChunk> = deps.coalesce
+        ? coalesceSentenceGroups(trimmed, deps.coalesce, turnAbort?.signal)
+        : (async function* () {
+            for await (const s of trimmed) yield { text: s, parts: [s] };
+          })();
+
+      for await (const chunk of chunks) {
+        if (parked) { parkedTexts.push(...chunk.parts); continue; }
         if (sink.aborted()) break;
         if (!firstSentence) { firstSentence = true; timer.mark("first_sentence"); }
         control ??= deps.brain.wasControlTurn?.() ?? false;
-        sink.sentence(sentence);
+        for (const part of chunk.parts) sink.sentence(part);
+        // Checked once per chunk, before synthesis: the cap means "stop speaking
+        // after N sentences", and a chunk that starts past it is silent whole.
         if (deps.tldr && !control && spoken >= deps.tldr.cap) {
-          gated.push(sentence); // pane gets the text; the voice stays quiet
+          gated.push(...chunk.parts); // pane gets the text; the voice stays quiet
           continue;
         }
         const audio = admitProviderAudio(
-          await deps.tts.generateAudio(sentence, undefined, { speed: deps.voice?.state.rate }),
+          await deps.tts.generateAudio(chunk.text, undefined, { speed: deps.voice?.state.rate }),
         );
         if (sink.aborted() && !parked) break;
         if (audio.byteLength > 0) {
@@ -1100,8 +1126,8 @@ async function streamReply(
             if (beat.byteLength > 0) sink.audio(beat);
           }
           sink.audio(audio);
-          spoken++;
-          spokenTexts.push(sentence);
+          spoken += chunk.parts.length;
+          spokenTexts.push(...chunk.parts);
         }
       }
     })();

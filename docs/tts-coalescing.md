@@ -16,6 +16,18 @@ tts_coalesce:
 Off by default. Read the numbers below before turning it on — on a local GPU
 engine this is measurably free and measurably pointless.
 
+## Where it applies
+
+Both paths that speak a streaming reply: the local streaming speaker, and web
+voice. That second one is the point — a `headless: true` box has no local
+speaker at all and talks entirely through the browser, so a setting that reached
+only the local path would be inert on the deployment most likely to be pointed
+at a hosted or remote engine.
+
+On the web path the merge is a synthesis-call detail and nothing else: the
+transcript pane still receives one entry per sentence, the TLDR cap still counts
+sentences, and barge-in recovery still records them individually.
+
 ## It never waits
 
 Sentences are drained into a queue as fast as the brain produces them, and each
@@ -33,9 +45,11 @@ hears.
 
 ## What it costs
 
-An interrupted merged chunk reports as a single pending item, so after a barge-in
-Cicero can no longer tell which sentences inside that chunk were actually heard.
-With coalescing off, that record is per sentence.
+On the **local speaker**, an interrupted merged chunk reports as a single pending
+item, so after a barge-in Cicero can no longer tell which sentences inside that
+chunk were actually heard. With coalescing off, that record is per sentence.
+Web voice does not pay this — it is told which sentences went into each chunk
+and records them individually.
 
 It also changes how far ahead the brain is allowed to run. Without coalescing the
 speaker pulls exactly one sentence at a time, which paces the brain to the
