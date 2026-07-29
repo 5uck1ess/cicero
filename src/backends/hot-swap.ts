@@ -128,6 +128,15 @@ export class ProviderSlot<T extends SwappableProvider> {
    * and a concurrent stop() can never both stop the same provider.
    */
   private readonly preparing = new Set<PreparingCandidate<T>>();
+  /**
+   * A cleanup deadline bounds how long this slot waits; it cannot cancel an
+   * arbitrary provider's stop(). Keep owning that exact teardown after timeout
+   * so a retry joins it instead of running a second stop concurrently against
+   * the same child. A late success is remembered because the generation could
+   * not mark itself stopped after its bounded wait had already rejected.
+   */
+  private readonly providerStops = new WeakMap<T, Promise<void>>();
+  private readonly releasedProviders = new WeakSet<T>();
 
   constructor(provider: T, options: ProviderSlotOptions = {}) {
     this.current = this.generation(provider);
@@ -437,8 +446,22 @@ export class ProviderSlot<T extends SwappableProvider> {
   }
 
   private async stopProvider(provider: T, label: string): Promise<void> {
-    if (!provider.stop) return;
-    await within(Promise.resolve().then(() => provider.stop!()), this.cleanupTimeoutMs, `${provider.name} ${label}`);
+    if (!provider.stop || this.releasedProviders.has(provider)) return;
+    let stopping = this.providerStops.get(provider);
+    if (!stopping) {
+      stopping = Promise.resolve().then(() => provider.stop!());
+      this.providerStops.set(provider, stopping);
+      void stopping.then(
+        () => {
+          this.releasedProviders.add(provider);
+          if (this.providerStops.get(provider) === stopping) this.providerStops.delete(provider);
+        },
+        () => {
+          if (this.providerStops.get(provider) === stopping) this.providerStops.delete(provider);
+        },
+      );
+    }
+    await within(stopping, this.cleanupTimeoutMs, `${provider.name} ${label}`);
   }
 }
 
@@ -480,6 +503,7 @@ export class SwappableSTTProvider implements STTProvider, PinnableProvider<STTPr
   requiredHealth(): Promise<boolean> {
     return this.slot.use((provider) => provider.requiredHealth?.() ?? provider.health());
   }
+  cancelStartup(): void { this.slot.currentProvider().cancelStartup?.(); }
   start(): Promise<void> { return this.slot.use(async (provider) => { await provider.start?.(); }); }
   async warmup(): Promise<void> { await this.slot.currentProvider().warmup?.(); }
   stop(): Promise<void> { return this.slot.stop(); }
@@ -500,6 +524,7 @@ export class SwappableTTSProvider implements TTSProvider, PinnableProvider<TTSPr
   requiredHealth(): Promise<boolean> {
     return this.slot.use((provider) => provider.requiredHealth?.() ?? provider.health());
   }
+  cancelStartup(): void { this.slot.currentProvider().cancelStartup?.(); }
   start(): Promise<void> { return this.slot.use(async (provider) => { await provider.start?.(); }); }
   async warmup(): Promise<void> { await this.slot.currentProvider().warmup?.(); }
   stop(): Promise<void> { return this.slot.stop(); }

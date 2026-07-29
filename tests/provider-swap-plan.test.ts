@@ -169,7 +169,11 @@ describe("a managed server shared by both roles", () => {
       raw.tts_fallback = { backend: "audiocpp", port: 8093 } as never;
       raw.stt = { backend: "audiocpp", port: 8092 } as never;
     });
-    const plan = await planVoiceProviderSwap(config, { role: "tts", backend: "kokoro" });
+    const plan = await planVoiceProviderSwap(
+      config,
+      { role: "tts", backend: "kokoro" },
+      () => Promise.resolve(29_050),
+    );
     expect(plan.selection.backend).toBe("kokoro");
   });
 
@@ -250,6 +254,20 @@ describe("a backend that ignores a configured model", () => {
         () => Promise.resolve(29_000),
       )).resolves.toBeDefined();
     });
+
+    test(`a stale configured model is removed when ${backend} ${role} is retained`, async () => {
+      const config = runtimeConfig((raw) => {
+        if (role === "stt") raw.stt = { backend, model: "acme/IgnoredModel" };
+        else raw.tts = { backend, model: "acme/IgnoredModel" };
+      });
+      const plan = await planVoiceProviderSwap(
+        config,
+        { role, backend },
+        () => Promise.resolve(29_000),
+      );
+
+      expect(plan.selection.model).toBeUndefined();
+    });
   }
 
   // The refusal must not spread to backends that DO select a model.
@@ -261,6 +279,22 @@ describe("a backend that ignores a configured model", () => {
       () => Promise.resolve(29_001),
     );
     expect(plan.selection).toMatchObject({ backend: "faster-whisper", model: "large-v3-turbo" });
+  });
+
+  test("a remote mlx-whisper endpoint cannot falsely accept a live model override", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.stt = {
+        backend: "mlx-whisper",
+        host: "speech.example.test",
+        model: "mlx-community/old-model",
+      };
+    });
+
+    await expect(planVoiceProviderSwap(
+      config,
+      { role: "stt", backend: "mlx-whisper", model: "mlx-community/new-model" },
+      () => Promise.resolve(29_002),
+    )).rejects.toThrow(/remote mlx-whisper.*selects its model when the server starts/);
   });
 });
 
@@ -284,6 +318,7 @@ describe("a cross-backend swap inherits what already configures that backend", (
     );
 
     expect(plan.selection).toMatchObject({ backend: "elevenlabs", voice: "voice_123", apiKey });
+    expect(plan.fallback).toMatchObject({ backend: "kokoro" });
   });
 
   test("the same holds for STT", async () => {
@@ -299,6 +334,7 @@ describe("a cross-backend swap inherits what already configures that backend", (
     );
 
     expect(plan.selection).toMatchObject({ backend: "audiocpp", host: "gpu.example.test", model: "parakeet" });
+    expect(plan.fallback).toMatchObject({ backend: "faster-whisper" });
   });
 
   // The role's own selection is the more specific statement about that backend.

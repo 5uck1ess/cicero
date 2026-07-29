@@ -17,6 +17,7 @@ class FakeVoiceProvider implements STTProvider, TTSProvider {
   healthy = true;
   warmupError: Error | null = null;
   startGate: Promise<void> | null = null;
+  stopGate: Promise<void> | null = null;
   /**
    * Whether this provider currently owns a process. Every managed backend
    * publishes that handle only once start() has returned (kokoro, mlx-audio,
@@ -37,6 +38,7 @@ class FakeVoiceProvider implements STTProvider, TTSProvider {
       this.stopFailures -= 1;
       throw new Error("stop failed");
     }
+    await this.stopGate;
     if (this.managed) {
       this.managed = false;
       this.reaped += 1;
@@ -81,6 +83,21 @@ for (const role of ["stt", "tts"] as const) {
       expect(candidate.stops).toBe(0);
       await owner.stop();
       expect(candidate.stops).toBe(1);
+    });
+
+    test("the stable facade forwards startup cancellation to its current generation", () => {
+      const provider = new FakeVoiceProvider(`${role}-current`) as FakeVoiceProvider & {
+        cancelStartup(): void;
+      };
+      let cancellations = 0;
+      provider.cancelStartup = () => { cancellations += 1; };
+      if (role === "stt") {
+        new SwappableSTTProvider(new ProviderSlot<STTProvider>(provider)).cancelStartup();
+      } else {
+        new SwappableTTSProvider(new ProviderSlot<TTSProvider>(provider)).cancelStartup();
+      }
+
+      expect(cancellations).toBe(1);
     });
 
     test("warmup failure cleans the candidate and retains live state without persisting", async () => {
@@ -200,6 +217,31 @@ for (const role of ["stt", "tts"] as const) {
       expect(old.stops).toBe(2);
       expect(first.stops).toBe(1);
       expect(owner.providerName).toBe(`${role}-second`);
+      await owner.stop();
+    });
+
+    test("a timed-out provider stop is not started again while its first teardown is still running", async () => {
+      const old = new FakeVoiceProvider(`${role}-old`);
+      let releaseStop!: () => void;
+      old.stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+      const first = new FakeVoiceProvider(`${role}-first`);
+      const second = new FakeVoiceProvider(`${role}-second`);
+      const owner = role === "stt"
+        ? new ProviderSlot<STTProvider>(old, { cleanupTimeoutMs: 25 })
+        : new ProviderSlot<TTSProvider>(old, { cleanupTimeoutMs: 25 });
+
+      await expect((owner as ProviderSlot<any>).swap(first, () => {})).rejects.toThrow(
+        "old provider cleanup was not confirmed",
+      );
+      expect(old.stops).toBe(1);
+
+      const retry = settle((owner as ProviderSlot<any>).swap(second, () => {}));
+      await Bun.sleep(1);
+      const callsWhileFirstStopWasPending = old.stops;
+      releaseStop();
+
+      expect(await retry).toBeNull();
+      expect(callsWhileFirstStopWasPending).toBe(1);
       await owner.stop();
     });
   });

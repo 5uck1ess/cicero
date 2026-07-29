@@ -10,6 +10,7 @@ interface ManagedProvider {
   readonly name: string;
   health(): Promise<boolean>;
   requiredHealth?(): Promise<boolean>;
+  cancelStartup?(): void;
   start?(): Promise<void>;
   stop?(): Promise<void>;
 }
@@ -112,6 +113,10 @@ export class ServerManager {
    * daemon is told teardown succeeded.
    */
   async stop(providers: BackendProviderSet): Promise<void> {
+    // Cancellation must land before the first await: managed launches publish
+    // their process handle only after readiness, so waiting for start() before
+    // cancelling can hold shutdown for the full cold-start budget.
+    this.cancelStartups(providers);
     const failures: unknown[] = [];
     // Derived from providerEntries, not a second hand-written role list: a role
     // added to one and forgotten in the other gets started and never stopped.
@@ -127,6 +132,17 @@ export class ServerManager {
     }
     if (failures.length > 0) {
       throw new AggregateError(failures, "one or more providers did not confirm release");
+    }
+  }
+
+  /** One broken cancellation must not prevent later owned launches from receiving theirs. */
+  cancelStartups(providers: BackendProviderSet): void {
+    for (const [role, provider] of providerEntries(providers)) {
+      try {
+        provider.cancelStartup?.();
+      } catch (error: unknown) {
+        log("warn", `${role} provider startup cancellation failed: ${errorDetail(error)}`);
+      }
     }
   }
 }

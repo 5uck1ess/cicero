@@ -4,13 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CLEANUP_TIMEOUT_MS } from "../src/backends/hot-swap";
 import { MANAGED_STARTUP_TIMEOUT_MS, PROVIDER_TIMEOUT_MS } from "../src/backends/http-transfer";
-import { CONTROL_TIMEOUT_MS, controlTimeoutMs, requestRuntimeSwap, startRuntimeControl, type RuntimeControlHandle } from "../src/runtime-control";
+import { writePrivateJson } from "../src/platform/private-json";
+import { CONTROL_TIMEOUT_MS, controlTimeoutMs, isSwapRequest, requestRuntimeSwap, startRuntimeControl, type RuntimeControlHandle } from "../src/runtime-control";
 
 let handle: RuntimeControlHandle | null = null;
 let dir = "";
+const realFetch = globalThis.fetch;
 afterEach(async () => {
   await handle?.stop().catch(() => {});
   handle = null;
+  globalThis.fetch = realFetch;
   if (dir) rmSync(dir, { recursive: true, force: true });
   dir = "";
 });
@@ -242,5 +245,34 @@ describe("runtime swap control", () => {
 
     expect(failure).toBeInstanceOf(Error);
     expect(failure!.message.length).toBeLessThanOrEqual(501);
+  });
+
+  test("rejects control characters in authenticated backend and model fields", () => {
+    expect(isSwapRequest({ role: "tts", backend: "koko\u001bro" })).toBe(false);
+    expect(isSwapRequest({ role: "tts", backend: "kokoro", model: "\u001b]0;pwned\u0007" })).toBe(false);
+    expect(isSwapRequest({ role: "tts", backend: "kokoro" })).toBe(true);
+  });
+
+  test("bounds the runtime-control response before parsing it", async () => {
+    dir = mkdtempSync(join(tmpdir(), "cicero-control-"));
+    const descriptorPath = join(dir, "runtime-control.json");
+    await writePrivateJson(descriptorPath, {
+      version: 1,
+      url: "http://127.0.0.1:12345",
+      token: "test-token",
+      pid: process.pid,
+    });
+    globalThis.fetch = (async () => Response.json({
+      ok: true,
+      role: "stt",
+      backend: "faster-whisper",
+      status: "active",
+      model: "x".repeat(5_000),
+    })) as typeof fetch;
+
+    await expect(requestRuntimeSwap(
+      { role: "stt", backend: "faster-whisper" },
+      { descriptorPath },
+    )).rejects.toThrow(/runtime control response exceeded the \d+-byte response limit/);
   });
 });

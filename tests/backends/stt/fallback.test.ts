@@ -263,7 +263,7 @@ test("start only succeeds when health verifies at least one live engine", async 
   const provider = new FallbackSTTProvider(primary, fallback);
 
   await provider.start();
-  await provider.warmup();
+  await expect(provider.warmup()).rejects.toThrow("primary cold failure");
   await provider.stop();
   expect(fallback.calls).toEqual(expect.arrayContaining(["health", "warmup", "stop"]));
 

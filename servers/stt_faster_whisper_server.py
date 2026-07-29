@@ -166,6 +166,11 @@ def transcriptions(
     # CTranslate2 inference doesn't stall the event loop (health probes stay live).
     if _model is None:
         return JSONResponse({"error": "model not loaded"}, status_code=503)
+    # The process has one resident model. Silently accepting another name lets
+    # a remote live swap warm the old model and then report the requested one as
+    # active, so reject the mismatch without reflecting the untrusted field.
+    if model and model != _model_name:
+        return JSONResponse({"error": "requested model is not loaded"}, status_code=400)
     try:
         data = read_file_limited(file.file, MAX_AUDIO_UPLOAD_BYTES)
         if not data:

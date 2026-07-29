@@ -17,6 +17,7 @@ import type { WebReplySink } from "../src/web-voice/turn";
 import type { HistoryTurn } from "../src/web-voice/history";
 import { readPairingState } from "../src/web-voice/pairing-state";
 import { hasDefaultHistoryCompactor } from "../src/brain/turn-context";
+import { ServerManager } from "../src/servers";
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -436,6 +437,78 @@ describe("CiceroDaemon lifecycle", () => {
       releaseProvider();
       await daemon.stop().catch(() => {});
       throw new Error(`stop-during-start test failed: ${(error as Error).message}`, { cause: error });
+    }
+  });
+
+  test("stop cancels a cancellable provider startup instead of waiting for its full cold-start budget", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-start-cancel-test-"));
+    const config = loadConfig({}, { home });
+    let releaseProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    let signalProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { signalProviderStarted = resolve; });
+    let cancelled = 0;
+    const providers = {
+      stt: {
+        name: "test-stt",
+        transcribe: () => Promise.resolve(null),
+        health: () => Promise.resolve(true),
+        stop: () => Promise.resolve(),
+      },
+      tts: {
+        name: "test-tts",
+        generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+        health: () => Promise.resolve(true),
+        stop: () => Promise.resolve(),
+      },
+      llm: {
+        name: "test-llm",
+        chatCompletion: () => Promise.resolve("ok"),
+        health: () => Promise.resolve(true),
+        start: async () => {
+          signalProviderStarted();
+          await providerGate;
+        },
+        cancelStartup: () => {
+          if (cancelled === 0) {
+            cancelled += 1;
+            releaseProvider();
+          }
+        },
+        stop: () => Promise.resolve(),
+      },
+    };
+    const daemon = new CiceroDaemon(config);
+    const state = daemon as unknown as {
+      lifecycle: "idle" | "starting" | "running" | "stopping";
+      startPromise: Promise<void> | null;
+      providers: typeof providers;
+      servers: ServerManager;
+    };
+    const starting = providers.llm.start();
+    state.lifecycle = "starting";
+    state.startPromise = starting;
+    state.providers = providers;
+    state.servers = new ServerManager();
+
+    try {
+      await providerStarted;
+      const stopping = daemon.stop();
+      try {
+        await withTimeout(stopping, 250, "cancellable provider shutdown");
+      } finally {
+        releaseProvider();
+        await stopping.catch(() => {});
+      }
+
+      expect(cancelled).toBe(1);
+      await expect(starting).resolves.toBeUndefined();
+      expect(state.lifecycle).toBe("idle");
+    } finally {
+      releaseProvider();
+      await daemon.stop().catch(() => {});
+      await starting;
+      rmSync(home, { recursive: true, force: true });
     }
   });
 

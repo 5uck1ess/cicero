@@ -389,9 +389,26 @@ export async function planVoiceProviderSwap(
     : configuredElsewhere?.backend === request.backend
       ? configuredElsewhere
       : undefined;
+  const promotingFallback = currentSelection?.backend !== request.backend
+    && configuredElsewhere?.backend === request.backend;
   const selection: STTProviderConfig | TTSProviderConfig = base
     ? { ...base, ...(request.model ? { model: request.model } : {}) }
     : { backend: request.backend, ...(request.model ? { model: request.model } : {}) };
+  // A fixed-model block can still contain a stale `model` from older config.
+  // Carrying the block into a no-argument swap would preserve and report the
+  // same ignored value that an explicit override is refused for above.
+  if (FIXED_MODEL_BACKENDS[request.role].has(request.backend)) delete selection.model;
+  if (
+    request.role === "stt"
+    && request.backend === "mlx-whisper"
+    && request.model !== undefined
+    && !isLocalHost(selection.host)
+  ) {
+    throw new Error(
+      "remote mlx-whisper selects its model when the server starts, and its inference API cannot apply "
+      + "a live model override. Restart or reconfigure the remote server, then swap without a model.",
+    );
+  }
   // The provider being retired may OWN a managed server the other role is only
   // borrowing — one audio.cpp process serving both STT and TTS on a single port
   // is a supported and common single-seat setup. Retiring it stops that
@@ -399,7 +416,12 @@ export async function planVoiceProviderSwap(
   // reporting itself active. Nothing here can transfer that ownership, so the
   // swap is refused rather than silently breaking the other half of the voice
   // stack. Give the operator the two ways out.
-  const fallback = request.role === "stt" ? config.sttFallbackBackend : config.ttsFallbackBackend;
+  const existingFallback = request.role === "stt" ? config.sttFallbackBackend : config.ttsFallbackBackend;
+  // Promoting the configured standby while leaving it in the fallback seat
+  // builds two copies of the same backend (and can persist the same endpoint in
+  // both seats). Rotate the retiring primary into that seat instead, preserving
+  // a distinct fallback and the operator's full configuration for both engines.
+  const fallback = promotingFallback ? { ...currentSelection } : existingFallback;
   // A role owns BOTH of its engines: the registry wraps primary and fallback in
   // one provider, and stopping that wrapper stops both. So every managed server
   // either half of the retiring role owns goes down with the swap, and every
@@ -415,7 +437,7 @@ export async function planVoiceProviderSwap(
     const endpoint = managedVoiceEndpoint(otherRole, provider);
     if (endpoint) otherEndpoints.add(endpoint);
   }
-  for (const retiring of [currentSelection, fallback]) {
+  for (const retiring of [currentSelection, existingFallback]) {
     if (!retiring) continue;
     const endpoint = managedVoiceEndpoint(request.role, retiring);
     if (!endpoint || !otherEndpoints.has(endpoint)) continue;
@@ -897,6 +919,7 @@ export class CiceroDaemon {
         this.lifecycleAbort.abort();
         this.lifecycle = "stopping";
         this.running = false;
+        this.cancelProviderStartups();
         const rollback = this.stopInternal();
         this.stopPromise = rollback;
         await rollback.catch((cleanupError: unknown) => {
@@ -2228,6 +2251,12 @@ export class CiceroDaemon {
     try {
       const plan = await planVoiceProviderSwap(this.config, request);
       const selection = plan.selection;
+      const result: SwapResult = {
+        role: request.role,
+        backend: selection.backend ?? request.backend,
+        ...(selection.model ? { model: selection.model } : {}),
+        status: "active",
+      };
       const candidateConfig = new RuntimeConfig(structuredClone(this.config.raw));
       candidateConfig.setVoiceBackend(request.role, selection);
       if (plan.fallback) candidateConfig.setVoiceFallback(request.role, plan.fallback);
@@ -2298,14 +2327,14 @@ export class CiceroDaemon {
               brain: this.config.brain.backend,
               model: this.config.raw.llm?.model ?? this.config.servers.router.model,
               ttsVoice: this.config.raw.tts?.voice ?? this.config.voice,
-              ttsBackend: request.backend,
+              ttsBackend: result.backend,
             });
             this.refillFillerBankAfterSwap();
           }
         }
       }
-      log("ok", `${request.role.toUpperCase()} swapped live to ${request.backend}${request.model ? ` (${request.model})` : ""}`);
-      return { ...request, status: "active" };
+      log("ok", `${request.role.toUpperCase()} swapped live to ${result.backend}${result.model ? ` (${result.model})` : ""}`);
+      return result;
     } finally {
       this.voiceSwapRunning = false;
     }
@@ -3224,6 +3253,7 @@ export class CiceroDaemon {
     // startup cannot complete later and resurrect conversational capture.
     this.voiceDesiredActive = false;
     dashBus.setVoiceActive(false);
+    this.cancelProviderStartups();
     if (this.lifecycle === "idle") {
       // A prior best-effort shutdown may have reached idle while an exact raw or
       // AEC child remained behind a failed reap. Retry every microphone owner;
@@ -3293,6 +3323,25 @@ export class CiceroDaemon {
       if (this.stopPromise === stopping) this.stopPromise = null;
     });
     return stopping;
+  }
+
+  /**
+   * Provider starts publish owned process handles only after readiness. Revoke
+   * every launch before shutdown waits on startPromise, including the auxiliary
+   * model owners that sit outside ServerManager.
+   */
+  private cancelProviderStartups(): void {
+    if (this.servers && this.providers) this.servers.cancelStartups(this.providers);
+    for (const [label, provider] of [
+      ["turn detector", this.turnDetector],
+      ["tone detector", this.serProvider],
+    ] as const) {
+      try {
+        provider?.cancelStartup?.();
+      } catch (error: unknown) {
+        log("warn", `${label} startup cancellation failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 
   /** Invoke both ingress stops now, while preserving every sync/async failure. */

@@ -65,3 +65,10 @@ test("health is true when /health responds ok, false when unreachable", async ()
   globalThis.fetch = (async () => { throw new Error("ECONNREFUSED"); }) as unknown as typeof fetch;
   expect(await p.health()).toBe(false);
 });
+
+test("warmup rejects when the configured model cannot transcribe", async () => {
+  captureFetch({ error: "unknown model" }, 400);
+  const p = new FasterWhisperProvider({ backend: "faster-whisper", model: "does-not-exist" });
+
+  await expect(p.warmup?.()).rejects.toThrow("faster-whisper returned 400");
+});

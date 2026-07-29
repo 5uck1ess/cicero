@@ -301,6 +301,17 @@ class SidecarContractTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(response), {"text": "hello faster"})
 
+        body, content_type = multipart(
+            pcm_wav(),
+            "audio.wav",
+            {"model": "different-model", "response_format": "json"},
+        )
+        status, response, _headers = asyncio.run(
+            asgi_request(faster.app, "POST", "/v1/audio/transcriptions", body, content_type)
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(response), {"error": "requested model is not loaded"})
+
     def test_raw_multipart_and_pocket_routes_reject_ambiguous_or_nonfinite_wavs(self) -> None:
         invalid = malformed_wavs()
         mlx = load_server("stt_server.py")

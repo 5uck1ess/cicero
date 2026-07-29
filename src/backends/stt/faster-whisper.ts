@@ -9,7 +9,10 @@ import { SerializedLifecycle } from "../serialized-lifecycle";
 import { httpBase, isLocalHost } from "../net";
 import { log } from "../../logger";
 import { join, dirname } from "path";
+import { unlink } from "node:fs/promises";
+import { encodeSilentWav } from "../../platform/wav";
 import { resolveVenvPython } from "../../platform/python";
+import { writeSecureTempAudio } from "../../platform/secure-temp-audio";
 import {
   MANAGED_STARTUP_TIMEOUT_MS,
   PROVIDER_TIMEOUT_MS,
@@ -124,6 +127,18 @@ export class FasterWhisperProvider implements STTProvider {
     } catch (err: unknown) {
       log("info", `faster-whisper health check failed: ${err instanceof Error ? err.message : String(err)}`);
       return false;
+    }
+  }
+
+  /** Exercise the selected model; a generic health endpoint cannot prove it is loadable. */
+  async warmup(): Promise<void> {
+    const tmp = await writeSecureTempAudio(encodeSilentWav(), { prefix: "cicero-stt-warm" });
+    try {
+      const result = await this.transcribeResult(tmp);
+      if (result.kind === "failure") throw new Error(result.reason);
+      log("ok", "STT model warmed");
+    } finally {
+      await unlink(tmp).catch(() => { /* best-effort cleanup */ });
     }
   }
 

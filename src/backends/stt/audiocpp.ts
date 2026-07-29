@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { basename } from "node:path";
 import {
   STT_DEFAULT_PORTS,
@@ -11,6 +12,8 @@ import { SerializedLifecycle } from "../serialized-lifecycle";
 import { audioCppLocalRuntimePaths } from "../tts/audiocpp";
 import { httpBase, isLocalHost } from "../net";
 import { log } from "../../logger";
+import { encodeSilentWav } from "../../platform/wav";
+import { writeSecureTempAudio } from "../../platform/secure-temp-audio";
 import {
   PROVIDER_TIMEOUT_MS,
   discardResponseBody,
@@ -132,6 +135,18 @@ export class AudioCppSTTProvider implements STTProvider {
     } catch (err: unknown) {
       log("info", `audiocpp STT health check failed: ${err instanceof Error ? err.message : String(err)}`);
       return false;
+    }
+  }
+
+  /** Exercise the selected model; the shared server can be healthy without that model. */
+  async warmup(): Promise<void> {
+    const tmp = await writeSecureTempAudio(encodeSilentWav(), { prefix: "cicero-stt-warm" });
+    try {
+      const result = await this.transcribeResult(tmp);
+      if (result.kind === "failure") throw new Error(result.reason);
+      log("ok", "STT model warmed");
+    } finally {
+      await unlink(tmp).catch(() => { /* best-effort cleanup */ });
     }
   }
 

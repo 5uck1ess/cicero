@@ -1,12 +1,14 @@
 import { unlink } from "node:fs/promises";
 import { DEFAULT_CLEANUP_TIMEOUT_MS } from "./backends/hot-swap";
-import { MANAGED_STARTUP_TIMEOUT_MS, PROVIDER_TIMEOUT_MS } from "./backends/http-transfer";
+import { MANAGED_STARTUP_TIMEOUT_MS, PROVIDER_TIMEOUT_MS, readBoundedJson } from "./backends/http-transfer";
 import { readRequestJsonLimited, RequestBodyTooLargeError } from "./http-request-body";
 import { readPrivateJson, writePrivateJson } from "./platform/private-json";
 import { ciceroPath } from "./platform/paths";
 
 const CONTROL_VERSION = 1 as const;
 const MAX_CONTROL_BODY_BYTES = 4_096;
+const MAX_CONTROL_RESPONSE_BYTES = 4_096;
+const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/;
 /**
  * The client must outlast a whole supported swap transaction, not just part of it:
  * aborting early prints a failure for a swap that goes on to commit, because the
@@ -99,14 +101,20 @@ export interface RuntimeControlOptions {
   onSwap(request: SwapRequest, options?: { signal?: AbortSignal }): Promise<SwapResult>;
 }
 
-function isSwapRequest(value: unknown): value is SwapRequest {
+export function isSwapRequest(value: unknown): value is SwapRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const input = value as Record<string, unknown>;
   return (input.role === "stt" || input.role === "tts")
     && typeof input.backend === "string"
     && input.backend.length > 0
     && input.backend.length <= 100
-    && (input.model === undefined || (typeof input.model === "string" && input.model.length > 0 && input.model.length <= 1_000));
+    && !CONTROL_CHARACTERS.test(input.backend)
+    && (input.model === undefined || (
+      typeof input.model === "string"
+      && input.model.length > 0
+      && input.model.length <= 1_000
+      && !CONTROL_CHARACTERS.test(input.model)
+    ));
 }
 
 export async function startRuntimeControl(options: RuntimeControlOptions): Promise<RuntimeControlHandle> {
@@ -247,19 +255,42 @@ export async function requestRuntimeSwap(
     body: JSON.stringify(request),
     signal: AbortSignal.timeout(options.timeoutMs ?? CONTROL_TIMEOUT_MS),
   });
-  const body = await response.json().catch(() => ({})) as { ok?: boolean; error?: string } & Partial<SwapResult>;
+  const body = await readBoundedJson<unknown>(
+    response,
+    MAX_CONTROL_RESPONSE_BYTES,
+    "runtime control response",
+  );
+  const record = body && typeof body === "object" && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : null;
   // Sanitize on receipt too: the daemon is trusted, but this is the last hop
   // before the string reaches a terminal, and the body is transport-shaped data.
-  if (!response.ok || !body.ok) {
-    throw new Error(body.error ? safeControlMessage(body.error) : `runtime control returned HTTP ${response.status}`);
+  if (!response.ok || record?.ok !== true) {
+    throw new Error(
+      typeof record?.error === "string"
+        ? safeControlMessage(record.error)
+        : `runtime control returned HTTP ${response.status}`,
+    );
   }
-  if (body.role !== request.role || body.backend !== request.backend || body.status !== "active") {
+  const model = record?.model;
+  if (
+    !record
+    || record.role !== request.role
+    || record.backend !== request.backend
+    || record.status !== "active"
+    || (model !== undefined && (
+      typeof model !== "string"
+      || model.length === 0
+      || model.length > 1_000
+      || CONTROL_CHARACTERS.test(model)
+    ))
+  ) {
     throw new Error("runtime control returned an invalid swap response");
   }
   return {
-    role: body.role,
-    backend: body.backend,
-    ...(body.model ? { model: body.model } : {}),
-    status: body.status,
-  } as SwapResult;
+    role: request.role,
+    backend: request.backend,
+    ...(typeof model === "string" ? { model } : {}),
+    status: "active",
+  };
 }

@@ -124,15 +124,13 @@ export class MlxWhisperProvider implements STTProvider {
 
   /** One silent inference at boot so the first real utterance isn't a cold load. */
   async warmup(): Promise<void> {
-    let tmp: string | undefined;
+    const tmp = await writeSecureTempAudio(encodeSilentWav(), { prefix: "cicero-stt-warm" });
     try {
-      tmp = await writeSecureTempAudio(encodeSilentWav(), { prefix: "cicero-stt-warm" });
-      await this.transcribe(tmp);
+      const result = await this.transcribeResult(tmp);
+      if (result.kind === "failure") throw new Error(result.reason);
       log("ok", "STT model warmed");
-    } catch (err: unknown) {
-      log("info", `mlx-whisper warmup skipped: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      if (tmp) await unlink(tmp).catch(() => { /* best-effort cleanup */ });
+      await unlink(tmp).catch(() => { /* best-effort cleanup */ });
     }
   }
 

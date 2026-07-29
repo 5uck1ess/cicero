@@ -83,6 +83,7 @@ export interface LLMProvider {
    */
   chatCompletionStream?(messages: ChatMessage[], opts?: LLMCompletionOpts): AsyncIterable<string>;
   health(): Promise<boolean>;
+  cancelStartup?(): void;
   start?(): Promise<void>;
   stop?(): Promise<void>;
 }

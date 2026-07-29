@@ -91,6 +91,54 @@ describe(`${role.toUpperCase()} daemon swap transaction`, () => {
       await state.ttsSlot.stop();
     });
 
+    test("reports the inherited active model and rotates the old primary into fallback", async () => {
+      root = mkdtempSync(join(tmpdir(), `cicero-${role}-fallback-promotion-`));
+      const configPath = join(root, "config.yaml");
+      const initial = role === "stt"
+        ? {
+            stt: { backend: "faster-whisper", host: "old.example.test", model: "old-model" },
+            stt_fallback: { backend: "audiocpp", host: "fallback.example.test", model: "parakeet" },
+          }
+        : {
+            tts: { backend: "vibevoice", host: "old.example.test", model: "old-model" },
+            tts_fallback: { backend: "audiocpp", host: "fallback.example.test", model: "parakeet" },
+          };
+      updateConfigFields(initial, configPath);
+      const config = loadConfig({}, { home: root });
+      const old = new FakeVoiceProvider(`${role}-old`);
+      const candidate = new FakeVoiceProvider(`${role}-new`);
+      let candidateConfig: RuntimeConfig | null = null;
+      const daemon = new CiceroDaemon(config, {
+        configPath,
+        sttProviderFactory: (next) => { candidateConfig = next; return candidate; },
+        ttsProviderFactory: (next) => { candidateConfig = next; return candidate; },
+      });
+      const state = daemon as unknown as SwapHarness;
+      state.running = true;
+      state.lifecycle = "running";
+      state.sttSlot = new ProviderSlot<STTProvider>(old);
+      state.ttsSlot = new ProviderSlot<TTSProvider>(old);
+
+      const result = await state.swapVoiceProvider({ role, backend: "audiocpp" });
+      const persisted = loadConfig({}, { home: root });
+      const persistedFallback = role === "stt"
+        ? persisted.sttFallbackBackend
+        : persisted.ttsFallbackBackend;
+      const candidateFallback = role === "stt"
+        ? candidateConfig!.sttFallbackBackend
+        : candidateConfig!.ttsFallbackBackend;
+
+      expect(result).toEqual({ role, backend: "audiocpp", model: "parakeet", status: "active" });
+      expect(persistedFallback).toMatchObject({
+        backend: role === "stt" ? "faster-whisper" : "vibevoice",
+        host: "old.example.test",
+        model: "old-model",
+      });
+      expect(candidateFallback).toEqual(persistedFallback);
+      await state.sttSlot.stop();
+      await state.ttsSlot.stop();
+    });
+
     test("health failure leaves persisted config and the active generation unchanged", async () => {
       root = mkdtempSync(join(tmpdir(), `cicero-${role}-rollback-`));
       const configPath = join(root, "config.yaml");

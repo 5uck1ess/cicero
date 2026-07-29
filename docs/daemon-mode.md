@@ -30,12 +30,18 @@ The optional final argument overrides the model. Backends that serve one fixed
 model — `kokoro`, `pocket-tts`, and `wyoming` for TTS, `wyoming` for STT —
 reject it rather than accept a model they would never load: a swap that
 persisted and reported an ignored model would be a lie about what is running.
-Swap those without a model. Cicero constructs and starts
+Swap those without a model. A remote `mlx-whisper` endpoint likewise rejects a
+model override because that server selects its model only when it starts and
+its inference request cannot switch models; reconfigure the remote server, then
+swap without a model. Cicero constructs and starts
 the complete configured provider, including its fallback, then requires warmup
 and a healthy primary before cutover. Local managed replacements that would
 collide with the live provider are staged on a free loopback port. New work uses
 the replacement after cutover; work already holding the old generation is
 allowed to finish before that generation is stopped.
+When the requested backend is the configured fallback, Cicero promotes that
+full block and rotates the old primary into the fallback seat; it does not run
+or persist two copies of the promoted backend.
 
 Only a successful readiness gate is written to `~/.cicero/config.yaml`, using
 the same atomic private-file update as other configuration commands. A startup,
