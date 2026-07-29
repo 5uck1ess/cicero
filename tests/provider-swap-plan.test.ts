@@ -263,3 +263,93 @@ describe("a backend that ignores a configured model", () => {
     expect(plan.selection).toMatchObject({ backend: "faster-whisper", model: "large-v3-turbo" });
   });
 });
+
+describe("a cross-backend swap inherits what already configures that backend", () => {
+  // `swap tts elevenlabs` built a bare {backend: "elevenlabs"} selection, so the
+  // voice ID and key the operator had already configured as the fallback were
+  // discarded -- and the provider then failed warmup asking for the voice ID it
+  // had just thrown away. The backend was unreachable as a swap target at all,
+  // because the command has no way to supply a voice.
+  test("a fallback's full configuration is carried into the swap", async () => {
+    const apiKey = ["synthetic", "elevenlabs", "key"].join("-");
+    const config = runtimeConfig((raw) => {
+      raw.tts = { backend: "kokoro" };
+      raw.tts_fallback = { backend: "elevenlabs", voice: "voice_123", apiKey };
+    });
+
+    const plan = await planVoiceProviderSwap(
+      config,
+      { role: "tts", backend: "elevenlabs" },
+      () => Promise.resolve(29_100),
+    );
+
+    expect(plan.selection).toMatchObject({ backend: "elevenlabs", voice: "voice_123", apiKey });
+  });
+
+  test("the same holds for STT", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.stt = { backend: "faster-whisper" };
+      raw.stt_fallback = { backend: "audiocpp", host: "gpu.example.test", port: 9200, model: "parakeet" };
+    });
+
+    const plan = await planVoiceProviderSwap(
+      config,
+      { role: "stt", backend: "audiocpp" },
+      () => Promise.resolve(29_101),
+    );
+
+    expect(plan.selection).toMatchObject({ backend: "audiocpp", host: "gpu.example.test", model: "parakeet" });
+  });
+
+  // The role's own selection is the more specific statement about that backend.
+  test("the live selection wins over a fallback naming the same backend", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.tts = { backend: "elevenlabs", voice: "live-voice" };
+      raw.tts_fallback = { backend: "elevenlabs", voice: "fallback-voice" };
+    });
+
+    const plan = await planVoiceProviderSwap(
+      config,
+      { role: "tts", backend: "elevenlabs" },
+      () => Promise.resolve(29_102),
+    );
+
+    expect(plan.selection).toMatchObject({ voice: "live-voice" });
+  });
+
+  // An explicit model override still wins over whatever the inherited block named.
+  test("a trailing model override beats the inherited model", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.stt = { backend: "faster-whisper" };
+      raw.stt_fallback = { backend: "audiocpp", model: "parakeet" };
+    });
+
+    // Inheriting the fallback puts a second audiocpp on its default port, so
+    // staging genuinely needs a fresh one — hand out distinct ports like the
+    // real allocator rather than the same number every call.
+    let next = 29_103;
+    const plan = await planVoiceProviderSwap(
+      config,
+      { role: "stt", backend: "audiocpp", model: "canary" },
+      () => Promise.resolve(next++),
+    );
+
+    expect(plan.selection).toMatchObject({ backend: "audiocpp", model: "canary" });
+  });
+
+  // A backend configured nowhere still swaps -- it just starts from its name.
+  test("an unconfigured backend still produces a bare selection", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.tts = { backend: "kokoro" };
+      raw.tts_fallback = undefined;
+    });
+
+    const plan = await planVoiceProviderSwap(
+      config,
+      { role: "tts", backend: "elevenlabs" },
+      () => Promise.resolve(29_104),
+    );
+
+    expect(plan.selection.backend).toBe("elevenlabs");
+  });
+});

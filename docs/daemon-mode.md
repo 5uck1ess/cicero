@@ -23,10 +23,14 @@ A running daemon can replace either speech provider without restarting:
 cicero swap stt faster-whisper
 cicero swap stt faster-whisper Systran/faster-whisper-large-v3-turbo
 cicero swap tts kokoro
-cicero swap tts kokoro hexgrad/Kokoro-82M
+cicero swap tts audiocpp some-org/some-voice-model
 ```
 
-The optional final argument overrides the model. Cicero constructs and starts
+The optional final argument overrides the model. Backends that serve one fixed
+model — `kokoro`, `pocket-tts`, and `wyoming` for TTS, `wyoming` for STT —
+reject it rather than accept a model they would never load: a swap that
+persisted and reported an ignored model would be a lie about what is running.
+Swap those without a model. Cicero constructs and starts
 the complete configured provider, including its fallback, then requires warmup
 and a healthy primary before cutover. Local managed replacements that would
 collide with the live provider are staged on a free loopback port. New work uses

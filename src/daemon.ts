@@ -373,8 +373,24 @@ export async function planVoiceProviderSwap(
   const explicitSelection = request.role === "stt" ? config.raw.stt : config.raw.tts;
   const currentSelection = explicitSelection
     ?? (request.role === "stt" ? config.sttBackend : config.ttsBackend);
-  const selection: STTProviderConfig | TTSProviderConfig = currentSelection?.backend === request.backend
-    ? { ...currentSelection, ...(request.model ? { model: request.model } : {}) }
+  // A cross-backend swap starts from whatever block already configures that
+  // backend — in practice the fallback, which the operator has usually set up
+  // in full. Building a bare {backend} instead discarded everything the
+  // provider needs beyond its name, which made some backends unreachable as a
+  // swap target entirely: `swap tts elevenlabs` dropped the configured voice ID
+  // and key and then failed warmup asking for the voice ID it had just thrown
+  // away. The role's own selection still wins when it already names the
+  // requested backend; the model override is applied last either way.
+  const configuredElsewhere = request.role === "stt"
+    ? config.raw.stt_fallback as STTProviderConfig | undefined
+    : config.raw.tts_fallback as TTSProviderConfig | undefined;
+  const base = currentSelection?.backend === request.backend
+    ? currentSelection
+    : configuredElsewhere?.backend === request.backend
+      ? configuredElsewhere
+      : undefined;
+  const selection: STTProviderConfig | TTSProviderConfig = base
+    ? { ...base, ...(request.model ? { model: request.model } : {}) }
     : { backend: request.backend, ...(request.model ? { model: request.model } : {}) };
   // The provider being retired may OWN a managed server the other role is only
   // borrowing — one audio.cpp process serving both STT and TTS on a single port
