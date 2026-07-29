@@ -7,6 +7,7 @@ import { registerKnownSecrets, clearKnownSecrets } from "./redact";
 import { log, logStep, logError } from "./logger";
 import { createListener, createConversationalListener, createDictationListener } from "./listener";
 import { createIntentJudge } from "./listener/intent-judge";
+import type { IntentJudge } from "./listener/intent-judge";
 import type { DictationListener } from "./listener/dictation";
 import { createRouter } from "./router";
 import { createBrain, summarizerClassifier } from "./brain";
@@ -615,6 +616,17 @@ export class CiceroDaemon {
     return await this.providers.tts.generateAudio(speakable(spoken), laneVoice);
   }
   private pendingRecovery: { spoken: string[] } | null = null;
+  /** The addressed-to-me veto, when configured. Shared by the host mic and the browser. */
+  private intentJudge: IntentJudge | null = null;
+  /**
+   * Rolling context for the browser's turns, kept apart from the host
+   * listener's: the two are different rooms, and a web deployment is usually
+   * headless, where the listener's rings are never filled at all. Bounded --
+   * this is captured room audio and must not accumulate.
+   */
+  private readonly webRecentUtterances: string[] = [];
+  private readonly webRecentAssistantSpeech: string[] = [];
+  private webLastSpokeAtMs: number | null = null;
   private activeLocalTurn: AbortController | null = null;
   /** Every local mic/dashboard command, including superseded turns winding down. */
   private localTurnTasks = new Set<Promise<void>>();
@@ -1181,7 +1193,13 @@ export class CiceroDaemon {
       let pendingDetail: string | null = null;
       let lastSpokenReply: string | null = null;
       const lastReply = {
-        store: (spokenReply: string) => { lastSpokenReply = spokenReply; },
+        store: (spokenReply: string) => {
+          lastSpokenReply = spokenReply;
+          // The browser heard this, so the next verdict is judged against it --
+          // a reply to Cicero's own question is what a judge most easily gets
+          // wrong, and this is what opens the hot window on the web path.
+          this.noteWebSpoken(spokenReply);
+        },
         pending: () => lastSpokenReply,
       };
       const tldrCfg = wv.tldr;
@@ -1454,7 +1472,7 @@ export class CiceroDaemon {
         // than a beat of silence).
         onStreamTurn: async (wav, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), tone, signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTurn(wav, deps, sink, options.spec);
               return;
@@ -1806,6 +1824,10 @@ export class CiceroDaemon {
       });
       if (judge) {
         this.conversational.setIntentJudge(judge);
+        // Kept as well as handed to the listener: a headless box never STARTS
+        // that listener, so the browser is the only capture path there is, and
+        // a veto that only works on the host mic would be no veto at all there.
+        this.intentJudge = judge;
         log("info", "Intent judge on: utterances are checked against the classifier before they become commands");
       } else {
         // Never silently borrow the reply model for a per-utterance decision.
@@ -1960,6 +1982,43 @@ export class CiceroDaemon {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  }
+
+  /** Bounded ring push. Mirrors the listener's own limits on captured speech. */
+  private static pushWebContext(ring: string[], line: string): void {
+    const bounded = line.length <= 300 ? line : line.slice(0, 300);
+    ring.push(bounded);
+    if (ring.length > 6) ring.splice(0, ring.length - 6);
+  }
+
+  /** What the browser just heard Cicero say — context for the next verdict. */
+  private noteWebSpoken(text: string): void {
+    const spoken = text.trim();
+    if (!spoken) return;
+    this.webLastSpokeAtMs = Date.now();
+    CiceroDaemon.pushWebContext(this.webRecentAssistantSpeech, spoken);
+  }
+
+  /**
+   * The browser's half of the addressed-to-me veto. Undefined when no judge is
+   * configured, which leaves every transcript dispatched exactly as before.
+   */
+  private webIntentGate(): ((transcript: string) => Promise<boolean>) | undefined {
+    const judge = this.intentJudge;
+    if (!judge) return undefined;
+    return async (transcript: string): Promise<boolean> => {
+      const decision = await judge.decide({
+        utterance: transcript,
+        recentUtterances: this.webRecentUtterances,
+        recentAssistantSpeech: this.webRecentAssistantSpeech,
+        msSinceAssistantSpoke: this.webLastSpokeAtMs === null ? null : Date.now() - this.webLastSpokeAtMs,
+      });
+      // Room speech is context whether or not it was for us.
+      CiceroDaemon.pushWebContext(this.webRecentUtterances, transcript);
+      if (decision.accept) return true;
+      log("info", `🙉 Web voice: not addressed to me (${decision.confidence.toFixed(2)}), ignoring the turn`);
+      return false;
+    };
   }
 
   private handleLocalBargeIn(): void {

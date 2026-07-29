@@ -730,6 +730,44 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))()).not.toThrow();
   });
 
+  // Round 12 (Codex): sharedEndpoint compared host strings literally, so
+  // localhost:8080 and 127.0.0.1:8080 read as two different endpoints -- the
+  // deliberate share went unrecognised and the collision check then reported
+  // the config as clashing with llm. They are one seat: the classifier's health
+  // probe adopts the server llama.cpp already launched there.
+  test("loopback aliases are one endpoint, not a collision", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  host: localhost",
+      "  port: 8080",
+      "  model: one-model-for-both",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  host: 127.0.0.1",
+      "  port: 8080",
+      "  model: one-model-for-both",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // The alias must be recognised for refusals too, not just for permission.
+  test("a loopback-alias share still refuses a second model", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  host: localhost",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  host: 127.0.0.1",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/it serves one model/);
+  });
+
   // Round 12 (Codex): sharing an endpoint with no classifier model is harmless
   // on ollama, whose default is a small model it loads locally. It is NOT
   // harmless on an OpenAI-compatible backend, whose default is a hosted name a

@@ -702,9 +702,24 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     // own, which rejected a local vLLM or llama-swap multiplexing two models --
     // a configuration this repo explicitly supports. What matters is the
     // backend, not whether the socket happens to be on this box.
+    const bindsEveryInterface = (host: string): boolean =>
+      host === "0.0.0.0" || host === "::" || host === "*";
+    /**
+     * Do two host strings name the same seat on this box?
+     *
+     * Round 12 (Codex): this used literal equality, so `localhost:8080` and
+     * `127.0.0.1:8080` read as two different endpoints -- the deliberate-share
+     * path went unrecognised and the collision check then reported the config
+     * as a clash with llm. They are one seat: the classifier's health probe
+     * adopts the server llama.cpp already launched there. The same predicate
+     * decides collisions below, so sharing and clashing cannot disagree about
+     * what "the same address" means.
+     */
+    const overlaps = (a: string, b: string): boolean =>
+      a === b || bindsEveryInterface(a) || bindsEveryInterface(b) || (isLocal(a) && isLocal(b));
     const sharedEndpoint = classifierEndpoint.port !== undefined
       && classifierEndpoint.port === llm.port
-      && classifierEndpoint.host === llm.host;
+      && overlaps(classifierEndpoint.host, llm.host);
     const effectiveBackend = classifierBackend ?? llm.backend;
     const singleModelShare = sharedEndpoint
       && singleModelServer(effectiveBackend)
@@ -773,10 +788,6 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     // 0.0.0.0:8090 contends with an interface-specific listener on 8090 even
     // though neither host string matches the other and one of them is not a
     // loopback address at all.
-    const bindsEveryInterface = (host: string): boolean =>
-      host === "0.0.0.0" || host === "::" || host === "*";
-    const overlaps = (a: string, b: string): boolean =>
-      a === b || bindsEveryInterface(a) || bindsEveryInterface(b) || (isLocal(a) && isLocal(b));
     if (classifierEndpoint.port !== undefined && isLocal(classifierEndpoint.host)) {
       // `boundHere` separates the listeners this daemon always binds -- whatever
       // host they are given is one of THIS box's interfaces -- from provider
