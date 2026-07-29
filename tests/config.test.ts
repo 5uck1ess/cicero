@@ -645,6 +645,60 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))()).not.toThrow();
   });
 
+  // Round 9 (Codex): the remediation this check recommends — drop classifier.model
+  // to share the reply model — is only true where the model field is
+  // informational. Ollama SELECTS a model per request, so an unset one resolves
+  // to that backend's own default (qwen3.5:0.8b), not to the loaded reply model.
+  // Startup would not notice either: the shared server is adopted on a health
+  // probe that never mentions a model.
+  test("sharing an ollama server with no classifier model is refused, not accepted", () => {
+    const failure = loadYaml([
+      "llm:",
+      "  backend: ollama",
+      "  port: 11434",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: ollama",
+      "  port: 11434",
+      "",
+    ].join("\n"));
+    expect(failure).toThrow(/selects a model per request/);
+    // And it says exactly what to write, rather than repeating advice that does
+    // not hold for this backend.
+    expect(failure).toThrow(/Set classifier\.model to big-reply-model/);
+  });
+
+  test("naming the shared ollama model explicitly is accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: ollama",
+      "  port: 11434",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: ollama",
+      "  port: 11434",
+      "  model: big-reply-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // llama-cpp serves the one model it loaded and treats the field as
+  // informational, so dropping it there really does share — that remediation is
+  // unchanged, and the message must not start recommending the ollama one.
+  test("the llama-cpp remediation still says to drop the model", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/drop classifier\.model to share the reply model/);
+  });
+
   // A listener that is off binds nothing, so it is not in the way.
   test("a disabled listener does not reserve its default port", () => {
     expect(() => loadYaml([

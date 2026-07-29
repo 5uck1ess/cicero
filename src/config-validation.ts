@@ -12,7 +12,7 @@ import {
   type STTProviderConfig,
 } from "./backends/stt/provider";
 import { ttsDefaultPort } from "./backends/tts/provider";
-import { llmDefaultPort } from "./backends/llm/provider";
+import { backendRoutesByModel, llmDefaultPort, LLM_DEFAULT_MODEL } from "./backends/llm/provider";
 import { OPENAI_COMPATIBLE_BACKENDS } from "./backends/llm/openai";
 
 /** A resolved network seat: what the role will actually bind or reach. */
@@ -643,17 +643,37 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     // An UNSET classifier.model is the documented way to share the reply model
     // on purpose — it must stay accepted, or the hint below sends operators to
     // a config this same check refuses.
+    // Round 9 (Codex): "drop classifier.model to share the reply model" is only
+    // true where the model field is informational. On a backend that routes by
+    // model, an UNSET model is not "whatever is loaded" — it is that backend's
+    // own default, so the remediation this check recommends produced exactly the
+    // mismatch the check exists to prevent, and startup would not notice: the
+    // shared server is adopted on a health probe that never mentions a model.
+    const unsetShareIsAmbiguous = classifier.model === undefined
+      && backendRoutesByModel(classifierBackend ?? llm.backend);
     const modelConflict = classifier.model !== undefined && classifier.model !== llm.model;
     const backendConflict = classifierBackend !== undefined && llm.backend !== undefined
       && classifierBackend !== llm.backend;
-    if (sharesLlmServer && (modelConflict || backendConflict)) {
+    if (sharesLlmServer && unsetShareIsAmbiguous) {
+      issues.push(
+        `classifier resolves to the same endpoint as llm (${classifierEndpoint.host}:${classifierEndpoint.port}) `
+        + `and names no model, but the '${String(classifierBackend ?? llm.backend)}' backend selects a model per `
+        + `request — so an unset one resolves to its default (${LLM_DEFAULT_MODEL.ollama}), not to the reply model. `
+        + `Set classifier.model to ${String(llm.model)} to share it, or give classifier its own port.`,
+      );
+    } else if (sharesLlmServer && (modelConflict || backendConflict)) {
       const named = modelConflict
         ? `names a different model (${String(classifier.model)} vs ${String(llm.model)})`
         : `names a different backend (${String(classifierBackend)} vs ${String(llm.backend)})`;
+      // The remediation differs by backend on purpose: dropping the model only
+      // shares it where the field is informational.
+      const share = backendRoutesByModel(classifierBackend ?? llm.backend)
+        ? `set classifier.model to ${String(llm.model)} to share the reply model`
+        : "drop classifier.model to share the reply model";
       issues.push(
         `classifier resolves to the same endpoint as llm (${classifierEndpoint.host}:${classifierEndpoint.port}) but ${named}; `
         + "the already-running reply server is reused, so the classifier model would never load. "
-        + "Give classifier its own port, or drop classifier.model to share the reply model.",
+        + `Give classifier its own port, or ${share}.`,
       );
     }
 
