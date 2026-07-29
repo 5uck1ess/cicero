@@ -41,3 +41,27 @@ test("logError redacts URL tokens from error stacks", () => {
   expect(output.join("\n")).not.toContain(secret);
   expect(output.join("\n")).toContain("?token=<redacted>&protocol=2");
 });
+
+// A remote endpoint routinely quotes the credential it just rejected, that body
+// is copied verbatim into the thrown error, and the error message is logged and
+// stored in dashboard history. The markers below are synthetic.
+test("redactLogSecrets strips a credential reflected back by a provider", () => {
+  const cases: Array<[string, string]> = [
+    ["classifier returned 401: invalid api key sk-TEST-NOT-A-REAL-KEY-000", "sk-TEST-NOT-A-REAL-KEY-000"],
+    ['classifier returned 401: {"error":{"api_key":"TEST-NOT-A-REAL-KEY-000"}}', "TEST-NOT-A-REAL-KEY-000"],
+    ["upstream rejected Authorization: Bearer TEST-NOT-A-REAL-KEY-000", "TEST-NOT-A-REAL-KEY-000"],
+    ["fetch failed for https://operator:TEST-NOT-A-REAL-PW@host/v1", "TEST-NOT-A-REAL-PW"],
+    ["callback https://host/cb?access_token=TEST-NOT-A-REAL-KEY-000&x=1", "TEST-NOT-A-REAL-KEY-000"],
+  ];
+  for (const [message, secret] of cases) {
+    const safe = redactLogSecrets(message);
+    expect(safe).not.toContain(secret);
+    expect(safe).toContain("<redacted>");
+  }
+});
+
+// Redaction must not swallow the diagnosis along with the credential.
+test("redactLogSecrets leaves ordinary diagnostics intact", () => {
+  const message = "classifier returned 503: upstream model qwen3-4b is loading (attempt 2 of 3)";
+  expect(redactLogSecrets(message)).toBe(message);
+});

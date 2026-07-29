@@ -1808,6 +1808,11 @@ export class CiceroDaemon {
       });
       // A bare "stop" interrupts without a follow-up command, so discard the
       // recovery snapshot — otherwise it would wrongly attach to the next turn.
+      // A vetoed barge-in produces no replacement turn, so the snapshot taken at
+      // the interrupt has nothing to attach to — same reasoning as a bare "stop".
+      this.conversational.onBargeInDiscarded(() => {
+        this.pendingRecovery = null;
+      });
       this.conversational.onStopCommand(() => {
         this.pendingRecovery = null;
         this.activeLocalTurn?.abort("stop command");
@@ -1940,7 +1945,13 @@ export class CiceroDaemon {
 
   private handleLocalBargeIn(): void {
     if (!this.streamingSpeaker) return;
-    this.pendingRecovery = { spoken: this.streamingSpeaker.getSnapshot().spoken };
+    const spoken = this.streamingSpeaker.getSnapshot().spoken;
+    this.pendingRecovery = { spoken };
+    // The room heard this much of the reply before it was cut. Hand it to the
+    // listener so the next verdict is judged against what Cicero was actually
+    // mid-way through saying; the live speaking-text provider goes empty the
+    // moment the speaker is interrupted below.
+    this.conversational?.noteInterrupted(spoken.join(" "));
     this.activeLocalTurn?.abort("barge-in");
     this.streamingSpeaker.interrupt();
   }

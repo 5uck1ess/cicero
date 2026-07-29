@@ -342,11 +342,18 @@ describe("intent judge configuration", () => {
 
 describe("the gate every dispatch path goes through", () => {
   type Gated = {
-    addressedToMe: (transcript: string, epoch: number) => Promise<boolean>;
+    addressedToMe: (transcript: string, epoch: number, budgetMs?: number) => Promise<boolean>;
     activationEpoch: number;
     active: boolean;
     recentUtterances: string[];
+    recentAssistantSpeech: string[];
+    lastSpokeAtMs: number | null;
+    judgeInFlight: Set<AbortController>;
     setIntentJudge: (j: unknown) => void;
+    setSpeakingTextProvider: (fn: () => string) => void;
+    noteInterrupted: (text: string) => void;
+    deactivate: () => void;
+    stop: () => Promise<void>;
   };
 
   /** An activated listener — the gate's epoch check requires one. */
@@ -425,5 +432,164 @@ describe("the gate every dispatch path goes through", () => {
     // One gate per dispatch site: idle loop plus both barge-in paths.
     expect(gates.length).toBeGreaterThanOrEqual(3);
     expect(dispatches.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("an in-flight verdict is owned", () => {
+  type Gated = {
+    addressedToMe: (transcript: string, epoch: number, budgetMs?: number) => Promise<boolean>;
+    activationEpoch: number;
+    active: boolean;
+    judgeInFlight: Set<AbortController>;
+    setIntentJudge: (j: unknown) => void;
+    deactivate: () => void;
+    stop: () => Promise<void>;
+  };
+
+  function gated(): Gated {
+    const l = new ConversationalListener(
+      { name: "stt", transcribe: () => Promise.resolve(null), health: () => Promise.resolve(true) } as never,
+      {} as never,
+      // deactivate() plays an earcon, so the player must be call-shaped.
+      { play: () => Promise.resolve() } as never,
+    ) as unknown as Gated;
+    l.active = true;
+    return l;
+  }
+
+  /** A classifier that never answers, but reports whether its request was aborted. */
+  function stalling(): { provider: LLMProvider; aborted: Promise<void> } {
+    let seen!: () => void;
+    const aborted = new Promise<void>((resolve) => { seen = resolve; });
+    return {
+      aborted,
+      provider: {
+        name: "stalled",
+        chatCompletion: (_messages, opts) => new Promise<string>((_resolve, reject) => {
+          opts?.signal?.addEventListener("abort", () => { seen(); reject(new Error("aborted")); });
+        }),
+        health: () => Promise.resolve(true),
+      },
+    };
+  }
+
+  // A remote classifier may legally be configured with a deadline in the
+  // minutes. Deactivation must not leave its fetch and timer running behind a
+  // session that is already gone.
+  test("deactivating releases a verdict that is still outstanding", async () => {
+    const l = gated();
+    const stalled = stalling();
+    l.setIntentJudge(createIntentJudge(stalled.provider, { timeoutMs: 900_000 }));
+    const gate = l.addressedToMe("open the log", l.activationEpoch);
+    await Bun.sleep(0);
+    expect(l.judgeInFlight.size).toBe(1);
+    l.deactivate();
+    await stalled.aborted;
+    // Accepts (the judge only ever vetoes) but the epoch moved, so nothing dispatches.
+    expect(await gate).toBe(false);
+    expect(l.judgeInFlight.size).toBe(0);
+  });
+
+  // stop() must release it even when voice mode was never activated, because
+  // deactivate() returns early in that case.
+  test("shutdown releases an outstanding verdict from an inactive listener", async () => {
+    const l = gated();
+    const stalled = stalling();
+    l.setIntentJudge(createIntentJudge(stalled.provider, { timeoutMs: 900_000 }));
+    const gate = l.addressedToMe("open the log", l.activationEpoch);
+    await Bun.sleep(0);
+    l.active = false; // deactivate() is a no-op from here
+    await l.stop();
+    await stalled.aborted;
+    await gate;
+    expect(l.judgeInFlight.size).toBe(0);
+  });
+
+  // Barge-in latency is the one thing this path may not trade away.
+  test("a caller budget gives up on a slow verdict and accepts", async () => {
+    const l = gated();
+    const stalled = stalling();
+    l.setIntentJudge(createIntentJudge(stalled.provider, { timeoutMs: 900_000 }));
+    const started = Date.now();
+    expect(await l.addressedToMe("someone else talking", l.activationEpoch, 30)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    await stalled.aborted;
+    expect(l.judgeInFlight.size).toBe(0);
+  });
+});
+
+describe("what the judge is told about an interrupted reply", () => {
+  type Inner = {
+    addressedToMe: (transcript: string, epoch: number, budgetMs?: number) => Promise<boolean>;
+    activationEpoch: number;
+    active: boolean;
+    recentAssistantSpeech: string[];
+    lastSpokeAtMs: number | null;
+    setIntentJudge: (j: unknown) => void;
+    setSpeakingTextProvider: (fn: () => string) => void;
+    noteInterrupted: (text: string) => void;
+  };
+
+  function gated(): Inner {
+    const l = new ConversationalListener(
+      { name: "stt", transcribe: () => Promise.resolve(null), health: () => Promise.resolve(true) } as never,
+      {} as never,
+      {} as never,
+    ) as unknown as Inner;
+    l.active = true;
+    return l;
+  }
+
+  // "yeah, do that" replies to the sentence being spoken, not to the last
+  // completed turn — so the live partial has to reach the prompt.
+  test("speech still in progress is shown to the judge", async () => {
+    const l = gated();
+    const seen = { messages: [] as ChatMessage[][], opts: [] as (LLMCompletionOpts | undefined)[] };
+    l.setSpeakingTextProvider(() => "I am redeploying staging now");
+    l.setIntentJudge(createIntentJudge(fakeClassifier('{"directed": true, "confidence": 1}', seen)));
+    await l.addressedToMe("wait, stop that", l.activationEpoch);
+    expect(JSON.stringify(seen.messages[0])).toContain("I am redeploying staging now");
+  });
+
+  // The live provider goes empty the moment the speaker is interrupted, so the
+  // partial is handed over explicitly.
+  test("an interrupted partial becomes context without opening a hot window", () => {
+    const l = gated();
+    l.noteInterrupted("I was in the middle of saying this");
+    expect(l.recentAssistantSpeech).toEqual(["I was in the middle of saying this"]);
+    // The hot window SKIPS the judge outright, and a barge-in is exactly when
+    // it must run — so an interruption must not start one.
+    expect(l.lastSpokeAtMs).toBeNull();
+  });
+
+  test("a blank partial is not recorded", () => {
+    const l = gated();
+    l.noteInterrupted("   ");
+    expect(l.recentAssistantSpeech).toEqual([]);
+  });
+});
+
+describe("barge-in ordering", () => {
+  const source = readFileSync(join(import.meta.dir, "../../src/listener/conversational.ts"), "utf8");
+
+  // An interrupt cannot be undone: the turn is aborted and the speaker flushed.
+  // On the streaming path the transcript already exists when the interrupt
+  // would fire, so the veto has to come first or a podcast still cuts Cicero
+  // off mid-sentence and merely fails to also issue a command.
+  test("the streaming path judges before it interrupts", () => {
+    const duplex = source.slice(source.indexOf("const cls = classifyBargeIn("));
+    const gate = duplex.indexOf("await this.addressedToMe(");
+    // The first interrupt on this path belongs to the unjudged "stop" branch —
+    // stopping is the safety valve and stays immediate. The one that ends in a
+    // dispatched turn is the last, and it must follow the gate.
+    expect(gate).toBeGreaterThan(-1);
+    expect(duplex.lastIndexOf("this.bargeInCallback!()")).toBeGreaterThan(gate);
+  });
+
+  // The legacy detector fires on energy with no transcript in hand, so its
+  // interrupt cannot be gated — but the dead partial must not attach to a
+  // later, unrelated turn.
+  test("a vetoed legacy barge-in discards the recovery snapshot", () => {
+    expect(source).toContain("this.bargeInDiscardedCallback?.();");
   });
 });
