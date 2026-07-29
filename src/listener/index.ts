@@ -31,14 +31,18 @@ export function createDictationListener(
   const target = dictation.target ?? "focused-app";
   const maxSeconds = dictation.max_recording_seconds;
   try {
+    // Only the focused-app target types; the cicero target needs no injector, so
+    // it stays available on sessions that cannot synthesize keystrokes.
+    const injector = target === "focused-app" ? createTextInjector() : undefined;
     return {
       listener: new DictationListener({
         stt: sttProvider,
         recorder,
         target,
-        // Only the focused-app target types; the cicero target needs no injector,
-        // so it stays available on sessions that cannot synthesize keystrokes.
-        typeText: target === "focused-app" ? createTextInjector() : undefined,
+        typeText: injector,
+        // The listener is the injector's only owner, so shutdown reaches a
+        // helper it retained through this.
+        stopTyping: injector ? () => injector.stop() : undefined,
         ...(maxSeconds ? { maxRecordingMs: maxSeconds * 1000 } : {}),
         ...(microphone
           ? { acquireMicrophone: microphone.acquire, releaseMicrophone: microphone.release }

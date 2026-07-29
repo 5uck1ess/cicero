@@ -2,13 +2,24 @@ import {
   boundInjectedText,
   buildTextInjection,
   resolveTextInjection,
+  XDOTOOL_TYPE_DELAY_MS,
   type InjectionEnvironment,
+  type InjectionMethod,
   type TextInjectionSpec,
   type TextInjectionSupport,
 } from "./text-inject";
 import { log } from "../logger";
 
-/** Bound on one synthetic-typing run, so a wedged helper cannot hold a turn open. */
+/**
+ * Bound on one synthetic-typing run, so a wedged helper cannot hold a turn open.
+ *
+ * It is a floor, not the whole budget: `xdotool` types at a fixed per-character
+ * delay, so a long transcript legitimately takes longer than any constant. A
+ * 3,000-character transcript needs ~36s of honest typing and used to be killed
+ * at 30s, mid-sentence, and reported as a wedged helper. The deadline is derived
+ * from the text instead — still absolute, and still bounded, because the text
+ * itself is capped at MAX_INJECTED_CHARS.
+ */
 const INJECT_TIMEOUT_MS = 30_000;
 /** Bound on confirming that a killed helper actually went away. */
 const HELPER_REAP_GRACE_MS = 2_000;
@@ -56,11 +67,17 @@ export interface InjectionTimeouts {
  * throw with an actionable reason. Callers resolve at startup so an operator
  * learns dictation cannot type on their session at boot, not on first use.
  */
+export interface TextInjector {
+  (text: string): Promise<void>;
+  /** Reap a helper retained by a timed-out run. Rejects if it is still alive. */
+  stop(): Promise<void>;
+}
+
 export function createTextInjector(
   env: InjectionEnvironment = {},
   spawn: SpawnInjection = spawnInjection,
   timeouts: InjectionTimeouts = {},
-): (text: string) => Promise<void> {
+): TextInjector {
   const injectMs = timeouts.injectMs ?? INJECT_TIMEOUT_MS;
   const reapMs = timeouts.reapMs ?? HELPER_REAP_GRACE_MS;
   const support = resolveTextInjection({ ...sessionEnvironment(), ...env });
@@ -75,7 +92,7 @@ export function createTextInjector(
    */
   let unreaped: ReturnType<typeof Bun.spawn> | null = null;
 
-  return async (text: string): Promise<void> => {
+  const typer = async (text: string): Promise<void> => {
     const bounded = boundInjectedText(text);
     if (bounded.truncated) {
       log("warn", `Dictation transcript was longer than the injection limit — typing the first ${bounded.text.length} characters`);
@@ -91,9 +108,33 @@ export function createTextInjector(
       buildTextInjection(bounded.text, support.method),
       spawn,
       (proc) => { unreaped = proc; },
-      { injectMs, reapMs },
+      { injectMs: injectMs + typingAllowanceMs(bounded.text.length, support.method), reapMs },
     );
   };
+
+  /**
+   * Release a helper this injector is still holding. Without it the survivor was
+   * reachable only from this closure, so daemon shutdown dropped the last
+   * reference to a process that was still typing. Rejects when release is
+   * unconfirmed, so the caller can retry rather than assume it is gone.
+   */
+  typer.stop = async (): Promise<void> => {
+    const survivor = unreaped;
+    if (!survivor) return;
+    try { survivor.kill(); } catch { /* already gone */ }
+    if (!await confirmExit(survivor, reapMs)) {
+      throw new Error("a typing helper has not exited");
+    }
+    unreaped = null;
+  };
+
+  return typer;
+}
+
+/** Extra deadline a method genuinely needs for this much text. */
+function typingAllowanceMs(chars: number, method: InjectionMethod): number {
+  // Only xdotool paces itself per character; osascript and SendKeys do not.
+  return method === "xdotool" ? chars * XDOTOOL_TYPE_DELAY_MS : 0;
 }
 
 /** Wait, bounded, for a helper to actually exit. True only when confirmed gone. */

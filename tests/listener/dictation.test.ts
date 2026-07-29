@@ -54,11 +54,15 @@ describe("dictation state machine", () => {
     expect(dict.getState()).toBe("idle");
 
     await dict.toggle();
+
+    await dict.settled();
     expect(dict.getState()).toBe("recording");
     expect(recorder.started.length).toBe(1);
     expect(typed).toEqual([]);
 
     await dict.toggle();
+
+    await dict.settled();
     expect(recorder.kills).toBe(1);
     expect(typed).toEqual(["hello world"]);
     expect(dict.getState()).toBe("idle");
@@ -68,8 +72,10 @@ describe("dictation state machine", () => {
     const { dict, recorder } = listener();
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     const file = recorder.started[0]!;
     await dict.toggle();
+    await dict.settled();
     expect(existsSync(file)).toBe(false);
     expect(readdirSync(dir)).toEqual([]);
   });
@@ -77,6 +83,7 @@ describe("dictation state machine", () => {
   test("a toggle before start() is ignored — no recorder is spawned", async () => {
     const { dict, recorder } = listener();
     await dict.toggle();
+    await dict.settled();
     expect(recorder.started.length).toBe(0);
     expect(dict.getState()).toBe("idle");
   });
@@ -85,7 +92,9 @@ describe("dictation state machine", () => {
     const { dict, typed } = listener({ stt: { transcribe: async () => "   " } });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     await dict.toggle();
+    await dict.settled();
     expect(typed).toEqual([]);
     expect(dict.getState()).toBe("idle");
   });
@@ -94,7 +103,9 @@ describe("dictation state machine", () => {
     const { dict, typed } = listener({ stt: { transcribe: async () => null } });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     await dict.toggle();
+    await dict.settled();
     expect(typed).toEqual([]);
     expect(dict.getState()).toBe("idle");
   });
@@ -113,13 +124,17 @@ describe("dictation state machine", () => {
     });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     await dict.toggle();
+    await dict.settled();
     expect(dict.getState()).toBe("idle");
     expect(typed).toEqual([]);
 
     // Still works afterwards — the failure did not wedge the state machine.
     await dict.toggle();
+    await dict.settled();
     await dict.toggle();
+    await dict.settled();
     expect(typed).toEqual(["second attempt"]);
   });
 
@@ -127,7 +142,9 @@ describe("dictation state machine", () => {
     const { dict } = listener({ typeText: async () => { throw new Error("no display"); } });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     await dict.toggle();
+    await dict.settled();
     expect(dict.getState()).toBe("idle");
   });
 
@@ -140,14 +157,15 @@ describe("dictation state machine", () => {
     });
     await dict.start();
     await dict.toggle();
-    const finishing = dict.toggle();
+    await dict.settled();
+    await dict.toggle();
     expect(dict.getState()).toBe("transcribing");
 
     await dict.toggle(); // ignored
     expect(recorder.started.length).toBe(1);
 
     releaseStt();
-    await finishing;
+    await dict.settled();
     expect(typed).toEqual(["slow result"]);
   });
 
@@ -157,7 +175,9 @@ describe("dictation state machine", () => {
     dict.onCommand((text) => commands.push(text));
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     await dict.toggle();
+    await dict.settled();
     expect(commands).toEqual(["hello world"]);
     expect(typed).toEqual([]);
   });
@@ -174,6 +194,7 @@ describe("dictation state machine", () => {
     const { dict, recorder, typed } = listener({ maxRecordingMs: 20 });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     expect(dict.getState()).toBe("recording");
 
     await Bun.sleep(60);
@@ -190,6 +211,7 @@ describe("dictation state machine", () => {
     });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     const file = recorder.started[0]!;
 
     await dict.stop();
@@ -201,6 +223,7 @@ describe("dictation state machine", () => {
 
     // And a hotkey press after shutdown does nothing.
     await dict.toggle();
+    await dict.settled();
     expect(recorder.started.length).toBe(1);
   });
 
@@ -215,6 +238,7 @@ describe("dictation state machine", () => {
     const { dict, recorder } = listener({ maxRecordingMs: 40 });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     await dict.toggle(); // normal finish well before the ceiling
     expect(recorder.kills).toBe(1);
 
@@ -234,6 +258,7 @@ test("stop() during transcription drains the in-flight capture before returning"
   });
   await dict.start();
   await dict.toggle();
+  await dict.settled();
   const finishing = dict.toggle(); // enters transcribing, parked on the gate
 
   let stopped = false;
@@ -256,6 +281,7 @@ test("a transcription that never finishes is abandoned at the shutdown drain bou
   });
   await dict.start();
   await dict.toggle();
+  await dict.settled();
   void dict.toggle();
   await Bun.sleep(5);
 
@@ -271,7 +297,9 @@ test("a cicero-target listener with no command handler warns instead of pretendi
   const { dict } = listener({ target: "cicero" });
   await dict.start();
   await dict.toggle();
+  await dict.settled();
   await dict.toggle();
+  await dict.settled();
   // Nothing to assert but the absence of a throw and a clean return to idle;
   // the daemon-side wiring is what makes this path actually deliver.
   expect(dict.getState()).toBe("idle");
@@ -292,9 +320,11 @@ test("a recorder that never exits is abandoned at the bound rather than hanging"
   const { dict } = listener({ recorder: stubborn as never, recorderExitTimeoutMs: 20 });
   await dict.start();
   await dict.toggle();
+  await dict.settled();
 
   const started = Date.now();
   await dict.toggle();
+  await dict.settled();
   expect(Date.now() - started).toBeLessThan(1000);
   expect(dict.getState()).toBe("idle");
 });
@@ -307,12 +337,17 @@ test("the in-flight latch clears between captures", async () => {
   await dict.start();
 
   await dict.toggle();
+
+  await dict.settled();
   await dict.toggle();
+  await dict.settled();
   expect(typed).toEqual(["hello world"]);
 
   // A second full cycle must behave identically to the first.
   await dict.toggle();
+  await dict.settled();
   await dict.toggle();
+  await dict.settled();
   expect(typed).toEqual(["hello world", "hello world"]);
 
   // And a stop with nothing in flight returns promptly.
@@ -339,9 +374,12 @@ describe("microphone ownership", () => {
 
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     expect(events).toEqual(["acquire", "record"]);
 
     await dict.toggle();
+
+    await dict.settled();
     // Released once the recorder is confirmed stopped — not left held across the
     // transcription, which needs no microphone.
     expect(events).toEqual(["acquire", "record", "release"]);
@@ -353,6 +391,7 @@ describe("microphone ownership", () => {
     });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
 
     expect(recorder.started.length).toBe(0);
     expect(dict.getState()).toBe("idle");
@@ -368,6 +407,7 @@ describe("microphone ownership", () => {
     });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     expect(events).toEqual(["acquire", "release"]);
     expect(dict.getState()).toBe("idle");
   });
@@ -392,6 +432,7 @@ test("the dictation capture disables silence-based auto-stop", async () => {
   const { dict } = listener({ recorder: capturing as never });
   await dict.start();
   await dict.toggle();
+  await dict.settled();
   expect(opts).toMatchObject({ stopOnSilence: false });
 });
 
@@ -406,6 +447,7 @@ test("a transcription abandoned at the drain does not type when it finally settl
   });
   await dict.start();
   await dict.toggle();
+  await dict.settled();
   const finishing = dict.toggle();
   await Bun.sleep(5);
 
@@ -429,6 +471,7 @@ test("the same abandonment applies to the cicero target's command dispatch", asy
   dict.onCommand((text) => commands.push(text));
   await dict.start();
   await dict.toggle();
+  await dict.settled();
   const finishing = dict.toggle();
   await Bun.sleep(5);
 
@@ -461,11 +504,14 @@ describe("a recorder that will not exit", () => {
     const { dict, typed } = listener({ recorder: stubborn as never, recorderExitTimeoutMs: 20 });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     await dict.toggle(); // release is unconfirmed
+    await dict.settled();
 
     expect(dict.getState()).toBe("idle");
     expect(typed).toEqual([]); // a partial file is not transcribed
     await dict.toggle();
+    await dict.settled();
     expect(stubborn.started.length).toBe(1); // refused, not stacked on the live one
   });
 
@@ -474,11 +520,14 @@ describe("a recorder that will not exit", () => {
     const { dict } = listener({ recorder: stubborn as never, recorderExitTimeoutMs: 20 });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     await dict.toggle();
+    await dict.settled();
     expect(stubborn.started.length).toBe(1);
 
     stubborn.release(); // the process goes away
     await dict.toggle();
+    await dict.settled();
     expect(stubborn.started.length).toBe(2); // no daemon restart needed
   });
 
@@ -493,7 +542,9 @@ describe("a recorder that will not exit", () => {
     });
     await dict.start();
     await dict.toggle();
+    await dict.settled();
     await dict.toggle();
+    await dict.settled();
     // Telling the daemon the device is free would let clap re-arm on top of the
     // recorder that is still running.
     expect(events).toEqual(["acquire"]);
@@ -501,5 +552,102 @@ describe("a recorder that will not exit", () => {
     stubborn.release();
     await dict.toggle(); // the reap succeeds, and only now is it handed back
     expect(events).toEqual(["acquire", "release", "acquire"]);
+  });
+});
+
+// Round 2, finding 1 (Codex): /api/dictate admits concurrent jobs. Two presses
+// both passed the idle check and then yielded at the reap, so both spawned a
+// recorder — and the second overwrote this.capture, stranding the first on the
+// microphone with nothing left holding a reference to it.
+test("two simultaneous presses start exactly one capture", async () => {
+  const { dict, recorder } = listener();
+  await dict.start();
+
+  await Promise.all([dict.toggle(), dict.toggle(), dict.toggle()]);
+
+  expect(recorder.started.length).toBe(1);
+  expect(dict.getState()).toBe("recording");
+});
+
+test("captures started in the same millisecond do not share a file", async () => {
+  const { dict, recorder } = listener({ now: () => 1_700_000_000_000 });
+  await dict.start();
+  await dict.toggle();
+  await dict.toggle();
+  await dict.settled();
+  await dict.toggle();
+  await dict.toggle();
+  await dict.settled();
+
+  expect(recorder.started.length).toBe(2);
+  expect(new Set(recorder.started).size).toBe(2);
+});
+
+// Round 2, finding 5 (Codex): the stop press awaited the whole decode, so the
+// HTTP job stayed charged for it and shutdown had to wait that out under the web
+// drain deadline before it could ever reach dictation.stop().
+test("the stop press returns without waiting for the transcription", async () => {
+  let releaseStt!: (text: string) => void;
+  const { dict, typed } = listener({
+    stt: { transcribe: () => new Promise<string>((resolve) => { releaseStt = resolve; }) },
+  });
+  await dict.start();
+  await dict.toggle();
+
+  await dict.toggle(); // resolves even though STT has not answered
+  expect(dict.getState()).toBe("transcribing");
+  expect(typed).toEqual([]);
+
+  // It returned before the provider was even called, which is the point.
+  while (!releaseStt) await Bun.sleep(1);
+  releaseStt("decoded later");
+  await dict.settled();
+  expect(typed).toEqual(["decoded later"]);
+});
+
+// Round 2, findings 3 and 4 (Codex): stop() resolved regardless, and the daemon
+// then dropped its only reference — so a recorder still holding the microphone,
+// or a helper still typing, had no owner left at all.
+describe("shutdown with an unconfirmed child", () => {
+  test("stop() reports the recorder it could not reap", async () => {
+    const stubborn = {
+      started: [] as string[],
+      record(outPath: string) {
+        stubborn.started.push(outPath);
+        return {
+          exited: new Promise<number>(() => { /* never exits */ }),
+          kill: () => { /* ignores it */ },
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      },
+    };
+    const { dict } = listener({ recorder: stubborn as never, recorderExitTimeoutMs: 20 });
+    await dict.start();
+    await dict.toggle();
+
+    await expect(dict.stop()).rejects.toThrow(/recorder has not exited/);
+  });
+
+  test("stop() reports a typing helper it could not reap", async () => {
+    const { dict } = listener({
+      stopTyping: async () => { throw new Error("a typing helper has not exited"); },
+    });
+    await dict.start();
+    await dict.toggle();
+    await dict.toggle();
+    await dict.settled();
+
+    await expect(dict.stop()).rejects.toThrow(/typing helper has not exited/);
+  });
+
+  test("a clean shutdown still resolves, and releases the injector", async () => {
+    let stopped = 0;
+    const { dict } = listener({ stopTyping: async () => { stopped += 1; } });
+    await dict.start();
+    await dict.toggle();
+    await dict.toggle();
+    await dict.settled();
+
+    await dict.stop();
+    expect(stopped).toBe(1);
   });
 });

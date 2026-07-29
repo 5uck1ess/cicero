@@ -99,7 +99,7 @@ describe("a typing helper that ignores its kill", () => {
       const helper = fakeHelper();
       helpers.push(helper);
       // Honours termination, just too late for the deadline.
-      setTimeout(() => helper.finish(0), 5);
+      setTimeout(() => helper.finish(0), 90);
       return helper.proc as unknown as ReturnType<typeof Bun.spawn>;
     };
     const type = createTextInjector(
@@ -108,10 +108,79 @@ describe("a typing helper that ignores its kill", () => {
       { injectMs: 1, reapMs: 500 },
     );
 
-    await expect(type("hello")).rejects.toThrow(/did not finish typing within 1ms$/);
+    // The plain overrun message, with no "did not exit when killed" — that
+    // distinction is what says nothing was retained.
+    await expect(type("hello")).rejects.toThrow(/did not finish typing within \d+ms$/);
     // Nothing retained: the next injection actually spawns rather than being
     // refused, which is what distinguishes this from the case above.
     await expect(type("world")).rejects.not.toThrow(/refusing to type over it/);
     expect(helpers.length).toBe(2);
   }, 15_000);
 });
+
+// Round 2, finding 4 (Codex): the retained helper lived only in the closure, so
+// the listener — its only owner — could not reach it at shutdown and the daemon
+// dropped the last reference to a process that was still typing.
+describe("releasing a retained helper at shutdown", () => {
+  test("stop() reaps it, and reports when it still will not go", async () => {
+    const helpers: ReturnType<typeof fakeHelper>[] = [];
+    const spawn = (_spec: TextInjectionSpec) => {
+      const helper = fakeHelper();
+      helpers.push(helper);
+      return helper.proc as unknown as ReturnType<typeof Bun.spawn>;
+    };
+    const type = createTextInjector(
+      { platform: "linux", sessionType: "x11", hasBinary: () => true },
+      spawn,
+      { injectMs: 20, reapMs: 20 },
+    );
+    await expect(type("hello")).rejects.toThrow(/did not exit when killed/);
+
+    // Still ignoring termination: an unconfirmed release must be reported, not
+    // swallowed, so the caller keeps the listener alive and retries.
+    await expect(type.stop()).rejects.toThrow(/has not exited/);
+    expect(helpers[0]!.proc.kills).toBe(2); // killed again on the way out
+
+    helpers[0]!.finish(0);
+    await type.stop(); // now confirmed, and idempotent
+    await type.stop();
+  }, 15_000);
+
+  test("stop() with nothing retained is a no-op", async () => {
+    const type = createTextInjector(
+      { platform: "linux", sessionType: "x11", hasBinary: () => true },
+      () => { throw new Error("must not spawn"); },
+    );
+    await type.stop();
+  });
+});
+
+// Round 2, finding 6 (Codex): a fixed 30s deadline against a 10,000-character
+// cap at 12ms per character meant any transcript over ~2,500 characters was
+// predictably killed partway through a sentence and reported as a wedged helper.
+test("the deadline scales with how long xdotool will actually take", async () => {
+  const specs: TextInjectionSpec[] = [];
+  let finish!: (code: number) => void;
+  const spawn = (spec: TextInjectionSpec) => {
+    specs.push(spec);
+    const helper = fakeHelper();
+    finish = helper.finish;
+    return helper.proc as unknown as ReturnType<typeof Bun.spawn>;
+  };
+  // A base of 40ms would kill a 3,000-character run instantly on the old fixed
+  // bound; the allowance (3,000 x 12ms) is what keeps it alive.
+  const type = createTextInjector(
+    { platform: "linux", sessionType: "x11", hasBinary: () => true },
+    spawn,
+    { injectMs: 40, reapMs: 20 },
+  );
+
+  const long = "a".repeat(3_000);
+  const typing = type(long);
+  await Bun.sleep(120); // well past the base bound alone
+  finish(0);
+  await typing; // not killed mid-sentence
+  expect(specs[0]!.stdin.length).toBe(3_000);
+  expect(specs[0]!.command).toContain("--delay");
+  expect(specs[0]!.command[specs[0]!.command.indexOf("--delay") + 1]).toBe("12");
+}, 15_000);

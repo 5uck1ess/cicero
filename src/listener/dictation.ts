@@ -31,6 +31,12 @@ export interface DictationDeps {
   recorder: AudioRecorder;
   /** Types text into the focused window. Required for the "focused-app" target. */
   typeText?: (text: string) => Promise<void>;
+  /**
+   * Release whatever the injector still owns. A helper that ignored its kill is
+   * retained inside the injector, and without this the listener — its only
+   * owner — could not reach it at shutdown. Rejects when release is unconfirmed.
+   */
+  stopTyping?: () => Promise<void>;
   target?: DictationTarget;
   /** Hard ceiling on one dictation, so a missed stop cannot record forever. */
   maxRecordingMs?: number;
@@ -105,6 +111,10 @@ export class DictationListener implements Listener {
    */
   private unreaped: Capture | null = null;
   private micHeld = false;
+  /** A start claimed but not yet reflected in `state`, so two presses cannot both spawn. */
+  private starting = false;
+  /** Distinguishes captures started inside the same millisecond. */
+  private sequence = 0;
   /**
    * The in-flight transcription's abandonment flag. A transcription the shutdown
    * drain gave up on still settles eventually, and used to deliver whenever that
@@ -156,7 +166,10 @@ export class DictationListener implements Listener {
     }
     // A recorder retained by an earlier failed reap gets another chance here, so
     // an unconfirmed release is recoverable without restarting the daemon.
-    await this.reapStuckRecorder();
+    const reaped = await this.reapStuckRecorder();
+    // Whatever the typing helper retained is owned by this listener too, and
+    // nothing else can reach it once the daemon drops its reference.
+    const typingReleased = await this.releaseTypingHelper();
     // A capture that already reached transcription is owned work, not new work.
     // Drain it so its typing cannot land after shutdown reports done, but bound
     // the wait so a wedged STT provider cannot hold the daemon open.
@@ -175,6 +188,30 @@ export class DictationListener implements Listener {
       ]).catch(() => { /* finishRecording already logged */ });
     }
     this.state = "idle";
+    // Report an unconfirmed release rather than swallowing it. stop() used to
+    // resolve regardless, and the daemon then cleared its only reference — so a
+    // recorder still holding the microphone, or a helper still typing, had no
+    // owner left at all. Throwing keeps the listener alive for a retry.
+    if (!reaped || !typingReleased) {
+      throw new Error(
+        `dictation teardown is unconfirmed: ${[
+          reaped ? null : "the recorder has not exited",
+          typingReleased ? null : "the typing helper has not exited",
+        ].filter(Boolean).join(" and ")}`,
+      );
+    }
+  }
+
+  /** Reap anything the typing helper retained. True when nothing is outstanding. */
+  private async releaseTypingHelper(): Promise<boolean> {
+    if (!this.deps.stopTyping) return true;
+    try {
+      await this.deps.stopTyping();
+      return true;
+    } catch (error: unknown) {
+      log("warn", `Dictation typing helper cleanup is unconfirmed: ${detail(error)}`);
+      return false;
+    }
   }
 
   onCommand(callback: (text: string) => void): void {
@@ -197,14 +234,38 @@ export class DictationListener implements Listener {
       return;
     }
     if (this.state === "recording") {
-      await this.trackFinish();
+      // Deliberately not awaited: the transcription is owned, drainable work,
+      // and awaiting it here kept the /api/dictate request charged for the whole
+      // decode — which shutdown then had to wait out under the web drain
+      // deadline before it could ever reach dictation.stop().
+      void this.trackFinish().catch((error: unknown) => {
+        log("error", `Dictation stop failed: ${detail(error)}`);
+      });
       return;
     }
-    if (!await this.reapStuckRecorder()) {
-      log("warn", "Dictation cannot start: the previous recorder has not exited and still holds the microphone");
+    // Claim the start SYNCHRONOUSLY. /api/dictate admits concurrent jobs, and
+    // two presses both passed the idle check above and then yielded at the reap
+    // below — so both spawned a recorder, and the second overwrote this.capture
+    // and stranded the first on the microphone.
+    if (this.starting) {
+      log("info", "Dictation is already starting a capture — ignoring");
       return;
     }
-    await this.beginRecording();
+    this.starting = true;
+    try {
+      if (!await this.reapStuckRecorder()) {
+        log("warn", "Dictation cannot start: the previous recorder has not exited and still holds the microphone");
+        return;
+      }
+      await this.beginRecording();
+    } finally {
+      this.starting = false;
+    }
+  }
+
+  /** Await the in-flight transcription, if any. The toggle no longer blocks on it. */
+  settled(): Promise<void> {
+    return (this.pending ?? Promise.resolve()).catch(() => { /* already logged */ });
   }
 
   /**
@@ -251,7 +312,10 @@ export class DictationListener implements Listener {
       await this.handBackMicrophone();
       return;
     }
-    const file = join(this.audioDir, `dictation-${this.now()}.wav`);
+    // The counter is not decoration: two captures in one millisecond would
+    // otherwise share a path and overwrite each other's audio.
+    this.sequence += 1;
+    const file = join(this.audioDir, `dictation-${this.now()}-${this.sequence}.wav`);
     let proc: ReturnType<typeof Bun.spawn>;
     try {
       proc = this.deps.recorder.record(file, {

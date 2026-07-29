@@ -15,6 +15,14 @@
 /** Cap on a single dictated insert. Long enough for a paragraph, bounded for a synthetic keyboard. */
 export const MAX_INJECTED_CHARS = 10_000;
 
+/**
+ * Per-character delay handed to `xdotool type`. Exported because the injection
+ * deadline is derived from it: a fixed 30s bound against a 10,000-character cap
+ * at 12ms each meant any transcript over ~2,500 characters was predictably
+ * killed partway through a sentence. The two numbers must move together.
+ */
+export const XDOTOOL_TYPE_DELAY_MS = 12;
+
 export type InjectionMethod = "applescript" | "sendkeys" | "xdotool";
 
 export type TextInjectionSupport =
@@ -145,7 +153,7 @@ export function buildTextInjection(text: string, method: InjectionMethod): TextI
     case "xdotool":
       // `--file -` takes the literal text on stdin, so there is nothing to escape.
       return {
-        command: ["xdotool", "type", "--clearmodifiers", "--delay", "12", "--file", "-"],
+        command: ["xdotool", "type", "--clearmodifiers", "--delay", String(XDOTOOL_TYPE_DELAY_MS), "--file", "-"],
         stdin: text,
       };
   }

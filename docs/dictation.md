@@ -69,7 +69,12 @@ logs the reason at startup rather than failing on the first hotkey press.
   hold-to-talk: the macOS hotkey helper emits key-down only, and holding a
   chord through a paragraph is uncomfortable anyway.
 - **A press during transcription is ignored**, not queued. Two captures racing
-  to type into the same field is worse than dropping one.
+  to type into the same field is worse than dropping one. Simultaneous presses
+  start exactly one capture — the API accepts concurrent requests.
+- **The stopping press returns as soon as the recorder is released**, reporting
+  `transcribing`; it does not wait out the decode. A caller is never held open
+  for a slow model, and shutdown does not have to wait for that request before
+  it can tear dictation down.
 - **`max_recording_seconds`** (default 300) bounds a single capture so a
   forgotten dictation cannot record indefinitely. Hitting it stops the
   recording and transcribes what it has.

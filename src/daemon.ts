@@ -1754,7 +1754,10 @@ export class CiceroDaemon {
     // Double-clap activation. Holds the mic only while voice mode is off, so it
     // releases on activate and resumes when voice mode turns back off (any way).
     const clap = this.config.clap;
-    if (clap.enabled && !this.options.skipServers && !this.config.headless) {
+    // A dictation started during the startup window (the listener is runnable
+    // before the servers bind) already owns the microphone. Arming clap on top
+    // of it is the same two-recorder overlap the handoff exists to prevent.
+    if (clap.enabled && !this.options.skipServers && !this.config.headless && !this.dictationHoldsMicrophone) {
       this.clapListener = new ClapListener({
         onDoubleClap: () => this.onDoubleClap(),
         threshold: clap.threshold,
@@ -1765,6 +1768,9 @@ export class CiceroDaemon {
         // Voice Processing's noise suppression crushes claps below the threshold.
       });
       await this.clapListener.start();
+      // A dictation press can land while that start is waiting on a recorder
+      // reap. Undo the stale commit rather than leaving two mic owners.
+      if (this.dictationHoldsMicrophone) await this.clapListener.stop();
     }
 
     // Start global hotkey listener for voice toggle
@@ -2705,8 +2711,20 @@ export class CiceroDaemon {
       this.actionsReloader = null;
       await cleanup("Telegram poller", () => this.stopTelegramPoller?.());
       this.stopTelegramPoller = null;
-      await cleanup("dictation", () => this.dictation?.stop());
-      this.dictation = null;
+      // Keep the listener when its teardown is unconfirmed: it is the only owner
+      // of a recorder still holding the microphone, or of a typing helper still
+      // typing, and clearing the reference here stranded both. A later stop()
+      // retries the reap.
+      let dictationReleased = true;
+      await cleanup("dictation", async () => {
+        try {
+          await this.dictation?.stop();
+        } catch (error: unknown) {
+          dictationReleased = false;
+          throw error;
+        }
+      });
+      if (dictationReleased) this.dictation = null;
       await cleanup("hotkey helper", () => this.hotkeyProc?.kill());
       this.hotkeyProc = null;
       await cleanup("voice lifecycle", async () => {
