@@ -149,6 +149,14 @@ brain:
 Omit `summarizer_url` to reuse `web_voice.tldr.summarizer_url`. With neither set,
 compaction stays off and `cicero doctor` says so rather than failing to start.
 
+It is a **base** URL — Cicero appends `/chat/completions` to it — so it must not
+carry a query string or fragment. A URL like `…/v1?token=abc` would become
+`…/v1?token=abc/chat/completions`, silently requesting `/v1` with a mangled
+token, so Cicero refuses it at startup instead. Endpoints that authenticate by
+query parameter need a gateway that accepts a header; the same rule applies to
+every configured base URL (`brain.base_url`, a provider's `baseUrl`,
+`web_voice.tldr.summarizer_url`).
+
 When the cap is crossed, the older half is sent to that endpoint in the
 background while the conversation continues against the **full, un-compacted**
 history. Once the summary returns, those turns are replaced by it and it is

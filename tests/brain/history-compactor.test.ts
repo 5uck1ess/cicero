@@ -49,6 +49,25 @@ describe("summarizer client", () => {
     await expect(complete("hello", 40)).rejects.toThrow(/^summarizer 401$/);
   });
 
+  // Codex: readBoundedJson used a bare JSON.parse, and the runtime quotes the
+  // offending token in its message. A 200 that is not JSON at all put the body
+  // verbatim into an Error the caller logs to the console AND publishes to the
+  // dashboard. Provider bodies are an explicit trust boundary.
+  test("a malformed 200 body never reaches the error message", async () => {
+    const secret = "ghp_SYNTHETIC0000000000000000000000000000";
+    globalThis.fetch = (async () => new Response(secret, {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+    const complete = createSummarizerComplete({ summarizer_url: "http://x:1/v1" })!;
+
+    const failure = await complete("hello", 40).then(() => null, (error: unknown) => error as Error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure!.message).not.toContain(secret);
+    expect(failure!.message).not.toContain("ghp_");
+    expect(failure!.message).toMatch(/was not valid JSON/);
+  });
+
   test("an empty completion is an error, not an empty summary", async () => {
     stubSummarizer("   ");
     const complete = createSummarizerComplete({ summarizer_url: "http://x:1/v1" })!;
