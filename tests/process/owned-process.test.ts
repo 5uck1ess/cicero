@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   OwnedProcessReapError,
+  windowsForcedKillNeeded,
   windowsTreeAccountedFor,
   processExitWithin,
   spawnOwnedProcess,
@@ -204,6 +205,30 @@ test("unconfirmed leader exit is a typed ownership failure", async () => {
 // terminateWindowsTree itself is unreachable off win32 (the platform check is
 // inline), so this covers the decision; real taskkill behavior is covered by the
 // Windows CI job.
+describe("windows forced-kill fallback", () => {
+  // Separate from the accounting matrix on purpose: main gated this on taskkill's
+  // exit code being non-zero, so a missing PID (128) reached the SIGKILL too. An
+  // earlier revision of this branch narrowed it to a refused kill only, which
+  // silently diverged from main for exit 128 — and `proc.kill()` is also what
+  // reaps Bun's child handle, so skipping it can leave `proc.exited` pending.
+  // A line-count comparison against main cannot catch a changed condition; this
+  // can.
+  test("every outcome but a pass that reached the tree still needs SIGKILL", () => {
+    expect(windowsForcedKillNeeded("targeted")).toBe(false);
+    expect(windowsForcedKillNeeded("absent")).toBe(true);
+    expect(windowsForcedKillNeeded("failed")).toBe(true);
+  });
+
+  // The two decisions genuinely disagree for absent/absent and absent/failed:
+  // the leader must still be killed, yet the tree is NOT accounted for. Pinning
+  // that keeps a future simplification from collapsing them back together.
+  test("needing a SIGKILL is not the same question as the tree being accounted for", () => {
+    expect(windowsForcedKillNeeded("absent")).toBe(true);
+    expect(windowsTreeAccountedFor("absent", "absent")).toBe(false);
+    expect(windowsTreeAccountedFor("absent", "failed")).toBe(false);
+  });
+});
+
 describe("windows tree accounting", () => {
   test("a forced pass that reached the tree is conclusive on its own", () => {
     for (const graceful of ["targeted", "absent", "failed"] as const) {

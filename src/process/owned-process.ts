@@ -233,7 +233,7 @@ async function terminateWindowsTree(
   }
 
   const forced = await runWindowsTaskkill(proc.pid, true);
-  if (forced.outcome === "failed") {
+  if (windowsForcedKillNeeded(forced.outcome)) {
     try { proc.kill("SIGKILL"); } catch { /* already exited */ }
   }
   const finalExit = await processExitWithin(proc.exited, reapTimeoutMs);
@@ -257,6 +257,23 @@ async function terminateWindowsTree(
       + `(graceful taskkill ${describeTaskkill(graceful)}, forced ${describeTaskkill(forced)})`,
     );
   }
+}
+
+/**
+ * Whether the leader still needs a direct SIGKILL after the forced taskkill pass.
+ *
+ * Anything but a pass that reached the tree does, which is what main has always
+ * done — it tested `taskkill`'s exit code for zero, so both a missing PID and a
+ * refused kill fell through to this. Narrowing it to only a refused kill skipped
+ * the call for exit 128, and `proc.kill()` is also what reaps Bun's own child
+ * handle: without it `proc.exited` can stay pending, the bounded observation below
+ * times out, and a caller still reading inherited pipes can be left waiting.
+ *
+ * The accounting verdict is a separate question with a different answer, so it is
+ * a separate function; conflating the two is how the divergence happened.
+ */
+export function windowsForcedKillNeeded(forced: WindowsTaskkillOutcome): boolean {
+  return forced !== "targeted";
 }
 
 /**
