@@ -225,29 +225,44 @@ describe("windows tree accounting", () => {
     expect(windowsTreeAccountedFor("targeted", "absent")).toBe(true);
   });
 
-  // The real CI failure. `send abort kills and reaps a silent subprocess group
-  // promptly` failed on the Windows job with
+  // The real CI failure, and the only pair whose verdict this change alters.
+  // `send abort kills and reaps a silent subprocess group promptly` failed on the
+  // Windows job with
   //   graceful taskkill absent (exit 128), forced failed (exit 255)
-  // because the leader had already exited before the reaper ran, and the forced
-  // pass against that already-missing PID answered 255 rather than 128 again.
-  // The reaper no longer issues that second pass, so the pair it must accept is
-  // absent/absent: nothing was left to kill, and the descendants of a root that
-  // is already gone were never enumerable on Windows regardless.
-  test("a leader already gone before the first pass is accounted for", () => {
+  // The leader PID was already gone before either pass ran, so neither had a root
+  // to enumerate from, and the caller saw a reap error instead of its own abort
+  // reason. Both orderings of a vanished leader are accounted for.
+  test("a leader already gone before either pass is accounted for", () => {
+    expect(windowsTreeAccountedFor("absent", "failed")).toBe(true);
     expect(windowsTreeAccountedFor("absent", "absent")).toBe(true);
   });
 
-  // With no grace window the graceful pass never runs, so a forced pass is the
+  // With no grace window the graceful pass never runs, so the forced pass is the
   // only thing that could have signalled the descendants. If it found no PID,
   // nothing did, and a vanished leader proves nothing about them.
   test("an absent PID after no graceful pass at all is not enough", () => {
     expect(windowsTreeAccountedFor("failed", "absent")).toBe(false);
   });
 
-  // A genuine failure to reach the tree still fails closed.
-  test("a failed forced pass is never accounted for", () => {
-    for (const graceful of ["targeted", "absent", "failed"] as const) {
-      expect(windowsTreeAccountedFor(graceful, "failed")).toBe(false);
-    }
+  // Everything else keeps the conservative verdict this reaper already had: a
+  // graceful pass that reached the tree and then a forced pass that could not is
+  // a genuine targeting failure, because processes that ignore the graceful
+  // signal may still be running.
+  test("a forced failure after a graceful pass that reached the tree still fails closed", () => {
+    expect(windowsTreeAccountedFor("targeted", "failed")).toBe(false);
+    expect(windowsTreeAccountedFor("failed", "failed")).toBe(false);
+  });
+
+  // Sanity bound on the whole matrix: only a vanished leader or a forced pass
+  // that reached the tree is accounted for, so nothing else silently becomes so.
+  test("no other outcome pair is accounted for", () => {
+    const outcomes = ["targeted", "absent", "failed"] as const;
+    const accounted = outcomes.flatMap((graceful) =>
+      outcomes.filter((forced) => windowsTreeAccountedFor(graceful, forced)).map((forced) => `${graceful}/${forced}`),
+    );
+    expect(accounted.sort()).toEqual([
+      "absent/absent", "absent/failed", "absent/targeted",
+      "failed/targeted", "targeted/absent", "targeted/targeted",
+    ]);
   });
 });
