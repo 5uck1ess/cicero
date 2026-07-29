@@ -224,14 +224,14 @@ async function terminateWindowsTree(
 ): Promise<void> {
   // Enumerate the tree before killing the root. Once the root disappears,
   // Windows cannot rediscover arbitrary descendants without a Job Object.
-  const gracefulTreeTargeted = graceMs > 0 && await runWindowsTaskkill(proc.pid, false);
-  if (gracefulTreeTargeted) {
+  const graceful = graceMs > 0 ? await runWindowsTaskkill(proc.pid, false) : "failed";
+  if (graceful === "targeted") {
     const gracefulExit = await processExitWithin(proc.exited, graceMs);
     if (gracefulExit.kind === "exited") return;
   }
 
-  const forcedTreeTargeted = await runWindowsTaskkill(proc.pid, true);
-  if (!forcedTreeTargeted) {
+  const forced = await runWindowsTaskkill(proc.pid, true);
+  if (forced === "failed") {
     try { proc.kill("SIGKILL"); } catch { /* already exited */ }
   }
   const finalExit = await processExitWithin(proc.exited, reapTimeoutMs);
@@ -245,9 +245,34 @@ async function terminateWindowsTree(
   if (finalExit.kind === "timeout") {
     throw new OwnedProcessReapError(proc.pid, "leader did not reap after forced tree termination");
   }
-  if (!forcedTreeTargeted) {
+  if (!windowsTreeAccountedFor(graceful, forced)) {
     throw new OwnedProcessReapError(proc.pid, "Windows tree targeting failed; only the leader was reaped");
   }
+}
+
+/**
+ * Whether the tree is accounted for, given how each taskkill pass ended and a
+ * leader already confirmed exited.
+ *
+ * Split out as a pure decision because the surrounding function only runs on
+ * win32 — the platform check is inline — so this is the only part of the Windows
+ * reaper a test on another OS can reach. Real taskkill behavior is covered by
+ * the Windows CI job.
+ */
+export function windowsTreeAccountedFor(
+  graceful: WindowsTaskkillOutcome,
+  forced: WindowsTaskkillOutcome,
+): boolean {
+  if (forced === "targeted") return true;
+  // `absent` means the forced pass found no such PID, which only happens once
+  // the leader is already gone — and a leader that outlives the grace window
+  // exits between that timeout and this call often enough to matter. It is only
+  // conclusive together with a graceful pass that DID reach the tree: that pass
+  // signalled every process then in it, so nothing was left unsignalled. Read as
+  // a targeting failure instead, a completed teardown was reported as an
+  // unconfirmed release, and an ordinary abort surfaced a reap error in place of
+  // the caller's own abort reason.
+  return forced === "absent" && graceful === "targeted";
 }
 
 function signalPosixTree(proc: OwnedProcess, signal: "SIGTERM" | "SIGKILL"): void {
@@ -274,7 +299,21 @@ async function waitForPosixGroupExit(pid: number, timeoutMs: number): Promise<bo
   return true;
 }
 
-async function runWindowsTaskkill(pid: number, force: boolean): Promise<boolean> {
+/**
+ * Whether `taskkill` reached the tree.
+ *
+ * `absent` is deliberately not `failed`: taskkill exits non-zero both when it
+ * could not reach the process and when there is no such PID any more. Those are
+ * opposite outcomes — one leaves the tree unaccounted for, the other means it is
+ * already gone — and collapsing them into one boolean reported a completed
+ * teardown as an unconfirmed release.
+ */
+export type WindowsTaskkillOutcome = "targeted" | "absent" | "failed";
+
+/** taskkill's exit code when no process carries the requested PID. */
+const WINDOWS_TASKKILL_NOT_FOUND = 128;
+
+async function runWindowsTaskkill(pid: number, force: boolean): Promise<WindowsTaskkillOutcome> {
   const args = ["taskkill", "/PID", String(pid), "/T", ...(force ? ["/F"] : [])];
   try {
     const helper = Bun.spawn(args, {
@@ -285,9 +324,14 @@ async function runWindowsTaskkill(pid: number, force: boolean): Promise<boolean>
       killSignal: "SIGKILL",
       windowsHide: true,
     });
-    return await helper.exited === 0;
+    const code = await helper.exited;
+    if (code === 0) return "targeted";
+    // Matched on the exit code rather than the message: taskkill's "not found"
+    // text is localized, so parsing stderr would silently stop recognizing it
+    // on a non-English Windows.
+    return code === WINDOWS_TASKKILL_NOT_FOUND ? "absent" : "failed";
   } catch {
-    return false;
+    return "failed";
   }
 }
 

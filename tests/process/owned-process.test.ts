@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   OwnedProcessReapError,
+  windowsTreeAccountedFor,
   processExitWithin,
   spawnOwnedProcess,
   terminateOwnedDirectProcess,
@@ -198,4 +199,43 @@ test("unconfirmed leader exit is a typed ownership failure", async () => {
     terminateGraceMs: 0,
     reapTimeoutMs: 5,
   })).rejects.toBeInstanceOf(OwnedProcessReapError);
+});
+
+// The Windows reaper reported a completed teardown as an unconfirmed release.
+// taskkill exits non-zero both when it cannot reach the process and when no
+// such PID exists any more; the old code read one boolean for both, so a leader
+// that outlived the grace window and then exited before the forced pass looked
+// like a targeting failure. The observed CI symptom was an ordinary abort
+// rejecting with "could not confirm turn process tree N exited" instead of the
+// caller's own abort reason.
+//
+// terminateWindowsTree itself is unreachable off win32 (the platform check is
+// inline), so this covers the decision; real taskkill behavior is covered by the
+// Windows CI job.
+describe("windows tree accounting", () => {
+  test("a forced pass that reached the tree is conclusive on its own", () => {
+    for (const graceful of ["targeted", "absent", "failed"] as const) {
+      expect(windowsTreeAccountedFor(graceful, "targeted")).toBe(true);
+    }
+  });
+
+  // The regression: graceful reached the whole tree, the leader ignored TERM
+  // past the grace window, then exited just before the forced pass ran.
+  test("an absent PID after a graceful pass that reached the tree is accounted for", () => {
+    expect(windowsTreeAccountedFor("targeted", "absent")).toBe(true);
+  });
+
+  // Without a graceful pass that reached the tree, nothing signalled the
+  // descendants, so a vanished leader proves nothing about them.
+  test("an absent PID alone is not enough", () => {
+    expect(windowsTreeAccountedFor("failed", "absent")).toBe(false);
+    expect(windowsTreeAccountedFor("absent", "absent")).toBe(false);
+  });
+
+  // A genuine failure to reach the tree still fails closed.
+  test("a failed forced pass is never accounted for", () => {
+    for (const graceful of ["targeted", "absent", "failed"] as const) {
+      expect(windowsTreeAccountedFor(graceful, "failed")).toBe(false);
+    }
+  });
 });
