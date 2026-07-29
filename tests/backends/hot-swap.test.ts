@@ -296,4 +296,28 @@ describe("turn-length generation pins", () => {
     expect(next.stops).toBe(1);
     expect(owner.currentProvider()).toBe(old);
   });
+
+  test("a preparing candidate whose stop fails during shutdown is retained, not lost", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    const owner = new ProviderSlot<TTSProvider>(old);
+    const next = new FakeVoiceProvider("tts-next");
+    next.stopFailures = 1; // refuses its first stop, like a process that will not exit
+
+    let releaseStart!: () => void;
+    next.startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+    const swapping = owner.swap(next, () => {});
+
+    // The candidate is started but is not a generation yet, so stop() can only
+    // reach it by claiming it. It refuses, so release is unconfirmed and stop()
+    // must say so — reporting success here left the daemon dropping its last
+    // handle to a provider that is still running.
+    await expect(owner.stop()).rejects.toThrow(/failed to stop/);
+    releaseStart();
+    await expect(swapping).rejects.toThrow(/shutting down/);
+    expect(next.stops).toBe(1);
+
+    // Retryable, not latched: the daemon's next teardown attempt reaches it.
+    await owner.stop();
+    expect(next.stops).toBe(2);
+  });
 });

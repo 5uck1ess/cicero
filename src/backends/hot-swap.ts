@@ -50,7 +50,15 @@ export interface ProviderSlotOptions {
   cleanupTimeoutMs?: number;
 }
 
-const DEFAULT_CLEANUP_TIMEOUT_MS = 15_000;
+interface PreparingCandidate<T extends SwappableProvider> {
+  provider: T;
+  /** Cleared by whoever takes responsibility for stopping this provider. */
+  owned: boolean;
+  /** Set once its owner starts stopping it, so a concurrent stop() can wait. */
+  disposal?: Promise<void>;
+}
+
+export const DEFAULT_CLEANUP_TIMEOUT_MS = 15_000;
 
 async function within<T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -78,6 +86,15 @@ export class ProviderSlot<T extends SwappableProvider> {
   private swapRunning = false;
   private closed = false;
   private readonly cleanupTimeoutMs: number;
+  /**
+   * Candidates an in-flight swap has already started. Such a provider is alive
+   * and owned by this slot, yet appears in none of the sets above — it becomes
+   * `current` only at cutover. stop() must be able to see and claim it, or it
+   * reports a confirmed release while that child is still running. `owned` is
+   * the single ownership token: whoever clears it does the stopping, so the swap
+   * and a concurrent stop() can never both stop the same provider.
+   */
+  private readonly preparing = new Set<PreparingCandidate<T>>();
 
   constructor(provider: T, options: ProviderSlotOptions = {}) {
     this.current = this.generation(provider);
@@ -133,7 +150,11 @@ export class ProviderSlot<T extends SwappableProvider> {
       throw new Error("another provider swap is already in progress");
     }
     this.swapRunning = true;
-    let candidateOwned = true;
+    // Register the candidate before the first await, so a stop() landing
+    // mid-preparation can claim it rather than snapshotting a set that cannot
+    // contain it yet.
+    const owning: PreparingCandidate<T> = { provider: candidate, owned: true };
+    this.preparing.add(owning);
     try {
       try {
         await this.cleanupRetired();
@@ -158,12 +179,22 @@ export class ProviderSlot<T extends SwappableProvider> {
         }
         await persist();
       } catch (error) {
-        candidateOwned = false;
-        try {
-          await this.stopProvider(candidate, "candidate cleanup");
-        } catch (cleanupError: unknown) {
-          this.quarantined.add(candidate);
-          throw new AggregateError([error, cleanupError], `provider swap failed and candidate cleanup was not confirmed`);
+        // A shutdown may already have claimed and reaped this candidate; then
+        // there is nothing left to clean up and the failure below still stands.
+        if (this.claimCandidate(owning)) {
+          let cleanupError: unknown;
+          // Quarantine INSIDE the disposal promise: a stop() waiting on it must
+          // not be able to snapshot `quarantined` before the failed candidate
+          // has been put there.
+          const disposal = this.stopProvider(candidate, "candidate cleanup").catch((failure: unknown) => {
+            this.quarantined.add(candidate);
+            cleanupError = failure;
+          });
+          owning.disposal = disposal;
+          await disposal;
+          if (cleanupError) {
+            throw new AggregateError([error, cleanupError], `provider swap failed and candidate cleanup was not confirmed`);
+          }
         }
         throw new Error(
           `candidate preparation failed; active provider and config retained: ${error instanceof Error ? error.message : String(error)}`,
@@ -180,7 +211,9 @@ export class ProviderSlot<T extends SwappableProvider> {
       }
       const previous = this.current;
       this.current = this.generation(candidate);
-      candidateOwned = false;
+      // Synchronous with the check above: the candidate is a generation now, so
+      // ownership passes to the generation sets a stop() already snapshots.
+      owning.owned = false;
       previous.retired = true;
       this.retired.add(previous);
       if (previous.leases === 0) previous.resolveDrain();
@@ -198,14 +231,46 @@ export class ProviderSlot<T extends SwappableProvider> {
       }
     } finally {
       this.swapRunning = false;
-      if (candidateOwned) {
-        await this.stopProvider(candidate, "candidate cleanup").catch(() => {});
+      if (this.claimCandidate(owning)) {
+        // Quarantine rather than swallow: a candidate whose stop fails here is
+        // still running, and dropping the error left it owned by nobody. In
+        // quarantine, stop() — including a later retry — will try it again.
+        const disposal = this.stopProvider(candidate, "candidate cleanup").catch(() => {
+          this.quarantined.add(candidate);
+        });
+        owning.disposal = disposal;
+        await disposal;
       }
+      // Only now: while the entry is still registered, a concurrent stop() can
+      // see that this candidate exists and wait for the disposal above.
+      this.preparing.delete(owning);
     }
+  }
+
+  /** Take exclusive responsibility for stopping a candidate, if nobody else has. */
+  private claimCandidate(entry: PreparingCandidate<T>): boolean {
+    if (!entry.owned) return false;
+    entry.owned = false;
+    return true;
   }
 
   async stop(): Promise<void> {
     this.closed = true;
+    // `closed` is now set, so an in-flight swap can no longer cut over — but it
+    // still owns a started candidate that is in none of the sets below until
+    // cutover, and a failed disposal only reaches `quarantined` afterwards.
+    // Snapshotting straight away reported a confirmed release while that child
+    // was still alive; the daemon then cleared its slots and the last handle to
+    // it was gone. So claim what the swap has not begun disposing of, and wait
+    // out the disposals it has (each already bounded by stopProvider) before the
+    // snapshot below. Deliberately NOT a wait on the whole swap: a candidate
+    // parked in start() would stall shutdown for as long as it takes to start.
+    const disposals: Promise<unknown>[] = [];
+    for (const entry of this.preparing) {
+      if (this.claimCandidate(entry)) this.quarantined.add(entry.provider);
+      else if (entry.disposal) disposals.push(entry.disposal.catch(() => {}));
+    }
+    if (disposals.length > 0) await Promise.all(disposals);
     const generations = [this.current, ...this.retired];
     for (const generation of generations) {
       generation.retired = true;

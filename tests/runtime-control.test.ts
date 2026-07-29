@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MANAGED_STARTUP_TIMEOUT_MS } from "../src/backends/http-transfer";
+import { DEFAULT_CLEANUP_TIMEOUT_MS } from "../src/backends/hot-swap";
+import { MANAGED_STARTUP_TIMEOUT_MS, PROVIDER_TIMEOUT_MS } from "../src/backends/http-transfer";
 import { CONTROL_TIMEOUT_MS, requestRuntimeSwap, startRuntimeControl, type RuntimeControlHandle } from "../src/runtime-control";
 
 let handle: RuntimeControlHandle | null = null;
@@ -58,11 +59,18 @@ describe("runtime swap control", () => {
     expect(observed?.aborted).toBe(false);
   });
 
-  test("the client deadline is not shorter than a supported managed cold start", () => {
-    // The original 120s deadline was under the 300s a managed candidate is allowed
-    // to take, which is what let the client abort a swap that then committed. These
-    // two numbers must never drift apart again.
-    expect(CONTROL_TIMEOUT_MS).toBeGreaterThan(MANAGED_STARTUP_TIMEOUT_MS);
+  test("the client deadline outlasts a whole supported swap transaction", () => {
+    // Not just the cold start: the swap runs start → warmup → health → persist →
+    // retired-generation cleanup back to back, and the abort is only honoured
+    // BEFORE persistence. A deadline that covers only startup still lets the CLI
+    // report failure for a swap that commits — 290s start + 35s warmup + 2s health
+    // + 5s drain overran the earlier 330s value. Each phase is bounded elsewhere,
+    // so the client budget must be at least their sum.
+    const worstCaseTransactionMs = MANAGED_STARTUP_TIMEOUT_MS
+      + Math.max(PROVIDER_TIMEOUT_MS.tts, PROVIDER_TIMEOUT_MS.stt)
+      + PROVIDER_TIMEOUT_MS.health
+      + DEFAULT_CLEANUP_TIMEOUT_MS;
+    expect(CONTROL_TIMEOUT_MS).toBeGreaterThan(worstCaseTransactionMs);
   });
 
   test("propagates actionable rollback errors", async () => {
@@ -102,17 +110,24 @@ describe("runtime swap control", () => {
     const descriptorPath = join(dir, "runtime-control.json");
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
     handle = await startRuntimeControl({
       token: "test-token",
       descriptorPath,
       onSwap: async (request) => {
+        signalEntered();
         await gate;
         return { ...request, status: "active" };
       },
     });
 
     const first = requestRuntimeSwap({ role: "stt", backend: "wyoming" }, { descriptorPath });
-    await Bun.sleep(0);
+    // Wait for the first swap to actually be in-flight rather than yielding a
+    // fixed number of ticks: under load the request had not reached the handler
+    // yet, so the second was admitted, blocked on the same gate, and the assertion
+    // below deadlocked until the test timeout instead of failing.
+    await entered;
     await expect(requestRuntimeSwap(
       { role: "tts", backend: "wyoming" },
       { descriptorPath },

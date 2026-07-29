@@ -1,5 +1,6 @@
 import { unlink } from "node:fs/promises";
-import { MANAGED_STARTUP_TIMEOUT_MS } from "./backends/http-transfer";
+import { DEFAULT_CLEANUP_TIMEOUT_MS } from "./backends/hot-swap";
+import { MANAGED_STARTUP_TIMEOUT_MS, PROVIDER_TIMEOUT_MS } from "./backends/http-transfer";
 import { readRequestJsonLimited, RequestBodyTooLargeError } from "./http-request-body";
 import { readPrivateJson, writePrivateJson } from "./platform/private-json";
 import { ciceroPath } from "./platform/paths";
@@ -7,12 +8,29 @@ import { ciceroPath } from "./platform/paths";
 const CONTROL_VERSION = 1 as const;
 const MAX_CONTROL_BODY_BYTES = 4_096;
 /**
- * Cold-starting a managed candidate is a supported swap path and may take the full
- * MANAGED_STARTUP_TIMEOUT_MS, after which the daemon still persists and cuts over.
- * A 120s client deadline aborted mid-startup and printed a failure for a swap that
- * then committed, so allow the startup budget plus room for the commit itself.
+ * The client must outlast a whole supported swap transaction, not just part of it:
+ * aborting early prints a failure for a swap that goes on to commit, because the
+ * abort is only honoured before persistence. Summed from the phases the swap
+ * actually runs back to back, each already bounded elsewhere:
+ *
+ *   start()          MANAGED_STARTUP_TIMEOUT_MS   (cold managed candidate)
+ *   warmup()         longest per-request provider deadline — a warmup is one
+ *                    ordinary synthesis/transcription, so it is bounded by the
+ *                    role's own budget, and the client cannot know which role
+ *                    it will be
+ *   health()         PROVIDER_TIMEOUT_MS.health
+ *   cutover cleanup  DEFAULT_CLEANUP_TIMEOUT_MS   (retired generation drain)
+ *
+ * plus a margin for persistence (a config file write) and transport. Deriving it
+ * this way is the point: the previous value was this constant plus a guessed 30s,
+ * which a 290s start + 35s warmup + 2s health + 5s drain already overran.
  */
-export const CONTROL_TIMEOUT_MS = MANAGED_STARTUP_TIMEOUT_MS + 30_000;
+const SWAP_WARMUP_TIMEOUT_MS = Math.max(PROVIDER_TIMEOUT_MS.tts, PROVIDER_TIMEOUT_MS.stt);
+export const CONTROL_TIMEOUT_MS = MANAGED_STARTUP_TIMEOUT_MS
+  + SWAP_WARMUP_TIMEOUT_MS
+  + PROVIDER_TIMEOUT_MS.health
+  + DEFAULT_CLEANUP_TIMEOUT_MS
+  + 30_000;
 const MAX_CONTROL_ERROR_CHARS = 500;
 
 /**
