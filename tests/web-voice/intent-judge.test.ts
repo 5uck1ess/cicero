@@ -179,10 +179,24 @@ test("the POST path also stops after a judge that accepted on cancellation", asy
   expect(reachedBrain).toBe(false);
 });
 
-// The POST path has to record what it spoke, or it never opens a hot window and
-// every follow-up on that transport is sent to the classifier.
-test("the daemon records what the POST path spoke", () => {
+// Context for the next verdict, but only what the client could actually hear:
+// a reply of "**" is non-empty text that synthesizes to an empty clip.
+test("the daemon records only a POST reply that produced audio", () => {
   const source = readFileSync(join(import.meta.dir, "../../src/daemon.ts"), "utf8");
   const turnCall = source.slice(source.indexOf("onTurn: async (wav, options) => {"));
-  expect(turnCall.slice(0, turnCall.indexOf("onTurnProbe")).includes("this.noteWebSpoken(turn.reply)")).toBe(true);
+  const body = turnCall.slice(0, turnCall.indexOf("onTurnProbe"));
+  expect(body.includes("if (turn.audio.byteLength > 0) this.noteWebSpoken(turn.reply)")).toBe(true);
+});
+
+// The hot window means "moments after Cicero FINISHED speaking", and the server
+// cannot observe that: the browser plays queued audio well past the turn being
+// marked done. Every attempt to track it opened the window at the wrong moment,
+// and an open window SKIPS the classifier — the one failure this cannot afford.
+test("the browser path never claims a hot window", () => {
+  const source = readFileSync(join(import.meta.dir, "../../src/daemon.ts"), "utf8");
+  const gate = source.slice(source.indexOf("private webIntentGate("));
+  const body = gate.slice(0, gate.indexOf("\n  }"));
+  expect(body).toContain("msSinceAssistantSpoke: null");
+  // And no resurrected timestamp to measure one from.
+  expect(source).not.toContain("webLastSpokeAtMs");
 });

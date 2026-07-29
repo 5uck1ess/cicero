@@ -631,3 +631,21 @@ describe("barge-in ordering", () => {
     expect(source).toContain("this.bargeInDiscardedCallback?.();");
   });
 });
+
+describe("what an interrupted turn records", () => {
+  const source = readFileSync(join(import.meta.dir, "../../src/daemon.ts"), "utf8");
+
+  // Barge-in aborts the signal and stops the speaker mid-sentence. Recording
+  // that as fully spoken opens a hot window for speech the room never heard the
+  // end of -- and an open hot window SKIPS the judge entirely.
+  test("a canned or action reply cut short is not recorded as spoken", () => {
+    expect(source).toContain("if (!signal.aborted) this.conversational?.noteSpoken(textToSpeak);");
+  });
+
+  // classifierBackend returns null, never undefined. Comparing against
+  // undefined made this true with no classifier configured at all, which
+  // switched off speculation for operators who have no judge.
+  test("speculation stands down only when a judge will actually exist", () => {
+    expect(source).toContain("this.config.classifierBackend !== null");
+  });
+});
