@@ -44,8 +44,11 @@ test("a vetoed browser utterance never reaches the brain", async () => {
     judge: () => Promise.resolve(false),
   }), out);
   expect(reachedBrain).toBe(false);
-  // The client still sees what was heard, so a veto is visible rather than silent.
-  expect(out.transcripts).toContain("deploy production now");
+  // And nothing is announced: the recording wrapper treats any transcript as a
+  // completed conversation, so an announced veto is persisted to history and
+  // replayed into the brain on the next resume -- the ambient speech would
+  // reach the brain after all, just later. The veto is logged, not published.
+  expect(out.transcripts).toEqual([]);
   expect(out.done_).toBe(true);
 });
 
@@ -106,8 +109,9 @@ test("the non-streaming POST path is judged as well", async () => {
   } as unknown as Parameters<typeof processWebTurn>[1]);
   expect(reachedBrain).toBe(false);
   expect(result.reply).toBe("");
-  // The client still learns what was heard.
-  expect(result.transcript).toBe("send him the files");
+  // Reported as nothing heard: the caller persists what it is told, and a
+  // vetoed utterance recorded as conversation is replayed into the brain later.
+  expect(result.transcript).toBe("");
 });
 
 test("the non-streaming POST path still dispatches an accepted turn", async () => {
@@ -199,4 +203,13 @@ test("the browser path never claims a hot window", () => {
   expect(body).toContain("msSinceAssistantSpoke: null");
   // And no resurrected timestamp to measure one from.
   expect(source).not.toContain("webLastSpokeAtMs");
+});
+
+// An interrupted reply is still speech the room heard. Left out of context, a
+// "yes" answering an interrupted "Should I deploy staging?" is judged with no
+// question in view and can be declined as undirected.
+test("an interrupted browser reply becomes verdict context", () => {
+  const source = readFileSync(join(import.meta.dir, "../../src/daemon.ts"), "utf8");
+  const recover = source.slice(source.indexOf("const recover = {"));
+  expect(recover.slice(0, recover.indexOf("pending:")).includes("this.noteWebSpoken(spokenPrefix)")).toBe(true);
 });

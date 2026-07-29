@@ -1096,6 +1096,26 @@ export class CiceroDaemon {
     // Step 3b: Web voice server (browser audio client). For a headless box with no
     // mic/speakers, the browser is the audio I/O. Off by default. Reuses the
     // STT → brain → TTS pipeline at the provider level (see processWebTurn).
+    // Built BEFORE the web server binds. The browser accepts turns the moment
+    // the port opens, and a judge constructed later leaves every turn in that
+    // window unjudged -- which is indistinguishable, to an operator, from the
+    // feature not working.
+    const judgeCfg = this.config.intentJudge;
+    if (judgeCfg.enabled) {
+      const judge = createIntentJudge(this.providers.classifier, {
+        hotWindowMs: judgeCfg.hotWindowMs,
+        minConfidence: judgeCfg.minConfidence,
+        contextTurns: judgeCfg.contextTurns,
+        timeoutMs: judgeCfg.timeoutMs,
+      });
+      if (judge) {
+        this.intentJudge = judge;
+        log("info", "Intent judge on: utterances are checked against the classifier before they become commands");
+      } else {
+        // Never silently borrow the reply model for a per-utterance decision.
+        log("warn", "intent_judge.enabled is set but no `classifier` backend is configured — every utterance will be accepted as before; see docs/intent-judge.md");
+      }
+    }
     const wv = this.config.web_voice;
     if (wv?.enabled) {
       const webHost = wv.host ?? "0.0.0.0";
@@ -1223,7 +1243,14 @@ export class CiceroDaemon {
       // later should be a fresh question, not a séance.
       let interruptedTail: { text: string; at: number } | null = null;
       const recover = {
-        store: (spokenPrefix: string) => { interruptedTail = { text: spokenPrefix, at: Date.now() }; },
+        store: (spokenPrefix: string) => {
+          interruptedTail = { text: spokenPrefix, at: Date.now() };
+          // The room heard this much before cutting in, so the next verdict is
+          // judged against it. Without it, "yes" answering an interrupted
+          // "Should I deploy staging?" is judged with no question in view and
+          // can be declined as undirected.
+          this.noteWebSpoken(spokenPrefix);
+        },
         pending: () => {
           if (!interruptedTail || Date.now() - interruptedTail.at > 5 * 60 * 1000) return null;
           const t = interruptedTail.text;
@@ -1837,26 +1864,9 @@ export class CiceroDaemon {
     // is configured. It can only ever decline an utterance the listener would
     // have taken, never cause one to be taken -- so a missing or broken judge
     // leaves behavior exactly as it is today.
-    const judgeCfg = this.config.intentJudge;
-    if (judgeCfg.enabled) {
-      const judge = createIntentJudge(this.providers.classifier, {
-        hotWindowMs: judgeCfg.hotWindowMs,
-        minConfidence: judgeCfg.minConfidence,
-        contextTurns: judgeCfg.contextTurns,
-        timeoutMs: judgeCfg.timeoutMs,
-      });
-      if (judge) {
-        this.conversational.setIntentJudge(judge);
-        // Kept as well as handed to the listener: a headless box never STARTS
-        // that listener, so the browser is the only capture path there is, and
-        // a veto that only works on the host mic would be no veto at all there.
-        this.intentJudge = judge;
-        log("info", "Intent judge on: utterances are checked against the classifier before they become commands");
-      } else {
-        // Never silently borrow the reply model for a per-utterance decision.
-        log("warn", "intent_judge.enabled is set but no `classifier` backend is configured — every utterance will be accepted as before; see docs/intent-judge.md");
-      }
-    }
+    // Constructed before the web server bound; hand it to the host listener now
+    // that the listener exists.
+    if (this.intentJudge) this.conversational.setIntentJudge(this.intentJudge);
     // Lifecycle cleanup belongs to voice-mode deactivation itself, not to the
     // optional clap feature. This runs for dashboard/hotkey/spoken shutdown and
     // recorder failures alike, and does not restart clap during daemon shutdown.

@@ -101,7 +101,10 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     if (!transcript) return { transcript: "", reply: "", audio: EMPTY };
     // Same veto the streaming path runs: this is browser-captured audio too,
     // and on a headless box it is the only capture path there is.
-    if (!(await dispatchAllowed(transcript, deps))) return { transcript, reply: "", audio: EMPTY };
+    // Reported as nothing heard, not as a heard-but-unanswered turn: the caller
+    // persists what it is told, and a vetoed utterance recorded as conversation
+    // is replayed into the brain later. Same reasoning as the streaming path.
+    if (!(await dispatchAllowed(transcript, deps))) return { transcript: "", reply: "", audio: EMPTY };
     // The judge resolves as ACCEPT when it is cancelled -- failing open is the
     // whole design -- so acceptance says nothing about whether the turn is
     // still wanted. Without this, an aborted turn walks straight into the TLDR
@@ -784,15 +787,14 @@ export async function streamWebTurn(
       }
       if (transcript) {
         timer.mark("stt");
-        sink.transcript(transcript);
-        // Speculation already started the brain, so a veto here has to drop
-        // that stream rather than adopt it -- the same disposal the abort path
-        // above performs.
+        // Same ordering as the normal path: nothing is announced, and so
+        // nothing is persisted, until the turn has passed the veto.
         if (!(await dispatchAllowed(transcript, deps))) {
           await spec.abort();
           sink.done();
           return;
         }
+        sink.transcript(transcript);
         if (deps.signal?.aborted || sink.aborted()) {
           await spec.abort();
           return;
@@ -840,9 +842,13 @@ export async function streamWebTurn(
     const transcript = (await deps.stt.transcribe(tmpFile))?.trim() ?? "";
     if (deps.signal?.aborted || sink.aborted()) return;
     timer.mark("stt");
-    sink.transcript(transcript);
-    if (!transcript) { sink.done(); return; }
+    if (!transcript) { sink.transcript(transcript); sink.done(); return; }
+    // Judged BEFORE the transcript is emitted. The recording wrapper treats any
+    // transcript as a completed conversation, so a vetoed utterance announced
+    // here is persisted to history and replayed into the brain on the next
+    // resume -- the ambient speech reaches the brain after all, just later.
     if (!(await dispatchAllowed(transcript, deps))) { sink.done(); return; }
+    sink.transcript(transcript);
     // Cancellation resolves the judge as ACCEPT, so re-check before spending
     // anything on a turn that is already gone.
     if (deps.signal?.aborted || sink.aborted()) return;
