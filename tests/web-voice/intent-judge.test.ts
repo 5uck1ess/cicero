@@ -140,8 +140,49 @@ test("the transport signal reaches the judge", async () => {
 test("the daemon passes the gate to every browser entry point", () => {
   const source = readFileSync(join(import.meta.dir, "../../src/daemon.ts"), "utf8");
   // processWebTurn (POST /api/turn) and streamWebTurn (WebSocket) both take it.
-  const turnCall = source.slice(source.indexOf("onTurn: (wav, options) => processWebTurn(wav, {"));
-  expect(turnCall.slice(0, turnCall.indexOf("})")).includes("judge: this.webIntentGate()")).toBe(true);
+  const turnCall = source.slice(source.indexOf("onTurn: async (wav, options) => {"));
+  expect(turnCall.slice(0, turnCall.indexOf("onTurnProbe")).includes("judge: this.webIntentGate()")).toBe(true);
   const streamCall = source.slice(source.indexOf("onStreamTurn: async (wav, sink, options)"));
   expect(streamCall.slice(0, streamCall.indexOf("onSpeculate")).includes("judge: this.webIntentGate()")).toBe(true);
+});
+
+// Cancellation resolves the judge as ACCEPT — failing open is the design — so
+// acceptance says nothing about whether the turn is still wanted. Without a
+// re-check, an aborted turn walks into the reply path and spends a TTS call
+// nobody is waiting for.
+test("a turn aborted while the judge is pending spends nothing after it", async () => {
+  const controller = new AbortController();
+  let synthesized = false;
+  let reachedBrain = false;
+  const out = sink();
+  await streamWebTurn(WAV, deps({
+    brain: { send: () => { reachedBrain = true; return Promise.resolve("done"); } } as unknown as WebStreamDeps["brain"],
+    tts: { generateAudio: () => { synthesized = true; return Promise.resolve(new ArrayBuffer(0)); } } as unknown as WebStreamDeps["tts"],
+    // Aborts mid-decision, then accepts — exactly what a cancelled judge does.
+    judge: () => { controller.abort(); return Promise.resolve(true); },
+    signal: controller.signal,
+  }), out);
+  expect(reachedBrain).toBe(false);
+  expect(synthesized).toBe(false);
+});
+
+test("the POST path also stops after a judge that accepted on cancellation", async () => {
+  const controller = new AbortController();
+  let reachedBrain = false;
+  await processWebTurn(WAV, {
+    stt: { transcribe: () => Promise.resolve("details") },
+    brain: { send: () => { reachedBrain = true; return Promise.resolve("done"); } },
+    tts: { generateAudio: () => Promise.resolve(new ArrayBuffer(0)) },
+    judge: () => { controller.abort(); return Promise.resolve(true); },
+    signal: controller.signal,
+  } as unknown as Parameters<typeof processWebTurn>[1]).catch(() => undefined);
+  expect(reachedBrain).toBe(false);
+});
+
+// The POST path has to record what it spoke, or it never opens a hot window and
+// every follow-up on that transport is sent to the classifier.
+test("the daemon records what the POST path spoke", () => {
+  const source = readFileSync(join(import.meta.dir, "../../src/daemon.ts"), "utf8");
+  const turnCall = source.slice(source.indexOf("onTurn: async (wav, options) => {"));
+  expect(turnCall.slice(0, turnCall.indexOf("onTurnProbe")).includes("this.noteWebSpoken(turn.reply)")).toBe(true);
 });

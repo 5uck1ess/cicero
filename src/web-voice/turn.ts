@@ -102,6 +102,12 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     // Same veto the streaming path runs: this is browser-captured audio too,
     // and on a headless box it is the only capture path there is.
     if (!(await dispatchAllowed(transcript, deps))) return { transcript, reply: "", audio: EMPTY };
+    // The judge resolves as ACCEPT when it is cancelled -- failing open is the
+    // whole design -- so acceptance says nothing about whether the turn is
+    // still wanted. Without this, an aborted turn walks straight into the TLDR
+    // fast path below and starts a TTS request nobody is waiting for, holding
+    // the server's lease until it finishes.
+    throwIfTurnAborted(deps.signal);
 
     // Expand request: speak the gated remainder of the previous reply, no brain turn.
     if (deps.tldr?.pending && isExpandRequest(transcript)) {
@@ -787,6 +793,10 @@ export async function streamWebTurn(
           sink.done();
           return;
         }
+        if (deps.signal?.aborted || sink.aborted()) {
+          await spec.abort();
+          return;
+        }
         try {
           await streamReply(transcript, deps, sink, timer, spec.tokens() ?? undefined);
         } catch (err: unknown) {
@@ -833,6 +843,9 @@ export async function streamWebTurn(
     sink.transcript(transcript);
     if (!transcript) { sink.done(); return; }
     if (!(await dispatchAllowed(transcript, deps))) { sink.done(); return; }
+    // Cancellation resolves the judge as ACCEPT, so re-check before spending
+    // anything on a turn that is already gone.
+    if (deps.signal?.aborted || sink.aborted()) return;
     const tag = await settleTone(tonePending?.result ?? null, deps.tone?.graceMs);
     await streamReply(transcript, deps, sink, timer, undefined, tag);
   } catch (err: unknown) {

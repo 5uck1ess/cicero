@@ -1448,7 +1448,8 @@ export class CiceroDaemon {
         // switchboard has an employee pinned, that lane's TTS voice override
         // applies (resolved per sentence, so the pin ack already sounds like
         // the employee). Notifications stay in Cicero's own voice.
-        onTurn: (wav, options) => processWebTurn(wav, {
+        onTurn: async (wav, options) => {
+          const turn = await processWebTurn(wav, {
           // Same veto as the streaming path. Adding the option without wiring
           // it here is what left this entry point open the first time round.
           judge: this.webIntentGate(),
@@ -1461,7 +1462,14 @@ export class CiceroDaemon {
           signal: options?.signal,
           trackBackground: options?.trackBackground,
           operationalContext: (signal) => this.operationalContext(signal),
-        }),
+          });
+          // The browser heard this, so the next verdict is judged against it.
+          // Without it the POST path never opens a hot window, and a direct
+          // answer to Cicero's own question -- the case a judge most easily
+          // gets wrong -- goes to the classifier instead of being taken.
+          this.noteWebSpoken(turn.reply);
+          return turn;
+        },
         // Semantic end-of-turn probes (see probe.ts): the client asks mid-pause
         // whether the speaker sounds done. this.turnDetector is read lazily —
         // it's created later in startup; probes before then return null and the
