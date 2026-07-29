@@ -730,6 +730,24 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))()).not.toThrow();
   });
 
+  // Bracketed IPv6 is the same host unbracketed: runtime networking strips the
+  // brackets before building the URL, so [::1] and ::1 reach one server.
+  test("a bracketed IPv6 loopback is the same seat as the bare form", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      '  host: "::1"',
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      '  host: "[::1]"',
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/it serves one model/);
+  });
+
   // Round 12 (Codex): sharedEndpoint compared host strings literally, so
   // localhost:8080 and 127.0.0.1:8080 read as two different endpoints -- the
   // deliberate share went unrecognised and the collision check then reported

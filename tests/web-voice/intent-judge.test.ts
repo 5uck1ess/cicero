@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { streamWebTurn, streamWebTextTurn, type WebStreamDeps, type WebReplySink } from "../../src/web-voice/turn";
+import { processWebTurn, streamWebTurn, streamWebTextTurn, type WebStreamDeps, type WebReplySink } from "../../src/web-voice/turn";
 
 /**
  * The browser is not a second-class capture path. A headless box never starts
@@ -90,4 +90,44 @@ test("typed text is never judged", async () => {
   }), out);
   expect(judged).toBe(false);
   expect(reachedBrain).toBe(true);
+});
+
+// The POST path is browser-captured audio too. Wiring only the streaming path
+// left the veto off for every non-streaming client.
+test("the non-streaming POST path is judged as well", async () => {
+  let reachedBrain = false;
+  const result = await processWebTurn(WAV, {
+    stt: { transcribe: () => Promise.resolve("send him the files") },
+    brain: { send: () => { reachedBrain = true; return Promise.resolve("done"); } },
+    tts: { generateAudio: () => Promise.resolve(new ArrayBuffer(0)) },
+    judge: () => Promise.resolve(false),
+  } as unknown as Parameters<typeof processWebTurn>[1]);
+  expect(reachedBrain).toBe(false);
+  expect(result.reply).toBe("");
+  // The client still learns what was heard.
+  expect(result.transcript).toBe("send him the files");
+});
+
+test("the non-streaming POST path still dispatches an accepted turn", async () => {
+  let reachedBrain = false;
+  await processWebTurn(WAV, {
+    stt: { transcribe: () => Promise.resolve("send him the files") },
+    brain: { send: () => { reachedBrain = true; return Promise.resolve("done"); } },
+    tts: { generateAudio: () => Promise.resolve(new ArrayBuffer(0)) },
+    judge: () => Promise.resolve(true),
+  } as unknown as Parameters<typeof processWebTurn>[1]);
+  expect(reachedBrain).toBe(true);
+});
+
+// A classifier can be configured with a deadline in the minutes. If the veto
+// does not carry the transport's signal, stopping the daemon leaves it live and
+// the web server's shutdown drain waits on it.
+test("the transport signal reaches the judge", async () => {
+  const controller = new AbortController();
+  let seen: AbortSignal | undefined;
+  await streamWebTurn(WAV, deps({
+    judge: (_transcript: string, signal?: AbortSignal) => { seen = signal; return Promise.resolve(true); },
+    signal: controller.signal,
+  }), sink());
+  expect(seen).toBe(controller.signal);
 });

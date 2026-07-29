@@ -627,6 +627,8 @@ export class CiceroDaemon {
   private readonly webRecentUtterances: string[] = [];
   private readonly webRecentAssistantSpeech: string[] = [];
   private webLastSpokeAtMs: number | null = null;
+  /** True while a browser reply is being spoken, so a new turn is an interruption. */
+  private webReplyInFlight = false;
   private activeLocalTurn: AbortController | null = null;
   /** Every local mic/dashboard command, including superseded turns winding down. */
   private localTurnTasks = new Set<Promise<void>>();
@@ -1386,7 +1388,19 @@ export class CiceroDaemon {
             "Set web_voice.speculative.allow_tool_brains: true to accept that.",
         );
       }
-      const speculator = specCfg?.enabled && this.config.turn.enabled && this.brain.sendStream && specSideEffectsAllowed
+      // Speculation starts the brain on the probe TAIL -- before a final
+      // transcript exists, so before there is anything to judge. A confident
+      // veto therefore lands after the brain has already recorded the exchange
+      // and, where tool brains are permitted, possibly acted; aborting the
+      // stream cannot reverse either. Stopping ambient speech from doing
+      // exactly that is the whole point of the veto, so the veto wins and
+      // speculation stands down. Read from CONFIG rather than the constructed
+      // judge because the web server is built before the judge is.
+      const judgeWillRun = this.config.intentJudge.enabled && this.config.classifierBackend !== undefined;
+      if (judgeWillRun && specCfg?.enabled) {
+        log("info", "Speculation off while the intent judge is on: speculation would reach the brain before the veto could decline the turn");
+      }
+      const speculator = specCfg?.enabled && !judgeWillRun && this.config.turn.enabled && this.brain.sendStream && specSideEffectsAllowed
         ? makeSpeculator({
             stt: this.providers.stt,
             brain: this.brain,
@@ -1474,11 +1488,11 @@ export class CiceroDaemon {
           try {
             const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
-              await streamWebTurn(wav, deps, sink, options.spec);
+              await streamWebTurn(wav, deps, this.trackWebReply(sink), options.spec);
               return;
             }
             const recorded = createRecordedWebTurn(sink, webHistory, noteTurn, () => this.brain.activeLane?.());
-            await streamWebTurn(wav, deps, recorded.sink, options?.spec);
+            await streamWebTurn(wav, deps, this.trackWebReply(recorded.sink), options?.spec);
             await recorded.drain();
           } catch (error) {
             throw new Error(`recorded web voice turn failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
@@ -1991,6 +2005,26 @@ export class CiceroDaemon {
     if (ring.length > 6) ring.splice(0, ring.length - 6);
   }
 
+  /**
+   * Mark a browser reply as in flight from its first spoken sentence until the
+   * turn ends, so a turn arriving in that window is judged as an interruption
+   * rather than measured against the hot window of some earlier, finished
+   * reply. Set on the first sentence, not at turn start, or this turn's own
+   * verdict would see itself as an interruption.
+   */
+  private trackWebReply(sink: WebReplySink): WebReplySink {
+    const owner = this;
+    return {
+      transcript: (text) => sink.transcript(text),
+      sentence(text) { owner.webReplyInFlight = true; sink.sentence(text); },
+      audio: (wav) => sink.audio(wav),
+      control: (message) => sink.control(message),
+      done() { owner.webReplyInFlight = false; sink.done(); },
+      error(message) { owner.webReplyInFlight = false; sink.error(message); },
+      aborted: () => sink.aborted(),
+    };
+  }
+
   /** What the browser just heard Cicero say — context for the next verdict. */
   private noteWebSpoken(text: string): void {
     const spoken = text.trim();
@@ -2003,16 +2037,23 @@ export class CiceroDaemon {
    * The browser's half of the addressed-to-me veto. Undefined when no judge is
    * configured, which leaves every transcript dispatched exactly as before.
    */
-  private webIntentGate(): ((transcript: string) => Promise<boolean>) | undefined {
+  private webIntentGate(): ((transcript: string, signal?: AbortSignal) => Promise<boolean>) | undefined {
     const judge = this.intentJudge;
     if (!judge) return undefined;
-    return async (transcript: string): Promise<boolean> => {
+    return async (transcript: string, signal?: AbortSignal): Promise<boolean> => {
+      // A turn arriving while a reply is still being spoken is an interruption,
+      // not a follow-up -- the same distinction the host listener draws. The
+      // hot window measures from a COMPLETED reply, so left in place it would
+      // skip the classifier entirely on the browser's barge-in path.
+      const interrupting = this.webReplyInFlight;
       const decision = await judge.decide({
         utterance: transcript,
         recentUtterances: this.webRecentUtterances,
         recentAssistantSpeech: this.webRecentAssistantSpeech,
-        msSinceAssistantSpoke: this.webLastSpokeAtMs === null ? null : Date.now() - this.webLastSpokeAtMs,
-      });
+        msSinceAssistantSpoke: interrupting || this.webLastSpokeAtMs === null
+          ? null
+          : Date.now() - this.webLastSpokeAtMs,
+      }, signal);
       // Room speech is context whether or not it was for us.
       CiceroDaemon.pushWebContext(this.webRecentUtterances, transcript);
       if (decision.accept) return true;

@@ -574,8 +574,14 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     const classifier = config.classifier;
     const portOf = (value: unknown): number | undefined =>
       Number.isInteger(value) ? value as number : undefined;
+    // Unbracketed to match runtime networking, which strips the brackets off an
+    // IPv6 literal before building the URL. Left bracketed here, `[::1]` and
+    // `::1` compared as different endpoints while resolving to the same server,
+    // so a second role adopted it and quietly ran on the wrong model.
     const hostOf = (value: unknown): string =>
-      typeof value === "string" && value.trim() ? value.trim().toLowerCase() : "127.0.0.1";
+      typeof value === "string" && value.trim()
+        ? value.trim().toLowerCase().replace(/^\[|\]$/g, "")
+        : "127.0.0.1";
     const isLocal = (host: string): boolean =>
       host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0";
     const servers = isRecord(config.servers) ? config.servers : {};

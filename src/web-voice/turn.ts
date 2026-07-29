@@ -23,6 +23,12 @@ import {
  * narrowed to the one method each so the turn logic is trivially testable.
  */
 export interface WebTurnDeps {
+  /**
+   * Optional "was that addressed to me?" veto — see {@link WebStreamDeps.judge}.
+   * The non-streaming POST path needs it for the same reason the streaming one
+   * does: it is browser-captured audio either way.
+   */
+  judge?: (transcript: string, signal?: AbortSignal) => Promise<boolean>;
   stt: Pick<STTProvider, "transcribe">;
   brain: Pick<Brain, "send"> & { wasControlTurn?: Brain["wasControlTurn"] };
   tts: Pick<TTSProvider, "generateAudio">;
@@ -93,6 +99,9 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     const transcript = (await deps.stt.transcribe(tmpFile))?.trim() ?? "";
     throwIfTurnAborted(deps.signal);
     if (!transcript) return { transcript: "", reply: "", audio: EMPTY };
+    // Same veto the streaming path runs: this is browser-captured audio too,
+    // and on a headless box it is the only capture path there is.
+    if (!(await dispatchAllowed(transcript, deps))) return { transcript, reply: "", audio: EMPTY };
 
     // Expand request: speak the gated remainder of the previous reply, no brain turn.
     if (deps.tldr?.pending && isExpandRequest(transcript)) {
@@ -197,7 +206,7 @@ export interface WebStreamDeps {
    * only capture path there is — the judged host listener never starts. Typed
    * text is left alone: someone who types a sentence has already addressed it.
    */
-  judge?: (transcript: string) => Promise<boolean>;
+  judge?: (transcript: string, signal?: AbortSignal) => Promise<boolean>;
   /** Cancels the transport-owned turn and its brain invocation. */
   signal?: AbortSignal;
   /** Register work intentionally detached after long-turn parking. */
@@ -839,10 +848,15 @@ export async function streamWebTurn(
  * Run the optional addressed-to-me veto. Absent judge, or any failure inside
  * it, dispatches — this can only ever decline a turn, never cause one.
  */
-async function dispatchAllowed(transcript: string, deps: WebStreamDeps): Promise<boolean> {
+async function dispatchAllowed(
+  transcript: string,
+  deps: Pick<WebStreamDeps, "judge" | "signal">,
+): Promise<boolean> {
   if (!deps.judge) return true;
   try {
-    return await deps.judge(transcript);
+    // The transport's signal, so a stalled classifier dies with the turn rather
+    // than outliving it and holding up the web server's shutdown drain.
+    return await deps.judge(transcript, deps.signal);
   } catch (err: unknown) {
     log("info", `web voice: intent judge failed, taking the turn: ${err instanceof Error ? err.message : String(err)}`);
     return true;
