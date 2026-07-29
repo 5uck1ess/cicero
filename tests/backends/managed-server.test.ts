@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -66,6 +67,61 @@ describe("startManagedServer", () => {
     });
     expect(result).toBeNull();
   });
+
+  // Round 8 (Codex): readiness can run for minutes, and the caller gets no handle
+  // on the child until start() resolves — so a stop() arriving inside that window
+  // reached nothing and the process outlived its owner. An aborted startup now
+  // reaps the child it already spawned.
+  test("an aborted startup reaps the child it already spawned", async () => {
+    const reservation = Bun.serve({ port: 0, fetch: () => new Response("reserved") });
+    const port = reservation.port;
+    await Promise.resolve(reservation.stop(true));
+
+    const abort = new AbortController();
+    // Never becomes healthy, and would otherwise hold the full budget.
+    const startup = startManagedServer({
+      name: "cancel-test",
+      port,
+      command: [process.execPath, "-e", "await Bun.sleep(30000)"],
+      healthUrl: `http://127.0.0.1:${port}/`,
+      timeoutMs: 30_000,
+      intervalMs: 50,
+      signal: abort.signal,
+    });
+
+    // Let it spawn, then stop wanting it.
+    await Bun.sleep(150);
+    abort.abort(new Error("owner is stopping"));
+    const started = performance.now();
+    const result = await startup;
+    const elapsed = performance.now() - started;
+
+    expect(result).toBeNull();
+    // Returned on the cancellation, nowhere near the 30s readiness budget.
+    expect(elapsed).toBeLessThan(5_000);
+  }, 40_000);
+
+  test("a startup cancelled before the spawn never launches a child", async () => {
+    const reservation = Bun.serve({ port: 0, fetch: () => new Response("reserved") });
+    const port = reservation.port;
+    await Promise.resolve(reservation.stop(true));
+
+    const abort = new AbortController();
+    abort.abort(new Error("owner is stopping"));
+    const marker = join(mkdtempSync(join(tmpdir(), "cicero-precancel-test-")), "ran");
+    const result = await startManagedServer({
+      name: "precancel-test",
+      port,
+      command: [process.execPath, "-e", `await Bun.write(${JSON.stringify(marker)}, "ran")`],
+      healthUrl: `http://127.0.0.1:${port}/`,
+      timeoutMs: 5_000,
+      signal: abort.signal,
+    });
+
+    expect(result).toBeNull();
+    await Bun.sleep(100);
+    expect(existsSync(marker)).toBe(false);
+  }, 20_000);
 
   test("startup polling does not sleep beyond its absolute readiness budget", async () => {
     const reservation = Bun.serve({ port: 0, fetch: () => new Response("reserved") });

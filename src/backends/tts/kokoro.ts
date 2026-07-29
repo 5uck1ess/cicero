@@ -27,7 +27,28 @@ export class KokoroProvider implements TTSProvider {
   private host?: string;
   private port: number;
   private voice: string;
+  /** Fresh cancellation scope for one startup; replaces any settled predecessor. */
+  private beginStartup(): AbortSignal {
+    const abort = new AbortController();
+    this.startAbort = abort;
+    return abort.signal;
+  }
+
+  /**
+   * Latch synchronously, BEFORE any await, so a launch in flight sees it and
+   * reaps the child it already spawned. Public because an owner holding a
+   * candidate (see ProviderSlot) must be able to cancel a minutes-long startup
+   * without waiting it out first. Safe to call at any time, including twice.
+   */
+  cancelStartup(): void {
+    this.startAbort?.abort(new Error("kokoro" + " is stopping"));
+    this.startAbort = null;
+  }
+
   private managed: ManagedProcess | null = null;
+  /** Cancels a startup still in flight, so stop() can reach a child that
+   *  start() has not published yet. Set synchronously by stop(). */
+  private startAbort: AbortController | null = null;
   private device: string;
   private readonly timeoutMs: number;
 
@@ -84,6 +105,7 @@ export class KokoroProvider implements TTSProvider {
     const server = join(projectRoot, "servers", "tts_kokoro_server.py");
 
     this.managed = await startManagedServer({
+      signal: this.beginStartup(),
       name: "kokoro",
       port: this.port,
       command: [
@@ -104,6 +126,8 @@ export class KokoroProvider implements TTSProvider {
   }
 
   async stop(): Promise<void> {
+    // Synchronous, before any await: a startup still in flight must see this.
+    this.cancelStartup();
     if (this.managed) {
       const managed = this.managed;
       try {

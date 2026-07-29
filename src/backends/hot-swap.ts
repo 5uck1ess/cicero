@@ -31,6 +31,19 @@ function isPinnable<T>(value: unknown): value is PinnableProvider<T> {
  * turns pick up the replacement. A plain (non-swappable) provider has no
  * generations, so this is a no-op pin over the provider itself.
  */
+/**
+ * Optional capability: abandon a startup that has not resolved yet. A managed
+ * provider spawns its child before readiness completes, so without this an owner
+ * can only wait the whole launch out — see stopQuarantined. Providers without it
+ * are unaffected (nothing to cancel).
+ */
+interface CancellableStartup { cancelStartup?(): void }
+
+function cancelProviderStartup(provider: unknown): void {
+  const cancellable = provider as CancellableStartup;
+  if (typeof cancellable.cancelStartup === "function") cancellable.cancelStartup();
+}
+
 export function pinGeneration<T extends object>(provider: T): GenerationPin<T> {
   if (isPinnable<T>(provider)) return provider.pinGeneration();
   return { provider, release: () => {} };
@@ -377,6 +390,17 @@ export class ProviderSlot<T extends SwappableProvider> {
    */
   private async stopQuarantined(provider: T, startup: Promise<void> | undefined): Promise<void> {
     if (startup) {
+      // Round 8 (Codex): cancel the launch before waiting on it. A managed
+      // startup can legitimately run for minutes (a cold model fetch), and this
+      // deadline is far shorter — so the wait expired while the launch ran on,
+      // and shutdown completed leaving a spawned child with no owner. Nothing
+      // else could reap it: the handle lives only in this process's memory, and
+      // a swap candidate is never published to config.
+      //
+      // Cancelling is synchronous and cannot fail, so the barrier below then
+      // settles promptly instead of timing out. The stop after it stays the one
+      // authoritative teardown.
+      cancelProviderStartup(provider);
       await within(startup, this.cleanupTimeoutMs, `${provider.name} candidate startup`);
       // Settled now, so a later retry has nothing left to wait for.
       this.quarantined.set(provider, undefined);

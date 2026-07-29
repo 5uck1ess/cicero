@@ -48,6 +48,13 @@ interface StartOpts {
    * gives up after 3 consecutive failed revivals (loud error each time).
    */
   supervise?: boolean;
+  /**
+   * Cancels an in-flight startup. Readiness can take minutes, and a stop()
+   * arriving inside that window used to reach nothing: the caller has no handle
+   * on the child until start() resolves. Aborting makes the launch reap its own
+   * child on the way out, so the process cannot outlive the daemon.
+   */
+  signal?: AbortSignal;
 }
 
 const REVIVE_BACKOFF_MS = [1000, 5000, 15000];
@@ -445,12 +452,20 @@ export async function startManagedServer(opts: StartOpts): Promise<ManagedProces
     return null;
   }
 
+  // Everything above this point is async (health probe, binary resolution), so a
+  // stop() can land before the spawn. Check the latch here rather than starting
+  // a child nobody is waiting for any more.
+  if (opts.signal?.aborted) {
+    log("info", `${name} startup cancelled before launch`);
+    return null;
+  }
+
   const proc = spawnOwnedProcess(command, {
     stdout: "ignore", stderr: "pipe", env: { ...process.env },
   });
   const stderrTail = collectStderrTail(proc);
 
-  const outcome = await waitForHealthOrExit(proc, healthUrl, timeoutMs, intervalMs);
+  const outcome = await waitForHealthOrExit(proc, healthUrl, timeoutMs, intervalMs, opts.signal);
   if (outcome === "healthy") {
     log("ok", `${name} server ready on :${port}`);
     const mp: ManagedProcess = { proc, port, managed: true, mode };
@@ -460,6 +475,10 @@ export async function startManagedServer(opts: StartOpts): Promise<ManagedProces
 
   if (outcome === "exited") {
     log("error", `${name} server exited during startup (code ${proc.exitCode ?? proc.signalCode})`);
+  } else if (outcome === "stopped") {
+    // Not a failure: the owner asked to stop mid-launch. Reaped below, like
+    // every other unsuccessful outcome.
+    log("info", `${name} startup cancelled — reaping the child it had already spawned`);
   } else {
     log("warn", `${name} server did not become healthy in ${timeoutMs / 1000}s — stopping it and continuing in degraded mode`);
   }

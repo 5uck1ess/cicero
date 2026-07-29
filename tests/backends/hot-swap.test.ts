@@ -321,6 +321,36 @@ describe("turn-length generation pins", () => {
     expect(owner.currentProvider()).toBe(old);
   });
 
+  // Round 8 (Codex): a managed candidate spawns its child before readiness
+  // completes, and readiness can legitimately run for minutes (VibeVoice allows
+  // 300s for a cold model fetch). Shutdown waited that barrier out under a much
+  // shorter cleanup deadline, so the wait expired, shutdown finished anyway, and
+  // the spawned child outlived the daemon with its only handle in the memory of
+  // a process that had just exited.
+  test("a candidate startup is cancelled during shutdown, not waited out", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    const next = new FakeVoiceProvider("tts-next") as FakeVoiceProvider & { cancelStartup(): void };
+    // A launch that settles only when cancelled — the cold-fetch case.
+    let releaseStart!: () => void;
+    next.startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+    let cancelled = 0;
+    next.cancelStartup = () => { cancelled += 1; releaseStart(); };
+
+    // Deliberately shorter than the launch: the point is that shutdown does not
+    // depend on this deadline at all.
+    const owner = new ProviderSlot<TTSProvider>(old, { cleanupTimeoutMs: 200 });
+    const swapping = settle(owner.swap(next, () => { /* never persisted */ }));
+    await Bun.sleep(5);
+
+    await owner.stop();
+    expect(cancelled).toBe(1);
+    expect((await swapping)?.message).toMatch(/shutting down/);
+    // And the candidate was still reaped exactly once, by the one authoritative
+    // stop after the barrier — cancelling is not a substitute for teardown.
+    expect(next.stops).toBe(1);
+    expect(next.reaped).toBe(1);
+  });
+
   test("a preparing candidate whose stop fails during shutdown is retained, not lost", async () => {
     const old = new FakeVoiceProvider("tts-old");
     const owner = new ProviderSlot<TTSProvider>(old);
