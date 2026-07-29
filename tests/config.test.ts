@@ -326,6 +326,103 @@ describe("Config — fail-fast validation", () => {
     expect(() => loadYaml(yaml)()).not.toThrow();
   });
 
+  // Round 4 (Codex): the classifier block ships COMMENTED OUT, so schema
+  // validation never saw it — and it shipped on web_voice's port, which any
+  // operator following the instructions would have copied verbatim.
+  test("every commented example block is valid once uncommented in place", () => {
+    const yaml = readFileSync(join(import.meta.dir, "..", "config.yaml.example"), "utf8");
+    const lines = yaml.split("\n");
+    // Find each commented-out top-level block: a "# key:" line plus the
+    // indented "#   ..." lines under it.
+    const blocks: Array<{ start: number; end: number; key: string }> = [];
+    let current: { start: number; end: number; key: string } | null = null;
+    for (const [index, line] of lines.entries()) {
+      const opener = /^# {0,2}([a-z_]+):\s*$/.exec(line);
+      if (opener) {
+        current = { start: index, end: index, key: opener[1]! };
+        blocks.push(current);
+        continue;
+      }
+      if (current && /^# {3,}\S/.test(line)) {
+        current.end = index;
+        continue;
+      }
+      current = null;
+    }
+    expect(blocks.map((block) => block.key)).toContain("classifier");
+
+    // Uncommenting one IN PLACE is what an operator actually does, so validate
+    // it against the rest of the shipped file — a block that is fine alone can
+    // still collide with an active listener's port.
+    for (const block of blocks) {
+      const merged = lines.map((line, index) =>
+        index >= block.start && index <= block.end ? line.replace(/^# ?/, "") : line);
+      expect(() => loadYaml(merged.join("\n"))(), `uncommenting ${block.key}:`).not.toThrow();
+    }
+  });
+
+  // Round 4 (Codex): startManagedServer() adopts a server already healthy on a
+  // port instead of starting one, and a chat request's `model` is informational
+  // to llama-server — so a classifier pointed at another listener's port never
+  // loads its model, classifies on whatever is there, and reports healthy.
+  test("a classifier sharing the reply model's endpoint with a different model is refused", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier resolves to the same endpoint as llm but names a different model/);
+  });
+
+  test("deliberately sharing one server for both roles stays allowed", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: one-model-for-both",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: one-model-for-both",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  test("a classifier port already used by another local listener is refused", () => {
+    expect(loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  host: 127.0.0.1",
+      "  port: 8090",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice\.port/);
+  });
+
+  test("a remote classifier is not compared against local ports", () => {
+    expect(() => loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  host: classifier.example",
+      "  port: 8090",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
   test("rejects unknown built-in keys with actionable suggestions", () => {
     expect(loadYaml([
       "headles: true",

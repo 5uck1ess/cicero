@@ -139,10 +139,15 @@ llm:
 # reply model is far too expensive to run on every utterance. Same shape as an
 # `llm:` section. There is no default and no fallback: leave this out and the
 # features that need it stay off and log why.
+# It needs its OWN port: a local server that is already healthy on a port is
+# reused as-is, so pointing this at the reply model's port (or web_voice's, or
+# any other listener above) silently runs classification on whatever is already
+# there — or fails to bind. Cicero refuses that configuration rather than
+# pretending the model loaded.
 # classifier:
 #   backend: llama-cpp
 #   host: 127.0.0.1
-#   port: 8090
+#   port: 8093
 #   model: your-small-model
 
 brain:

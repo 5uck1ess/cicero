@@ -197,6 +197,31 @@ describe("classifier doctor coverage", () => {
     expect(text).toContain("classifier.");
     expect(text).not.toMatch(/\bllm\./);
   });
+
+  // Round 4 (Codex): the OpenAI-compatible branches are the ones that carry
+  // credential remediation, and both hardcoded `llm.` — so a broken classifier
+  // endpoint sent the operator to edit the unrelated reply role. Neither branch
+  // is reachable through a llama-cpp check, which is why the test above missed
+  // it.
+  test("credential remediation names the classifier role, not llm", async () => {
+    const embedded = await collectChecks(
+      doctorConfig({ backend: "openai", baseUrl: "https://user:pass@classifier.example/v1", model: "tiny" }),
+      { which: (b: string) => `/mock/${b}` },
+    );
+    const credentials = embedded.find((c) => c.name.startsWith("classifier"));
+    expect(credentials!.hint).toContain("classifier.apiKey");
+    expect(`${credentials!.detail ?? ""} ${credentials!.hint ?? ""}`).not.toMatch(/\bllm\./);
+    // And the secret itself never reaches the report.
+    expect(`${credentials!.detail ?? ""} ${credentials!.hint ?? ""}`).not.toContain("pass");
+
+    const missingKey = await collectChecks(
+      doctorConfig({ backend: "openai", baseUrl: "https://classifier.example/v1", model: "tiny" }),
+      { which: (b: string) => `/mock/${b}`, env: {} },
+    );
+    const missing = missingKey.find((c) => c.name.startsWith("classifier"));
+    expect(missing!.hint).toContain("classifier.apiKeyEnv");
+    expect(`${missing!.detail ?? ""} ${missing!.hint ?? ""}`).not.toMatch(/\bllm\./);
+  });
 });
 
 describe("classifier lifecycle", () => {

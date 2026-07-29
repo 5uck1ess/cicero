@@ -498,6 +498,59 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
   }
 
+  // A local model server that is ALREADY healthy on a port is reused as-is —
+  // startManagedServer() adopts it rather than starting a second one — and a
+  // chat request's `model` field is informational to llama-server. So pointing
+  // the classifier at a port something else already serves does not load the
+  // classifier's model; it silently classifies on whatever is listening there,
+  // and reports healthy. An explicitly configured collision is an error, not a
+  // silent fallback.
+  if (config.classifier !== undefined && isRecord(config.classifier)) {
+    const classifier = config.classifier;
+    const llm = isRecord(config.llm) ? config.llm : null;
+    const localPort = (value: unknown): number | undefined =>
+      Number.isInteger(value) ? value as number : undefined;
+    const host = (value: unknown): string =>
+      typeof value === "string" && value.trim() ? value.trim().toLowerCase() : "127.0.0.1";
+    const classifierHost = host(classifier.host);
+    const classifierPort = localPort(classifier.port);
+    // Same backend, same host, same port (explicit or both defaulted) is ONE
+    // server. Sharing it is legitimate — as long as both roles want the model
+    // that server actually loaded.
+    const sharesLlmServer = llm !== null
+      && classifier.backend === llm.backend
+      && classifierHost === host(llm.host)
+      && classifierPort === localPort(llm.port);
+    if (sharesLlmServer && classifier.model !== llm!.model) {
+      issues.push(
+        "classifier resolves to the same endpoint as llm but names a different model "
+        + `(${String(classifier.model)} vs ${String(llm!.model)}); the already-running reply server is reused, so the `
+        + "classifier model would never load. Give classifier its own port, or drop classifier.model to share the reply model.",
+      );
+    }
+    const isLoopback = classifierHost === "127.0.0.1" || classifierHost === "localhost"
+      || classifierHost === "::1" || classifierHost === "0.0.0.0";
+    if (classifierPort !== undefined && isLoopback) {
+      const others: Array<[string, unknown]> = [
+        ["web_voice", isRecord(config.web_voice) ? config.web_voice.port : undefined],
+        ["tone", isRecord(config.tone) ? config.tone.port : undefined],
+        ["stt", isRecord(config.stt) ? config.stt.port : undefined],
+        ["stt_fallback", isRecord(config.stt_fallback) ? config.stt_fallback.port : undefined],
+        ["tts", isRecord(config.tts) ? config.tts.port : undefined],
+        ["tts_fallback", isRecord(config.tts_fallback) ? config.tts_fallback.port : undefined],
+        ...(sharesLlmServer ? [] : [["llm", llm ? llm.port : undefined] as [string, unknown]]),
+      ];
+      for (const [name, port] of others) {
+        if (localPort(port) === classifierPort) {
+          issues.push(
+            `classifier.port ${classifierPort} is already used by ${name}.port; `
+            + "give the classification model a port of its own",
+          );
+        }
+      }
+    }
+  }
+
   if (checkRecord(config.actions, "actions", issues)) {
     const categories = new Set(["terminal", "cli", "brain", "local", "local-llm"]);
     const ttsModes = new Set(["full", "summary", "silent"]);
