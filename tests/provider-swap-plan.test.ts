@@ -81,7 +81,9 @@ describe("live provider swap planning", () => {
     const config = runtimeConfig((raw) => {
       raw.stt = { backend: "faster-whisper", port: 8083 };
       raw.stt_fallback = { backend: "audiocpp", port: 8092 };
-      raw.tts = { backend: "audiocpp", port: 8092 };
+      // Deliberately NOT the fallback's port: a managed server shared across the
+      // two roles is refused outright (see the shared-server describe below).
+      raw.tts = { backend: "kokoro", port: 8082 };
     });
     const ports = [19001, 19002];
 
@@ -131,6 +133,41 @@ describe("a managed server shared by both roles", () => {
     const config = runtimeConfig((raw) => {
       raw.stt = { backend: "audiocpp", port: 8092 } as never;
       raw.tts = { backend: "audiocpp", port: 8093 } as never;
+    });
+    const plan = await planVoiceProviderSwap(config, { role: "tts", backend: "kokoro" });
+    expect(plan.selection.backend).toBe("kokoro");
+  });
+
+  // Round 4 (Codex): the guard compared only the two roles' PRIMARY engines. A
+  // role owns both of its engines — createTTSProvider wraps primary and fallback
+  // into one provider and stopping that wrapper stops both — so a fallback can
+  // own the very process the other role is borrowing.
+  test("a fallback that owns the shared process is refused too", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.tts = { backend: "vibevoice", port: 19001 } as never;
+      raw.tts_fallback = { backend: "audiocpp", port: 8092 } as never;
+      raw.stt = { backend: "audiocpp", port: 8092 } as never;
+    });
+    await expect(planVoiceProviderSwap(config, { role: "tts", backend: "kokoro" }))
+      .rejects.toThrow(/TTS shares one managed audiocpp server with STT/);
+  });
+
+  test("the other role's fallback is protected as well as its primary", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.tts = { backend: "audiocpp", port: 8092 } as never;
+      raw.stt = { backend: "faster-whisper", port: 19001 } as never;
+      raw.stt_fallback = { backend: "audiocpp", port: 8092 } as never;
+    });
+    await expect(planVoiceProviderSwap(config, { role: "tts", backend: "kokoro" }))
+      .rejects.toThrow(/TTS shares one managed audiocpp server with STT/);
+  });
+
+  // Fallbacks on their own ports own their own processes — still swappable.
+  test("fallbacks on separate ports do not collide", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.tts = { backend: "vibevoice", port: 19001 } as never;
+      raw.tts_fallback = { backend: "audiocpp", port: 8093 } as never;
+      raw.stt = { backend: "audiocpp", port: 8092 } as never;
     });
     const plan = await planVoiceProviderSwap(config, { role: "tts", backend: "kokoro" });
     expect(plan.selection.backend).toBe("kokoro");

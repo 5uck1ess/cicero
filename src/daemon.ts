@@ -337,21 +337,33 @@ export async function planVoiceProviderSwap(
   // reporting itself active. Nothing here can transfer that ownership, so the
   // swap is refused rather than silently breaking the other half of the voice
   // stack. Give the operator the two ways out.
-  const retiringEndpoint = currentSelection ? managedVoiceEndpoint(request.role, currentSelection) : null;
-  if (retiringEndpoint) {
-    const otherRole: SwapRole = request.role === "stt" ? "tts" : "stt";
-    const otherProvider = otherRole === "stt" ? config.sttBackend : config.ttsBackend;
-    const otherEndpoint = otherProvider ? managedVoiceEndpoint(otherRole, otherProvider) : null;
-    if (otherEndpoint === retiringEndpoint) {
-      throw new Error(
-        `${request.role.toUpperCase()} shares one managed ${currentSelection!.backend} server with `
-        + `${otherRole.toUpperCase()}, so swapping it would stop the process ${otherRole.toUpperCase()} is still using. `
-        + `Give ${otherRole} its own port first, or swap both roles by editing config and restarting.`,
-      );
-    }
+  const fallback = request.role === "stt" ? config.sttFallbackBackend : config.ttsFallbackBackend;
+  // A role owns BOTH of its engines: the registry wraps primary and fallback in
+  // one provider, and stopping that wrapper stops both. So every managed server
+  // either half of the retiring role owns goes down with the swap, and every
+  // managed server either half of the other role uses must survive it — a
+  // configuration as ordinary as "TTS falls back to audio.cpp, STT uses
+  // audio.cpp" collides on the fallback, not on the primary.
+  const otherRole: SwapRole = request.role === "stt" ? "tts" : "stt";
+  const otherEndpoints = new Set<string>();
+  for (const provider of otherRole === "stt"
+    ? [config.sttBackend, config.sttFallbackBackend]
+    : [config.ttsBackend, config.ttsFallbackBackend]) {
+    if (!provider) continue;
+    const endpoint = managedVoiceEndpoint(otherRole, provider);
+    if (endpoint) otherEndpoints.add(endpoint);
+  }
+  for (const retiring of [currentSelection, fallback]) {
+    if (!retiring) continue;
+    const endpoint = managedVoiceEndpoint(request.role, retiring);
+    if (!endpoint || !otherEndpoints.has(endpoint)) continue;
+    throw new Error(
+      `${request.role.toUpperCase()} shares one managed ${retiring.backend} server with `
+      + `${otherRole.toUpperCase()}, so swapping it would stop the process ${otherRole.toUpperCase()} is still using. `
+      + `Give ${otherRole} its own port first, or swap both roles by editing config and restarting.`,
+    );
   }
 
-  const fallback = request.role === "stt" ? config.sttFallbackBackend : config.ttsFallbackBackend;
   const occupied = new Set<string>();
   for (const [role, provider] of [
     ["stt", config.sttBackend],
@@ -2044,9 +2056,10 @@ export class CiceroDaemon {
             ...options,
             onCutover: () => {
               cutOver = true;
-              // Queued, not awaited: the cutover must stay synchronous. Once
-              // enqueued, pick() can only return a clip the bank still holds,
-              // and an empty bank simply means a turn skips its filler.
+              // Not awaited: the cutover must stay synchronous. The clear itself
+              // queues behind any in-flight prime, but discardPrepared() closes
+              // the bank to pick() before it returns, so no turn admitted in
+              // that window can take a retired-provider clip.
               void this.webFillerBank?.discardPrepared().catch((error: unknown) => {
                 log("warn", `filler bank invalidation at cutover failed: ${error instanceof Error ? error.message : String(error)}`);
               });

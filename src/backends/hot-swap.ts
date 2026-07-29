@@ -56,6 +56,13 @@ interface PreparingCandidate<T extends SwappableProvider> {
   owned: boolean;
   /** Set once its owner starts stopping it, so a concurrent stop() can wait. */
   disposal?: Promise<void>;
+  /**
+   * Resolves once start()/warmup() have settled, however they settled. A managed
+   * provider publishes the process it owns only when its startup succeeds, so
+   * stopping it before this point is a no-op that leaves the child running the
+   * moment start() completes.
+   */
+  readonly started: Promise<void>;
 }
 
 export const DEFAULT_CLEANUP_TIMEOUT_MS = 15_000;
@@ -153,13 +160,23 @@ export class ProviderSlot<T extends SwappableProvider> {
     // Register the candidate before the first await, so a stop() landing
     // mid-preparation can claim it rather than snapshotting a set that cannot
     // contain it yet.
-    const owning: PreparingCandidate<T> = { provider: candidate, owned: true };
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const owning: PreparingCandidate<T> = { provider: candidate, owned: true, started };
     this.preparing.add(owning);
     try {
       try {
-        await this.cleanupRetired();
-        await candidate.start?.();
-        await candidate.warmup?.();
+        try {
+          await this.cleanupRetired();
+          await candidate.start?.();
+          await candidate.warmup?.();
+        } finally {
+          // Whatever this candidate owns — a spawned server, a client, nothing
+          // at all — it owns by now, so a shutdown waiting to reap it can stop
+          // waiting. Signalled on the failure path too: a candidate that threw
+          // may still have published something before it did.
+          markStarted();
+        }
         const healthy = candidate.requiredHealth
           ? await candidate.requiredHealth()
           : await candidate.health();
@@ -277,11 +294,12 @@ export class ProviderSlot<T extends SwappableProvider> {
     // was still alive; the daemon then cleared its slots and the last handle to
     // it was gone. So claim what the swap has not begun disposing of, and wait
     // out the disposals it has (each already bounded by stopProvider) before the
-    // snapshot below. Deliberately NOT a wait on the whole swap: a candidate
-    // parked in start() would stall shutdown for as long as it takes to start.
+    // snapshot below. Deliberately NOT a wait on the whole swap — only on the
+    // claimed candidate's start, and only for the cleanup deadline.
     const disposals: Promise<unknown>[] = [];
+    const claimed: PreparingCandidate<T>[] = [];
     for (const entry of this.preparing) {
-      if (this.claimCandidate(entry)) this.quarantined.add(entry.provider);
+      if (this.claimCandidate(entry)) claimed.push(entry);
       else if (entry.disposal) disposals.push(entry.disposal.catch(() => {}));
     }
     if (disposals.length > 0) await Promise.all(disposals);
@@ -296,6 +314,22 @@ export class ProviderSlot<T extends SwappableProvider> {
         this.cleanupTimeoutMs,
         `${generation.provider.name} generation cleanup`,
       )),
+      ...claimed.map(async (entry) => {
+        // A managed provider only publishes the process it owns once startup
+        // succeeds, and its stop() is a no-op until then — so reaping a
+        // candidate that is still inside start() reaps nothing, and the child it
+        // spawns a moment later outlives the daemon. Wait for the start to
+        // settle first, bounded like every other release here. If the wait times
+        // out, the candidate stays quarantined so a later stop() retries it and
+        // this shutdown reports the release as unconfirmed rather than clean.
+        try {
+          await within(entry.started, this.cleanupTimeoutMs, `${entry.provider.name} candidate startup`);
+          await this.stopProvider(entry.provider, "candidate cleanup");
+        } catch (error) {
+          this.quarantined.add(entry.provider);
+          throw error;
+        }
+      }),
       ...[...this.quarantined].map(async (provider) => {
         await this.stopProvider(provider, "quarantined candidate cleanup");
         this.quarantined.delete(provider);

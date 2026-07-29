@@ -17,9 +17,18 @@ class FakeVoiceProvider implements STTProvider, TTSProvider {
   healthy = true;
   warmupError: Error | null = null;
   startGate: Promise<void> | null = null;
+  /**
+   * Whether this provider currently owns a process. Every managed backend
+   * publishes that handle only once start() has returned (kokoro, mlx-audio,
+   * pocket-tts, vibevoice all set it after their startup health passes), and
+   * its stop() is a no-op while the handle is null — so counting stop() calls
+   * alone hides a stop that reaped nothing.
+   */
+  managed = false;
+  reaped = 0;
 
   constructor(readonly name: string) {}
-  async start(): Promise<void> { this.starts += 1; await this.startGate; }
+  async start(): Promise<void> { this.starts += 1; await this.startGate; this.managed = true; }
   async warmup(): Promise<void> { this.warmups += 1; if (this.warmupError) throw this.warmupError; }
   async health(): Promise<boolean> { this.healthChecks += 1; return this.healthy; }
   async stop(): Promise<void> {
@@ -28,9 +37,22 @@ class FakeVoiceProvider implements STTProvider, TTSProvider {
       this.stopFailures -= 1;
       throw new Error("stop failed");
     }
+    if (this.managed) {
+      this.managed = false;
+      this.reaped += 1;
+    }
   }
   async transcribe(): Promise<string> { return this.name; }
   async generateAudio(): Promise<ArrayBuffer> { return new TextEncoder().encode(this.name).buffer; }
+}
+
+/**
+ * Capture an outcome the moment the promise is created. A swap these tests
+ * deliberately leave in flight rejects while the test is awaiting a shutdown,
+ * which without a handler already attached surfaces as an unhandled rejection.
+ */
+function settle(work: Promise<unknown>): Promise<Error | null> {
+  return work.then(() => null, (error: unknown) => error as Error);
 }
 
 type Role = "stt" | "tts";
@@ -285,11 +307,13 @@ describe("turn-length generation pins", () => {
     next.startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
 
     let persisted = false;
-    const swapping = owner.swap(next, () => { persisted = true; });
-    await owner.stop();
+    const swapping = settle(owner.swap(next, () => { persisted = true; }));
+    await Bun.sleep(5);
+    const stopping = owner.stop();
     releaseStart();
+    await stopping;
 
-    await expect(swapping).rejects.toThrow(/shutting down/);
+    expect((await swapping)?.message).toMatch(/shutting down/);
     // Refused before persistence, and the candidate it started was stopped
     // rather than installed behind stop()'s back.
     expect(persisted).toBe(false);
@@ -305,20 +329,70 @@ describe("turn-length generation pins", () => {
 
     let releaseStart!: () => void;
     next.startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
-    const swapping = owner.swap(next, () => {});
+    const swapping = settle(owner.swap(next, () => {}));
 
     // The candidate is started but is not a generation yet, so stop() can only
     // reach it by claiming it. It refuses, so release is unconfirmed and stop()
     // must say so — reporting success here left the daemon dropping its last
     // handle to a provider that is still running.
-    await expect(owner.stop()).rejects.toThrow(/failed to stop/);
+    await Bun.sleep(5);
+    const stopping = owner.stop();
     releaseStart();
-    await expect(swapping).rejects.toThrow(/shutting down/);
+    await expect(stopping).rejects.toThrow(/failed to stop/);
+    expect((await swapping)?.message).toMatch(/shutting down/);
     expect(next.stops).toBe(1);
 
     // Retryable, not latched: the daemon's next teardown attempt reaches it.
     await owner.stop();
     expect(next.stops).toBe(2);
+    expect(next.reaped).toBe(1);
+  });
+
+  // Round 4 (Codex): stop() claimed a candidate that was still inside start()
+  // and reaped it on the spot. Managed backends publish the process they own
+  // only once startup succeeds, so that stop was a no-op — and the child it
+  // spawned a moment later outlived the daemon with no handle left on it.
+  test("a shutdown reaps a candidate that publishes its process only when start() completes", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    const owner = new ProviderSlot<TTSProvider>(old);
+    const next = new FakeVoiceProvider("tts-next");
+
+    let releaseStart!: () => void;
+    next.startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+    const swapping = settle(owner.swap(next, () => {}));
+    await Bun.sleep(5);
+
+    const stopping = owner.stop();
+    // The startup that spawns the child finishes only now, after stop() has
+    // already claimed the candidate.
+    releaseStart();
+    await stopping;
+    expect((await swapping)?.message).toMatch(/shutting down/);
+
+    expect(next.reaped).toBe(1);
+    expect(next.managed).toBe(false);
+  });
+
+  test("a candidate startup that never settles is reported unconfirmed, not assumed clean", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    // Waiting for the start is bounded like every other release in this class.
+    const owner = new ProviderSlot<TTSProvider>(old, { cleanupTimeoutMs: 25 });
+    const next = new FakeVoiceProvider("tts-next");
+
+    let releaseStart!: () => void;
+    next.startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+    const swapping = settle(owner.swap(next, () => {}));
+    await Bun.sleep(5);
+
+    const failure = await settle(owner.stop()) as AggregateError | null;
+    expect(failure?.errors.map(String).join("\n")).toMatch(/candidate startup did not finish within 25ms/);
+
+    // Latched as retryable, not dropped: once the start settles, the next
+    // teardown attempt reaps the process it published.
+    releaseStart();
+    expect((await swapping)?.message).toMatch(/shutting down/);
+    await owner.stop();
+    expect(next.reaped).toBe(1);
   });
 });
 

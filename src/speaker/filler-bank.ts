@@ -74,6 +74,8 @@ export class FillerBank {
   private readonly limits: FillerBankLimits;
   /** Replacement accounting must observe one coherent bank snapshot. */
   private priming: Promise<void> = Promise.resolve();
+  /** Discards requested but not yet applied; the bank serves nothing meanwhile. */
+  private discardsPending = 0;
 
   constructor(
     private readonly tts: Pick<TTSProvider, "generateAudio">,
@@ -141,12 +143,21 @@ export class FillerBank {
    * budget does not stay charged for audio that is gone.
    */
   discardPrepared(): Promise<void> {
+    // The clear itself is queued, but the bank stops serving SYNCHRONOUSLY here:
+    // pick() reads the installed maps directly and never joins this queue, so
+    // between a swap's cutover and a clear that is waiting out an in-flight
+    // prime — a full bank of synthesis — every turn would still be handed the
+    // retired provider's voice. Counted, not a boolean, so overlapping discards
+    // cannot re-open the bank while one is still pending.
+    this.discardsPending += 1;
     return this.enqueuePrime(async () => {
       this.prepared = new Map();
       this.preparedUsage = { ...EMPTY_USAGE };
       this.perVoice = new Map();
       this.perVoiceUsage = new Map();
       this.last = undefined;
+    }).finally(() => {
+      this.discardsPending -= 1;
     });
   }
 
@@ -210,8 +221,9 @@ export class FillerBank {
     return { clips, usage };
   }
 
-  /** True once at least one phrase has been primed. */
+  /** True once at least one phrase has been primed, and not pending invalidation. */
   get ready(): boolean {
+    if (this.discardsPending > 0) return false;
     return [...this.prepared.values()].some((b) => b.length > 0);
   }
 
@@ -226,6 +238,10 @@ export class FillerBank {
    * front desk's clips.
    */
   pick(transcript?: string, voice?: string): PreparedFiller | undefined {
+    // An invalidated bank still holds its clips until the queued clear runs.
+    // They belong to a provider that is no longer live, so a beat of silence is
+    // the honest answer until the refill lands.
+    if (this.discardsPending > 0) return undefined;
     const kind = classifyFillerBucket(transcript);
     if (kind === "none") return undefined; // bare ack — silence beats "One moment."
     const source = voice ? this.perVoice.get(voice) : this.prepared;

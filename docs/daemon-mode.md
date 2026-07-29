@@ -56,6 +56,11 @@ swap them independently, or change both in config and restart. A shared
 *remote* endpoint is unaffected: no local process is owned, so there is nothing
 to stop.
 
+This covers **fallbacks too**. A role owns both of its engines — retiring it
+stops the primary and the fallback together — so a fallback naming the same
+local backend and port as anything the other role uses is the same collision,
+and is refused the same way.
+
 The CLI reaches the daemon through a loopback-only authenticated control socket.
 Its short-lived descriptor is private under `~/.cicero/` and is removed during
 clean shutdown. If the descriptor is absent, the CLI reports that runtime

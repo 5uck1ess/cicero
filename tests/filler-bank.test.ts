@@ -251,6 +251,48 @@ test("discardPrepared drops clips synthesized on a retired provider, in every vo
   expect(bank.pick()).toBeDefined();
 });
 
+// Round 4 (Codex): the daemon invalidates the bank from the cutover hook, which
+// must stay synchronous — so it cannot await the discard. The clear itself
+// queues behind any in-flight prime (a whole bank of synthesis), while pick()
+// reads the installed maps directly and never joins that queue. Every turn in
+// that window was still handed the retired provider's voice.
+test("discardPrepared silences the bank immediately, before the queued clear runs", async () => {
+  let releasePrime!: () => void;
+  const primeGate = new Promise<void>((resolve) => { releasePrime = resolve; });
+  let primed = 0;
+  const bank = new FillerBank(
+    {
+      generateAudio: async () => {
+        // Only the second prime blocks: the first fills the bank so there is
+        // something stale to serve.
+        if (primed > 0) await primeGate;
+        return encodeWav(new Int16Array([1])).buffer as ArrayBuffer;
+      },
+    },
+    onlyDefault(["one", "two"]),
+  );
+  await bank.prime();
+  primed = 1;
+  expect(bank.pick()).toBeDefined();
+
+  // A prime is in flight, so the discard cannot run yet.
+  const repriming = bank.prime();
+  const discarding = bank.discardPrepared();
+
+  expect(bank.ready).toBe(false);
+  expect(bank.pick()).toBeUndefined();
+
+  releasePrime();
+  await repriming;
+  await discarding;
+  expect(bank.pick()).toBeUndefined();
+
+  // And the bank comes back once it is primed on the replacement provider.
+  expect(await bank.prime()).toBe(2);
+  expect(bank.ready).toBe(true);
+  expect(bank.pick()).toBeDefined();
+});
+
 test("discardPrepared releases the per-voice clip budget it was holding", async () => {
   // Every voice's clips share one retention budget. perVoice is cleared on discard,
   // so perVoiceUsage must be cleared with it: a bank still charged for lane clips it
