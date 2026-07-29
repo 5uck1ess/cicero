@@ -561,8 +561,26 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       };
     };
 
+    // Round 7 (Codex): an OpenAI-compatible backend addresses a URL, not a
+    // host/port pair — and has no default port, so a classifier configured only
+    // with baseUrl resolved to `port: undefined` and skipped every comparison
+    // below. It is the same seat either way: `baseUrl: http://127.0.0.1:8080/v1`
+    // pointed at the reply server adopts the reply model exactly as `port: 8080`
+    // would.
+    const fromBaseUrl = (value: unknown): Endpoint | null => {
+      if (typeof value !== "string" || !value.trim()) return null;
+      try {
+        const url = new URL(value.trim());
+        const port = url.port ? Number(url.port) : (url.protocol === "https:" ? 443 : 80);
+        // URL keeps IPv6 literals bracketed; the host comparisons here do not.
+        return { host: url.hostname.toLowerCase().replace(/^\[|\]$/g, ""), port };
+      } catch {
+        return null; // malformed URLs are reported by the dedicated baseUrl check
+      }
+    };
+
     const classifierBackend = typeof classifier.backend === "string" ? classifier.backend : undefined;
-    const classifierEndpoint: Endpoint = {
+    const classifierEndpoint: Endpoint = fromBaseUrl(classifier.baseUrl) ?? {
       host: hostOf(classifier.host),
       port: portOf(classifier.port) ?? llmDefaultPort(classifierBackend),
     };
@@ -572,12 +590,13 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     // classifier on the same seat would silently adopt.
     const llmSection = section("llm");
     const llmBackend = llmSection && typeof llmSection.backend === "string" ? llmSection.backend : undefined;
+    const llmUrlEndpoint = llmSection ? fromBaseUrl(llmSection.baseUrl) : null;
     const llm = llmSection
       ? {
         backend: llmBackend,
         model: llmSection.model,
-        host: hostOf(llmSection.host),
-        port: portOf(llmSection.port) ?? llmDefaultPort(llmBackend),
+        host: llmUrlEndpoint?.host ?? hostOf(llmSection.host),
+        port: llmUrlEndpoint?.port ?? portOf(llmSection.port) ?? llmDefaultPort(llmBackend),
       }
       : {
         backend: "mlx-lm" as string | undefined,

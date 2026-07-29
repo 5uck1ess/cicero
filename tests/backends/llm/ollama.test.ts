@@ -64,3 +64,33 @@ test.skipIf(process.platform === "win32")("a managed ollama is told its port thr
     rmSync(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+// Round 7 (Codex): every tier preset configures Ollama WITHOUT a host, and
+// interpolating it raw produced the literal `OLLAMA_HOST=undefined:11434` —
+// a hostname Ollama tries to bind rather than its localhost default. The
+// previous regression only covered an explicitly configured host, so it passed.
+test.skipIf(process.platform === "win32")("an omitted host resolves to localhost, never the string 'undefined'", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cicero-ollama-nohost-test-"));
+  const recorded = join(dir, "env.txt");
+  const fake = join(dir, "ollama");
+  writeFileSync(fake, `#!/bin/sh\nprintf '%s' "$OLLAMA_HOST" > ${JSON.stringify(recorded)}\nexit 0\n`);
+  chmodSync(fake, 0o755);
+
+  const reservation = Bun.serve({ port: 0, fetch: () => new Response("reserved") });
+  const port = reservation.port;
+  await Promise.resolve(reservation.stop(true));
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir}:${originalPath ?? ""}`;
+  try {
+    // No `host` — exactly what deployment: local-cpu expands to.
+    await new OllamaProvider({ backend: "ollama", port, model: "m" }).start();
+    const recordedHost = readFileSync(recorded, "utf8");
+    expect(recordedHost).not.toContain("undefined");
+    // And it names the same endpoint the health probe will use.
+    expect(recordedHost).toBe(`localhost:${port}`);
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);

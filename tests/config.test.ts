@@ -529,6 +529,69 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))()).not.toThrow();
   });
 
+  // Round 7 (Codex): an OpenAI-compatible backend addresses a URL and has no
+  // default port, so a classifier configured only with baseUrl resolved to no
+  // port at all and skipped every comparison — while pointing at the reply
+  // server's socket and adopting the reply model, exactly as a bare port would.
+  test("a classifier baseUrl aimed at the reply server is refused", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8080/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm \(127\.0\.0\.1:8080\)/);
+  });
+
+  test("a classifier baseUrl colliding with another local listener is refused", () => {
+    expect(loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://localhost:8090/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.port 8090 is already used by web_voice/);
+  });
+
+  // The reverse pairing too: the reply model behind a URL, the classifier on a
+  // bare port. One seat, named two ways.
+  test("an llm baseUrl is resolved to the same seat as a classifier port", () => {
+    expect(loadYaml([
+      "llm:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8080/v1",
+      "  model: big-reply-model",
+      "classifier:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/same endpoint as llm \(127\.0\.0\.1:8080\)/);
+  });
+
+  // A genuinely remote URL still binds nothing here.
+  test("a remote classifier baseUrl is not compared against local ports", () => {
+    expect(() => loadYaml([
+      "web_voice:",
+      "  enabled: true",
+      "  port: 8090",
+      "  token: a-token-that-is-long-enough",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: https://classifier.example/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
   // A listener that is off binds nothing, so it is not in the way.
   test("a disabled listener does not reserve its default port", () => {
     expect(() => loadYaml([
