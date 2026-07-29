@@ -14,7 +14,7 @@ import {
 } from "./backends/stt/provider";
 import { ttsDefaultPort } from "./backends/tts/provider";
 import { backendRoutesByModel, llmDefaultPort, LLM_DEFAULT_MODEL } from "./backends/llm/provider";
-import { OPENAI_COMPATIBLE_BACKENDS } from "./backends/llm/openai";
+import { OPENAI_COMPATIBLE_BACKENDS, OPENAI_DEFAULT_MODEL } from "./backends/llm/openai";
 
 /** A resolved network seat: what the role will actually bind or reach. */
 interface Endpoint { host: string; port: number | undefined }
@@ -721,7 +721,31 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     const modelConflict = classifier.model !== undefined && classifier.model !== llm.model;
     const backendConflict = classifierBackend !== undefined && llm.backend !== undefined
       && classifierBackend !== llm.backend;
-    if (singleModelShare && modelConflict) {
+    // Round 12 (Codex): a shared endpoint with an UNSET classifier model is only
+    // harmless when the backend's default is something that endpoint plausibly
+    // serves. Ollama's default is a small model it loads locally on demand, so
+    // sharing there works and stays allowed. An OpenAI-compatible default is a
+    // HOSTED name (gpt-4o-mini): a local vLLM or llama-swap serving the reply
+    // model has never heard of it, so every classification fails -- and the
+    // judge fails OPEN, leaving a classifier that is configured, reports
+    // healthy, and silently vetoes nothing.
+    //
+    // Scoped to the shared case deliberately. That is where the config states
+    // what the endpoint serves (the reply model), so the mismatch is provable.
+    // A standalone OpenAI-compatible classifier with no model may well point at
+    // a proxy that does serve the default, and refusing that would be guessing.
+    const unsetShareResolvesElsewhere = sharedEndpoint
+      && classifier.model === undefined
+      && readsBaseUrl(effectiveBackend);
+    if (unsetShareResolvesElsewhere) {
+      issues.push(
+        `classifier resolves to the same endpoint as llm (${classifierEndpoint.host}:${classifierEndpoint.port}) `
+        + `and names no model, so it would request '${OPENAI_DEFAULT_MODEL}' — the default for an `
+        + "OpenAI-compatible backend, not the model that endpoint serves"
+        + (typeof llm.model === "string" ? ` (${llm.model})` : "")
+        + ". Set classifier.model to the model that endpoint serves.",
+      );
+    } else if (singleModelShare && modelConflict) {
       issues.push(
         `classifier resolves to the same endpoint as llm (${classifierEndpoint.host}:${classifierEndpoint.port}) `
         + `but names a different model (${String(classifier.model)} vs ${String(llm.model)}); the already-running reply server is `

@@ -98,12 +98,25 @@ test("a registered credential is gone from the console and from dashboard histor
   expect(JSON.stringify(history)).not.toContain("correcthorsebattery");
 });
 
-// Redacting a two-character "secret" would blank ordinary prose everywhere.
-test("a value too short to be a credential is never registered", () => {
-  registerKnownSecrets(["ok", "a"]);
+// Round 12 (Codex): there used to be a six-character floor here, and a
+// configured five-character key reflected in a 401 body walked straight through
+// it to the console and dashboard. Readability is not worth a leaked
+// credential, and the repo already settled this trade the same way for board
+// text: what the operator configured as a credential is removed wherever it
+// appears. The marker below is synthetic.
+test("a short configured credential is redacted, floor or no floor", () => {
+  registerKnownSecrets(["abcde"]);
   try {
-    expect(redactLogSecrets("the server said ok")).toBe("the server said ok");
+    const safe = redactLogSecrets("openai-compatible returned 401: remote rejected credential abcde");
+    expect(safe).not.toContain("abcde");
+    expect(safe).toContain("<redacted>");
   } finally {
     clearKnownSecrets();
   }
+});
+
+test("nothing is redacted when no credential was registered", () => {
+  clearKnownSecrets();
+  const message = "openai-compatible returned 401: remote rejected credential abcde";
+  expect(redactLogSecrets(message)).toBe(message);
 });

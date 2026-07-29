@@ -46,16 +46,21 @@ const RULES: ReadonlyArray<readonly [RegExp, string]> = [
  */
 const known = new Set<string>();
 /**
- * Short values are refused: a two-character "secret" would blank out ordinary
- * prose everywhere it happened to appear, which destroys diagnostics without
- * protecting anything worth protecting.
+ * Round 12 (Codex): there was a six-character floor here, on the reasoning that
+ * blanking a short value would wreck ordinary prose. That reasoning protects
+ * readability at the cost of the credential -- a configured five-character key
+ * reflected in a 401 body reached the console and dashboard verbatim. The
+ * repository already settled this trade in the other direction for board-text
+ * egress ("redacting an occasional non-secret value that also appears verbatim
+ * is safe-fail, the operator-approved direction"), so there is no floor: what
+ * the operator configured as a credential is removed wherever it appears. An
+ * operator who configures a two-character key and dislikes the noise has the
+ * fix in their own hands.
  */
-const MIN_KNOWN_SECRET_CHARS = 6;
-
 export function registerKnownSecrets(values: Iterable<string | undefined>): void {
   for (const value of values) {
     const trimmed = value?.trim();
-    if (trimmed && trimmed.length >= MIN_KNOWN_SECRET_CHARS) known.add(trimmed);
+    if (trimmed) known.add(trimmed);
   }
 }
 

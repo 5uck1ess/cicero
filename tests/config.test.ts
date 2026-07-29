@@ -730,6 +730,55 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))()).not.toThrow();
   });
 
+  // Round 12 (Codex): sharing an endpoint with no classifier model is harmless
+  // on ollama, whose default is a small model it loads locally. It is NOT
+  // harmless on an OpenAI-compatible backend, whose default is a hosted name a
+  // local server has never heard of -- every classification then fails, and the
+  // judge fails OPEN, so the classifier reports healthy and vetoes nothing.
+  test("a shared OpenAI-compatible endpoint with no classifier model is refused", () => {
+    const failure = loadYaml([
+      "llm:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "  model: reply-model",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "",
+    ].join("\n"));
+    expect(failure).toThrow(/would request 'gpt-4o-mini'/);
+    // It names the model that endpoint actually serves, so the fix is obvious.
+    expect(failure).toThrow(/reply-model/);
+  });
+
+  test("naming the shared OpenAI-compatible model is accepted", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "  model: reply-model",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "  model: reply-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // The refusal is about a PROVABLE mismatch, which only the shared case gives.
+  // A standalone endpoint may be a proxy that does serve the default.
+  test("a standalone OpenAI-compatible classifier with no model is left alone", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: llama-cpp",
+      "  port: 8080",
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8000/v1",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
   // A single-model server is still a single-model server: llama-server loads
   // one model and the request's `model` field is informational.
   test("a shared llama-cpp server naming a second model is still refused", () => {
