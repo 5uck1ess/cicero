@@ -6,6 +6,7 @@ import {
   PROVIDER_RESPONSE_LIMIT_BYTES,
   providerSignal,
   readBoundedBytes,
+  readBoundedJson,
   readErrorDetail,
   requestTimeout,
   responseIsOk,
@@ -61,6 +62,39 @@ export class ElevenLabsProvider implements TTSProvider {
     );
     if (pcm.byteLength === 0) throw new Error("ElevenLabs returned empty audio");
     return wavFromPcm(pcm, { rate: 24_000, width: 2, channels: 1 });
+  }
+
+  /**
+   * Round 10 (Codex): verify the configured model, which health() structurally
+   * cannot — `/voices/{id}` validates the VOICE, and `model_id` is first sent on
+   * synthesis. So a swap to an invalid model passed the readiness gate, was
+   * persisted, and left the newly active provider unusable on its first real
+   * request. This is a list lookup, not a synthesis: checking a name spends no
+   * synthesis credits.
+   */
+  async warmup(): Promise<void> {
+    this.requireReady(this.voiceId ?? "");
+    const response = await fetch(`${ELEVENLABS_API_BASE}/models`, {
+      headers: { "xi-api-key": this.apiKey },
+      signal: providerSignal(this.timeoutMs),
+    });
+    if (!response.ok) {
+      const detail = await readErrorDetail(response);
+      throw new Error(`ElevenLabs model lookup returned ${response.status}${detail ? `: ${detail}` : ""}`);
+    }
+    const models = await readBoundedJson<unknown>(response, PROVIDER_RESPONSE_LIMIT_BYTES.json, "ElevenLabs model list");
+    if (!Array.isArray(models)) throw new Error("ElevenLabs model list was not a list");
+    // Untrusted body: read only the one field, and never echo the rest.
+    const known = models.flatMap((entry) =>
+      typeof entry === "object" && entry !== null && typeof (entry as { model_id?: unknown }).model_id === "string"
+        ? [(entry as { model_id: string }).model_id]
+        : []);
+    if (!known.includes(this.model)) {
+      throw new Error(
+        `ElevenLabs does not offer model '${this.model}'`
+        + (known.length > 0 ? ` — available: ${known.slice(0, 12).join(", ")}` : ""),
+      );
+    }
   }
 
   async health(timeoutMs: number = PROVIDER_TIMEOUT_MS.health): Promise<boolean> {

@@ -91,3 +91,63 @@ test("health does not wait for an irrelevant body that refuses cancellation", as
     throw error instanceof Error ? error : new Error(String(error));
   }
 });
+
+// Round 10 (Codex): health() validates the VOICE (`/voices/{id}`) and model_id is
+// first sent on synthesis, so nothing in the readiness gate ever looked at the
+// model. `cicero swap tts elevenlabs invalid-model-id` therefore passed the gate,
+// persisted to config, and left the newly active provider failing on its first
+// real request. warmup() is the gate's model check — a list lookup, so verifying
+// a name spends no synthesis credits.
+test("warmup rejects a model ElevenLabs does not offer", async () => {
+  const calls = captureFetch(JSON.stringify([
+    { model_id: "eleven_multilingual_v2" },
+    { model_id: "eleven_turbo_v2" },
+  ]));
+  const provider = new ElevenLabsProvider({
+    backend: "elevenlabs",
+    voice: "voice/id",
+    apiKey: "secret-key",
+    model: "invalid-model-id",
+  });
+
+  await expect(provider.warmup()).rejects.toThrow(/does not offer model 'invalid-model-id'/);
+  expect(calls[0]!.url).toContain("/models");
+  // A lookup, never a synthesis: the readiness check must not spend credits.
+  expect(calls.every((call) => !call.url.includes("/text-to-speech/"))).toBe(true);
+});
+
+test("warmup accepts a model ElevenLabs offers", async () => {
+  captureFetch(JSON.stringify([{ model_id: "eleven_multilingual_v2" }]));
+  const provider = new ElevenLabsProvider({
+    backend: "elevenlabs",
+    voice: "voice/id",
+    apiKey: "secret-key",
+    model: "eleven_multilingual_v2",
+  });
+  await expect(provider.warmup()).resolves.toBeUndefined();
+});
+
+// Provider bodies are untrusted: read the one field, never echo the rest.
+test("warmup does not surface a hostile model list body", async () => {
+  captureFetch(JSON.stringify([{ model_id: "ok", note: "sk-test-NOT-A-REAL-KEY" }]));
+  const provider = new ElevenLabsProvider({
+    backend: "elevenlabs",
+    voice: "voice/id",
+    apiKey: "secret-key",
+    model: "missing",
+  });
+  const failure = await provider.warmup().then(() => null, (error: unknown) => error as Error);
+  expect(failure!.message).toContain("does not offer model 'missing'");
+  expect(failure!.message).not.toContain("NOT-A-REAL-KEY");
+});
+
+test("a model list that is not a list is refused, not parsed loosely", async () => {
+  captureFetch(JSON.stringify({ models: [] }));
+  const provider = new ElevenLabsProvider({
+    backend: "elevenlabs",
+    voice: "voice/id",
+    apiKey: "secret-key",
+    model: "eleven_multilingual_v2",
+  });
+  await expect(provider.warmup()).rejects.toThrow(/was not a list/);
+});
