@@ -273,15 +273,6 @@ export function windowsTreeAccountedFor(
   forced: WindowsTaskkillOutcome,
 ): boolean {
   if (forced === "targeted") return true;
-  // The leader was already gone before this reaper could signal it at all, so
-  // neither pass had a root to enumerate from. Windows cannot rediscover the
-  // descendants of a vanished root without a Job Object — the caller's own
-  // comment above is why the graceful pass runs first — so there is no kill left
-  // to issue and no later retry that could learn more. Reporting an unconfirmed
-  // release here recovers nothing; it only replaces the caller's abort reason
-  // with a reap error on every abort that loses this race, which is what the
-  // Windows job caught.
-  if (graceful === "absent") return true;
   // A forced pass that found no PID after a graceful pass that DID reach the
   // tree: that pass signalled every process then in it, so nothing was left
   // unsignalled, and the leader exited between the grace timeout and this call —
@@ -317,10 +308,10 @@ async function waitForPosixGroupExit(pid: number, timeoutMs: number): Promise<bo
  * Whether `taskkill` reached the tree.
  *
  * `absent` is deliberately not `failed`: taskkill exits non-zero both when it
- * could not reach the process and when there is no such PID any more. Those are
- * opposite outcomes — one leaves the tree unaccounted for, the other means it is
- * already gone — and collapsing them into one boolean reported a completed
- * teardown as an unconfirmed release.
+ * could not reach the process and when no leader carries that PID any more.
+ * Keeping them distinct preserves the exit-code diagnostic and lets a prior
+ * targeted pass account for the tree; absence alone proves nothing about
+ * descendants.
  */
 export type WindowsTaskkillOutcome = "targeted" | "absent" | "failed";
 

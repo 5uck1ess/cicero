@@ -201,14 +201,6 @@ test("unconfirmed leader exit is a typed ownership failure", async () => {
   })).rejects.toBeInstanceOf(OwnedProcessReapError);
 });
 
-// The Windows reaper reported a completed teardown as an unconfirmed release.
-// taskkill exits non-zero both when it cannot reach the process and when no
-// such PID exists any more; the old code read one boolean for both, so a leader
-// that outlived the grace window and then exited before the forced pass looked
-// like a targeting failure. The observed CI symptom was an ordinary abort
-// rejecting with "could not confirm turn process tree N exited" instead of the
-// caller's own abort reason.
-//
 // terminateWindowsTree itself is unreachable off win32 (the platform check is
 // inline), so this covers the decision; real taskkill behavior is covered by the
 // Windows CI job.
@@ -225,16 +217,10 @@ describe("windows tree accounting", () => {
     expect(windowsTreeAccountedFor("targeted", "absent")).toBe(true);
   });
 
-  // The real CI failure, and the only pair whose verdict this change alters.
-  // `send abort kills and reaps a silent subprocess group promptly` failed on the
-  // Windows job with
-  //   graceful taskkill absent (exit 128), forced failed (exit 255)
-  // The leader PID was already gone before either pass ran, so neither had a root
-  // to enumerate from, and the caller saw a reap error instead of its own abort
-  // reason. Both orderings of a vanished leader are accounted for.
-  test("a leader already gone before either pass is accounted for", () => {
-    expect(windowsTreeAccountedFor("absent", "failed")).toBe(true);
-    expect(windowsTreeAccountedFor("absent", "absent")).toBe(true);
+  // A vanished leader cannot be used to rediscover or signal its descendants.
+  test("a leader absent before the graceful pass is not accounted for", () => {
+    expect(windowsTreeAccountedFor("absent", "failed")).toBe(false);
+    expect(windowsTreeAccountedFor("absent", "absent")).toBe(false);
   });
 
   // With no grace window the graceful pass never runs, so the forced pass is the
@@ -253,16 +239,16 @@ describe("windows tree accounting", () => {
     expect(windowsTreeAccountedFor("failed", "failed")).toBe(false);
   });
 
-  // Sanity bound on the whole matrix: only a vanished leader or a forced pass
-  // that reached the tree is accounted for, so nothing else silently becomes so.
+  // Sanity bound on the whole matrix: only a forced pass that reached the tree,
+  // or an absent PID after a targeted graceful pass, is accounted for.
   test("no other outcome pair is accounted for", () => {
     const outcomes = ["targeted", "absent", "failed"] as const;
     const accounted = outcomes.flatMap((graceful) =>
       outcomes.filter((forced) => windowsTreeAccountedFor(graceful, forced)).map((forced) => `${graceful}/${forced}`),
     );
     expect(accounted.sort()).toEqual([
-      "absent/absent", "absent/failed", "absent/targeted",
-      "failed/targeted", "targeted/absent", "targeted/targeted",
+      "absent/targeted", "failed/targeted",
+      "targeted/absent", "targeted/targeted",
     ]);
   });
 });
