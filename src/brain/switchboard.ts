@@ -1,5 +1,5 @@
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
-import { dialBackMemo, matchCallMe } from "../call-intent";
+import { dialBackMemo, matchCallMe, SpeculativeSideEffectError } from "../call-intent";
 import { log } from "../logger";
 import { BrainTurnContext } from "./turn-context";
 import { bindBrainCapability } from "./capabilities";
@@ -952,7 +952,11 @@ export class SwitchboardBrain implements Brain {
     this.turnContext.inject(note);
   }
 
-  private async handleControl(message: string, turn: AcceptedTurn): Promise<string | null> {
+  private async handleControl(
+    message: string,
+    turn: AcceptedTurn,
+    options: BrainTurnOptions,
+  ): Promise<string | null> {
     this.assertAcceptedTurn(turn);
     const m = normalizeUtterance(message);
     if (ROLLCALL_RE.test(m)) return this.doRollcall(turn);
@@ -962,7 +966,18 @@ export class SwitchboardBrain implements Brain {
     if (this.callMe) {
       const call = matchCallMe(m);
       if (call) {
+        // Refuse below the selection, exactly like DialBackBrain: the lane
+        // setup skips that wrapper (this class exposes setCallMeHandler), so
+        // this is the only place a speculative dial can be stopped. Spooling a
+        // callback is not retractable by the final utterance.
+        if (options.speculative) throw new SpeculativeSideEffectError();
         log("info", `switchboard: dial-back requested${call.who ? ` — ${call.who}` : ""}`);
+        // Handler args deliberately unchanged by this PR: only `{ signal }`, as
+        // before. `options` is needed for the refusal above, NOT by the handler
+        // — forwarding it there regressed named dial-backs, and the underlying
+        // re-entrancy defect (the handler pins the lane by calling transferTo()
+        // back into this switchboard, whose admission supersedes the turn it was
+        // called from) is pre-existing and tracked separately.
         const reply = await this.callMe(call.who, { signal: turn.signal });
         // Memo even if this turn was superseded meanwhile: the call was placed.
         this.leaveMemo(dialBackMemo(call.who));
@@ -1042,6 +1057,7 @@ export class SwitchboardBrain implements Brain {
     label: string | null,
     utterance: string,
     turn: AcceptedTurn,
+    options: BrainTurnOptions,
   ): Promise<string | "standup" | null> {
     this.assertAcceptedTurn(turn);
     if (!label) return null;
@@ -1068,7 +1084,11 @@ export class SwitchboardBrain implements Brain {
         return null;
       }
       const who = label.startsWith("callme:") ? label.slice("callme:".length).trim() : "";
+      // Same refusal as the lexical path — the classifier selects a call the
+      // patterns miss ("phone me now"), so no phrase list can cover this.
+      if (options.speculative) throw new SpeculativeSideEffectError();
       log("info", `switchboard: dial-back requested (classifier)${who ? ` — ${who}` : ""}`);
+      // Handler args unchanged by this PR — see the note on the lexical path.
       const reply = await this.callMe(who || undefined);
       // Memo before the turn assert: a superseding turn still needs to know.
       this.leaveMemo(dialBackMemo(who || undefined));
@@ -1176,7 +1196,7 @@ export class SwitchboardBrain implements Brain {
     turn: AcceptedTurn,
   ): AsyncIterable<string> {
     this.control = false;
-    const routed = await this.controlPlane(message, turn);
+    const routed = await this.controlPlane(message, turn, turnOptions);
     this.assertAcceptedTurn(turn);
     if (routed === "standup") {
       this.control = true;
@@ -1344,6 +1364,7 @@ export class SwitchboardBrain implements Brain {
   private async controlPlane(
     message: string,
     turn: AcceptedTurn,
+    options: BrainTurnOptions,
   ): Promise<string | "standup" | null> {
     this.assertAcceptedTurn(turn);
     const m = normalizeUtterance(message);
@@ -1375,12 +1396,12 @@ export class SwitchboardBrain implements Brain {
     this.assertAcceptedTurn(turn);
     const vm = this.takeVoicemail(message, turn); // matched on the RAW text — the message body keeps its punctuation
     if (vm !== null) return vm;
-    const ack = await this.handleControl(message, turn);
+    const ack = await this.handleControl(message, turn, options);
     this.assertAcceptedTurn(turn);
     if (ack !== null) return ack;
     const label = await this.classifyIntent(m, turn.signal);
     this.assertAcceptedTurn(turn);
-    const routed = await this.actOnIntent(label, m, turn);
+    const routed = await this.actOnIntent(label, m, turn, options);
     this.assertAcceptedTurn(turn);
     // A normal brain turn ends the "again" context — a later bare "again"
     // refers to the conversation, not to a roll call from minutes ago.
@@ -1435,7 +1456,7 @@ export class SwitchboardBrain implements Brain {
   send(message: string, options?: BrainTurnOptions): Promise<string> {
     return this.runAcceptedTurn(options, async (turn, turnOptions) => {
       this.control = false;
-      const routed = await this.controlPlane(message, turn);
+      const routed = await this.controlPlane(message, turn, turnOptions);
       this.assertAcceptedTurn(turn);
       if (routed === "standup") {
         this.control = true;
@@ -1485,7 +1506,7 @@ export class SwitchboardBrain implements Brain {
     turn: AcceptedTurn,
   ): AsyncIterable<string> {
     this.control = false;
-    const routed = await this.controlPlane(message, turn);
+    const routed = await this.controlPlane(message, turn, turnOptions);
     this.assertAcceptedTurn(turn);
     if (routed === "standup") {
       this.control = true;

@@ -11,6 +11,25 @@
 # I/O. Delete this line on a desktop to use the local mic instead.
 headless: true
 
+# ---------------------------------------------------------------------------
+# Native dictation: record on demand, transcribe with Cicero's own STT, and
+# deliver the transcript. Off by default — it types into other applications.
+#
+# Toggle it with `cicero dictate` (press once to start, again to stop). Bind
+# that command to any OS-level keyboard shortcut: macOS Shortcuts, a Windows
+# shortcut key, or your Linux desktop's keybinding settings.
+#
+# dictation:
+#   enabled: true
+#   # focused-app: type the transcript into whatever window has focus.
+#   #              Needs macOS, Windows, or Linux/X11 with xdotool installed.
+#   #              Wayland blocks synthetic input to other apps and is refused.
+#   # cicero:      hand the transcript to Cicero as a spoken command instead.
+#   #              Works on every platform — nothing is typed.
+#   target: focused-app
+#   # Ceiling on a single capture, so a forgotten dictation cannot record forever.
+#   max_recording_seconds: 300
+
 web_voice:
   enabled: true
   host: 0.0.0.0                 # bind the LAN; use 127.0.0.1 to keep it local
@@ -56,6 +75,19 @@ web_voice:
   speculative:
     enabled: false
     min_probability: 0.85       # end-of-turn confidence required to jump the gun
+    # A speculative turn starts before you have finished speaking. On a brain
+    # that only returns text a wrong guess costs nothing — the tokens are
+    # thrown away. On a brain that runs tools the turn may already have written
+    # files or run commands by the time the guess is retracted, which is not
+    # undoable. Those brains ignore `enabled` unless you also set this.
+    #
+    # Treated as tool-capable (speculation off unless you opt in): claude-code,
+    # codex, gemini, qwen, acp, any tab-inject brain, any unrecognized backend
+    # name, AND any OpenAI-compatible brain with an explicit `base_url` — that
+    # URL can point at an agent that runs tools server-side, and config alone
+    # cannot tell that apart from a plain model server.
+    # Treated as text-only: ollama, and an OpenAI preset on its own endpoint.
+    allow_tool_brains: false
   # Long-turn parking: if a reply's first sentence hasn't arrived in
   # park_after_s, Cicero says "I'll keep working on it" and releases the audio
   # floor; the finished reply is spoken later via the notify path. A stateful
@@ -152,6 +184,18 @@ brain:
   max_queue_bytes: 262144
   max_response_bytes: 2097152
   max_pending_turns: 32
+
+  # Background history compaction (off by default). Cicero replays a bounded
+  # transcript to the brain; past the cap the oldest turns are simply dropped and
+  # the conversation quietly forgets its beginning. Enabled, the older half is
+  # summarized by a small local model in the background instead, and the full
+  # turns keep serving prompts until that summary lands. If the summarizer is
+  # slow or down it falls back to dropping them, so this can never stall a turn.
+  # Omit the URL here to reuse web_voice.tldr.summarizer_url.
+  # history_compaction:
+  #   enabled: true
+  #   summarizer_url: http://127.0.0.1:8080/v1
+  #   summarizer_model: your-small-model
 
   # Optional: "think hard about …" escalates that one turn to a heavier agent.
   escalate:

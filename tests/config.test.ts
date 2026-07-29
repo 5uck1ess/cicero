@@ -595,6 +595,17 @@ describe("Config — fail-fast validation", () => {
     expect(loadYaml("terminal: iterm2\n")).toThrow(/terminal must be one of.*kitty.*wezterm.*tmux.*none/);
   });
 
+  test("rejects a non-boolean speculative side-effect opt-in", () => {
+    // A mistyped value fails closed (speculation stays off), so report it
+    // rather than let the operator believe the opt-in took effect.
+    expect(loadYaml([
+      "web_voice:",
+      "  speculative:",
+      "    allow_tool_brains: yes-please",
+      "",
+    ].join("\n"))).toThrow(/allow_tool_brains/);
+  });
+
   test("rejects non-finite and out-of-range web turn controls", () => {
     expect(loadYaml([
       "web_voice:",
@@ -621,6 +632,55 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))).toThrow(
       /web_voice\.tls\.cert_file and web_voice\.tls\.key_file[\s\S]*web_voice\.tldr\.summarizer_url/,
     );
+  });
+
+  // Codex: every consumer appends a path to a base URL by concatenation, so
+  // `https://api.example/v1?token=abc` became
+  // `https://api.example/v1?token=abc/chat/completions` — real path `/v1`, token
+  // `abc/chat/completions`. The intended endpoint was never requested, and it
+  // read like a broken provider rather than a mis-set URL.
+  test("rejects a base URL carrying a query string or fragment", () => {
+    expect(loadYaml([
+      "brain:",
+      "  backend: openai-compatible",
+      "  base_url: https://api.example/v1?token=abc",
+      "",
+    ].join("\n"))).toThrow(/brain\.base_url must not carry a query string/);
+
+    expect(loadYaml([
+      "brain:",
+      "  backend: openai-compatible",
+      "  base_url: https://api.example/v1#frag",
+      "",
+    ].join("\n"))).toThrow(/brain\.base_url must not carry a fragment/);
+  });
+
+  // The same validator guards every base URL, so the fix holds for all of them
+  // rather than only the summarizer the finding happened to cite.
+  test("the query rejection covers every configured base URL", () => {
+    expect(loadYaml([
+      "brain:",
+      "  history_compaction:",
+      "    summarizer_url: http://x:1/v1?token=abc",
+      "web_voice:",
+      "  tldr:",
+      "    summarizer_url: http://x:1/v1?key=abc",
+      "",
+    ].join("\n"))).toThrow(
+      /brain\.history_compaction\.summarizer_url must not carry a query string[\s\S]*web_voice\.tldr\.summarizer_url must not carry a query string/,
+    );
+  });
+
+  // The offending value is exactly the kind of URL that carries a credential.
+  test("the rejection never echoes the URL it refused", () => {
+    const failure = loadYaml([
+      "brain:",
+      "  backend: openai-compatible",
+      "  base_url: https://api.example/v1?token=SYNTHETIC_SECRET_VALUE",
+      "",
+    ].join("\n"));
+    expect(failure).toThrow(/must not carry a query string/);
+    expect(failure).not.toThrow(/SYNTHETIC_SECRET_VALUE/);
   });
 
   test("validates audio detector thresholds and timing relationships", () => {
@@ -803,5 +863,33 @@ describe("Config — TTS coalescing", () => {
     expect(loadYaml("tts_coalesce:\n  enabled: true\n  max_char: 300")).toThrow(/tts_coalesce/);
     expect(loadYaml("tts_coalesce:\n  enabled: true\n  max_chars: 1")).toThrow(/max_chars/);
     expect(loadYaml("tts_coalesce:\n  enabled: true\n  passthrough_first: -1")).toThrow(/passthrough_first/);
+  });
+});
+
+describe("Config — dictation", () => {
+  test("accepts the documented shape", () => {
+    expect(loadYaml([
+      "dictation:",
+      "  enabled: true",
+      "  target: cicero",
+      "  max_recording_seconds: 300",
+    ].join("\n"))).not.toThrow();
+  });
+
+  test("rejects a mistyped target rather than silently dropping every transcript", () => {
+    expect(loadYaml("dictation:\n  target: ciceroo")).toThrow(/dictation.target must be/);
+  });
+
+  test("rejects an unknown dictation key", () => {
+    expect(loadYaml("dictation:\n  enbaled: true")).toThrow(/dictation.enbaled is not supported/);
+  });
+
+  test("rejects a nonsensical recording ceiling", () => {
+    expect(loadYaml("dictation:\n  max_recording_seconds: 0")).toThrow(/max_recording_seconds/);
+  });
+
+  // Removing config keys must not stop an existing operator's daemon from booting.
+  test("tolerates the retired wispr keys so an existing config still starts", () => {
+    expect(loadYaml('wake_word_enabled: false\nwispr_hotkey: "option+space"')).not.toThrow();
   });
 });

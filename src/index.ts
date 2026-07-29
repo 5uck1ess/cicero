@@ -18,6 +18,7 @@ import {
   SpeechInterruptedError,
 } from "./cli/speak";
 import { sendWebVoiceNotification } from "./cli/notify";
+import { requestDictationToggle } from "./cli/dictate";
 import { commandText } from "./cli/text-input";
 import { unlink } from "node:fs/promises";
 import {
@@ -49,8 +50,6 @@ program
   .description("Start the Cicero daemon")
   .option("--tts", "Enable TTS")
   .option("--no-tts", "Disable TTS")
-  .option("--wake-word", "Enable wake word detection")
-  .option("--no-wake-word", "Disable wake word detection")
   .option("--brain <backend>", "Override brain backend")
   .option("--brain-mode <mode>", "Brain mode: subprocess or tab-inject")
   .option("--brain-tab <tab>", "Target tab for tab-inject mode")
@@ -66,7 +65,6 @@ program
       ensureConfigDir();
       const config = loadConfig({
         tts: opts.tts,
-        wakeWord: opts.wakeWord,
         brain: opts.brain,
         brainMode: opts.brainMode,
         brainTab: opts.brainTab,
@@ -197,6 +195,35 @@ program
       process.stdout.write(renderStatus(await collectStatus(config)));
     } catch (error: unknown) {
       console.error(`Could not collect Cicero status: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("dictate")
+  .description("Toggle native dictation on the running daemon (press once to start, again to stop)")
+  .action(async () => {
+    try {
+      const config = loadConfig();
+      const wv = config.raw.web_voice;
+      if (!wv?.enabled) {
+        console.error("web_voice is not enabled in config — `cicero dictate` toggles dictation through the daemon's local API, so it needs web_voice.enabled and web_voice.token. See docs/dictation.md.");
+        process.exit(1);
+      }
+      if (!wv.token) {
+        console.error("web_voice.token is not set in config — a fixed token is required to call the daemon.");
+        process.exit(1);
+      }
+      const result = await requestDictationToggle({
+        scheme: wv.tls?.enabled === false ? "http" : "https",
+        port: wv.port ?? 8090,
+        token: wv.token,
+      });
+      console.error(result.state === "recording"
+        ? "[cicero] dictation recording — run `cicero dictate` again to stop"
+        : `[cicero] dictation ${result.state}`);
+    } catch (error) {
+      console.error(`[cicero] dictate failed: ${error instanceof Error ? error.message : String(error)}`);
       process.exitCode = 1;
     }
   });

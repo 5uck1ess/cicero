@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { randomUUID } from "node:crypto";
 import { join, dirname } from "path";
 import { parse as parseYaml, parseDocument as parseYamlDocument, stringify as stringifyYaml } from "yaml";
-import type { CiceroConfig, ActionConfig, SidecarConfig } from "./types";
+import type { CiceroConfig, ActionConfig, SidecarConfig, DictationConfig } from "./types";
 import type { STTProviderConfig } from "./backends/stt/provider";
 import type { TTSProviderConfig } from "./backends/tts/provider";
 import type { LLMProviderConfig } from "./backends/llm/provider";
@@ -28,9 +28,7 @@ const ACTIONS_FILE = "actions.yaml";
 
 export const DEFAULT_CONFIG: CiceroConfig = {
   tts_enabled: true,
-  wake_word_enabled: false,
   hotkey: "ctrl+shift+space",
-  wispr_hotkey: "option+space",
   terminal: "auto",
   voice: "default",
   brain: {
@@ -284,7 +282,6 @@ export function loadActionSnapshot(actionsPath: string): ActionSnapshot {
 
 export interface CLIFlags {
   tts?: boolean;
-  wakeWord?: boolean;
   brain?: string;
   brainMode?: "subprocess" | "tab-inject";
   brainTab?: string;
@@ -303,9 +300,8 @@ export class RuntimeConfig {
   get ttsEnabled(): boolean { return this.config.tts_enabled; }
   set ttsEnabled(v: boolean) { this.config.tts_enabled = v; }
 
-  get wakeWordEnabled(): boolean { return this.config.wake_word_enabled; }
   get hotkey(): string { return this.config.hotkey; }
-  get wisprHotkey(): string { return this.config.wispr_hotkey; }
+  get dictation(): DictationConfig { return this.config.dictation ?? {}; }
   get terminal(): string { return this.config.terminal; }
   get voice(): string { return this.config.voice; }
   get voiceRefAudio(): string | undefined { return this.config.voice_ref_audio; }
@@ -547,7 +543,6 @@ export function loadConfig(
 
   // Layer 2: CLI flags override
   if (flags.tts !== undefined) config.tts_enabled = flags.tts;
-  if (flags.wakeWord !== undefined) config.wake_word_enabled = flags.wakeWord;
   if (flags.brain) {
     const VALID_BRAINS = ["claude-code", "codex", "gemini", "qwen", "ollama", "acp"] as const;
     if (!(VALID_BRAINS as readonly string[]).includes(flags.brain)) {
