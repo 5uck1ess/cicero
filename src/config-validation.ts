@@ -646,8 +646,13 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     const readsBaseUrl = (backend: string | undefined): boolean =>
       backend !== undefined && OPENAI_COMPATIBLE_BACKENDS.includes(backend);
     /** A server that loads ONE model, so a second role naming another never gets it. */
+    // A server this daemon launches that holds exactly ONE model: llama-server
+    // and mlx_lm.server load a model at startup and treat a request's `model`
+    // field as informational. Ollama also has a default port and is also
+    // launched here, but it selects per request, so it is deliberately not one
+    // of these -- sharing it between roles is a working setup, not a clash.
     const singleModelServer = (backend: string | undefined): boolean =>
-      backend !== undefined && llmDefaultPort(backend) !== undefined;
+      backend !== undefined && llmDefaultPort(backend) !== undefined && !backendRoutesByModel(backend);
 
     const classifierBackend = typeof classifier.backend === "string" ? classifier.backend : undefined;
     if (classifier.baseUrl !== undefined && classifierBackend !== undefined && !readsBaseUrl(classifierBackend)) {
@@ -682,62 +687,76 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
         port: serverPort("router", 8081),
       };
 
-    // One host:port is one server process, whether it is on this box or a
-    // remote one — llama-server loads a single model, so a second role naming
-    // a different one there is asking for something it will never get.
-    // Round 8 (Codex): a shared endpoint only forces ONE model when it is one
-    // model server. A cloud API multiplexes — two roles at api.openai.com with
-    // different models is the ordinary way to run a cheap classifier beside an
-    // expensive reply model, and refusing it was plain wrong. Loopback still
-    // counts whatever the backend says: that is a server this daemon starts or
-    // adopts, and adoption is what silently hands over the wrong model.
+    // Two roles on one host:port are one server process. Whether that is a
+    // problem depends entirely on what that process can serve:
+    //
+    //   - a SINGLE-MODEL server (llama-server, mlx_lm.server) loads one model at
+    //     launch, and `model` in a request is informational. A second role
+    //     naming a different one silently classifies on whatever is loaded --
+    //     and reports healthy, because adoption probes health, never the model.
+    //   - a MODEL-ROUTING server (ollama, vLLM, llama-swap, a cloud API) selects
+    //     per request. Two roles with different models there is the ordinary way
+    //     to run a cheap classifier beside an expensive reply model.
+    //
+    // Round 10 (Codex): loopback was previously treated as single-model on its
+    // own, which rejected a local vLLM or llama-swap multiplexing two models --
+    // a configuration this repo explicitly supports. What matters is the
+    // backend, not whether the socket happens to be on this box.
     const sharedEndpoint = classifierEndpoint.port !== undefined
       && classifierEndpoint.port === llm.port
       && classifierEndpoint.host === llm.host;
-    const sharesLlmServer = sharedEndpoint
-      && (isLocal(classifierEndpoint.host)
-        || singleModelServer(classifierBackend)
-        || singleModelServer(llm.backend));
-    // An UNSET classifier.model is the documented way to share the reply model
-    // on purpose — it must stay accepted, or the hint below sends operators to
-    // a config this same check refuses.
-    // Round 9 (Codex): "drop classifier.model to share the reply model" is only
-    // true where the model field is informational. On a backend that routes by
-    // model, an UNSET model is not "whatever is loaded" — it is that backend's
-    // own default, so the remediation this check recommends produced exactly the
-    // mismatch the check exists to prevent, and startup would not notice: the
-    // shared server is adopted on a health probe that never mentions a model.
-    const unsetShareIsAmbiguous = classifier.model === undefined
-      && backendRoutesByModel(classifierBackend ?? llm.backend);
+    const effectiveBackend = classifierBackend ?? llm.backend;
+    const singleModelShare = sharedEndpoint
+      && singleModelServer(effectiveBackend)
+      && singleModelServer(llm.backend ?? classifierBackend);
+    // Round 10 (Codex): an unset model was treated as ambiguous on every
+    // routing backend, which rejected the plainest configuration there is --
+    // two ollama roles, neither naming a model, both resolving to the same
+    // default. There is nothing to refuse on a routing backend at all: an unset
+    // classifier model there resolves to that backend's own small default and
+    // the server loads it alongside the reply model, which is a working setup,
+    // not a misconfiguration. So the conflict below is asked only of a
+    // single-model share, where an EXPLICIT second model is the trap and an
+    // unset one is the documented way to share what is already loaded.
     const modelConflict = classifier.model !== undefined && classifier.model !== llm.model;
     const backendConflict = classifierBackend !== undefined && llm.backend !== undefined
       && classifierBackend !== llm.backend;
-    if (sharesLlmServer && unsetShareIsAmbiguous) {
+    if (singleModelShare && modelConflict) {
       issues.push(
         `classifier resolves to the same endpoint as llm (${classifierEndpoint.host}:${classifierEndpoint.port}) `
-        + `and names no model, but the '${String(classifierBackend ?? llm.backend)}' backend selects a model per `
-        + `request — so an unset one resolves to its default (${LLM_DEFAULT_MODEL.ollama}), not to the reply model. `
-        + `Set classifier.model to ${String(llm.model)} to share it, or give classifier its own port.`,
+        + `but names a different model (${String(classifier.model)} vs ${String(llm.model)}); the already-running reply server is `
+        + `reused and it serves one model, so the classifier model would never load. `
+        + "Give classifier its own port, or drop classifier.model to share the reply model.",
       );
-    } else if (sharesLlmServer && (modelConflict || backendConflict)) {
-      const named = modelConflict
-        ? `names a different model (${String(classifier.model)} vs ${String(llm.model)})`
-        : `names a different backend (${String(classifierBackend)} vs ${String(llm.backend)})`;
-      // The remediation differs by backend on purpose: dropping the model only
-      // shares it where the field is informational.
-      const share = backendRoutesByModel(classifierBackend ?? llm.backend)
-        ? `set classifier.model to ${String(llm.model)} to share the reply model`
-        : "drop classifier.model to share the reply model";
+    } else if (sharedEndpoint && backendConflict
+      && (singleModelServer(classifierBackend) || singleModelServer(llm.backend))) {
+      // Only raised when one side is a server this daemon LAUNCHES: that is the
+      // case where a specific process must own the port and the other role
+      // adopts it on a health probe, then speaks the wrong protocol to it. Two
+      // routing backends sharing a port is left alone -- ollama, for one, serves
+      // its own API and an OpenAI-compatible one from the same socket.
       issues.push(
-        `classifier resolves to the same endpoint as llm (${classifierEndpoint.host}:${classifierEndpoint.port}) but ${named}; `
-        + "the already-running reply server is reused, so the classifier model would never load. "
-        + `Give classifier its own port, or ${share}.`,
+        `classifier resolves to the same endpoint as llm (${classifierEndpoint.host}:${classifierEndpoint.port}) `
+        + `but names a different backend (${String(classifierBackend)} vs ${String(llm.backend)}); one of them starts `
+        + "a server on that port and the other adopts it. Give classifier its own port.",
       );
     }
 
     // A port collision is about two local processes wanting one seat. A remote
     // peer binds nothing here, so its port is not in the way.
+    //
+    // Round 10 (Codex): a wildcard bind takes the port on EVERY interface, so
+    // 0.0.0.0:8090 contends with an interface-specific listener on 8090 even
+    // though neither host string matches the other and one of them is not a
+    // loopback address at all.
+    const bindsEveryInterface = (host: string): boolean =>
+      host === "0.0.0.0" || host === "::" || host === "*";
+    const overlaps = (a: string, b: string): boolean =>
+      a === b || bindsEveryInterface(a) || bindsEveryInterface(b) || (isLocal(a) && isLocal(b));
     if (classifierEndpoint.port !== undefined && isLocal(classifierEndpoint.host)) {
+      // `boundHere` separates the listeners this daemon always binds -- whatever
+      // host they are given is one of THIS box's interfaces -- from provider
+      // endpoints, which may be a remote peer that binds nothing locally.
       const others: Array<[string, Endpoint | null]> = [
         // The dashboard is default-ON and starts before any provider, so it is
         // holding 8086 in every config that does not switch it off.
@@ -749,10 +768,15 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
         ["stt_fallback", optionalVoicePort("stt_fallback", sttDefaultPort)],
         ["tts", voicePort("tts", ttsDefaultPort, serverPort("tts", 8082))],
         ["tts_fallback", optionalVoicePort("tts_fallback", ttsDefaultPort)],
-        ...(sharesLlmServer ? [] : [["llm", { host: llm.host, port: llm.port }] as [string, Endpoint]]),
+        // A deliberate, permitted share is not also a collision: the whole point
+        // is that one server answers both roles.
+        ...(sharedEndpoint ? [] : [["llm", { host: llm.host, port: llm.port }] as [string, Endpoint]]),
       ];
+      const boundHere = new Set(["dashboard", "web_voice", "tone", "turn"]);
       for (const [name, endpoint] of others) {
-        if (endpoint && isLocal(endpoint.host) && endpoint.port === classifierEndpoint.port) {
+        if (!endpoint || endpoint.port !== classifierEndpoint.port) continue;
+        if ((boundHere.has(name) || isLocal(endpoint.host))
+          && overlaps(classifierEndpoint.host, endpoint.host)) {
           issues.push(
             `classifier.port ${classifierEndpoint.port} is already used by ${name}; `
             + "give the classification model a port of its own",

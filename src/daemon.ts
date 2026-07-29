@@ -1065,6 +1065,20 @@ export class CiceroDaemon {
           .chatCompletion([{ role: "user" as const, content: "hi" }], { max_tokens: 1, signal })
           .then(() => { if (!signal.aborted) log("ok", "LLM model warmed"); }));
       }
+      // The classifier role promises a model that is already warm, but startup
+      // only ever probed its health — and a health probe does not load a model.
+      // On ollama it is GET /api/tags, which lists what is AVAILABLE; the model
+      // loads on the first generate/chat request. On an adopted llama-server the
+      // probe says nothing about which model is resident either. So warm it the
+      // same way as the reply model: with a real completion, in the background,
+      // best-effort. A classifier that cannot answer this is not fatal — every
+      // caller of it already falls back.
+      const classifier = this.providers.classifier;
+      if (classifier && !this.startupPolicies.classifier?.skipReason) {
+        this.runBackground("classifier warmup", (signal) => classifier
+          .chatCompletion([{ role: "user" as const, content: "hi" }], { max_tokens: 1, signal })
+          .then(() => { if (!signal.aborted) log("ok", "Classifier model warmed"); }));
+      }
     }
 
     // Step 3b: Web voice server (browser audio client). For a headless box with no

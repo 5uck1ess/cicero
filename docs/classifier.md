@@ -17,13 +17,19 @@ Same shape as an `llm:` section:
 classifier:
   backend: llama-cpp          # any backend the llm role supports
   host: 127.0.0.1
-  port: 8090
+  port: 8093                  # not 8090 — that is web voice's default
   model: your-small-model
 ```
 
 A ~2B-class instruct model is the intended size. It must be **warm** — a model
 that loads on demand defeats the purpose, because the latency lands in the path
-of every utterance.
+of every utterance. Cicero sends one throwaway completion to the classifier at
+startup so the model is resident before the first real one arrives; a health
+check alone would not do it, since none of the backends load a model on a health
+probe (ollama's `/api/tags` lists what is available, it does not load anything).
+The warmup is best-effort and runs in the background — startup does not wait on
+it, and a classifier that fails to answer is not fatal because every caller
+already falls back.
 
 Remote and local-managed both work. `host` pointing at another machine makes it
 a remote endpoint Cicero only talks to; a local backend that Cicero can launch
