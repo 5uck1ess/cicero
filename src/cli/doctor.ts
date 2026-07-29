@@ -1,4 +1,5 @@
 import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
+import { describeTextInjection } from "../platform/text-inject-run";
 import { join, dirname } from "node:path";
 import { loadConfig, type RuntimeConfig } from "../config";
 import { ciceroHome } from "../platform/paths";
@@ -773,6 +774,26 @@ export async function collectChecks(
   await checkEngine("tts", config.ttsBackend, checks, options, config.raw.tts === undefined);
   await checkEngine("tts_fallback", config.ttsFallbackBackend ?? undefined, checks, options);
   await checkLlm(config.llmBackend, checks, options, config.raw.llm === undefined);
+
+  // -- native dictation ----------------------------------------------------
+  const dictation = config.dictation;
+  if (dictation.enabled) {
+    const target = dictation.target ?? "focused-app";
+    if (target === "cicero") {
+      // This target never synthesizes keystrokes, so it works everywhere.
+      checks.push({ name: "dictation", level: "ok", detail: "enabled, transcripts go to Cicero as commands" });
+    } else {
+      const support = describeTextInjection();
+      checks.push(support.kind === "supported"
+        ? { name: "dictation", level: "ok", detail: `enabled, typing into the focused window via ${support.method}` }
+        : {
+            name: "dictation",
+            level: "fail",
+            detail: `cannot type into other windows: ${support.reason}`,
+            hint: support.fix ?? 'set dictation.target: cicero to hand transcripts to Cicero instead',
+          });
+    }
+  }
 
   // -- semantic end-of-turn sidecar ---------------------------------------
   const turn = config.turn;

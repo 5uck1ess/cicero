@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import type { RuntimeConfig } from "./config";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
 import { log, logStep, logError } from "./logger";
-import { createListener, createConversationalListener } from "./listener";
+import { createListener, createConversationalListener, createDictationListener } from "./listener";
+import type { DictationListener } from "./listener/dictation";
 import { createRouter } from "./router";
 import { createBrain, summarizerClassifier } from "./brain";
 import { createHistoryCompactor, createSummarizerComplete } from "./brain/history-compactor";
@@ -273,6 +274,17 @@ export interface DaemonOptions {
   brainReadiness?: BrainReadinessOptions;
 }
 
+/**
+ * Whether this daemon may run the local dictation listener. Headless means no
+ * local microphone at all — the hotkey, clap, and conversational capture are
+ * already skipped for it — and a dictation toggle spawns a recorder on this very
+ * box. Enabling both used to build the listener anyway, so the one configuration
+ * that promises never to touch the microphone was the one that opened it.
+ */
+export function dictationRunnable(config: RuntimeConfig): boolean {
+  return Boolean(config.dictation.enabled) && !config.headless;
+}
+
 const DEFAULT_DAEMON_SHUTDOWN_DRAIN_TIMEOUT_MS = 95_000;
 
 /** Wrap one finished string as a single-shot async stream for the streaming speaker. */
@@ -311,6 +323,13 @@ export class CiceroDaemon {
   private lastFiller?: string; // last thinking-filler spoken, so the next one varies
   private aecHub: AecAudioHub | null = null;
   private voiceDesiredActive = false;
+  /**
+   * Dictation is holding the local microphone for a capture. Clap must not
+   * re-arm underneath it and voice mode must not claim the device from under
+   * it — on an exclusive capture device two recorders is a broken stream, not a
+   * shared one.
+   */
+  private dictationHoldsMicrophone = false;
   private voiceTransition: Promise<void> = Promise.resolve();
   // Includes conversational recorder release, AEC direct-child reap, and any
   // conditional clap re-arm. Shutdown drains this exact barrier before touching
@@ -588,6 +607,7 @@ export class CiceroDaemon {
   private activeLocalTurn: AbortController | null = null;
   /** Every local mic/dashboard command, including superseded turns winding down. */
   private localTurnTasks = new Set<Promise<void>>();
+  private dictation: DictationListener | null = null;
   private hotkeyProc: ReturnType<typeof Bun.spawn> | null = null;
 
   constructor(config: RuntimeConfig, options: DaemonOptions = {}) {
@@ -982,6 +1002,30 @@ export class CiceroDaemon {
         log("ok", warmMsg.length > 60 ? "Brain warmed (cache primed + conversation resumed)" : "Brain warmed (prompt cache primed)");
       }
     });
+
+    // Native dictation is opt-in. Resolve its typing capability now rather than
+    // on first use, so an operator on a session that cannot synthesize
+    // keystrokes (Wayland, or Linux without xdotool) learns at startup instead
+    // of pressing the hotkey and watching nothing happen.
+    if (this.config.dictation.enabled && this.config.headless) {
+      log("warn", "Dictation is enabled but headless mode is on — no local microphone is opened, so dictation is disabled this run");
+    }
+    if (dictationRunnable(this.config)) {
+      const built = createDictationListener(this.config, this.providers.stt, audioRecorder, {
+        acquire: () => this.acquireDictationMicrophone(),
+        release: () => this.releaseDictationMicrophone(),
+      });
+      if ("listener" in built) {
+        this.dictation = built.listener;
+        // The "cicero" target delivers through this callback. Without it the
+        // whole path succeeds and then silently drops every transcript.
+        this.dictation.onCommand((text) => this.dispatchCommand(text));
+        await this.dictation.start();
+      } else {
+        log("warn", `Dictation is configured but unavailable: ${built.unavailable}`);
+      }
+      this.assertStartupActive();
+    }
 
     // Pre-warm TTS and STT so the first turn isn't hit with a multi-second cold
     // model load. Fire-and-forget — startup must not block on warmup.
@@ -1418,6 +1462,11 @@ export class CiceroDaemon {
         // deferred) becomes one-shot brain context, so "call me" or "what do
         // we do about that?" right after an announcement lands on-topic.
         onNotified: (text) => this.brain.injectContext(notificationTurnContext(text, new Date())),
+        onDictate: async () => {
+          if (!this.dictation) throw new Error("dictation is not enabled on this daemon");
+          await this.dictation.toggle();
+          return { state: this.dictation.getState() };
+        },
         onNotify: async (text, voice, opts) => {
           try {
             if (opts?.signal?.aborted) return null;
@@ -1743,7 +1792,10 @@ export class CiceroDaemon {
     // Double-clap activation. Holds the mic only while voice mode is off, so it
     // releases on activate and resumes when voice mode turns back off (any way).
     const clap = this.config.clap;
-    if (clap.enabled && !this.options.skipServers && !this.config.headless) {
+    // A dictation started during the startup window (the listener is runnable
+    // before the servers bind) already owns the microphone. Arming clap on top
+    // of it is the same two-recorder overlap the handoff exists to prevent.
+    if (clap.enabled && !this.options.skipServers && !this.config.headless && !this.dictationHoldsMicrophone) {
       this.clapListener = new ClapListener({
         onDoubleClap: () => this.onDoubleClap(),
         threshold: clap.threshold,
@@ -1754,6 +1806,9 @@ export class CiceroDaemon {
         // Voice Processing's noise suppression crushes claps below the threshold.
       });
       await this.clapListener.start();
+      // A dictation press can land while that start is waiting on a recorder
+      // reap. Undo the stale commit rather than leaving two mic owners.
+      if (this.dictationHoldsMicrophone) await this.clapListener.stop();
     }
 
     // Start global hotkey listener for voice toggle
@@ -2353,12 +2408,14 @@ export class CiceroDaemon {
 
     const handoff = Promise.all([prior.catch(() => {}), captureRelease, aecRelease]).then(async () => {
       // Raw clap and the AEC/conversational paths are mutually exclusive. Re-arm
-      // only while the daemon still wants the idle voice state.
-      if (!this.running || this.stopRequested || this.voiceDesiredActive) return;
+      // only while the daemon still wants the idle voice state — and never while
+      // dictation is holding the device for a capture.
+      if (!this.running || this.stopRequested || this.voiceDesiredActive || this.dictationHoldsMicrophone) return;
       await this.clapListener?.start();
-      // stop() or a new activation may arrive while clap startup is waiting on a
-      // prior recorder reap. Undo that stale commit before the handoff settles.
-      if (!this.running || this.stopRequested || this.voiceDesiredActive) {
+      // stop(), a new activation, or a dictation press may arrive while clap
+      // startup is waiting on a prior recorder reap. Undo that stale commit
+      // before the handoff settles.
+      if (!this.running || this.stopRequested || this.voiceDesiredActive || this.dictationHoldsMicrophone) {
         await this.clapListener?.stop();
       }
     });
@@ -2367,6 +2424,45 @@ export class CiceroDaemon {
       log("info", `Voice-input handoff cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
     });
     return handoff;
+  }
+
+  /**
+   * Hand the local microphone to a dictation capture.
+   *
+   * Dictation used to spawn its recorder directly, while clap detection held a
+   * raw `rec` process (it is on by default whenever voice mode is off). On an
+   * exclusive ALSA capture device that is two processes competing for one
+   * stream. Ownership now moves through the same handoff barrier voice
+   * activation uses, and `dictationHoldsMicrophone` keeps clap from re-arming
+   * underneath the capture.
+   *
+   * Throwing refuses the capture. Voice mode is refused rather than pre-empted:
+   * it is the same mutual exclusion clap already has with the conversational
+   * path, and pre-empting a live conversation for a hotkey press is worse.
+   */
+  private async acquireDictationMicrophone(): Promise<void> {
+    if (this.voiceDesiredActive || this.conversational?.isActive()) {
+      throw new Error("voice mode is holding the microphone — turn it off before dictating");
+    }
+    this.dictationHoldsMicrophone = true;
+    try {
+      await this.beginVoiceInputHandoff();
+      // The handoff deliberately skips the clap re-arm above; clap may still be
+      // armed from before, so stop it explicitly and confirm that release.
+      await this.clapListener?.stop();
+    } catch (error: unknown) {
+      // Fail closed: an unconfirmed release means something may still own the
+      // device, so dictation must not add a second recorder on top of it.
+      this.dictationHoldsMicrophone = false;
+      void this.beginVoiceInputHandoff();
+      throw error;
+    }
+  }
+
+  /** Give it back, so clap re-arms if the daemon is still idle. */
+  private async releaseDictationMicrophone(): Promise<void> {
+    this.dictationHoldsMicrophone = false;
+    await this.beginVoiceInputHandoff();
   }
 
   /**
@@ -2426,6 +2522,15 @@ export class CiceroDaemon {
     }
 
     if (this.voiceDesiredActive && !conversational.isActive()) {
+      if (this.dictationHoldsMicrophone) {
+        // Symmetric with the refusal in acquireDictationMicrophone: whoever has
+        // the device keeps it until they are done. Starting AEC or raw capture
+        // here would put a second recorder on a live dictation.
+        this.voiceDesiredActive = false;
+        dashBus.setVoiceActive(false);
+        log("warn", "Dictation is holding the microphone — voice mode stays off until the capture ends");
+        return;
+      }
       try {
         await this.voiceInputHandoff;
       } catch (err: unknown) {
@@ -2519,10 +2624,19 @@ export class CiceroDaemon {
       const clapRelease = this.clapListener?.stop();
       const conversationalRelease = this.conversational?.stop();
       const aecRelease = this.aecHub?.stop();
+      // The dictation listener is retained by the same rule and belongs in the
+      // same retry: shutdown logs its failure best-effort and reaches idle, so
+      // leaving it out here meant a recorder still holding the microphone, or a
+      // helper still typing, was owned by an object nothing would ever call
+      // again. Cleared only once its release is confirmed.
+      const dictationRelease = this.dictation
+        ? this.dictation.stop().then(() => { this.dictation = null; })
+        : Promise.resolve();
       await Promise.all([
         clapRelease ?? Promise.resolve(),
         conversationalRelease ?? Promise.resolve(),
         aecRelease ?? Promise.resolve(),
+        dictationRelease,
       ]);
       return;
     }
@@ -2649,6 +2763,20 @@ export class CiceroDaemon {
       this.actionsReloader = null;
       await cleanup("Telegram poller", () => this.stopTelegramPoller?.());
       this.stopTelegramPoller = null;
+      // Keep the listener when its teardown is unconfirmed: it is the only owner
+      // of a recorder still holding the microphone, or of a typing helper still
+      // typing, and clearing the reference here stranded both. A later stop()
+      // retries the reap.
+      let dictationFailure: unknown;
+      await cleanup("dictation", async () => {
+        try {
+          await this.dictation?.stop();
+        } catch (error: unknown) {
+          dictationFailure = error;
+          throw error;
+        }
+      });
+      if (!dictationFailure) this.dictation = null;
       await cleanup("hotkey helper", () => this.hotkeyProc?.kill());
       this.hotkeyProc = null;
       await cleanup("voice lifecycle", async () => {
@@ -2733,6 +2861,21 @@ export class CiceroDaemon {
       const pidLease = this.pidLease;
       this.pidLease = null;
       await cleanup("PID file", () => pidLease?.release() ?? Promise.resolve());
+      // Everything else is torn down, but a dictation listener whose release was
+      // unconfirmed still owns a live recorder holding the microphone, or a
+      // helper still typing. Logging that best-effort and reporting a clean stop
+      // was the lie: the signal path calls stop() exactly once, so nothing ever
+      // reached the retry the retained listener exists for. Fail closed here
+      // instead — the daemon stays in `stopping` with the listener retained, and
+      // a later stop() runs the reap again.
+      if (dictationFailure) {
+        throw new Error(
+          `dictation teardown is unconfirmed, so shutdown is not complete: ${
+            dictationFailure instanceof Error ? dictationFailure.message : String(dictationFailure)
+          }`,
+          { cause: dictationFailure },
+        );
+      }
       log("ok", "Cicero stopped.");
       shutdownCompleted = true;
     } finally {

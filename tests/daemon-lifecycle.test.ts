@@ -6,6 +6,7 @@ import { loadConfig } from "../src/config";
 import {
   CiceroDaemon,
   createRecordedWebTurn,
+  dictationRunnable,
   deliverBriefingTelegramChunks,
   injectDeliveredBriefingContext,
   recordParkedBriefingVoiceOutcome,
@@ -780,6 +781,75 @@ describe("CiceroDaemon lifecycle", () => {
 
     await expect(daemon.stop()).resolves.toBeUndefined();
     expect(streamingStops).toBe(2);
+    expect(state.lifecycle).toBe("idle");
+  });
+
+  // Round 3, finding 4 (Codex): headless is defined as "no local mic/speakers"
+  // and already skips clap, conversational capture, and the hotkey — but
+  // dictation was built anyway, and its toggle (reachable over the
+  // authenticated control surface) spawns a recorder on this box. Configuration
+  // validation permits both keys, so the daemon has to be the one to refuse.
+  test("headless does not run local dictation, however dictation is configured", () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-headless-dictation-test-"));
+    const withDictation = (headless: boolean) => {
+      const config = loadConfig({}, { home });
+      config.raw.headless = headless;
+      config.raw.dictation = { enabled: true };
+      return config;
+    };
+    expect(dictationRunnable(withDictation(false))).toBe(true);
+    expect(dictationRunnable(withDictation(true))).toBe(false);
+
+    // And headless alone still leaves dictation off, as it is opt-in.
+    const bare = loadConfig({}, { home });
+    bare.raw.headless = true;
+    expect(dictationRunnable(bare)).toBe(false);
+  });
+
+  // Round 3, finding 2 (Codex): a dictation teardown failure is logged
+  // best-effort and the listener is deliberately retained — but shutdown then
+  // reached `idle`, and the idle retry branch stopped every microphone owner
+  // EXCEPT dictation. The retained listener was the only handle on a recorder
+  // still holding the device, or a helper still typing, and nothing ever called
+  // it again.
+  test("a retained dictation listener is retried by the next stop", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-dictation-retry-test-"));
+    const daemon = new CiceroDaemon(loadConfig({}, { home }));
+    let dictationStops = 0;
+    const state = daemon as unknown as {
+      lifecycle: "idle" | "starting" | "running" | "stopping";
+      running: boolean;
+      dictation: { stop: () => Promise<void> } | null;
+      brain: { stop: () => Promise<void> } | null;
+      streamingSpeaker: { stop: () => Promise<void> } | null;
+      speaker: { stop: () => Promise<void> } | null;
+    };
+    state.lifecycle = "running";
+    state.running = true;
+    state.dictation = {
+      stop: () => {
+        dictationStops += 1;
+        return dictationStops === 1
+          ? Promise.reject(new Error("dictation teardown is unconfirmed: the recorder has not exited"))
+          : Promise.resolve();
+      },
+    };
+    state.streamingSpeaker = { stop: () => Promise.resolve() };
+    state.speaker = { stop: () => Promise.resolve() };
+    state.brain = { stop: () => Promise.resolve() };
+
+    // The rest of the shutdown still runs, but it does NOT report success: the
+    // signal path calls stop() exactly once and then drops its handlers, so a
+    // clean resolve here meant the retry the retained listener exists for was
+    // never reached, and the recorder holding the microphone outlived the daemon.
+    await expect(daemon.stop()).rejects.toThrow(/dictation teardown is unconfirmed/);
+    expect(state.lifecycle).toBe("stopping");
+    expect(dictationStops).toBe(1);
+    expect(state.dictation).not.toBeNull(); // retained, on purpose
+
+    await daemon.stop();
+    expect(dictationStops).toBe(2);
+    expect(state.dictation).toBeNull(); // released, so no further retry
     expect(state.lifecycle).toBe("idle");
   });
 

@@ -841,3 +841,31 @@ describe("Config — fail-fast validation", () => {
     );
   });
 });
+
+describe("Config — dictation", () => {
+  test("accepts the documented shape", () => {
+    expect(loadYaml([
+      "dictation:",
+      "  enabled: true",
+      "  target: cicero",
+      "  max_recording_seconds: 300",
+    ].join("\n"))).not.toThrow();
+  });
+
+  test("rejects a mistyped target rather than silently dropping every transcript", () => {
+    expect(loadYaml("dictation:\n  target: ciceroo")).toThrow(/dictation.target must be/);
+  });
+
+  test("rejects an unknown dictation key", () => {
+    expect(loadYaml("dictation:\n  enbaled: true")).toThrow(/dictation.enbaled is not supported/);
+  });
+
+  test("rejects a nonsensical recording ceiling", () => {
+    expect(loadYaml("dictation:\n  max_recording_seconds: 0")).toThrow(/max_recording_seconds/);
+  });
+
+  // Removing config keys must not stop an existing operator's daemon from booting.
+  test("tolerates the retired wispr keys so an existing config still starts", () => {
+    expect(loadYaml('wake_word_enabled: false\nwispr_hotkey: "option+space"')).not.toThrow();
+  });
+});

@@ -11,6 +11,25 @@
 # I/O. Delete this line on a desktop to use the local mic instead.
 headless: true
 
+# ---------------------------------------------------------------------------
+# Native dictation: record on demand, transcribe with Cicero's own STT, and
+# deliver the transcript. Off by default — it types into other applications.
+#
+# Toggle it with `cicero dictate` (press once to start, again to stop). Bind
+# that command to any OS-level keyboard shortcut: macOS Shortcuts, a Windows
+# shortcut key, or your Linux desktop's keybinding settings.
+#
+# dictation:
+#   enabled: true
+#   # focused-app: type the transcript into whatever window has focus.
+#   #              Needs macOS, Windows, or Linux/X11 with xdotool installed.
+#   #              Wayland blocks synthetic input to other apps and is refused.
+#   # cicero:      hand the transcript to Cicero as a spoken command instead.
+#   #              Works on every platform — nothing is typed.
+#   target: focused-app
+#   # Ceiling on a single capture, so a forgotten dictation cannot record forever.
+#   max_recording_seconds: 300
+
 web_voice:
   enabled: true
   host: 0.0.0.0                 # bind the LAN; use 127.0.0.1 to keep it local

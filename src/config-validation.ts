@@ -1,4 +1,5 @@
 import type { CiceroConfig } from "./types";
+import { log } from "./logger";
 import { TIER_PRESETS } from "./backends/tiers";
 import { MAX_PROVIDER_TIMEOUT_MS } from "./backends/http-transfer";
 import {
@@ -66,6 +67,9 @@ function suggestedKey(key: string, allowed: readonly string[]): string | undefin
   const threshold = Math.max(1, Math.floor(Math.max(normalized.length, normalizedKey(best.key).length) / 4));
   return best.distance <= threshold ? best.key : undefined;
 }
+
+/** Removed with the Wispr Flow listener; tolerated so old configs still boot. */
+const RETIRED_TOP_LEVEL_KEYS = ["wake_word_enabled", "wispr_hotkey"] as const;
 
 function checkKnownKeys(
   owner: Record<string, unknown>,
@@ -273,19 +277,37 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
 
   checkKnownKeys(config, "config", [
     "quick_intents", "filler_lines", "tts_enabled", "tts_summary_max_tokens", "tts_local_max_tokens",
-    "wake_word_enabled", "hotkey", "wispr_hotkey", "terminal", "voice", "voice_ref_audio",
+    "hotkey", "dictation", "terminal", "voice", "voice_ref_audio",
+    // Retired with the Wispr Flow listener (see docs/dictation.md). Still
+    // accepted so an existing config keeps starting; both are ignored.
+    ...RETIRED_TOP_LEVEL_KEYS,
     "voice_ref_text", "barge_in_enabled", "full_duplex", "aec", "silence_duration",
     "silence_threshold", "phonetic_aliases", "brain", "servers", "actions", "deployment", "stt",
     "stt_fallback", "tts", "tts_fallback", "llm", "compute", "sidecar", "dashboard", "web_voice",
     "notify", "headless", "turn", "tone", "clap", "vad", "earcons",
   ], issues);
 
+  for (const key of RETIRED_TOP_LEVEL_KEYS) {
+    if (config[key] !== undefined) {
+      // A warning, not an error: refusing to start over a key we removed would
+      // punish the operator for our change.
+      log("warn", `config.${key} is no longer used and is ignored — see docs/dictation.md`);
+    }
+  }
+
+  if (config.dictation !== undefined && checkRecord(config.dictation, "dictation", issues)) {
+    checkKnownKeys(config.dictation, "dictation", ["enabled", "target", "max_recording_seconds"], issues);
+    checkOptionalBoolean(config.dictation, "enabled", "dictation", issues);
+    if (config.dictation.target !== undefined && config.dictation.target !== "focused-app" && config.dictation.target !== "cicero") {
+      issues.push('dictation.target must be "focused-app" or "cicero"');
+    }
+    checkOptionalNumber(config.dictation, "max_recording_seconds", "dictation", issues, { min: 1, max: 3_600 });
+  }
+
   checkBoolean(config.tts_enabled, "tts_enabled", issues);
-  checkBoolean(config.wake_word_enabled, "wake_word_enabled", issues);
   // Cicero uses explicit feature switches rather than empty-string sentinels;
   // hotkey names and voice selections must therefore remain usable values.
   checkString(config.hotkey, "hotkey", issues);
-  checkString(config.wispr_hotkey, "wispr_hotkey", issues);
   checkString(config.voice, "voice", issues);
   for (const key of ["voice_ref_audio", "voice_ref_text"] as const) {
     checkOptionalString(config, key, "config", issues);

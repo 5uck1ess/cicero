@@ -19,9 +19,7 @@ function cfg(
 ): RuntimeConfig {
   return new RuntimeConfig({
     tts_enabled: true,
-    wake_word_enabled: false,
     hotkey: "ctrl+shift+space",
-    wispr_hotkey: "option+space",
     terminal: "auto",
     voice: "default",
     brain: { backend, mode: "subprocess", ...brainExtra },
