@@ -179,13 +179,56 @@ describe("releasing a retained helper at shutdown", () => {
     // the dictation drain rather than being swallowed.
     await expect(typing).rejects.toThrow(/exited with 143/);
 
-    // Nothing is left held afterwards: the next injection spawns rather than
-    // being refused as typing-over.
-    const next = type("after");
-    await Bun.sleep(0);
-    helpers[1]!.finish(0);
-    await next;
-    expect(helpers.length).toBe(2);
+    // Nothing is left held afterwards: a second release resolves and does not
+    // kill anything again. (Typing again is refused — the injector is closed for
+    // shutdown — which is covered separately below.)
+    await type.stop();
+    expect(helpers[0]!.proc.kills).toBe(1);
+    expect(helpers.length).toBe(1);
+  }, 15_000);
+
+  // Round 4 (Codex): releasing the injector is not enough on its own. A
+  // transcription still in flight when shutdown started settles afterwards and
+  // is typed, spawning a fresh helper — up to ~2 minutes of xdotool for a capped
+  // transcript — after stop() already found nothing to reap and reported a
+  // confirmed release. The daemon then dropped the listener.
+  test("a released injector refuses to spawn a late transcript", async () => {
+    let spawns = 0;
+    const type = createTextInjector(
+      { platform: "linux", sessionType: "x11", hasBinary: () => true },
+      () => {
+        spawns += 1;
+        return fakeHelper().proc as unknown as ReturnType<typeof Bun.spawn>;
+      },
+      { injectMs: 10_000, reapMs: 500 },
+    );
+
+    await type.stop(); // nothing held — exactly the shutdown ordering that failed
+    await expect(type("a transcript that arrived late")).rejects.toThrow(/released for shutdown/);
+    expect(spawns).toBe(0);
+  });
+
+  test("a helper held at release still blocks, and the refusal outlives it", async () => {
+    const helpers: ReturnType<typeof fakeHelper>[] = [];
+    const spawn = (_spec: TextInjectionSpec) => {
+      const helper = fakeHelper();
+      helpers.push(helper);
+      return helper.proc as unknown as ReturnType<typeof Bun.spawn>;
+    };
+    const type = createTextInjector(
+      { platform: "linux", sessionType: "x11", hasBinary: () => true },
+      spawn,
+      { injectMs: 20, reapMs: 20 },
+    );
+    await expect(type("hello")).rejects.toThrow(/did not exit when killed/);
+
+    await expect(type.stop()).rejects.toThrow(/has not exited/);
+    helpers[0]!.finish(0);
+    await type.stop(); // now confirmed
+
+    // Confirmed gone is still not an invitation to type again after shutdown.
+    await expect(type("later")).rejects.toThrow(/released for shutdown/);
+    expect(helpers.length).toBe(1);
   }, 15_000);
 
   test("stop() with nothing retained is a no-op", async () => {

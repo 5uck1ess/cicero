@@ -69,7 +69,11 @@ export interface InjectionTimeouts {
  */
 export interface TextInjector {
   (text: string): Promise<void>;
-  /** Reap a helper retained by a timed-out run. Rejects if it is still alive. */
+  /**
+   * Reap the helper this injector holds and close it to further typing. Rejects
+   * if the helper is still alive. Latched: once released, a late transcript is
+   * refused rather than typed, so shutdown's "released" stays true.
+   */
   stop(): Promise<void>;
 }
 
@@ -97,6 +101,19 @@ export function createTextInjector(
    * away, dictation types again without a daemon restart.
    */
   let held: ReturnType<typeof Bun.spawn> | null = null;
+  /**
+   * Set by stop(): this injector may not spawn again. Releasing it is not enough
+   * on its own — a transcription still in flight when the daemon began shutting
+   * down resolves AFTER that release, and typing it spawned a fresh helper (up
+   * to two minutes of xdotool for a capped transcript) that nothing owned any
+   * more, while shutdown had already reported a confirmed release. Fail closed:
+   * a transcript is worth less than a keyboard typing into whatever the operator
+   * does next.
+   */
+  let closed = false;
+  const refuseWhenClosed = (): void => {
+    if (closed) throw new Error("the typing helper has been released for shutdown; the transcript was not typed");
+  };
   const hold = (proc: ReturnType<typeof Bun.spawn>): void => { held = proc; };
   const release = (proc: ReturnType<typeof Bun.spawn>): void => { if (held === proc) held = null; };
 
@@ -106,11 +123,15 @@ export function createTextInjector(
       log("warn", `Dictation transcript was longer than the injection limit — typing the first ${bounded.text.length} characters`);
     }
     if (!bounded.text) return;
+    refuseWhenClosed();
     if (held) {
       if (!await confirmExit(held, reapMs)) {
         throw new Error("a previous typing helper has not exited; refusing to type over it");
       }
       held = null;
+      // The only await between the check above and the spawn below, so it is the
+      // only window in which a shutdown can land unnoticed.
+      refuseWhenClosed();
     }
     await runInjection(
       buildTextInjection(bounded.text, support.method),
@@ -127,6 +148,9 @@ export function createTextInjector(
    * unconfirmed, so the caller can retry rather than assume it is gone.
    */
   typer.stop = async (): Promise<void> => {
+    // Synchronous, before any await: a caller already inside typer() must not be
+    // able to slip a spawn past this.
+    closed = true;
     const survivor = held;
     if (!survivor) return;
     try { survivor.kill(); } catch { /* already gone */ }

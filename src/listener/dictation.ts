@@ -174,8 +174,11 @@ export class DictationListener implements Listener {
     // and reapStuckRecorder hands it back itself when it finally exits.
     if (reaped) await this.handBackMicrophone();
     // Whatever the typing helper retained is owned by this listener too, and
-    // nothing else can reach it once the daemon drops its reference.
-    const typingReleased = await this.releaseTypingHelper();
+    // nothing else can reach it once the daemon drops its reference. Released
+    // BEFORE the drain so a helper already typing cannot hold the drain open for
+    // the length of a transcript; its outcome is not the one reported, because
+    // the release below supersedes it.
+    await this.releaseTypingHelper();
     // A capture that already reached transcription is owned work, not new work.
     // Drain it so its typing cannot land after shutdown reports done, but bound
     // the wait so a wedged STT provider cannot hold the daemon open.
@@ -193,6 +196,15 @@ export class DictationListener implements Listener {
         }),
       ]).catch(() => { /* finishRecording already logged */ });
     }
+    // And again after the drain. A transcription that settles INSIDE the drain
+    // window is delivered — that is what the drain is for — so it reaches
+    // typeText and can spawn a helper after the release above already found
+    // nothing. The injector refuses to spawn once released, but a helper it
+    // spawned just before that must still be reaped here rather than outliving a
+    // shutdown that reported success. This is the outcome stop() reports: it
+    // supersedes the earlier attempt, so a helper that refused the first kill and
+    // died on the second counts as released.
+    const typingReleased = await this.releaseTypingHelper();
     this.state = "idle";
     // Report an unconfirmed release rather than swallowing it. stop() used to
     // resolve regardless, and the daemon then cleared its only reference — so a

@@ -554,6 +554,52 @@ describe("a recorder that will not exit", () => {
     expect(events).toEqual(["acquire", "release", "acquire"]);
   });
 
+  // Round 4 (Codex): a transcription that settles INSIDE the drain window is
+  // delivered — that is what the drain is for — so it reaches typeText after the
+  // typing helper was already released. Releasing only before the drain left a
+  // helper spawned by that delivery with no owner, while stop() reported a
+  // confirmed release and the daemon dropped the listener.
+  test("a transcript delivered during the drain cannot leave a typing helper behind", async () => {
+    const events: string[] = [];
+    let releaseStt!: (text: string) => void;
+    const sttGate = new Promise<string>((resolve) => { releaseStt = resolve; });
+    const { dict } = listener({
+      stt: { transcribe: () => sttGate },
+      typeText: async (text: string) => { events.push(`type:${text}`); },
+      stopTyping: async () => { events.push("stopTyping"); },
+      drainTimeoutMs: 500,
+    });
+    await dict.start();
+    await dict.toggle();
+    await dict.settled();
+    await dict.toggle(); // stop pressed: transcription is now in flight
+    await Bun.sleep(5);
+
+    const stopping = dict.stop();
+    await Bun.sleep(5);
+    releaseStt("landed during the drain");
+    await stopping;
+
+    // Released once before the drain so an active helper cannot hold it open,
+    // and again after, which is the release stop() actually reports.
+    expect(events).toEqual(["stopTyping", "type:landed during the drain", "stopTyping"]);
+  });
+
+  test("a helper that dies on the post-drain release is not reported unconfirmed", async () => {
+    let attempts = 0;
+    const { dict } = listener({
+      stopTyping: async () => {
+        attempts += 1;
+        // Refuses the first kill, goes on the second — the retryable shape the
+        // injector already has.
+        if (attempts === 1) throw new Error("a typing helper has not exited");
+      },
+    });
+    await dict.start();
+    await dict.stop();
+    expect(attempts).toBe(2);
+  });
+
   // Round 3, finding 3 (Codex): shutdown killed the recorder and dropped the
   // file but never handed the device back, so the daemon went on believing
   // dictation owned the microphone and never re-armed clap or conversational
@@ -690,6 +736,9 @@ describe("shutdown with an unconfirmed child", () => {
     await dict.settled();
 
     await dict.stop();
-    expect(stopped).toBe(1);
+    // Twice on purpose: once before the drain so an active helper cannot hold it
+    // open, once after so a helper spawned by a transcript delivered inside the
+    // drain window is reaped too.
+    expect(stopped).toBe(2);
   });
 });
