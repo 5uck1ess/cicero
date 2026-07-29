@@ -58,13 +58,21 @@ describe("history compaction", () => {
   // Single-flight: a second trigger while one is running must not start another.
   test("only one compaction runs at a time", async () => {
     let started = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const ctx = new BrainTurnContext();
     ctx.setCompactor(async () => {
       started += 1;
-      await gate;
-      return "summary";
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await gate;
+        return "summary";
+      } finally {
+        inFlight -= 1;
+      }
     });
 
     fill(ctx, 13);
@@ -74,7 +82,10 @@ describe("history compaction", () => {
 
     release();
     await ctx.settled();
-    expect(started).toBe(1);
+    // Single-flight means never two AT ONCE. A follow-up pass afterwards is
+    // wanted, not a violation: turns that arrived during the run were not in
+    // its batch, and evicting them instead would delete unsummarized history.
+    expect(maxInFlight).toBe(1);
   });
 
   // The full turns must keep serving prompts until the summary actually lands —
@@ -268,4 +279,58 @@ describe("history compaction", () => {
     expect(replayed).toBeLessThanOrEqual(32_000);
   });
 
+});
+
+// Round 2 (Codex): turns that arrive DURING a compaction are not in its batch,
+// so a successful run could return under the relaxed ceiling and then be trimmed
+// straight to the normal one — deleting turns that were never summarized. That
+// is the exact loss compaction exists to prevent, arriving through compaction's
+// own success path.
+test("a turn that arrived mid-compaction is summarized, never silently dropped", async () => {
+  const sent: string[] = [];
+  let releaseFirst!: () => void;
+  const firstRun = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let runs = 0;
+
+  const ctx = new BrainTurnContext();
+  ctx.setCompactor(async ({ turns }) => {
+    runs += 1;
+    for (const turn of turns) sent.push(turn.assistant);
+    if (runs === 1) await firstRun;
+    return `summary ${runs}`;
+  });
+
+  // Six small turns trip the compactor; the batch is those six.
+  for (let i = 0; i < 6; i += 1) ctx.remember(`t${i}`, `t${i}-reply`);
+  // Three near-maximal turns land while that request is still open. Together
+  // they exceed the normal ceiling but fit the relaxed one.
+  const large = ["L0", "L1", "L2"];
+  for (const tag of large) ctx.remember(tag.padEnd(4_000, "x"), `${tag}-reply`.padEnd(8_000, "y"));
+
+  releaseFirst();
+  await ctx.settled();
+
+  // Every large turn is either still in the transcript or was handed to a
+  // summarizer. None may be missing from both.
+  const text = ctx.buildTextPrompt("now", true);
+  for (const tag of large) {
+    const retained = text.includes(`${tag}-reply`.padEnd(8_000, "y"));
+    const summarized = sent.some((assistant) => assistant.startsWith(`${tag}-reply`));
+    expect({ tag, accountedFor: retained || summarized }).toEqual({ tag, accountedFor: true });
+  }
+});
+
+// The chain must not spin: a failing summarizer would otherwise be retried
+// against the same batch forever.
+test("a failing compactor is not retried in a loop by the follow-up pass", async () => {
+  let calls = 0;
+  const ctx = new BrainTurnContext();
+  ctx.setCompactor(async () => { calls += 1; throw new Error("summarizer down"); });
+  for (let i = 0; i < 13; i += 1) ctx.remember(`u${i}`.padEnd(4_000, "x"), `a${i}`.padEnd(8_000, "y"));
+  await ctx.settled();
+
+  const afterFirst = calls;
+  await ctx.settled();
+  expect(calls).toBe(afterFirst);
+  expect(calls).toBeLessThan(5);
 });

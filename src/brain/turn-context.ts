@@ -143,8 +143,15 @@ export class BrainTurnContext {
   }
 
   /** Awaits an in-flight compaction. For shutdown drains and tests. */
-  settled(): Promise<void> {
-    return this.compacting ?? Promise.resolve();
+  async settled(): Promise<void> {
+    // A compaction can start a follow-up pass from its own teardown, so awaiting
+    // one latch is not the same as awaiting compaction. Drain until the latch
+    // stops being replaced, or a caller resumes with work still in flight.
+    while (this.compacting) {
+      const current = this.compacting;
+      await current;
+      if (this.compacting === current) break;
+    }
   }
 
   inject(context: string): void {
@@ -235,6 +242,7 @@ export class BrainTurnContext {
     if (batch.length === 0) return;
     const previousSummary = this.summary;
     const generation = this.generation;
+    let compacted = false;
 
     const run = async (): Promise<void> => {
       const controller = new AbortController();
@@ -258,6 +266,7 @@ export class BrainTurnContext {
         if (!summary) throw new Error("compactor returned nothing");
         if (generation !== this.generation) return; // cleared while we were running
         this.applyCompaction(batch, summary);
+        compacted = true;
       } catch (error: unknown) {
         // Falling back to eviction is the correct failure mode: the transcript
         // stays bounded, we just lose the older turns as we always did.
@@ -272,10 +281,22 @@ export class BrainTurnContext {
     // never clear and only the FIRST compaction would ever run.
     const tracked: Promise<void> = run().finally(() => {
       if (this.compacting === tracked) this.compacting = null;
+      // Turns that arrived DURING the run were never in the batch, so a
+      // compaction can succeed and still leave the history over the normal
+      // ceiling. Trimming straight to that ceiling deleted those turns without
+      // ever summarizing them — precisely the loss compaction exists to
+      // prevent. Summarize them in a follow-up pass instead.
+      //
+      // Only after a SUCCESSFUL run: chaining after a failure would retry the
+      // same batch against the same broken summarizer forever. Termination is
+      // structural — every batch leaves at least one turn behind, so the chain
+      // stops as soon as there is nothing left to retire.
+      if (compacted && this.overCap()) this.beginCompaction();
       // Only now, with the latch cleared, does limit() report the normal
       // ceiling again. Trim here so a failed compaction lands back at the
       // documented bound immediately instead of sitting at 2x until the next
-      // turn happens to arrive.
+      // turn happens to arrive. A chained compaction above re-relaxes it, so
+      // this evicts only when nothing is going to summarize them.
       this.enforceLimits();
     });
     this.compacting = tracked;

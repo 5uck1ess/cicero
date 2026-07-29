@@ -226,10 +226,14 @@ function checkHttpUrl(value: unknown, path: string, issues: string[]): void {
     issues.push(`${path} must be a non-empty HTTP(S) URL`);
     return;
   }
-  if (url.search) {
+  // Test the raw value, not `url.search`/`url.hash`: those are empty strings for
+  // a bare `?` or `#`, so `http://h/v1?` slipped through and still concatenated
+  // into `http://h/v1?/chat/completions`, whose real path is `/v1`. The
+  // delimiter is the problem, with or without anything after it.
+  if (value.includes("?")) {
     issues.push(`${path} must not carry a query string — Cicero appends a path to it; put credentials in the API key setting instead`);
   }
-  if (url.hash) {
+  if (value.includes("#")) {
     issues.push(`${path} must not carry a fragment — Cicero appends a path to it`);
   }
 }
