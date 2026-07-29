@@ -13,6 +13,7 @@ import {
 } from "./backends/stt/provider";
 import { ttsDefaultPort } from "./backends/tts/provider";
 import { llmDefaultPort } from "./backends/llm/provider";
+import { OPENAI_COMPATIBLE_BACKENDS } from "./backends/llm/openai";
 
 /** A resolved network seat: what the role will actually bind or reach. */
 interface Endpoint { host: string; port: number | undefined }
@@ -579,8 +580,26 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       }
     };
 
+    // Round 8 (Codex): only the OpenAI-compatible family reads baseUrl. The
+    // local single-model backends select their endpoint from host/port and
+    // ignore it entirely, so resolving THEIR baseUrl made validation reason
+    // about an endpoint the runtime never contacts — the opposite mismatch to
+    // the one it was added to catch.
+    const readsBaseUrl = (backend: string | undefined): boolean =>
+      backend !== undefined && OPENAI_COMPATIBLE_BACKENDS.includes(backend);
+    /** A server that loads ONE model, so a second role naming another never gets it. */
+    const singleModelServer = (backend: string | undefined): boolean =>
+      backend !== undefined && llmDefaultPort(backend) !== undefined;
+
     const classifierBackend = typeof classifier.backend === "string" ? classifier.backend : undefined;
-    const classifierEndpoint: Endpoint = fromBaseUrl(classifier.baseUrl) ?? {
+    if (classifier.baseUrl !== undefined && classifierBackend !== undefined && !readsBaseUrl(classifierBackend)) {
+      issues.push(
+        `classifier.baseUrl is set but the '${classifierBackend}' backend ignores it and connects to `
+        + "classifier.host/classifier.port instead; use classifier.host and classifier.port, or "
+        + "backend: openai-compatible if that URL is what you meant.",
+      );
+    }
+    const classifierEndpoint: Endpoint = (readsBaseUrl(classifierBackend) ? fromBaseUrl(classifier.baseUrl) : null) ?? {
       host: hostOf(classifier.host),
       port: portOf(classifier.port) ?? llmDefaultPort(classifierBackend),
     };
@@ -590,7 +609,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     // classifier on the same seat would silently adopt.
     const llmSection = section("llm");
     const llmBackend = llmSection && typeof llmSection.backend === "string" ? llmSection.backend : undefined;
-    const llmUrlEndpoint = llmSection ? fromBaseUrl(llmSection.baseUrl) : null;
+    const llmUrlEndpoint = llmSection && readsBaseUrl(llmBackend) ? fromBaseUrl(llmSection.baseUrl) : null;
     const llm = llmSection
       ? {
         backend: llmBackend,
@@ -608,9 +627,19 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     // One host:port is one server process, whether it is on this box or a
     // remote one — llama-server loads a single model, so a second role naming
     // a different one there is asking for something it will never get.
-    const sharesLlmServer = classifierEndpoint.port !== undefined
+    // Round 8 (Codex): a shared endpoint only forces ONE model when it is one
+    // model server. A cloud API multiplexes — two roles at api.openai.com with
+    // different models is the ordinary way to run a cheap classifier beside an
+    // expensive reply model, and refusing it was plain wrong. Loopback still
+    // counts whatever the backend says: that is a server this daemon starts or
+    // adopts, and adoption is what silently hands over the wrong model.
+    const sharedEndpoint = classifierEndpoint.port !== undefined
       && classifierEndpoint.port === llm.port
       && classifierEndpoint.host === llm.host;
+    const sharesLlmServer = sharedEndpoint
+      && (isLocal(classifierEndpoint.host)
+        || singleModelServer(classifierBackend)
+        || singleModelServer(llm.backend));
     // An UNSET classifier.model is the documented way to share the reply model
     // on purpose — it must stay accepted, or the hint below sends operators to
     // a config this same check refuses.

@@ -592,6 +592,59 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))()).not.toThrow();
   });
 
+  // Round 8 (Codex): only the OpenAI-compatible family reads baseUrl. LlamaCpp
+  // selects host/port and ignores it, so a classifier carrying baseUrl was
+  // validated against an endpoint the runtime never contacts — it actually
+  // targeted 8080 and adopted the reply server. Refusing the key beats
+  // mirroring a setting that silently does nothing.
+  test("a baseUrl on a backend that ignores it is refused, not silently honoured", () => {
+    expect(loadYaml([
+      "classifier:",
+      "  backend: llama-cpp",
+      "  baseUrl: http://127.0.0.1:8093/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))).toThrow(/classifier\.baseUrl is set but the 'llama-cpp' backend ignores it/);
+  });
+
+  test("the same key on an OpenAI-compatible backend stays valid", () => {
+    expect(() => loadYaml([
+      "classifier:",
+      "  backend: openai-compatible",
+      "  baseUrl: http://127.0.0.1:8093/v1",
+      "  model: small-classifier-model",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
+  // Round 8 (Codex): a shared endpoint only forces one model when it is one
+  // model server. A cloud API multiplexes, and a cheap classifier beside an
+  // expensive reply model on the same API is the ordinary way to run this.
+  test("two cloud roles on one API with different models is allowed", () => {
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: openai",
+      "  baseUrl: https://api.openai.com/v1",
+      "  model: gpt-4.1",
+      "classifier:",
+      "  backend: openai",
+      "  baseUrl: https://api.openai.com/v1",
+      "  model: gpt-4.1-mini",
+      "",
+    ].join("\n"))()).not.toThrow();
+
+    // And with the URLs left implicit, which resolves to the same endpoint.
+    expect(() => loadYaml([
+      "llm:",
+      "  backend: openai",
+      "  model: gpt-4.1",
+      "classifier:",
+      "  backend: openai",
+      "  model: gpt-4.1-mini",
+      "",
+    ].join("\n"))()).not.toThrow();
+  });
+
   // A listener that is off binds nothing, so it is not in the way.
   test("a disabled listener does not reserve its default port", () => {
     expect(() => loadYaml([
