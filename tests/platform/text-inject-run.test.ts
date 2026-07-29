@@ -146,6 +146,48 @@ describe("releasing a retained helper at shutdown", () => {
     await type.stop();
   }, 15_000);
 
+  // Round 3, finding 1 (Codex): only a helper retained after a refused kill was
+  // reachable. A helper that is actively typing lived solely inside
+  // runInjection(), so a shutdown mid-injection killed nothing and reported a
+  // clean release while xdotool went on typing into the focused field.
+  test("stop() kills a helper that is still typing", async () => {
+    const helpers: ReturnType<typeof fakeHelper>[] = [];
+    const spawn = (_spec: TextInjectionSpec) => {
+      const helper = fakeHelper();
+      helpers.push(helper);
+      return helper.proc as unknown as ReturnType<typeof Bun.spawn>;
+    };
+    const type = createTextInjector(
+      { platform: "linux", sessionType: "x11", hasBinary: () => true },
+      spawn,
+      // Generous: this helper is well inside its deadline, i.e. healthily typing.
+      { injectMs: 10_000, reapMs: 500 },
+    );
+
+    const typing = type("a long transcript still being typed");
+    await Bun.sleep(0);
+    expect(helpers.length).toBe(1);
+
+    const stopping = type.stop();
+    await Bun.sleep(0);
+    expect(helpers[0]!.proc.kills).toBe(1);
+
+    // The helper honours the kill, as a real xdotool does.
+    helpers[0]!.finish(143);
+    await stopping;
+    // The injection itself fails — it was killed — and that failure surfaces to
+    // the dictation drain rather than being swallowed.
+    await expect(typing).rejects.toThrow(/exited with 143/);
+
+    // Nothing is left held afterwards: the next injection spawns rather than
+    // being refused as typing-over.
+    const next = type("after");
+    await Bun.sleep(0);
+    helpers[1]!.finish(0);
+    await next;
+    expect(helpers.length).toBe(2);
+  }, 15_000);
+
   test("stop() with nothing retained is a no-op", async () => {
     const type = createTextInjector(
       { platform: "linux", sessionType: "x11", hasBinary: () => true },

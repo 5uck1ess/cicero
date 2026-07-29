@@ -167,6 +167,12 @@ export class DictationListener implements Listener {
     // A recorder retained by an earlier failed reap gets another chance here, so
     // an unconfirmed release is recoverable without restarting the daemon.
     const reaped = await this.reapStuckRecorder();
+    // Ordinary transcription hands the microphone back; a shutdown that killed
+    // the recorder instead did not, so the daemon stayed convinced dictation
+    // still owned the device and never re-armed clap or conversational capture.
+    // Only once nothing is outstanding — an unconfirmed recorder still holds it,
+    // and reapStuckRecorder hands it back itself when it finally exits.
+    if (reaped) await this.handBackMicrophone();
     // Whatever the typing helper retained is owned by this listener too, and
     // nothing else can reach it once the daemon drops its reference.
     const typingReleased = await this.releaseTypingHelper();

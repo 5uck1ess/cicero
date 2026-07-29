@@ -553,6 +553,48 @@ describe("a recorder that will not exit", () => {
     await dict.toggle(); // the reap succeeds, and only now is it handed back
     expect(events).toEqual(["acquire", "release", "acquire"]);
   });
+
+  // Round 3, finding 3 (Codex): shutdown killed the recorder and dropped the
+  // file but never handed the device back, so the daemon went on believing
+  // dictation owned the microphone and never re-armed clap or conversational
+  // capture. Only ordinary transcription released it.
+  test("stop() during a recording hands the microphone back", async () => {
+    const events: string[] = [];
+    const { dict } = listener({
+      acquireMicrophone: async () => { events.push("acquire"); },
+      releaseMicrophone: async () => { events.push("release"); },
+    });
+    await dict.start();
+    await dict.toggle();
+    await dict.settled();
+    expect(events).toEqual(["acquire"]);
+
+    await dict.stop();
+    expect(events).toEqual(["acquire", "release"]);
+  });
+
+  test("stop() does not hand it back while a retained recorder still holds it", async () => {
+    const stubborn = stubbornRecorder();
+    const events: string[] = [];
+    const { dict } = listener({
+      recorder: stubborn as never,
+      recorderExitTimeoutMs: 20,
+      acquireMicrophone: async () => { events.push("acquire"); },
+      releaseMicrophone: async () => { events.push("release"); },
+    });
+    await dict.start();
+    await dict.toggle();
+    await dict.settled();
+
+    // The recorder refuses to exit, so the release is unconfirmed and reported.
+    await expect(dict.stop()).rejects.toThrow(/has not exited/);
+    expect(events).toEqual(["acquire"]);
+
+    // Retryable: once it goes, the retry reaps it AND returns the device.
+    stubborn.release();
+    await dict.stop();
+    expect(events).toEqual(["acquire", "release"]);
+  });
 });
 
 // Round 2, finding 1 (Codex): /api/dictate admits concurrent jobs. Two presses

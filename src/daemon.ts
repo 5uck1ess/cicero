@@ -272,6 +272,17 @@ export interface DaemonOptions {
   brainReadiness?: BrainReadinessOptions;
 }
 
+/**
+ * Whether this daemon may run the local dictation listener. Headless means no
+ * local microphone at all — the hotkey, clap, and conversational capture are
+ * already skipped for it — and a dictation toggle spawns a recorder on this very
+ * box. Enabling both used to build the listener anyway, so the one configuration
+ * that promises never to touch the microphone was the one that opened it.
+ */
+export function dictationRunnable(config: RuntimeConfig): boolean {
+  return Boolean(config.dictation.enabled) && !config.headless;
+}
+
 const DEFAULT_DAEMON_SHUTDOWN_DRAIN_TIMEOUT_MS = 95_000;
 
 /** Wrap one finished string as a single-shot async stream for the streaming speaker. */
@@ -957,7 +968,10 @@ export class CiceroDaemon {
     // on first use, so an operator on a session that cannot synthesize
     // keystrokes (Wayland, or Linux without xdotool) learns at startup instead
     // of pressing the hotkey and watching nothing happen.
-    if (this.config.dictation.enabled) {
+    if (this.config.dictation.enabled && this.config.headless) {
+      log("warn", "Dictation is enabled but headless mode is on — no local microphone is opened, so dictation is disabled this run");
+    }
+    if (dictationRunnable(this.config)) {
       const built = createDictationListener(this.config, this.providers.stt, audioRecorder, {
         acquire: () => this.acquireDictationMicrophone(),
         release: () => this.releaseDictationMicrophone(),
@@ -2586,10 +2600,19 @@ export class CiceroDaemon {
       const clapRelease = this.clapListener?.stop();
       const conversationalRelease = this.conversational?.stop();
       const aecRelease = this.aecHub?.stop();
+      // The dictation listener is retained by the same rule and belongs in the
+      // same retry: shutdown logs its failure best-effort and reaches idle, so
+      // leaving it out here meant a recorder still holding the microphone, or a
+      // helper still typing, was owned by an object nothing would ever call
+      // again. Cleared only once its release is confirmed.
+      const dictationRelease = this.dictation
+        ? this.dictation.stop().then(() => { this.dictation = null; })
+        : Promise.resolve();
       await Promise.all([
         clapRelease ?? Promise.resolve(),
         conversationalRelease ?? Promise.resolve(),
         aecRelease ?? Promise.resolve(),
+        dictationRelease,
       ]);
       return;
     }

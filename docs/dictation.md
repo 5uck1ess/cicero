@@ -63,6 +63,12 @@ the target rather than shipping that. Options: use an X11/Xorg session, or set
 `cicero doctor` reports which of these applies to your machine, and the daemon
 logs the reason at startup rather than failing on the first hotkey press.
 
+**Headless daemons do not run dictation.** `headless: true` means this box has
+no local microphone to open — it already skips clap, conversational capture, and
+the hotkey — and a dictation toggle records on that same machine. Setting both
+is not an error, but dictation is disabled for the run and the daemon says so at
+startup. Talk to a headless daemon through [web voice](web-voice.md) instead.
+
 ## Behavior
 
 - **Toggle, not hold.** Press to start, press again to stop. There is no

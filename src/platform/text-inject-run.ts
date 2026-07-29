@@ -84,13 +84,21 @@ export function createTextInjector(
   if (support.kind === "unsupported") throw new TextInjectionUnavailableError(support.reason, support.fix);
 
   /**
+   * The helper this injector is responsible for: held from the instant it is
+   * spawned until its exit is confirmed, so it covers a helper that is actively
+   * typing as well as one that ignored its kill. Tracking only the latter meant
+   * stop() had nothing to kill during the window that matters most — a shutdown
+   * mid-injection returned "released" while xdotool went on typing.
+   *
    * A helper that ignored its kill still owns the synthetic keyboard. Spawning a
    * second one would interleave two streams of keystrokes into the same focused
    * field, so the survivor is retained and the next injection fails closed until
    * its exit is confirmed. Retryable rather than latched: the moment it does go
    * away, dictation types again without a daemon restart.
    */
-  let unreaped: ReturnType<typeof Bun.spawn> | null = null;
+  let held: ReturnType<typeof Bun.spawn> | null = null;
+  const hold = (proc: ReturnType<typeof Bun.spawn>): void => { held = proc; };
+  const release = (proc: ReturnType<typeof Bun.spawn>): void => { if (held === proc) held = null; };
 
   const typer = async (text: string): Promise<void> => {
     const bounded = boundInjectedText(text);
@@ -98,16 +106,16 @@ export function createTextInjector(
       log("warn", `Dictation transcript was longer than the injection limit — typing the first ${bounded.text.length} characters`);
     }
     if (!bounded.text) return;
-    if (unreaped) {
-      if (!await confirmExit(unreaped, reapMs)) {
+    if (held) {
+      if (!await confirmExit(held, reapMs)) {
         throw new Error("a previous typing helper has not exited; refusing to type over it");
       }
-      unreaped = null;
+      held = null;
     }
     await runInjection(
       buildTextInjection(bounded.text, support.method),
       spawn,
-      (proc) => { unreaped = proc; },
+      { hold, release },
       { injectMs: injectMs + typingAllowanceMs(bounded.text.length, support.method), reapMs },
     );
   };
@@ -119,13 +127,13 @@ export function createTextInjector(
    * unconfirmed, so the caller can retry rather than assume it is gone.
    */
   typer.stop = async (): Promise<void> => {
-    const survivor = unreaped;
+    const survivor = held;
     if (!survivor) return;
     try { survivor.kill(); } catch { /* already gone */ }
     if (!await confirmExit(survivor, reapMs)) {
       throw new Error("a typing helper has not exited");
     }
-    unreaped = null;
+    release(survivor);
   };
 
   return typer;
@@ -153,10 +161,17 @@ async function confirmExit(proc: ReturnType<typeof Bun.spawn>, timeoutMs: number
 async function runInjection(
   spec: TextInjectionSpec,
   spawn: SpawnInjection,
-  retain: (proc: ReturnType<typeof Bun.spawn>) => void,
+  owner: {
+    hold: (proc: ReturnType<typeof Bun.spawn>) => void;
+    release: (proc: ReturnType<typeof Bun.spawn>) => void;
+  },
   bounds: { injectMs: number; reapMs: number },
 ): Promise<void> {
   const proc = spawn(spec);
+  // Owned from this instant, not just once a kill is refused: while this runs,
+  // the injector's stop() is the only thing that can reach a helper that is
+  // still typing.
+  owner.hold(proc);
   // Start draining stderr immediately. Reading it only after exit would let a
   // helper that floods stderr block on its own full pipe and never exit.
   const stderr = readHelperStderr(proc);
@@ -181,13 +196,15 @@ async function runInjection(
       // field, and reporting a clean failure here let the next call spawn a
       // second one on top of it.
       if (!await confirmExit(proc, bounds.reapMs)) {
-        retain(proc);
+        // Stays held: it is still typing and nothing else can reach it.
         throw new Error(
           `${spec.command[0]} did not finish typing within ${bounds.injectMs}ms and did not exit when killed`,
         );
       }
+      owner.release(proc);
       throw new Error(`${spec.command[0]} did not finish typing within ${bounds.injectMs}ms`);
     }
+    owner.release(proc);
     if (code !== 0) throw new Error(`${spec.command[0]} exited with ${code}${await stderr}`);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
