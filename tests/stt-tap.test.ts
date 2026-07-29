@@ -452,4 +452,29 @@ describe("stt tap", () => {
     expect(warmed).toBe(true);
     expect(await provider.health()).toBe(true);
   });
+
+  // Round 9 (Codex): the registry wraps the tap around the COMPLETE provider, so
+  // an owner holding a wrapped candidate sees only the tap. A managed backend
+  // spawns its child before readiness finishes, so dropping this made the
+  // wrapped provider's startup uncancellable — the owner could only wait the
+  // whole launch out, miss its deadline, and leave the child unowned.
+  test("forwards startup cancellation, synchronously", async () => {
+    const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
+    let cancelled = 0;
+    const provider = wrapSTTWithTap(
+      fakeProvider({ cancelStartup: () => { cancelled += 1; } }),
+      join(work, "tap"),
+    );
+    expect(typeof provider.cancelStartup).toBe("function");
+    provider.cancelStartup!(); // no await: the latch must land before any
+    expect(cancelled).toBe(1);
+  });
+
+  // A provider with nothing to cancel must not grow a method that pretends
+  // otherwise — the owner checks for its presence to decide what is safe.
+  test("does not invent cancellation the provider does not have", async () => {
+    const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
+    const provider = wrapSTTWithTap(fakeProvider(), join(work, "tap"));
+    expect(provider.cancelStartup).toBeUndefined();
+  });
 });

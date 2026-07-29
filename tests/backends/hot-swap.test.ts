@@ -403,6 +403,36 @@ describe("turn-length generation pins", () => {
     expect(next.managed).toBe(false);
   });
 
+  // Round 9 (Codex): cancelStartup reaches a managed launch, but the candidate
+  // barrier also covers warmup — a synthesis request on the provider's OWN
+  // deadline (up to 600s) that cancellation does not abort. Shutdown cancelled,
+  // waited, timed out, and returned without ever calling stop(): the child that
+  // start() had already published was left with no owner.
+  test("a candidate hung in warmup is still stopped, not abandoned", async () => {
+    const old = new FakeVoiceProvider("tts-old");
+    const next = new FakeVoiceProvider("tts-next") as FakeVoiceProvider & { cancelStartup(): void };
+    // Cancellable, like every managed backend — but the hang is in warmup, which
+    // cancellation cannot reach, so the barrier misses its deadline regardless.
+    next.cancelStartup = () => { /* start() already returned; nothing to cancel */ };
+    let releaseWarmup!: () => void;
+    const warmupGate = new Promise<void>((resolve) => { releaseWarmup = resolve; });
+    const baseWarmup = next.warmup.bind(next);
+    next.warmup = async () => { await baseWarmup(); await warmupGate; };
+
+    const owner = new ProviderSlot<TTSProvider>(old, { cleanupTimeoutMs: 25 });
+    const swapping = settle(owner.swap(next, () => { /* never persisted */ }));
+    // Let start() finish and publish its handle, then hang inside warmup.
+    while (!next.managed) await Bun.sleep(1);
+
+    await owner.stop();
+    // The published child was reaped rather than left to outlive the daemon.
+    expect(next.reaped).toBe(1);
+    expect(next.managed).toBe(false);
+
+    releaseWarmup();
+    expect((await swapping)?.message).toMatch(/shutting down/);
+  });
+
   test("a candidate startup that never settles is reported unconfirmed, not assumed clean", async () => {
     const old = new FakeVoiceProvider("tts-old");
     // Waiting for the start is bounded like every other release in this class.

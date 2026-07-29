@@ -3128,6 +3128,7 @@ export class CiceroDaemon {
 
     let shutdownCompleted = false;
     let providerReleaseUnconfirmed = false;
+    let providerReleaseFailure: unknown = null;
     try {
       // Quiesce every scheduler/timer synchronously, then drain the briefing's
       // exact owned run before dependencies are released.
@@ -3259,6 +3260,7 @@ export class CiceroDaemon {
           // a later stop() can retry them, so do NOT clear the slot references
           // below — dropping them here would strand the child for good.
           providerReleaseUnconfirmed = true;
+          providerReleaseFailure = error;
           log("warn", `provider teardown was not confirmed: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
@@ -3280,7 +3282,19 @@ export class CiceroDaemon {
           { cause: dictationFailure },
         );
       }
-      log("ok", "Cicero stopped.");
+      // Round 9 (Codex): an unconfirmed provider release was logged and shutdown
+      // reported success. The slots are kept so a later stop() can retry the
+      // unreaped generation — but the signal path calls stop() exactly once and
+      // exits when it resolves, so that retry was never reached in production and
+      // the child outlived the only process holding its handle.
+      //
+      // So: do not claim a clean stop — but DO finish the bookkeeping below.
+      // Reaching `idle` with the slots retained is exactly what lets the next
+      // start() retry those handles and refuse by name while the child is still
+      // alive; staying in `stopping` instead would replace that with a generic
+      // "cannot start while stopping" and strand recovery. The failure is thrown
+      // after the state settles.
+      if (!providerReleaseFailure) log("ok", "Cicero stopped.");
       shutdownCompleted = true;
     } finally {
       if (shutdownCompleted) {
@@ -3317,6 +3331,16 @@ export class CiceroDaemon {
         this.lifecycle = "idle";
         this.stopPromise = null;
       }
+    }
+    // State has settled (see above): report the unconfirmed release now, so the
+    // caller exits non-zero instead of believing the daemon shut down cleanly.
+    if (providerReleaseFailure) {
+      throw new Error(
+        `provider teardown is unconfirmed, so shutdown is not complete: ${
+          providerReleaseFailure instanceof Error ? providerReleaseFailure.message : String(providerReleaseFailure)
+        }`,
+        { cause: providerReleaseFailure },
+      );
     }
   }
 }

@@ -1,3 +1,4 @@
+import { log } from "../logger";
 import type { STTProvider, STTTranscriptionResult } from "./stt/provider";
 import type { TTSOptions, TTSProvider } from "./tts/provider";
 
@@ -39,9 +40,12 @@ function isPinnable<T>(value: unknown): value is PinnableProvider<T> {
  */
 interface CancellableStartup { cancelStartup?(): void }
 
-function cancelProviderStartup(provider: unknown): void {
+/** True when the provider actually had a startup to cancel. */
+function cancelProviderStartup(provider: unknown): boolean {
   const cancellable = provider as CancellableStartup;
-  if (typeof cancellable.cancelStartup === "function") cancellable.cancelStartup();
+  if (typeof cancellable.cancelStartup !== "function") return false;
+  cancellable.cancelStartup();
+  return true;
 }
 
 export function pinGeneration<T extends object>(provider: T): GenerationPin<T> {
@@ -400,10 +404,33 @@ export class ProviderSlot<T extends SwappableProvider> {
       // Cancelling is synchronous and cannot fail, so the barrier below then
       // settles promptly instead of timing out. The stop after it stays the one
       // authoritative teardown.
-      cancelProviderStartup(provider);
-      await within(startup, this.cleanupTimeoutMs, `${provider.name} candidate startup`);
-      // Settled now, so a later retry has nothing left to wait for.
-      this.quarantined.set(provider, undefined);
+      const cancellable = cancelProviderStartup(provider);
+      try {
+        await within(startup, this.cleanupTimeoutMs, `${provider.name} candidate startup`);
+        // Settled now, so a later retry has nothing left to wait for.
+        this.quarantined.set(provider, undefined);
+      } catch (error: unknown) {
+        // Round 9 (Codex): the barrier covers warmup as well as start(), and
+        // warmup is a synthesis/transcription request on the provider's own
+        // independently configured deadline (up to 600s) that cancelStartup does
+        // not abort. So a CANCELLABLE provider that still misses this deadline is
+        // hung in warmup — which means start() already returned and published its
+        // handle, so stop() has something to reap. Doing it is also safe: the
+        // latch is set and startManagedServer re-checks it before spawning, so no
+        // new child can appear behind this teardown.
+        //
+        // A provider with nothing to cancel is the round 5 case and keeps that
+        // behaviour: its handle appears only when start() returns, so stopping
+        // now would reap nothing and strand the child that is about to exist.
+        // Report unconfirmed and stay quarantined for a later retry instead.
+        if (!cancellable) throw error;
+        log("warn", `${provider.name} candidate warmup did not settle (${
+          error instanceof Error ? error.message : String(error)
+        }) — stopping the candidate anyway rather than leaving its child unowned`);
+        await this.stopProvider(provider, "quarantined candidate cleanup");
+        this.quarantined.delete(provider);
+        return;
+      }
     }
     await this.stopProvider(provider, "quarantined candidate cleanup");
     this.quarantined.delete(provider);

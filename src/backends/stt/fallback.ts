@@ -256,6 +256,13 @@ export class FallbackSTTProvider implements STTProvider {
     }
   }
 
+  /** This wrapper owns BOTH engines' startups, so it cancels both. Synchronous
+   *  on purpose: it must land before the lifecycle queue, not inside it. */
+  cancelStartup(): void {
+    this.primary.cancelStartup?.();
+    this.fallback.cancelStartup?.();
+  }
+
   private async stopProviders(context: string): Promise<void> {
     try {
       const results = await Promise.allSettled([

@@ -496,7 +496,12 @@ describe("CiceroDaemon lifecycle", () => {
 
     try {
       await daemon.start();
-      await daemon.stop();
+      // Round 9 (Codex): this first stop now REJECTS rather than resolving. An
+      // unconfirmed release used to be logged and reported as a clean stop, but
+      // the signal path calls stop() once and exits when it resolves, so the
+      // retry below was never reached in production. The retention this test is
+      // about is unchanged; only the report is.
+      await expect(daemon.stop()).rejects.toThrow(/provider teardown is unconfirmed/);
       expect(ttsStopAttempts).toBe(1);
 
       // The retry is the whole point: a second stop() must reach the provider
@@ -570,7 +575,9 @@ describe("CiceroDaemon lifecycle", () => {
 
     try {
       await daemon.start();
-      await daemon.stop();
+      // Fails closed now (see the retry test above); the refusal on start is
+      // what this test is about and is unchanged.
+      await expect(daemon.stop()).rejects.toThrow(/provider teardown is unconfirmed/);
       expect(ttsStopAttempts).toBe(1);
 
       // Restarting must NOT install a second provider on the same port. Startup
@@ -1259,6 +1266,90 @@ describe("CiceroDaemon lifecycle", () => {
     } catch (error) {
       await daemon.stop().catch(() => {});
       throw new Error(`optional warmup test failed: ${(error as Error).message}`, { cause: error });
+    }
+  });
+
+  // Round 9 (Codex): an unconfirmed provider release was logged and shutdown
+  // reported success. The slots are deliberately retained so a later stop() can
+  // retry the unreaped generation — but the signal path calls stop() exactly once
+  // and exits when it resolves, so that retry was never reached and the child
+  // outlived the only process holding its handle.
+  test("an unconfirmed provider release fails the shutdown instead of reporting success", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-provider-unconfirmed-test-"));
+    const pidFile = join(home, "cicero.pid");
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.dashboard = { enabled: false };
+    config.raw.stt = { backend: "company-stt-plugin" };
+    config.raw.tts = { backend: "company-tts-plugin" };
+    config.raw.web_voice = {
+      enabled: true,
+      port: 0,
+      token: "test-token-that-is-long-enough",
+      tls: { enabled: false },
+    };
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+    };
+    let sttStops = 0;
+    const daemon = new CiceroDaemon(config, {
+      skipServers: true,
+      pidFile,
+      webVoiceServerStarter: () => ({
+        scheme: "http",
+        port: 18_445,
+        clientCount: () => 0,
+        notify: () => Promise.resolve(null),
+        stop: () => Promise.resolve(),
+      }),
+      providerFactory: () => ({
+        stt: {
+          name: "company-stt-plugin",
+          transcribe: () => Promise.resolve(null),
+          start: () => Promise.resolve(),
+          health: () => Promise.resolve(true),
+          // A child that will not confirm it is gone on the first attempt.
+          stop: () => {
+            sttStops += 1;
+            return sttStops === 1
+              ? Promise.reject(new Error("stt release unconfirmed: the server has not exited"))
+              : Promise.resolve();
+          },
+        },
+        tts: {
+          name: "company-tts-plugin",
+          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+          start: () => Promise.resolve(),
+          health: () => Promise.resolve(true),
+          stop: () => Promise.resolve(),
+        },
+        llm: {
+          name: "company-llm-plugin",
+          chatCompletion: () => Promise.resolve("ok"),
+          start: () => Promise.resolve(),
+          health: () => Promise.resolve(true),
+          stop: () => Promise.resolve(),
+        },
+      }),
+    });
+
+    try {
+      await daemon.start();
+      await expect(daemon.stop()).rejects.toThrow(/unconfirmed/);
+      expect(sttStops).toBe(1);
+
+      // Retryable, and the retry succeeds — the point is that the caller was told,
+      // not that recovery needs a restart.
+      await daemon.stop();
+      expect(sttStops).toBe(2);
+    } finally {
+      await daemon.stop().catch(() => {});
+      rmSync(home, { recursive: true, force: true });
     }
   });
 
