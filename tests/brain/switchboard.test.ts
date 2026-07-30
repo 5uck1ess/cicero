@@ -1,6 +1,17 @@
 import { test, expect } from "bun:test";
 import { SwitchboardBrain, type LaneDef } from "../../src/brain/switchboard";
 import { SpeculativeSideEffectError } from "../../src/brain/dial-back";
+import {
+  DAEMON_STOPPING,
+  LOCAL_TURN_BARGE_IN,
+  LOCAL_TURN_STOPPED,
+  LOCAL_TURN_SUPERSEDED,
+  TURN_ABORTED_BY_CLIENT,
+  TURN_SUPERSEDED_BY_NEWER,
+  VOICE_SERVER_SHUTTING_DOWN,
+  VOICE_SOCKET_CLOSED,
+  turnCancellationContinuesConversation,
+} from "../../src/types";
 import type { Brain, BrainTurnOptions } from "../../src/types";
 
 const NONCE_A = "11111111-1111-4111-8111-111111111111";
@@ -275,6 +286,136 @@ test("a transfer talked over during a cold start is not silently dropped", async
     expect(sb.activeLane()).toBe("worker");
     // Resolved once — a later turn is an ordinary lane turn, not another ack.
     expect(await sb.send("what's up")).toBe("worker reply");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("every transport cancellation reason is classified", () => {
+  // The switchboard decides a pending transfer's fate from the abort reason, so
+  // the whitelist in types.ts and the reasons src/web-voice/server.ts actually
+  // raises have to stay in step. The literals below are asserted rather than
+  // imported on purpose: importing the constant would make this test agree with
+  // whatever the constant says, which is how the push-to-talk reason was missed
+  // in the first place.
+  expect(TURN_SUPERSEDED_BY_NEWER).toBe("superseded by a newer turn");
+  expect(TURN_ABORTED_BY_CLIENT).toBe("turn aborted by client");
+  expect(VOICE_SOCKET_CLOSED).toBe("voice socket closed");
+  expect(VOICE_SERVER_SHUTTING_DOWN).toBe("web voice server shutting down");
+  expect(LOCAL_TURN_SUPERSEDED).toBe("superseded by a newer local turn");
+  expect(LOCAL_TURN_BARGE_IN).toBe("barge-in");
+  expect(LOCAL_TURN_STOPPED).toBe("stop command");
+  expect(DAEMON_STOPPING).toBe("daemon stopping");
+
+  // Speaker still on the line.
+  expect(turnCancellationContinuesConversation(new Error(TURN_SUPERSEDED_BY_NEWER))).toBe(true);
+  expect(turnCancellationContinuesConversation(new Error(TURN_ABORTED_BY_CLIENT))).toBe(true);
+  // Conversation over.
+  expect(turnCancellationContinuesConversation(new Error(VOICE_SOCKET_CLOSED))).toBe(false);
+  expect(turnCancellationContinuesConversation(new Error(VOICE_SERVER_SHUTTING_DOWN))).toBe(false);
+
+  // The local microphone surface aborts with bare strings, not Errors.
+  expect(turnCancellationContinuesConversation(LOCAL_TURN_SUPERSEDED)).toBe(true);
+  expect(turnCancellationContinuesConversation(LOCAL_TURN_BARGE_IN)).toBe(true);
+  // "stop" is the operator cancelling the work, not talking over it.
+  expect(turnCancellationContinuesConversation(LOCAL_TURN_STOPPED)).toBe(false);
+  expect(turnCancellationContinuesConversation(DAEMON_STOPPING)).toBe(false);
+
+  // Anything unrecognised is terminal.
+  expect(turnCancellationContinuesConversation(new Error("something new"))).toBe(false);
+  expect(turnCancellationContinuesConversation("something new")).toBe(false);
+  expect(turnCancellationContinuesConversation(undefined)).toBe(false);
+  expect(turnCancellationContinuesConversation({ message: TURN_ABORTED_BY_CLIENT })).toBe(false);
+});
+
+test("a push-to-talk barge-in keeps the pending cold transfer alive", async () => {
+  // The browser's PTT interruption aborts the active turn BEFORE it has the
+  // replacement audio to send (page.ts abortActiveTurn, then endPtt sends the
+  // WAV), and the server records that as "turn aborted by client". abortTurn
+  // fixes the reason on the FIRST abort, so the later same-socket supersession
+  // can never overwrite it. This is an ordinary barge-in with the speaker still
+  // on the line, so the transfer must survive it exactly as a queued-turn
+  // supersession does — treating it as the conversation going away reinstates
+  // the very incident this feature exists to fix.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  const transport = new AbortController();
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker", { signal: transport.signal });
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    transport.abort(new Error("turn aborted by client"));
+    await expect(transfer).rejects.toThrow("turn aborted by client");
+    expect(await settlesWithin(sb.send("hello?"), "barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("you there?"), "pin")).toBe("Worker here.");
+    expect(sb.activeLane()).toBe("worker");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a local-microphone barge-in keeps the pending cold transfer alive", async () => {
+  // src/daemon.ts aborts the active local turn with a bare string rather than an
+  // Error. Same contract as the browser barge-in, different reason shape — a
+  // classifier that only understood Errors dropped every local transfer.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  const transport = new AbortController();
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker", { signal: transport.signal });
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    transport.abort(LOCAL_TURN_BARGE_IN);
+    await expect(transfer).rejects.toThrow();
+    expect(await settlesWithin(sb.send("hello?"), "local barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("you there?"), "pin")).toBe("Worker here.");
+    expect(sb.activeLane()).toBe("worker");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("an explicit local stop drops the pending cold transfer", async () => {
+  // "stop" cancels the work in flight. The operator is still on the line, but
+  // they asked for this to go away — the next thing they say must not be
+  // steered into a lane they just cancelled.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  const transport = new AbortController();
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker", { signal: transport.signal });
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    transport.abort(LOCAL_TURN_STOPPED);
+    await expect(transfer).rejects.toThrow();
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await sb.send("new conversation")).toBe("front reply");
+    expect(sb.activeLane()).toBeNull();
   } finally {
     cold.release();
     await sb.stop().catch(() => { /* test cleanup */ });

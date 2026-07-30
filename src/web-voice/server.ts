@@ -1,7 +1,12 @@
 import { log } from "../logger";
 import { isConfirmationNonce } from "../brain/approval";
 import type { Brain } from "../types";
-import { TURN_SUPERSEDED_BY_NEWER } from "../types";
+import {
+  TURN_ABORTED_BY_CLIENT,
+  TURN_SUPERSEDED_BY_NEWER,
+  VOICE_SERVER_SHUTTING_DOWN,
+  VOICE_SOCKET_CLOSED,
+} from "../types";
 import { presentedToken, tokenMatches } from "../http-auth";
 import { PAGE } from "./page";
 import { MANIFEST, ICON_SVG } from "./pwa";
@@ -818,7 +823,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           controller,
           signal: AbortSignal.any([controller.signal, shutdownController.signal]),
         };
-        if (shutdownController.signal.aborted) abortTurn(state, "web voice server shutting down");
+        if (shutdownController.signal.aborted) abortTurn(state, VOICE_SERVER_SHUTTING_DOWN);
         ws.data.current = state;
         // Any in-flight speculation belongs to exactly one turn: a WAV turn
         // gets to adopt it; a typed turn (different input entirely) kills it.
@@ -1438,10 +1443,10 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                   protocolError(ws, "abort requires a valid turn id");
                   return;
                 }
-                if (ws.data.current?.turnId === msg.turnId) abortTurn(ws.data.current, "turn aborted by client");
+                if (ws.data.current?.turnId === msg.turnId) abortTurn(ws.data.current, TURN_ABORTED_BY_CLIENT);
                 if (ws.data.pending?.turnId === msg.turnId) ws.data.pending = null;
               } else if (ws.data.current) {
-                abortTurn(ws.data.current, "turn aborted by client");
+                abortTurn(ws.data.current, TURN_ABORTED_BY_CLIENT);
               }
               return;
             }
@@ -1557,7 +1562,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         close(ws) {
           if (ws.data.pendingClientSlot) pendingClients = Math.max(0, pendingClients - 1);
           clients.delete(ws);
-          abortTurn(ws.data.current, "voice socket closed");
+          abortTurn(ws.data.current, VOICE_SOCKET_CLOSED);
           ws.data.pending = null;
           ws.data.latestProbeTurnId = null;
           const spec = ws.data.spec;
@@ -1623,13 +1628,13 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       // request into dependencies after shutdown has begun.
       accepting = false;
       if (!shutdownController.signal.aborted) {
-        shutdownController.abort(new Error("web voice server shutting down"));
+        shutdownController.abort(new Error(VOICE_SERVER_SHUTTING_DOWN));
       }
       pendingClients = 0;
       parked.length = 0;
 
       for (const ws of clients) {
-        abortTurn(ws.data.current, "web voice server shutting down");
+        abortTurn(ws.data.current, VOICE_SERVER_SHUTTING_DOWN);
         ws.data.pending = null;
         ws.data.latestProbeTurnId = null;
         const spec = ws.data.spec;

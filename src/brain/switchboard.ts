@@ -1,5 +1,5 @@
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
-import { TURN_SUPERSEDED_BY_NEWER } from "../types";
+import { turnCancellationContinuesConversation } from "../types";
 import { dialBackMemo, matchCallMe, SpeculativeSideEffectError } from "../call-intent";
 import { log } from "../logger";
 import { BrainTurnContext } from "./turn-context";
@@ -604,11 +604,17 @@ export class SwitchboardBrain implements Brain {
     if (this.acceptedTurn === turn) this.acceptedTurn = null;
   }
 
-  private isContinuingSupersession(turn: AcceptedTurn): boolean {
+  /**
+   * True when this turn was cancelled but the conversation carries on, so a
+   * pending cold transfer should wait for the successor turn instead of being
+   * dropped. Both signals are consulted: a switchboard-internal supersession
+   * aborts `signal`, while a transport barge-in aborts `callerSignal`.
+   */
+  private isContinuingCancellation(turn: AcceptedTurn): boolean {
     if (turn.signal.reason instanceof SwitchboardTurnSupersededError) return true;
+    if (turnCancellationContinuesConversation(turn.signal.reason)) return true;
     return turn.callerSignal?.aborted === true
-      && turn.callerSignal.reason instanceof Error
-      && turn.callerSignal.reason.message === TURN_SUPERSEDED_BY_NEWER;
+      && turnCancellationContinuesConversation(turn.callerSignal.reason);
   }
 
   private clearPendingTransfer(expected?: PendingTransfer): void {
@@ -624,7 +630,7 @@ export class SwitchboardBrain implements Brain {
     pending.disposition = "owned";
     const onAbort = (): void => {
       if (this.pendingTransfer !== pending || pending.owner !== turn) return;
-      if (this.isContinuingSupersession(turn)) {
+      if (this.isContinuingCancellation(turn)) {
         pending.disposition = "awaiting-successor";
         pending.detachAbort();
       } else {

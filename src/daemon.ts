@@ -2,6 +2,12 @@ import { existsSync, readFileSync, rmSync, watch } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "node:os";
 import type { RuntimeConfig } from "./config";
+import {
+  DAEMON_STOPPING,
+  LOCAL_TURN_BARGE_IN,
+  LOCAL_TURN_STOPPED,
+  LOCAL_TURN_SUPERSEDED,
+} from "./types";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
 import { registerKnownSecrets, clearKnownSecrets } from "./redact";
 import { log, logStep, logError } from "./logger";
@@ -1892,7 +1898,7 @@ export class CiceroDaemon {
       });
       this.conversational.onStopCommand(() => {
         this.pendingRecovery = null;
-        this.activeLocalTurn?.abort("stop command");
+        this.activeLocalTurn?.abort(LOCAL_TURN_STOPPED);
       });
     }
     // Headless: skip starting any local-mic capture (clap, conversational, hotkey).
@@ -1972,7 +1978,7 @@ export class CiceroDaemon {
   }
 
   private dispatchCommand(text: string): Promise<void> {
-    this.activeLocalTurn?.abort("superseded by a newer local turn");
+    this.activeLocalTurn?.abort(LOCAL_TURN_SUPERSEDED);
     const controller = new AbortController();
     this.activeLocalTurn = controller;
     let task!: Promise<void>;
@@ -2074,7 +2080,7 @@ export class CiceroDaemon {
     // mid-way through saying; the live speaking-text provider goes empty the
     // moment the speaker is interrupted below.
     this.conversational?.noteInterrupted(spoken.join(" "));
-    this.activeLocalTurn?.abort("barge-in");
+    this.activeLocalTurn?.abort(LOCAL_TURN_BARGE_IN);
     this.streamingSpeaker.interrupt();
   }
 
@@ -2852,7 +2858,7 @@ export class CiceroDaemon {
       log("info", `Shutdown voice-input cancellation failed: ${error instanceof Error ? error.message : String(error)}`);
     });
     this.lifecycleAbort.abort();
-    this.activeLocalTurn?.abort("daemon stopping");
+    this.activeLocalTurn?.abort(DAEMON_STOPPING);
     this.activeLocalTurn = null;
     this.lifecycle = "stopping";
     const stopping = this.stopAfterStartup(this.startPromise, ingressStop);
