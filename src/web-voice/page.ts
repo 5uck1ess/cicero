@@ -831,6 +831,10 @@ function stopConversation() {
   reconnectAttempt = 0;
   if (pttBargeTimer) { clearTimeout(pttBargeTimer); pttBargeTimer = null; }
   abortActiveTurn();
+  // Tell the server this is the operator stopping, not the network dropping:
+  // the two are indistinguishable from a closed socket, and only this one means
+  // "call off anything you were still working on for me".
+  if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify({ type: "bye" })); } catch (e) { /* ignore */ } }
   if (ws) { try { ws.close(); } catch (e) { /* ignore */ } ws = null; }
   wsSessionId = ""; captureTurnId = null;
   stopPlayback();

@@ -93,6 +93,7 @@ function start(opts: {
   shutdownDrainTimeoutMs?: number;
   vadDir?: string;
   onConversationEnded?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onConversationEnded"]>;
+  conversationEndGraceMs?: number;
 } = {}): string {
   handle = startWebVoiceServer({
     host: "127.0.0.1",
@@ -116,6 +117,7 @@ function start(opts: {
     shutdownDrainTimeoutMs: opts.shutdownDrainTimeoutMs,
     vadDir: opts.vadDir,
     onConversationEnded: opts.onConversationEnded,
+    conversationEndGraceMs: opts.conversationEndGraceMs ?? 0,
   });
   if (!handle) throw new Error("server failed to start");
   return `http://127.0.0.1:${handle.port}`;
@@ -2110,4 +2112,51 @@ test("one browser leaving does not end a conversation another is still in", asyn
   second.close();
   await Bun.sleep(50);
   expect(ended).toBe(1);
+});
+
+test("a dropped socket does not end the conversation while the page reconnects", async () => {
+  // The PWA reconnects by itself (1s → 2s → 5s) whenever the operator has not
+  // stopped it, so a tunnel or a sleeping laptop must not be read as "we're
+  // done" — that threw away a cold transfer the operator was still waiting on.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 300 });
+  const first = await connect(base);
+  first.close();
+  await Bun.sleep(60);
+  expect(ended).toBe(0);          // still within the grace
+  const second = await connect(base); // ...and the page comes back
+  await Bun.sleep(400);
+  expect(ended).toBe(0);          // the reconnect cancelled the ending outright
+  second.close();
+  await Bun.sleep(400);
+  expect(ended).toBe(1);          // nobody came back this time
+});
+
+test("saying goodbye ends the conversation without waiting out the grace", async () => {
+  // Stop is not a disconnect: it must take effect at once, or pressing Stop and
+  // Start again inside the grace would resurrect the work it called off.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const ws = await connect(base);
+  ws.send(JSON.stringify({ type: "bye" }));
+  await Bun.sleep(30);
+  ws.close();
+  await Bun.sleep(60);
+  expect(ended).toBe(1);
+});
+
+test("a pending conversation end does not outlive the server", async () => {
+  // The timer is owned: a shutdown mid-grace must not leave it armed.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 200 });
+  const ws = await connect(base);
+  ws.close();
+  await Bun.sleep(20);
+  await handle!.stop();
+  handle = null;
+  const afterStop = ended;
+  expect(afterStop).toBeGreaterThanOrEqual(1); // shutdown ends it immediately
+  await Bun.sleep(400);
+  expect(ended).toBe(afterStop);              // ...and the armed timer never fires again
+  expect(base).toContain("127.0.0.1");
 });

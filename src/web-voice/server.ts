@@ -74,6 +74,13 @@ interface WsData {
   record: boolean;
   /** In-flight speculative turn from the last confident "complete" probe (see speculative.ts). */
   spec: SpecState | null;
+  /**
+   * The page said goodbye before closing, so this disconnect is the operator
+   * ending the conversation rather than the network dropping it. Without it the
+   * two are indistinguishable at the server, and they mean opposite things for
+   * work the brain has deferred.
+   */
+  saidGoodbye: boolean;
 }
 
 export interface WebVoiceServerOptions {
@@ -105,6 +112,14 @@ export interface WebVoiceServerOptions {
    * reason, so the close is invisible to anything reading it. Fire-and-forget.
    */
   onConversationEnded?: () => void;
+  /**
+   * How long to wait, after the last voice socket goes away, before deciding
+   * the conversation is over. The PWA reconnects automatically (1s → 2s → 5s
+   * backoff) whenever the operator has not stopped it, so treating every drop
+   * as an ending discarded work across an ordinary network blip. An explicit
+   * goodbye skips this wait entirely. Default 30s; tests inject something small.
+   */
+  conversationEndGraceMs?: number;
   /**
    * Toggle native dictation on the daemon. Separate from onNotify because it
    * neither renders nor fans out — it starts or ends a local capture.
@@ -262,6 +277,8 @@ function abortTurn(turn: TurnState | null, reason: string): void {
 }
 
 const BODY_READ_TIMEOUT_MS = 5_000;
+/** Long enough to cover the page's 1s → 2s → 5s reconnect backoff several times over. */
+const DEFAULT_CONVERSATION_END_GRACE_MS = 30_000;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 95_000;
 const MAX_BACKGROUND_WEB_JOBS = MAX_CONCURRENT_WEB_JOBS;
 const MAX_VOICE_NAME_CHARS = 128;
@@ -344,6 +361,50 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   let stopPromise: Promise<void> | null = null;
   // Live voice clients — notify broadcasts go to every open socket.
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
+
+  /*
+   * Deciding the conversation is over.
+   *
+   * A dropped socket and a deliberate Stop look identical at this end, and they
+   * mean opposite things to a brain holding deferred work: the PWA reconnects
+   * by itself after an unplanned close, so ending the conversation on every
+   * disconnect threw that work away across an ordinary network blip. The page
+   * says goodbye when the operator stops; anything else gets a grace period
+   * that a reconnecting client cancels just by arriving.
+   *
+   * The timer is owned here: replaced when another wait starts, cleared when
+   * the ending fires, and cleared on shutdown, so it can never outlive the
+   * server.
+   */
+  const conversationEndGraceMs = Number.isFinite(opts.conversationEndGraceMs)
+    && (opts.conversationEndGraceMs ?? -1) >= 0
+    ? Math.floor(opts.conversationEndGraceMs!)
+    : DEFAULT_CONVERSATION_END_GRACE_MS;
+  let conversationEndTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const cancelConversationEnd = (): void => {
+    if (conversationEndTimer === null) return;
+    clearTimeout(conversationEndTimer);
+    conversationEndTimer = null;
+  };
+
+  const endConversationNow = (): void => {
+    cancelConversationEnd();
+    try { opts.onConversationEnded?.(); } catch { /* fire-and-forget */ }
+  };
+
+  const scheduleConversationEnd = (): void => {
+    cancelConversationEnd();
+    if (conversationEndGraceMs === 0) { endConversationNow(); return; }
+    conversationEndTimer = setTimeout(() => {
+      conversationEndTimer = null;
+      // Re-checked rather than cancelled on connect: this is the single place
+      // that decides, so a client that arrived during the wait (a reconnect) or
+      // arrived and left again is handled by the same question either way.
+      if (clients.size === 0) endConversationNow();
+    }, conversationEndGraceMs);
+    conversationEndTimer.unref?.();
+  };
   const debugConfirmation = (reason: string, nonce?: string, approved?: boolean): void => {
     // The project logger intentionally has no debug level. Keep rejected
     // controls out of the operator event stream while retaining a debug trace.
@@ -987,6 +1048,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 latestProbeTurnId: null,
                 record,
                 spec: null,
+                saidGoodbye: false,
               },
             });
           } finally {
@@ -1436,6 +1498,14 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               broadcastConfirmationResolved(replyNonce);
               return;
             }
+            if (msg.type === "bye") {
+              // Deliberately ahead of the session-id gate: this frame carries no
+              // authority, only the operator's intent to stop, and refusing it
+              // over a stale session id would silently downgrade a Stop into a
+              // dropped connection.
+              ws.data.saidGoodbye = true;
+              return;
+            }
             if (ws.data.protocol === 2 && msg.sessionId !== ws.data.sessionId) {
               protocolError(ws, "session id does not match this connection");
               return;
@@ -1572,7 +1642,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // when the last of them leaves, so reporting it per socket would let
           // one browser closing call off work another is still waiting on.
           if (clients.size === 0) {
-            try { opts.onConversationEnded?.(); } catch { /* fire-and-forget */ }
+            if (ws.data.saidGoodbye) endConversationNow();
+            else scheduleConversationEnd();
           }
           ws.data.pending = null;
           ws.data.latestProbeTurnId = null;
@@ -1641,7 +1712,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       if (!shutdownController.signal.aborted) {
         shutdownController.abort(new Error("web voice server shutting down"));
       }
-      try { opts.onConversationEnded?.(); } catch { /* fire-and-forget */ }
+      endConversationNow();
       pendingClients = 0;
       parked.length = 0;
 

@@ -96,6 +96,16 @@ handler cannot be mistaken for the current reply. Turn queues, abort state,
 speculation, and replay detection are scoped to one WebSocket; one browser
 cannot abort or drain another browser's transport queue.
 
+Stopping the conversation sends a `{"type":"bye"}` control frame before closing.
+A closed socket alone cannot say whether the operator stopped or the network
+dropped, and the page reconnects by itself (1s → 2s → 5s) in the second case, so
+the server ends the conversation immediately after a goodbye and otherwise waits
+out a grace period that a returning client cancels. That matters to a brain
+holding deferred work — a cold transfer still connecting — which would otherwise
+be called off by an ordinary blip. The frame carries no authority and is
+accepted regardless of session id: refusing it would silently downgrade a Stop
+into a dropped connection.
+
 Protocol-v2 binary frames are `CVP2`, two little-endian ID lengths, the UTF-8
 session and turn IDs, then the existing WAV or `PRB2` payload. Clients that do
 not request `protocol=2` remain on the original raw-binary/untagged-JSON format
