@@ -15,7 +15,12 @@ import type { STTProvider } from "../src/backends/stt/provider";
 import type { TTSProvider } from "../src/backends/tts/provider";
 import { loadConfig, updateConfigFields, type RuntimeConfig } from "../src/config";
 import { CiceroDaemon } from "../src/daemon";
-import type { SwapRequest, SwapResult } from "../src/runtime-control";
+import {
+  controlTimeoutMs,
+  voiceSwapAttemptTimeoutMs,
+  type SwapRequest,
+  type SwapResult,
+} from "../src/runtime-control";
 
 class FakeVoiceProvider implements STTProvider, TTSProvider {
   starts = 0;
@@ -76,8 +81,13 @@ class SupervisedStagedProvider extends FakeVoiceProvider {
     name: string,
     readonly port: number,
     private readonly dieDuringWarmup: boolean,
+    private readonly onWarmup?: () => void,
   ) {
     super(name);
+  }
+
+  get managedReleased(): boolean {
+    return this.managed?.proc === null;
   }
 
   override async start(): Promise<void> {
@@ -122,6 +132,7 @@ class SupervisedStagedProvider extends FakeVoiceProvider {
 
   override async warmup(): Promise<void> {
     this.warmups += 1;
+    this.onWarmup?.();
     if (!this.dieDuringWarmup) return;
     this.finishChild?.(1);
     await Bun.sleep(0);
@@ -350,7 +361,62 @@ test("a compatible listener that steals a staged port is refused and the swap re
   await state.sttSlot.stop();
 });
 
-test("a supervised staged child that dies during warmup is not persisted and retries another port", async () => {
+test("staged-port retries stop when the whole-swap budget cannot fit another attempt", async () => {
+  root = mkdtempSync(join(tmpdir(), "cicero-staged-swap-deadline-"));
+  const configPath = join(root, "config.yaml");
+  const activePort = randomInt(20_000, 30_000);
+  const deadPort = randomInt(30_000, 40_000);
+  const unusedReplacementPort = randomInt(40_000, 50_000);
+  updateConfigFields({
+    stt: { backend: "faster-whisper", port: activePort, model: "old-model" },
+  }, configPath);
+  const config = loadConfig({}, { home: root });
+  const old = new FakeVoiceProvider("stt-old");
+  const candidates: SupervisedStagedProvider[] = [];
+  const ports = [deadPort, unusedReplacementPort];
+  const retryHeadroomMs = controlTimeoutMs() - voiceSwapAttemptTimeoutMs();
+  let nowMs = 1_000;
+  const daemon = new CiceroDaemon(config, {
+    configPath,
+    voiceSwapNow: () => nowMs,
+    voiceSwapPortAllocator: async () => ports.shift()!,
+    sttProviderFactory: (candidateConfig) => {
+      const candidate = new SupervisedStagedProvider(
+        `candidate-${candidates.length + 1}`,
+        candidateConfig.sttBackend.port!,
+        candidates.length === 0,
+        candidates.length === 0
+          ? () => { nowMs += retryHeadroomMs; }
+          : undefined,
+      );
+      candidates.push(candidate);
+      return candidate;
+    },
+  });
+  const state = daemon as unknown as SwapHarness;
+  state.running = true;
+  state.lifecycle = "running";
+  state.sttSlot = new ProviderSlot<STTProvider>(old);
+
+  await expect(state.swapVoiceProvider({
+    role: "stt",
+    backend: "faster-whisper",
+    model: "new-model",
+  })).rejects.toThrow("too late to retry within the provider swap deadline");
+  const persisted = loadConfig({}, { home: root });
+
+  expect(candidates).toHaveLength(1);
+  expect(candidates[0]!.stops).toBe(1);
+  expect(candidates[0]!.managedReleased).toBe(true);
+  expect(ports).toEqual([unusedReplacementPort]);
+  expect(persisted.sttBackend.port).toBe(activePort);
+  expect(persisted.sttBackend.model).toBe("old-model");
+  expect(state.sttSlot.providerName).toBe("stt-old");
+  expect(old.stops).toBe(0);
+  await state.sttSlot.stop();
+});
+
+test("a fast staged-port conflict still retries within the whole-swap budget", async () => {
   root = mkdtempSync(join(tmpdir(), "cicero-supervised-staged-swap-"));
   const configPath = join(root, "config.yaml");
   const activePort = randomInt(20_000, 30_000);
@@ -363,14 +429,20 @@ test("a supervised staged child that dies during warmup is not persisted and ret
   const old = new FakeVoiceProvider("stt-old");
   const candidates: SupervisedStagedProvider[] = [];
   const ports = [deadPort, replacementPort];
+  const retryHeadroomMs = controlTimeoutMs() - voiceSwapAttemptTimeoutMs();
+  let nowMs = 1_000;
   const daemon = new CiceroDaemon(config, {
     configPath,
+    voiceSwapNow: () => nowMs,
     voiceSwapPortAllocator: async () => ports.shift()!,
     sttProviderFactory: (candidateConfig) => {
       const candidate = new SupervisedStagedProvider(
         `candidate-${candidates.length + 1}`,
         candidateConfig.sttBackend.port!,
         candidates.length === 0,
+        candidates.length === 0
+          ? () => { nowMs += retryHeadroomMs - 1; }
+          : undefined,
       );
       candidates.push(candidate);
       return candidate;
@@ -391,8 +463,10 @@ test("a supervised staged child that dies during warmup is not persisted and ret
   expect(result.status).toBe("active");
   expect(candidates).toHaveLength(2);
   expect(candidates[0]!.stops).toBe(1);
+  expect(candidates[0]!.managedReleased).toBe(true);
   expect(persisted.sttBackend.port).toBe(replacementPort);
   expect(persisted.sttBackend.port).not.toBe(deadPort);
   expect(state.sttSlot.providerName).toBe("candidate-2");
   await state.sttSlot.stop();
-}, 10_000);
+  expect(candidates[1]!.managedReleased).toBe(true);
+});

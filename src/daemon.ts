@@ -55,7 +55,15 @@ import {
   StagedManagedServerPortError,
   withStagedManagedServerPorts,
 } from "./backends/managed-server";
-import { startRuntimeControl, type RuntimeControlHandle, type SwapRequest, type SwapResult, type SwapRole } from "./runtime-control";
+import {
+  controlTimeoutMs,
+  startRuntimeControl,
+  voiceSwapAttemptTimeoutMs,
+  type RuntimeControlHandle,
+  type SwapRequest,
+  type SwapResult,
+  type SwapRole,
+} from "./runtime-control";
 import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "./backends/llm/openai";
 import type { LLMProviderConfig } from "./backends/llm/provider";
 import {
@@ -279,6 +287,8 @@ export interface DaemonOptions {
   ttsProviderFactory?: (config: RuntimeConfig) => TTSProvider;
   /** Loopback staging-port injection for live-swap tests/embedders. */
   voiceSwapPortAllocator?: () => Promise<number>;
+  /** Wall-clock injection for the whole live-swap retry deadline. */
+  voiceSwapNow?: () => number;
   /** Override persistence and runtime-control publication for tests/embedders. */
   configPath?: string;
   runtimeControlDescriptorPath?: string;
@@ -2288,6 +2298,16 @@ export class CiceroDaemon {
     if (this.voiceSwapRunning) throw new Error("another provider swap is already in progress");
     this.voiceSwapRunning = true;
     try {
+      const now = this.options.voiceSwapNow ?? Date.now;
+      const raw = this.config.raw;
+      const configuredTimeouts = [
+        raw.stt?.timeout_ms,
+        raw.stt_fallback?.timeout_ms,
+        raw.tts?.timeout_ms,
+        raw.tts_fallback?.timeout_ms,
+      ].filter((value): value is number => typeof value === "number");
+      const attemptTimeoutMs = voiceSwapAttemptTimeoutMs(configuredTimeouts);
+      const deadlineMs = now() + controlTimeoutMs(configuredTimeouts);
       const unavailablePorts = new Set<number>();
       for (let attempt = 0; attempt < STAGING_PORT_ATTEMPTS; attempt += 1) {
         try {
@@ -2296,6 +2316,17 @@ export class CiceroDaemon {
           const conflict = stagedPortFailure(error);
           if (!conflict || attempt + 1 >= STAGING_PORT_ATTEMPTS) throw error;
           unavailablePorts.add(conflict.port);
+          // A fresh attempt can consume every bounded phase represented by
+          // attemptTimeoutMs. Refuse it unless the one deadline shared by all
+          // retries still leaves strictly more than that amount, preserving
+          // client headroom for the config write and response transport.
+          if (deadlineMs - now() <= attemptTimeoutMs) {
+            throw new Error(
+              `staged ${request.role.toUpperCase()} port became unavailable too late to retry within the provider swap deadline; `
+              + "the active provider and config are unchanged.",
+              { cause: error },
+            );
+          }
           log(
             "warn",
             `staged ${request.role.toUpperCase()} port ${conflict.port} became unavailable; selecting another loopback port`,

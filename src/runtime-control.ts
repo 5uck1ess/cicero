@@ -11,10 +11,8 @@ const MAX_CONTROL_BODY_BYTES = 4_096;
 const MAX_CONTROL_RESPONSE_BYTES = 4_096;
 const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/;
 /**
- * The client must outlast a whole supported swap transaction, not just part of it:
- * aborting early prints a failure for a swap that goes on to commit, because the
- * abort is only honoured before persistence. Summed from the phases the swap
- * actually runs back to back, each already bounded elsewhere:
+ * A whole supported swap attempt runs these phases back to back, each already
+ * bounded elsewhere:
  *
  *   start()          MANAGED_STARTUP_TIMEOUT_MS   (cold managed candidate)
  *   warmup()         longest per-request provider deadline — a warmup is one
@@ -25,9 +23,10 @@ const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/;
  *   persistence      CONFIG_UPDATE_LOCK_TIMEOUT_MS (config lease acquisition)
  *   cutover cleanup  DEFAULT_CLEANUP_TIMEOUT_MS   (retired generation drain)
  *
- * plus a margin for the config write itself and transport. Deriving it
- * this way is the point: the previous value was this constant plus a guessed 30s,
- * which a 290s start + 35s warmup + 2s health + 5s drain already overran.
+ * The daemon uses their sum to decide whether another staged-port attempt fits.
+ * The client adds a margin for the config write itself and transport: aborting
+ * early prints a failure for a swap that goes on to commit, because the abort is
+ * only honoured before persistence.
  */
 /**
  * `timeout_ms` is configurable per provider (up to 15 minutes), and a
@@ -38,9 +37,9 @@ const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/;
  * `timeout_ms: 600000` answering after 450s) outlived the client, which then
  * printed a failure for a swap that went on to commit — the exact lie this
  * deadline is derived to avoid. Callers that know the config pass its provider
- * timeouts in; the export below is the floor for callers that do not.
+ * timeouts in; the attempt bound below is the floor for callers that do not.
  */
-export function controlTimeoutMs(configuredProviderTimeoutsMs: readonly number[] = []): number {
+export function voiceSwapAttemptTimeoutMs(configuredProviderTimeoutsMs: readonly number[] = []): number {
   const warmup = Math.max(
     PROVIDER_TIMEOUT_MS.tts,
     PROVIDER_TIMEOUT_MS.stt,
@@ -50,8 +49,12 @@ export function controlTimeoutMs(configuredProviderTimeoutsMs: readonly number[]
     + warmup
     + PROVIDER_TIMEOUT_MS.health
     + CONFIG_UPDATE_LOCK_TIMEOUT_MS
-    + DEFAULT_CLEANUP_TIMEOUT_MS
-    + 30_000;
+    + DEFAULT_CLEANUP_TIMEOUT_MS;
+}
+
+/** Client deadline for one bounded attempt plus config-write/transport headroom. */
+export function controlTimeoutMs(configuredProviderTimeoutsMs: readonly number[] = []): number {
+  return voiceSwapAttemptTimeoutMs(configuredProviderTimeoutsMs) + 30_000;
 }
 
 export const CONTROL_TIMEOUT_MS = controlTimeoutMs();
