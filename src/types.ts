@@ -566,3 +566,17 @@ export interface TerminalAdapter {
   closeTab(id: string): Promise<void>;
   health(): Promise<{ ok: boolean; reason?: string }>;
 }
+
+/**
+ * Abort reason a transport uses when a queued turn on the SAME connection has
+ * superseded the current one — an ordinary barge-in, as opposed to the
+ * conversation itself going away.
+ *
+ * It lives here because two modules have to agree on it and the failure mode is
+ * silent: `SwitchboardBrain` keeps a pending cold transfer alive across this
+ * reason so the successor turn can finish the handoff, and clears it for every
+ * other cancellation. If a transport reworded its own copy of this string, the
+ * switchboard would quietly start discarding transfers on every barge-in — the
+ * exact bug that behaviour was added to fix.
+ */
+export const TURN_SUPERSEDED_BY_NEWER = "superseded by a newer turn";

@@ -1,6 +1,7 @@
 import { log } from "../logger";
 import { isConfirmationNonce } from "../brain/approval";
 import type { Brain } from "../types";
+import { TURN_SUPERSEDED_BY_NEWER } from "../types";
 import { presentedToken, tokenMatches } from "../http-auth";
 import { PAGE } from "./page";
 import { MANIFEST, ICON_SVG } from "./pwa";
@@ -802,7 +803,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     // Latest input wins on this socket only. Its current sink is immediately
     // invalidated, so even a handler that emits after observing the abort
     // cannot leak stale text/audio into the replacement turn.
-    abortTurn(ws.data.current, "superseded by a newer turn");
+    abortTurn(ws.data.current, TURN_SUPERSEDED_BY_NEWER);
     ws.data.pending = { input, turnId };
     if (ws.data.busy) return; // the running drain loop will pick it up
     ws.data.busy = true;

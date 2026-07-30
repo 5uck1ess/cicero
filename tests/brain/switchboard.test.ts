@@ -239,6 +239,8 @@ function coldLane(calls: string[], name = "worker") {
 }
 
 test("a transfer talked over during a cold start is not silently dropped", async () => {
+  // Forward guard for these review fixes: the PR already preserves a genuine
+  // barge-in; cancellation ownership must not clear that intentional handoff.
   // Live incident 2026-07-30: "get Rick" started a 14-second ACP lane cold
   // start with no further speech to cover it. The user spoke into the silence,
   // that barge-in superseded the pending transfer, and the request evaporated —
@@ -249,17 +251,21 @@ test("a transfer talked over during a cold start is not silently dropped", async
   const calls: string[] = [];
   const cold = coldLane(calls);
   const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  const transport = new AbortController();
   try {
     await sb.start();
-    const transfer = sb.send("talk to the worker");
+    const transfer = sb.send("talk to the worker", { signal: transport.signal });
     void transfer.catch(() => { /* asserted below */ });
     await Bun.sleep(0);
     expect(cold.startCount()).toBe(1);
 
-    // The barge-in still supersedes: the invariant is preserved.
+    // The web transport aborts the old same-socket turn before its drain loop
+    // admits the queued successor. The dead turn still rejects and publishes
+    // nothing; the successor owns the pending ask.
+    transport.abort(new Error("superseded by a newer turn"));
+    await expect(transfer).rejects.toThrow("superseded by a newer turn");
     expect(await settlesWithin(sb.send("hello?"), "barge-in"))
       .toBe("Still getting Worker on the line — one moment.");
-    await expect(transfer).rejects.toThrow("superseded by a newer accepted turn");
     expect(sb.activeLane()).toBeNull(); // nothing pinned late by the dead turn
 
     cold.release();
@@ -269,6 +275,31 @@ test("a transfer talked over during a cold start is not silently dropped", async
     expect(sb.activeLane()).toBe("worker");
     // Resolved once — a later turn is an ordinary lane turn, not another ack.
     expect(await sb.send("what's up")).toBe("worker reply");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a transport-cancelled cold transfer does not steer a later conversation", async () => {
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  const transport = new AbortController();
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker", { signal: transport.signal });
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    transport.abort(new Error("voice socket closed"));
+    await expect(transfer).rejects.toThrow("voice socket closed");
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await sb.send("new conversation")).toBe("front reply");
+    expect(sb.activeLane()).toBeNull();
   } finally {
     cold.release();
     await sb.stop().catch(() => { /* test cleanup */ });
@@ -324,6 +355,38 @@ test("'never mind' calls off a transfer that is still coming", async () => {
     cold.release();
     await Bun.sleep(0);
     expect(await sb.send("you there?")).toBe("front reply"); // stays at the front desk
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("'that's all' releases an active lane and cancels a pending cold transfer", async () => {
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    coder: { brain: fakeBrain("coder", calls) },
+    worker: { brain: cold.brain },
+  });
+  try {
+    await sb.start();
+    expect(await sb.send("talk to the coder")).toBe("Coder here.");
+
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+    expect(sb.activeLane()).toBe("coder");
+
+    expect(await settlesWithin(sb.send("that's all"), "release and cancel"))
+      .toBe("Back with you — and I'll leave Worker out of it.");
+    await expect(transfer).rejects.toThrow("superseded by a newer accepted turn");
+    expect(sb.activeLane()).toBeNull();
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await sb.send("new topic")).toBe("front reply");
     expect(sb.activeLane()).toBeNull();
   } finally {
     cold.release();
@@ -876,6 +939,35 @@ test("stop does not wait for a lane start that never settles", async () => {
   expect(stops).toBe(1);
   expect(sb.activeLane()).toBeNull();
   await expect(settlesWithin(transfer, "retired transfer")).rejects.toThrow("switchboard stopping");
+});
+
+test("stop clears a pending cold transfer before the next board session", async () => {
+  // Forward guard: stop already cleared the scalar pending state before the
+  // pending-transfer ownership fix made cancellation disposition explicit.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* superseded below */ });
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("hello?"), "barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+    await expect(transfer).rejects.toThrow("superseded by a newer accepted turn");
+
+    await settlesWithin(sb.stop(), "switchboard stop");
+    cold.release();
+    await Bun.sleep(0);
+    await Bun.sleep(0);
+
+    await sb.start();
+    expect(await sb.send("fresh conversation")).toBe("front reply");
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
 });
 
 test("stop preempts a primary start that never settles", async () => {
