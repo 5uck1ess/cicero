@@ -76,6 +76,8 @@ export interface ConfigUpdateLockOptions {
   ) => void;
   /** Internal test-only process-identity injection used by focused lock regressions. */
   processIdentitySync?: (pid: number) => ProcessIdentity;
+  /** Internal test-only timeout injection used by focused lock regressions. */
+  timeoutMs?: number;
 }
 
 const configLockWaiter = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
@@ -328,11 +330,32 @@ function inspectLegacyConfigLock(configPath: string): "absent" | "blocked" | "re
   }
 }
 
+function configUpdateLockTimeoutError(configPath: string): Error {
+  return new Error(
+    `Timed out waiting for another Cicero process to finish updating ${configPath}; retry the command.`,
+  );
+}
+
+function assertConfigUpdateLockDeadline(configPath: string, deadlineMs?: number): void {
+  if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+    throw configUpdateLockTimeoutError(configPath);
+  }
+}
+
 function scanConfigLocks(
   configPath: string,
   readProcessIdentity: (pid: number) => ProcessIdentity,
   readFreshProcessIdentity: (pid: number) => ProcessIdentity,
+  deadlineMs?: number,
 ): ConfigLockScan {
+  const readProcessIdentityBeforeDeadline = (pid: number): ProcessIdentity => {
+    assertConfigUpdateLockDeadline(configPath, deadlineMs);
+    return readProcessIdentity(pid);
+  };
+  const readFreshProcessIdentityBeforeDeadline = (pid: number): ProcessIdentity => {
+    assertConfigUpdateLockDeadline(configPath, deadlineMs);
+    return readFreshProcessIdentity(pid);
+  };
   const directory = dirname(configPath);
   const participants = new Map<string, ConfigLockParticipant>();
   let entries: string[];
@@ -384,8 +407,8 @@ function scanConfigLocks(
       ? undefined
       : choosingIdentity ?? ownerIdentity;
     if (
-      reclaimableConfigLock(participant, recordedIdentity, readProcessIdentity)
-      && removeStaleConfigLock(participant, recordedIdentity, readFreshProcessIdentity)
+      reclaimableConfigLock(participant, recordedIdentity, readProcessIdentityBeforeDeadline)
+      && removeStaleConfigLock(participant, recordedIdentity, readFreshProcessIdentityBeforeDeadline)
     ) {
       continue;
     }
@@ -452,7 +475,7 @@ export function acquireConfigUpdateLock(
   const participantBase = `${configPath}.update-lock-${process.pid}-${token}`;
   const choosingPath = `${participantBase}.choosing`;
   const ownerPath = `${participantBase}.owner.json`;
-  const deadlineMs = Date.now() + CONFIG_UPDATE_LOCK_TIMEOUT_MS;
+  const deadlineMs = Date.now() + (options.timeoutMs ?? CONFIG_UPDATE_LOCK_TIMEOUT_MS);
   let owner: ConfigUpdateLockOwner | undefined;
   const lease: ConfigUpdateLeaseState = {
     token,
@@ -483,7 +506,12 @@ export function acquireConfigUpdateLock(
       token,
       identity,
     }), { flag: "wx", mode: PRIVATE_FILE_MODE });
-    const initial = scanConfigLocks(configPath, readProcessIdentity, readFreshProcessIdentity);
+    const initial = scanConfigLocks(
+      configPath,
+      readProcessIdentity,
+      readFreshProcessIdentity,
+      deadlineMs,
+    );
     const highestTicket = initial.owners.reduce(
       (highest, entry) => Math.max(highest, entry.owner.ticket),
       0,
@@ -505,7 +533,12 @@ export function acquireConfigUpdateLock(
     unlinkPath(choosingPath);
 
     while (true) {
-      const scan = scanConfigLocks(configPath, readProcessIdentity, readFreshProcessIdentity);
+      const scan = scanConfigLocks(
+        configPath,
+        readProcessIdentity,
+        readFreshProcessIdentity,
+        deadlineMs,
+      );
       const own = scan.owners.find(({ owner: candidate }) =>
         candidate.pid === owner!.pid
         && candidate.token === owner!.token
@@ -522,6 +555,7 @@ export function acquireConfigUpdateLock(
         && scan.invalid.length === 0
         && !blockedByOwner
       ) {
+        assertConfigUpdateLockDeadline(configPath, deadlineMs);
         return {
           assertOwned(): void {
             if (
@@ -546,9 +580,7 @@ export function acquireConfigUpdateLock(
 
       const nowMs = Date.now();
       if (nowMs >= deadlineMs) {
-        throw new Error(
-          `Timed out waiting for another Cicero process to finish updating ${configPath}; retry the command.`,
-        );
+        throw configUpdateLockTimeoutError(configPath);
       }
       Atomics.wait(configLockWaiter, 0, 0, Math.min(CONFIG_UPDATE_LOCK_WAIT_MS, deadlineMs - nowMs));
     }

@@ -293,6 +293,79 @@ describe("updateConfigFields", () => {
     expect(existsSync(secondOwnerPath)).toBe(true);
   });
 
+  test("a config lock deadline exceeded by an identity scan fails acquisition", () => {
+    writeParticipantOwner(2_147_483_647, "test:departed-process");
+    const blocker = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+    let foreignIdentityReads = 0;
+    let unexpectedLock: ReturnType<typeof acquireConfigUpdateLock> | undefined;
+    let acquisitionError: unknown;
+
+    try {
+      unexpectedLock = acquireConfigUpdateLock(path, {
+        timeoutMs: 50,
+        processIdentitySync: (pid) => {
+          if (pid === process.pid) {
+            return { kind: "identified", value: "test:config-writer" };
+          }
+          foreignIdentityReads += 1;
+          if (foreignIdentityReads === 2) Atomics.wait(blocker, 0, 0, 75);
+          return { kind: "not-running" };
+        },
+      });
+    } catch (error) {
+      acquisitionError = error;
+    } finally {
+      unexpectedLock?.release();
+    }
+
+    expect(acquisitionError).toBeInstanceOf(Error);
+    expect((acquisitionError as Error).message).toContain(
+      "Timed out waiting for another Cicero process to finish updating",
+    );
+    expect(foreignIdentityReads).toBe(2);
+  });
+
+  test("an expired config lock scan stops probing and remains retryable", () => {
+    writeParticipantOwner(2_147_483_646, "test:departed-process-a");
+    writeParticipantOwner(2_147_483_647, "test:departed-process-b");
+    const blocker = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+    let foreignIdentityReads = 0;
+    let unexpectedLock: ReturnType<typeof acquireConfigUpdateLock> | undefined;
+    let acquisitionError: unknown;
+
+    try {
+      unexpectedLock = acquireConfigUpdateLock(path, {
+        timeoutMs: 50,
+        processIdentitySync: (pid) => {
+          if (pid === process.pid) {
+            return { kind: "identified", value: "test:config-writer" };
+          }
+          foreignIdentityReads += 1;
+          if (foreignIdentityReads === 2) Atomics.wait(blocker, 0, 0, 75);
+          return { kind: "not-running" };
+        },
+      });
+    } catch (error) {
+      acquisitionError = error;
+    } finally {
+      unexpectedLock?.release();
+    }
+
+    expect(acquisitionError).toBeInstanceOf(Error);
+    expect((acquisitionError as Error).message).toContain(
+      "Timed out waiting for another Cicero process to finish updating",
+    );
+    expect(foreignIdentityReads).toBe(2);
+
+    const retry = acquireConfigUpdateLock(path, {
+      processIdentitySync: (pid) =>
+        pid === process.pid
+          ? { kind: "identified", value: "test:config-writer" }
+          : { kind: "not-running" },
+    });
+    retry.release();
+  });
+
   test("an identity-free owner falls back to liveness and remains valid", () => {
     expect(() => process.kill(process.ppid, 0)).not.toThrow();
     const ownerPath = writeParticipantOwner(process.ppid);
