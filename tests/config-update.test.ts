@@ -37,6 +37,19 @@ describe("updateConfigFields", () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+  function writeParticipantOwner(pid: number, identity?: string): string {
+    const token = crypto.randomUUID();
+    const ownerPath = `${path}.update-lock-${pid}-${token}.owner.json`;
+    writeFileSync(ownerPath, JSON.stringify({
+      pid,
+      token,
+      acquiredAtMs: 0,
+      ticket: Number.MAX_SAFE_INTEGER,
+      ...(identity ? { identity } : {}),
+    }));
+    return ownerPath;
+  }
+
   test("writes fields to a fresh config file", async () => {
     updateConfigFields({ voice: "jarvis", voice_ref_audio: "/v/jarvis.wav" }, path);
     expect(existsSync(path)).toBe(true);
@@ -200,6 +213,60 @@ describe("updateConfigFields", () => {
       writer_c: true,
     });
   }, 10_000);
+
+  test("a stale owner with a live reused PID and mismatched identity is reclaimed", () => {
+    expect(() => process.kill(process.ppid, 0)).not.toThrow();
+    const ownerPath = writeParticipantOwner(process.ppid, "test:stale-parent");
+    let foreignIdentityReads = 0;
+
+    const lock = acquireConfigUpdateLock(path, {
+      processIdentitySync: (pid) => {
+        if (pid === process.pid) return { kind: "identified", value: "test:config-writer" };
+        if (pid === process.ppid) {
+          foreignIdentityReads += 1;
+          return { kind: "identified", value: "test:current-parent" };
+        }
+        return { kind: "not-running" };
+      },
+    });
+
+    expect(foreignIdentityReads).toBe(1);
+    expect(existsSync(ownerPath)).toBe(false);
+    lock.release();
+    updateConfigFields({ voice: "recovered-after-pid-reuse" }, path);
+    expect(parseYaml(readFileSync(path, "utf8")).voice).toBe("recovered-after-pid-reuse");
+  });
+
+  test("a live owner with a matching process identity is not reclaimed", () => {
+    expect(() => process.kill(process.ppid, 0)).not.toThrow();
+    const ownerPath = writeParticipantOwner(process.ppid, "test:current-parent");
+
+    expect(() => acquireConfigUpdateLock(path, {
+      processIdentitySync: (pid) => {
+        if (pid === process.pid) return { kind: "identified", value: "test:config-writer" };
+        if (pid === process.ppid) return { kind: "identified", value: "test:current-parent" };
+        return { kind: "not-running" };
+      },
+    })).toThrow("Config update lease tickets are exhausted");
+
+    expect(existsSync(ownerPath)).toBe(true);
+  });
+
+  test("an identity-free owner falls back to liveness and remains valid", () => {
+    expect(() => process.kill(process.ppid, 0)).not.toThrow();
+    const ownerPath = writeParticipantOwner(process.ppid);
+    let foreignIdentityReads = 0;
+
+    expect(() => acquireConfigUpdateLock(path, {
+      processIdentitySync: (pid) => {
+        if (pid === process.ppid) foreignIdentityReads += 1;
+        return { kind: "identified", value: "test:config-writer" };
+      },
+    })).toThrow("Config update lease tickets are exhausted");
+
+    expect(foreignIdentityReads).toBe(0);
+    expect(existsSync(ownerPath)).toBe(true);
+  });
 
   test("an old lease held by a live PID is not stolen", async () => {
     const lockPath = `${path}.update-lock`;

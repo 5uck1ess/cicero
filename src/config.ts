@@ -29,6 +29,7 @@ import {
 } from "./platform/secure-storage";
 import { voiceProviderContractForBackend } from "./voice/provider-contract";
 import { webVoiceTokenProblem } from "./web-voice/startup-policy";
+import { processIdentitySync, type ProcessIdentity } from "./daemon-pid";
 
 const CONFIG_FILE = "config.yaml";
 const ACTIONS_FILE = "actions.yaml";
@@ -40,6 +41,7 @@ interface ConfigUpdateLockOwner {
   token: string;
   acquiredAtMs: number;
   ticket: number;
+  identity?: string;
 }
 
 interface ConfigUpdateLeaseState {
@@ -68,6 +70,8 @@ export interface ConfigUpdateLockOptions {
     data: string,
     options: { flag: "wx"; mode: number },
   ) => void;
+  /** Internal test-only process-identity injection used by focused lock regressions. */
+  processIdentitySync?: (pid: number) => ProcessIdentity;
 }
 
 const configLockWaiter = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
@@ -121,7 +125,8 @@ function settleConfigLockCleanup(obligation: ConfigLockCleanupObligation): void 
  * confirm identity first is what latched a corrupt record forever, because an
  * unparseable file could never satisfy the check and so was never unlinked.
  * Displacing a lease held by a DIFFERENT process is prevented by
- * reclaimableConfigLock, which still requires a dead PID; that is a separate path.
+ * reclaimableConfigLock, which still requires a dead or different process
+ * identity (with a liveness fallback); that is a separate path.
  */
 function tryConfigLockCleanup(
   obligation: ConfigLockCleanupObligation,
@@ -215,24 +220,67 @@ function validConfigLockOwner(
     && Number.isFinite(owner.acquiredAtMs)
     && typeof owner.ticket === "number"
     && Number.isSafeInteger(owner.ticket)
-    && owner.ticket > 0;
+    && owner.ticket > 0
+    && (
+      owner.identity === undefined
+      || (
+        typeof owner.identity === "string"
+        && owner.identity.length > 0
+        && owner.identity.length <= 1_024
+      )
+    );
 }
 
-function reclaimableConfigLock(participant: ConfigLockParticipant): boolean {
-  if (participant.pid !== process.pid) return !processIsAlive(participant.pid);
+function configLockRecordIdentity(
+  value: unknown,
+  participant: Pick<ConfigLockParticipant, "pid" | "token">,
+): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Partial<ConfigUpdateLockOwner>;
+  return record.pid === participant.pid
+    && record.token === participant.token
+    && typeof record.identity === "string"
+    && record.identity.length > 0
+    && record.identity.length <= 1_024
+    ? record.identity
+    : undefined;
+}
+
+function reclaimableConfigLock(
+  participant: ConfigLockParticipant,
+  recordedIdentity: string | undefined,
+  readProcessIdentity: (pid: number) => ProcessIdentity,
+): boolean {
+  if (participant.pid !== process.pid) {
+    /*
+     * Old records and unsupported identity platforms deliberately retain the
+     * previous PID-liveness behavior. That preserves upgrade compatibility and
+     * never makes an unsupported platform easier to wedge than it is today.
+     */
+    if (!recordedIdentity) return !processIsAlive(participant.pid);
+    const currentIdentity = readProcessIdentity(participant.pid);
+    if (currentIdentity.kind === "not-running") return true;
+    if (currentIdentity.kind === "unsupported") return !processIsAlive(participant.pid);
+    return currentIdentity.value !== recordedIdentity;
+  }
   /*
    * UUID participant paths are never reused. This process alone may reclaim
    * one of its paths when the ticket is absent from its live-lease map, because
-   * it knows that ticket is not held. Other processes still require a dead PID,
-   * and a cleanup failure stays in the map until unlink is confirmed, so neither
-   * a live lease nor an unconfirmed release is ever displaced based on age.
+   * it knows that ticket is not held. Other processes still require a dead or
+   * different process identity, and a cleanup failure stays in the map until
+   * unlink is confirmed, so neither a live lease nor an unconfirmed release is
+   * ever displaced based on age.
    */
   return !liveConfigUpdateLeases.has(participant.token);
 }
 
-function removeStaleConfigLock(participant: ConfigLockParticipant): void {
+function removeStaleConfigLock(
+  participant: ConfigLockParticipant,
+  recordedIdentity: string | undefined,
+  readProcessIdentity: (pid: number) => ProcessIdentity,
+): void {
   // Re-check immediately before removal so a live ticket cannot be displaced.
-  if (!reclaimableConfigLock(participant)) return;
+  if (!reclaimableConfigLock(participant, recordedIdentity, readProcessIdentity)) return;
   for (const path of [participant.choosingPath, participant.ownerPath]) {
     if (!path) continue;
     try {
@@ -274,7 +322,10 @@ function inspectLegacyConfigLock(configPath: string): "absent" | "blocked" | "re
   }
 }
 
-function scanConfigLocks(configPath: string): ConfigLockScan {
+function scanConfigLocks(
+  configPath: string,
+  readProcessIdentity: (pid: number) => ProcessIdentity,
+): ConfigLockScan {
   const directory = dirname(configPath);
   const participants = new Map<string, ConfigLockParticipant>();
   let entries: string[];
@@ -301,21 +352,40 @@ function scanConfigLocks(configPath: string): ConfigLockScan {
   const invalid: ConfigLockParticipant[] = [];
   const owners: ConfigLockScan["owners"] = [];
   for (const participant of participants.values()) {
-    if (reclaimableConfigLock(participant)) {
-      removeStaleConfigLock(participant);
+    let choosingRecord: unknown;
+    if (participant.choosingPath) {
+      try {
+        choosingRecord = JSON.parse(readFileSync(participant.choosingPath, "utf8"));
+      } catch {
+        // Empty pre-identity markers and partial publications use liveness fallback.
+      }
+    }
+
+    let ownerRecord: unknown;
+    let ownerRecordInvalid = false;
+    if (participant.ownerPath) {
+      try {
+        ownerRecord = JSON.parse(readFileSync(participant.ownerPath, "utf8"));
+      } catch (error: unknown) {
+        ownerRecordInvalid = errorCode(error) !== "ENOENT";
+      }
+    }
+
+    const choosingIdentity = configLockRecordIdentity(choosingRecord, participant);
+    const ownerIdentity = configLockRecordIdentity(ownerRecord, participant);
+    const recordedIdentity = choosingIdentity && ownerIdentity && choosingIdentity !== ownerIdentity
+      ? undefined
+      : choosingIdentity ?? ownerIdentity;
+    if (reclaimableConfigLock(participant, recordedIdentity, readProcessIdentity)) {
+      removeStaleConfigLock(participant, recordedIdentity, readProcessIdentity);
       continue;
     }
     if (participant.choosingPath) choosing.push(participant);
     if (!participant.ownerPath) continue;
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(participant.ownerPath, "utf8"));
-      if (validConfigLockOwner(parsed, participant)) {
-        owners.push({ participant, owner: parsed });
-      } else {
-        invalid.push(participant);
-      }
-    } catch (error: unknown) {
-      if (errorCode(error) !== "ENOENT") invalid.push(participant);
+    if (validConfigLockOwner(ownerRecord, participant)) {
+      owners.push({ participant, owner: ownerRecord });
+    } else if (ownerRecordInvalid || ownerRecord !== undefined) {
+      invalid.push(participant);
     }
   }
 
@@ -333,8 +403,12 @@ function compareConfigLockOwners(left: ConfigUpdateLockOwner, right: ConfigUpdat
   return left.token.localeCompare(right.token);
 }
 
-function configLockIsOwned(configPath: string, expected: ConfigUpdateLockOwner): boolean {
-  const scan = scanConfigLocks(configPath);
+function configLockIsOwned(
+  configPath: string,
+  expected: ConfigUpdateLockOwner,
+  readProcessIdentity: (pid: number) => ProcessIdentity,
+): boolean {
+  const scan = scanConfigLocks(configPath, readProcessIdentity);
   const own = scan.owners.find(({ owner }) =>
     owner.pid === expected.pid
     && owner.token === expected.token
@@ -377,11 +451,26 @@ export function acquireConfigUpdateLock(
   };
   const unlinkPath = options.unlinkSync ?? unlinkSync;
   const writePath = options.writeFileSync ?? writeFileSync;
+  const identityReader = options.processIdentitySync ?? processIdentitySync;
+  const identityCache = new Map<number, ProcessIdentity>();
+  const readProcessIdentity = (pid: number): ProcessIdentity => {
+    const cached = identityCache.get(pid);
+    if (cached) return cached;
+    const identity = identityReader(pid);
+    identityCache.set(pid, identity);
+    return identity;
+  };
 
   liveConfigUpdateLeases.set(token, lease);
   try {
-    writePath(choosingPath, "", { flag: "wx", mode: PRIVATE_FILE_MODE });
-    const initial = scanConfigLocks(configPath);
+    const currentIdentity = readProcessIdentity(process.pid);
+    const identity = currentIdentity.kind === "identified" ? currentIdentity.value : undefined;
+    writePath(choosingPath, JSON.stringify({
+      pid: process.pid,
+      token,
+      identity,
+    }), { flag: "wx", mode: PRIVATE_FILE_MODE });
+    const initial = scanConfigLocks(configPath, readProcessIdentity);
     const highestTicket = initial.owners.reduce(
       (highest, entry) => Math.max(highest, entry.owner.ticket),
       0,
@@ -394,6 +483,7 @@ export function acquireConfigUpdateLock(
       token,
       acquiredAtMs: Date.now(),
       ticket: highestTicket + 1,
+      identity,
     };
     writePath(ownerPath, JSON.stringify(owner), {
       flag: "wx",
@@ -402,7 +492,7 @@ export function acquireConfigUpdateLock(
     unlinkPath(choosingPath);
 
     while (true) {
-      const scan = scanConfigLocks(configPath);
+      const scan = scanConfigLocks(configPath, readProcessIdentity);
       const own = scan.owners.find(({ owner: candidate }) =>
         candidate.pid === owner!.pid
         && candidate.token === owner!.token
@@ -421,7 +511,7 @@ export function acquireConfigUpdateLock(
       ) {
         return {
           assertOwned(): void {
-            if (!lease.usable || !configLockIsOwned(configPath, owner!)) {
+            if (!lease.usable || !configLockIsOwned(configPath, owner!, readProcessIdentity)) {
               throw configLockOwnershipError(configPath);
             }
           },
