@@ -49,8 +49,12 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
-      - name: Test brain spawning, generated TLS, and history trimming on Windows
-        run: bun test tests/brain-subprocess-cli.test.ts tests/web-voice/tls.test.ts tests/web-voice/history.test.ts
+      # config-update is here for the config lease's process-identity read, which
+      # resolves a PID to a start-time identity through PowerShell on win32 and
+      # /proc on Linux. The Linux reader runs in the `test` job; without this the
+      # win32 reader had no runner and its only evidence was that it typechecked.
+      - name: Test brain spawning, generated TLS, history trimming, and config leases on Windows
+        run: bun test tests/brain-subprocess-cli.test.ts tests/web-voice/tls.test.ts tests/web-voice/history.test.ts tests/config-update.test.ts
 
   python-sidecars:
     name: Python sidecars (${{ matrix.python-version }}, ${{ matrix.resolution }})
