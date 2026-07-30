@@ -694,14 +694,15 @@ test("a replacement socket does not leave its predecessor's ending owed to a lat
   const replacementAttachedBy = Date.now() + 1_000;
   while (handle!.clientCount() === 0 && Date.now() < replacementAttachedBy) await Bun.sleep(5);
   expect(handle!.clientCount()).toBe(1);
+  expect(ended).toBe(2);
   releaseSay.resolve();
   expect((await say).status).toBe(200);
-  expect(ended).toBe(1);
+  expect(ended).toBe(2);
 
   replacement.send(JSON.stringify({ type: "bye" }));
   const replacementDetachedBy = Date.now() + 1_000;
   while (handle!.clientCount() !== 0 && Date.now() < replacementDetachedBy) await Bun.sleep(5);
-  expect(ended).toBe(2);
+  expect(ended).toBe(3);
 
   const chat = await fetch(base + "/api/chat", {
     method: "POST",
@@ -710,9 +711,90 @@ test("a replacement socket does not leave its predecessor's ending owed to a lat
   });
   expect(chat.status).toBe(200);
   expect(handle!.activeJobCount()).toBe(0);
-  expect(ended).toBe(2);
+  expect(ended).toBe(3);
   first.close();
   replacement.close();
+});
+
+test("a new conversation definitively ends the previous conversation whose ending is owed", async () => {
+  // The old say lease began before the replacement conversation existed. Its
+  // presence must not let the new conversation inherit work that the daemon
+  // declined to drop when the old conversation first said goodbye.
+  const sayEntered = deferred();
+  const releaseSay = deferred();
+  const endings: boolean[] = [];
+  const base = start({
+    onConversationEnded: (ending?: { definitive?: boolean }) => {
+      endings.push(ending?.definitive === true);
+    },
+    onSay: async () => {
+      sayEntered.resolve();
+      await releaseSay.promise;
+      return wav();
+    },
+  });
+  const first = await connect(base);
+  const say = fetch(base + "/api/say", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "work from the old conversation" }),
+  });
+  await sayEntered.promise;
+  first.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(endings).toEqual([false]);
+
+  const fresh = await connect(base);
+  const attachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() === 0 && Date.now() < attachedBy) await Bun.sleep(5);
+  expect(endings).toEqual([false, true]);
+
+  releaseSay.resolve();
+  expect((await say).status).toBe(200);
+  expect(endings).toEqual([false, true]);
+  first.close();
+  fresh.close();
+});
+
+test("a resume does not definitively end the conversation whose ending is owed", async () => {
+  // An automatic reconnect continues the same conversation, so it must keep
+  // the deferred transfer that the still-running old lease may complete.
+  const sayEntered = deferred();
+  const releaseSay = deferred();
+  const endings: boolean[] = [];
+  const base = start({
+    onConversationEnded: (ending?: { definitive?: boolean }) => {
+      endings.push(ending?.definitive === true);
+    },
+    onSay: async () => {
+      sayEntered.resolve();
+      await releaseSay.promise;
+      return wav();
+    },
+  });
+  const first = await connect(base);
+  const say = fetch(base + "/api/say", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "work from the continuing conversation" }),
+  });
+  await sayEntered.promise;
+  first.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(endings).toEqual([false]);
+
+  const resumed = await connect(base, true);
+  const attachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() === 0 && Date.now() < attachedBy) await Bun.sleep(5);
+  expect(endings).toEqual([false]);
+
+  releaseSay.resolve();
+  expect((await say).status).toBe(200);
+  expect(endings).toEqual([false]);
+  first.close();
+  resumed.close();
 });
 
 test("overlapping jobs re-report a departure once when the last lease releases", async () => {
@@ -1716,6 +1798,29 @@ test("ws: a typed {type:'text'} frame runs the text turn and streams the reply",
   expect(JSON.parse(msgs[3] as string)).toEqual({ type: "done" });
 });
 
+test("ws: a text frame after goodbye does not produce a turn", async () => {
+  // Stop is terminal for this socket. A frame already following it through the
+  // transport cannot become input for a conversation the operator just ended.
+  let turns = 0;
+  const base = start({
+    onTextTurn: async (_text, sink) => {
+      turns += 1;
+      sink.done();
+    },
+  });
+  const ws = await connect(base);
+  const closed = new Promise<void>((resolve) => {
+    ws.addEventListener("close", () => resolve(), { once: true });
+  });
+  ws.send(JSON.stringify({ type: "bye" }));
+  ws.send(JSON.stringify({ type: "text", text: "too late" }));
+  await Promise.race([
+    closed,
+    Bun.sleep(2_000).then(() => { throw new Error("goodbye socket did not close"); }),
+  ]);
+  expect(turns).toBe(0);
+});
+
 test("ws: typed frame without onTextTurn reports 'typed input not available'", async () => {
   const base = start({ onStreamTurn: async () => { /* unused */ } });
   const reply = await new Promise<string>((resolve, reject) => {
@@ -2423,6 +2528,36 @@ test("goodbye ends before a replacement socket opens and the old close is a life
   await Bun.sleep(60);
   expect(ended).toBe(1);
   expect(handle!.clientCount()).toBe(1);
+  replacement.close();
+});
+
+test("goodbye releases owned connection slots and its close does not end the conversation twice", async () => {
+  // Detached sockets are still server-owned transports until they close. If
+  // goodbye leaves them open outside admission accounting, repeated Stops can
+  // accumulate more live transports than the connection limit is meant to own.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const sockets = await Promise.all(
+    Array.from({ length: MAX_WEB_VOICE_CLIENTS }, () => connect(base)),
+  );
+  const closed = sockets.map((ws) => new Promise<void>((resolve) => {
+    ws.addEventListener("close", () => resolve(), { once: true });
+  }));
+  for (const ws of sockets) ws.send(JSON.stringify({ type: "bye" }));
+
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(handle!.clientCount()).toBe(0);
+  await Promise.race([
+    Promise.all(closed),
+    Bun.sleep(2_000).then(() => { throw new Error("goodbye sockets did not close"); }),
+  ]);
+  expect(ended).toBe(1);
+
+  const replacement = await connect(base);
+  expect(handle!.clientCount()).toBe(1);
+  await Bun.sleep(60);
+  expect(ended).toBe(1);
   replacement.close();
 });
 

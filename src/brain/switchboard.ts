@@ -963,6 +963,10 @@ export class SwitchboardBrain implements Brain {
           .join("\n")}`
       : "";
     this.laneLog = [];
+    // A conversation-end release is a boundary, so its last exchange cannot
+    // brief a lane in the next conversation. An ordinary return deliberately
+    // keeps it because the user is still in the same conversation.
+    if (!memo) this.lastExchange = null;
     if (memo) {
       this.leaveMemo(`System note: the user just ended a side conversation with ${name} and returned to the main line.${recap}`);
     }

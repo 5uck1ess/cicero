@@ -1428,4 +1428,31 @@ describe("deferred brain work", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  test("a definitive browser ending drops deferred work despite an older active job", async () => {
+    // A fresh browser conversation cannot own a job that started before it
+    // attached. Consulting that old lease here lets the fresh conversation
+    // adopt deferred work left by the conversation it replaced.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-definitive-"));
+    let serverOptions: Record<string, unknown> | null = null;
+    const daemon = startableDaemon(home, (opts) => { serverOptions = opts; }, {
+      clients: 1,
+      live: true,
+      activeJobs: 1,
+    });
+    let dropped = 0;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      const ended = (serverOptions as unknown as {
+        onConversationEnded?: (ending?: { definitive?: boolean }) => void;
+      } | null)?.onConversationEnded;
+      expect(typeof ended).toBe("function");
+      ended?.({ definitive: true });
+      expect(dropped).toBe(1);
+    } finally {
+      await daemon.stop().catch(() => { /* best effort */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

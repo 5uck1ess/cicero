@@ -463,6 +463,65 @@ test("ending a conversation leaves the front desk no memo about it", async () =>
   }
 });
 
+test("ending a conversation clears its exchange before the next transfer", async () => {
+  // A deferred pin can settle before the conversation-end notification arrives.
+  // Releasing that pin clears its recap, but the handoff record must go too or
+  // the next conversation's first transfer briefs a new lane on the old caller.
+  const calls: string[] = [];
+  const thinkContexts: string[] = [];
+  const cold = coldLane(calls);
+  const think = {
+    ...fakeBrain("think", calls),
+    injectContext: (context: string) => { thinkContexts.push(context); },
+  };
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    worker: { brain: cold.brain },
+    think: { brain: think },
+  });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    cold.release();
+    expect(await transfer).toBe("Worker here.");
+    expect(await sb.send("the old conversation's private detail")).toBe("worker reply");
+
+    sb.dropDeferredWork();
+    expect(await sb.send("talk to think")).toBe("Think here.");
+    expect(thinkContexts.join("\n")).not.toContain("the old conversation's private detail");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("returning to the front desk preserves the exchange for a later transfer", async () => {
+  // Returning to Cicero is still inside one conversation. The next lane should
+  // receive the prior lane's exchange so the user does not have to repeat it.
+  const calls: string[] = [];
+  const thinkContexts: string[] = [];
+  const coder = fakeBrain("coder", calls);
+  const think = {
+    ...fakeBrain("think", calls),
+    injectContext: (context: string) => { thinkContexts.push(context); },
+  };
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    coder: { brain: coder },
+    think: { brain: think },
+  });
+  try {
+    await sb.start();
+    expect(await sb.send("talk to coder")).toBe("Coder here.");
+    expect(await sb.send("keep this same-conversation detail")).toBe("coder reply");
+    expect(await sb.send("back to Cicero")).toBe("Back with you.");
+
+    expect(await sb.send("talk to think")).toBe("Think here.");
+    expect(thinkContexts.join("\n")).toContain("keep this same-conversation detail");
+  } finally {
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
 test("ending a conversation does not release an ordinary explicit transfer", async () => {
   // A deliberate transfer to an already-started lane is the existing sticky
   // product behavior. Conversation cleanup must not mistake that live pin for

@@ -1562,7 +1562,13 @@ export class CiceroDaemon {
         // deferred) becomes one-shot brain context, so "call me" or "what do
         // we do about that?" right after an announcement lands on-topic.
         onNotified: (text) => this.brain.injectContext(notificationTurnContext(text, new Date())),
-        onConversationEnded: () => { this.noteInputSurfaceDeparted(); },
+        onConversationEnded: (ending) => {
+          if (ending?.definitive) {
+            this.dropDeferredBrainWork();
+          } else {
+            this.noteInputSurfaceDeparted();
+          }
+        },
         onDictate: async () => {
           if (!this.dictation) throw new Error("dictation is not enabled on this daemon");
           await this.dictation.toggle();
