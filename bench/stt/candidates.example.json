@@ -1,14 +1,18 @@
 {
-  "_comment": "Copy to candidates.json and edit. 'provider' = an integrated Cicero backend (its server must be running). 'command' = any CLI model not yet wired in; it must print ONLY the transcript to stdout, with {audio} replaced by the WAV path. Uncomment (remove the leading _) the models you've installed.",
+  "_comment": "Copy to candidates.json and edit. Three kinds: 'provider' = an integrated Cicero backend (its server must be running). 'command' = any CLI model not yet wired in; it must print ONLY the transcript to stdout, with {audio} replaced by the WAV path. 'stream' = an audio.cpp model fed at real-time pace over POST /v1/audio/transcriptions/live, which is the only kind that measures streaming time-to-final. Move the templates you want out of _templates and into candidates.",
+  "_warning": "Point audio.cpp candidates at an ISOLATED server, never the seat Cicero is live on — a bench run holds the model lock for its whole duration. A 'stream' run also costs at least the total clip duration per run, by construction.",
 
   "candidates": [
-    { "name": "mlx-whisper (current)", "kind": "provider", "backend": "mlx-whisper", "port": 8083 },
+    { "name": "mlx-whisper (current)", "kind": "provider", "backend": "mlx-whisper", "port": 8083 }
+  ],
 
-    "--- templates below: rename the model CLIs to match your install, then move into the array ---",
+  "_templates": {
+    "kyutai":    { "name": "kyutai-stt-1b (mlx)", "kind": "command", "command": "python -m moshi_mlx.run_stt {audio}" },
+    "parakeet":  { "name": "parakeet-mlx",        "kind": "command", "command": "parakeet-mlx transcribe {audio} --output-format txt" },
+    "moonshine": { "name": "moonshine-base",      "kind": "command", "command": "moonshine transcribe --model base {audio}" },
+    "faster":    { "name": "faster-whisper", "kind": "provider", "backend": "faster-whisper", "port": 8083 },
 
-    "_kyutai":    { "name": "kyutai-stt-1b (mlx)", "kind": "command", "command": "python -m moshi_mlx.run_stt {audio}" },
-    "_parakeet":  { "name": "parakeet-mlx",        "kind": "command", "command": "parakeet-mlx transcribe {audio} --output-format txt" },
-    "_moonshine": { "name": "moonshine-base",      "kind": "command", "command": "moonshine transcribe --model base {audio}" },
-    "_faster":    { "name": "faster-whisper", "kind": "provider", "backend": "faster-whisper", "port": 8083 }
-  ]
+    "audiocpp_batch":  { "name": "audiocpp nemotron (batch)", "kind": "command", "command": "curl -s -F file=@{audio} -F model=nemotron http://127.0.0.1:8093/v1/audio/transcriptions | jq -r .text" },
+    "audiocpp_stream": { "name": "audiocpp voxtral-realtime (streaming)", "kind": "stream", "model": "voxtral-realtime", "port": 8093 }
+  }
 }

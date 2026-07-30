@@ -26,6 +26,7 @@ bench/stt/clips/*.wav
 bench/stt/clips/*.txt
 bench/stt/candidates.json
 bench/stt/last-results.md
+bench/stt/results/
 
 # TTS bench + audiocpp spike artifacts (machine-local / regenerated).
 bench/tts/last-results.md

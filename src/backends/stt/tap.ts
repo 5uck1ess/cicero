@@ -2,6 +2,7 @@ import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { log } from "../../logger";
 import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE } from "../../platform/secure-storage";
+import { sanitizeLabel } from "../../text-utils";
 import type { STTProvider, STTTranscriptionResult } from "./provider";
 
 /**
@@ -81,19 +82,6 @@ const MAX_ENGINE_CHARS = 128; // provider name is untrusted; cap it in logs + si
 
 /** Matches only files this tap wrote: an ISO-ish stamp plus a 3-digit counter. */
 const TAP_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2}T[0-9-]+Z-\d{3})\.(wav|json)$/;
-
-/**
- * Make a value safe to interpolate into a log line: strip C0/C7F control
- * characters (so a newline or terminal escape in an env path / provider name
- * can't forge log entries or emit control sequences) and length-cap it.
- */
-function sanitizeLabel(value: string, max: number): string {
-  const cleaned = Array.from(value, (ch) => {
-    const c = ch.codePointAt(0)!;
-    return c < 0x20 || c === 0x7f ? "\uFFFD" : ch; // strip C0/DEL controls
-  });
-  return cleaned.length > max ? cleaned.slice(0, max).join("") + "\u2026" : cleaned.join("");
-}
 
 /** One utterance, fully read from the source and ready to persist off the hot path. */
 interface Capture {
