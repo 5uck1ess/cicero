@@ -65,6 +65,7 @@ export interface CiceroConfig {
   clap?: ClapConfig; // double-clap to activate voice mode (default on)
   vad?: VadConfig; // streaming voice-activity end-of-turn (default on)
   earcons?: boolean; // play activate/ready/thinking/success/error beeps (default true)
+  tts_coalesce?: TTSCoalesceConfig; // merge already-available sentences into fewer TTS calls (default off)
   // "Was that addressed to me?" veto over captured speech. Needs a configured
   // `classifier` model. Off by default; see docs/intent-judge.md.
   intent_judge?: IntentJudgeConfig;
@@ -77,6 +78,19 @@ export interface IntentJudgeConfig {
   min_confidence?: number;    // an undirected verdict below this does not decline the turn (default 0.6)
   context_turns?: number;     // earlier utterances and assistant lines shown (default 4)
   timeout_ms?: number;        // absolute deadline for one verdict (default 1500)
+}
+
+/**
+ * Batch adjacent sentences before synthesis. Worth enabling only for an engine
+ * with real per-call overhead — a hosted API, or a cold local server. Against a
+ * warm local GPU seat it measurably cuts elapsed synthesis time while changing nothing
+ * the user hears, because the speaker already renders ahead during playback.
+ * See bench/tts-coalesce-bench.ts.
+ */
+export interface TTSCoalesceConfig {
+  enabled?: boolean;           // default false
+  max_chars?: number;          // upper bound on a merged chunk (default 240)
+  passthrough_first?: number;  // sentences sent alone before merging, protects first audio (default 1)
 }
 
 /** Browser audio client: capture mic + play TTS in the browser, talk to a headless box. */
@@ -508,6 +522,8 @@ export interface Brain {
   setCallMeHandler?(handler: (who?: string, options?: BrainTurnOptions) => Promise<string>): void;
   /** Lane switchboard: TTS voice override for the current speaker (undefined = default voice). */
   activeLaneVoice?(): string | undefined;
+  /** Lane switchboard: discard queued control-turn voices owned by this exact caller signal. */
+  discardControlTurnVoices?(turnSignal: AbortSignal): void;
   /**
    * Unattended background turn (scheduled prompts). Not a spoken turn: lane
    * switchboards skip the control plane and never move the pinned lane;

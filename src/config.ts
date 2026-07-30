@@ -15,6 +15,7 @@ import type { STTProviderConfig } from "./backends/stt/provider";
 import type { TTSProviderConfig } from "./backends/tts/provider";
 import type { LLMProviderConfig } from "./backends/llm/provider";
 import { TIER_PRESETS } from "./backends/tiers";
+import { DEFAULT_COALESCE_OPTIONS, type CoalesceOptions } from "./speaker/coalesce";
 import { ciceroHome } from "./platform/paths";
 import {
   ConfigValidationError,
@@ -564,6 +565,16 @@ export class RuntimeConfig {
       minSpeechMs: v.min_speech_ms ?? 120,
       calibrationMs: v.calibration_ms ?? 300,
       prerollMs: v.preroll_ms ?? 240,
+    };
+  }
+
+  /** Resolved TTS input coalescing, or null when it is off (the default). */
+  get ttsCoalesce(): CoalesceOptions | null {
+    const c = this.config.tts_coalesce;
+    if (!c?.enabled) return null;
+    return {
+      maxChars: c.max_chars ?? DEFAULT_COALESCE_OPTIONS.maxChars,
+      passthroughFirst: c.passthrough_first ?? DEFAULT_COALESCE_OPTIONS.passthroughFirst,
     };
   }
 

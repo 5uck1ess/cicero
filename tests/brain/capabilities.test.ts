@@ -39,6 +39,7 @@ class CapableBrain implements Brain {
     return Promise.resolve(`${this.name}:${ref}`);
   }
   activeLaneVoice(): string | undefined { this.calls.push("activeLaneVoice"); return `${this.name}-voice`; }
+  discardControlTurnVoices(): void { this.calls.push("discardControlTurnVoices"); }
   wasControlTurn(): boolean { this.calls.push("wasControlTurn"); return true; }
   hasPendingConfirmation(): boolean { this.calls.push("hasPendingConfirmation"); return this.pending; }
   pendingConfirmations(): readonly [{ nonce: string; summary: string }] | [] {
@@ -89,6 +90,8 @@ test("QuickIntentsBrain preserves and binds every optional inner capability", as
   expect(brain.activeLane!()).toBe("inner");
   expect(await brain.transferTo!("coder", brief)).toBe("inner:coder");
   expect(brain.activeLaneVoice!()).toBe("inner-voice");
+  brain.discardControlTurnVoices!(new AbortController().signal);
+  expect(inner.calls).toContain("discardControlTurnVoices");
   inner.pending = true;
   expect(brain.hasPendingConfirmation!()).toBe(true);
   expect(brain.resolvePendingConfirmation!(true, inner.confirmationNonce)).toBe(true);
@@ -105,6 +108,7 @@ test("QuickIntentsBrain leaves unsupported optional capabilities absent", () => 
   expect(brain.activeLane).toBeUndefined();
   expect(brain.transferTo).toBeUndefined();
   expect(brain.activeLaneVoice).toBeUndefined();
+  expect(brain.discardControlTurnVoices).toBeUndefined();
   expect(brain.hasPendingConfirmation).toBeUndefined();
   expect(brain.pendingConfirmations).toBeUndefined();
   expect(brain.resolvePendingConfirmation).toBeUndefined();

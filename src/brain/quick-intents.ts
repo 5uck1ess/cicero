@@ -106,6 +106,7 @@ export class QuickIntentsBrain implements Brain {
   get activeLane(): Brain["activeLane"] { return bindBrainCapability(this.inner, "activeLane"); }
   get transferTo(): Brain["transferTo"] { return bindBrainCapability(this.inner, "transferTo"); }
   get activeLaneVoice(): Brain["activeLaneVoice"] { return bindBrainCapability(this.inner, "activeLaneVoice"); }
+  get discardControlTurnVoices(): Brain["discardControlTurnVoices"] { return bindBrainCapability(this.inner, "discardControlTurnVoices"); }
   get setCallMeHandler(): Brain["setCallMeHandler"] { return bindBrainCapability(this.inner, "setCallMeHandler"); }
   /** Background turns are never quick-intent material — straight to the inner brain. */
   sendBackground(message: string, options?: BackgroundTurnOptions): Promise<string> { return sendUnattended(this.inner, message, options); }

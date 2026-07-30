@@ -150,6 +150,17 @@ tts_fallback:
   device: cpu
   timeout_ms: 60000
 
+# Batch sentences that are already available into fewer synthesis calls. Only
+# worth enabling for an engine with real per-call overhead (a hosted API, a
+# remote box) — against a warm local seat it changes nothing you can hear.
+# Applies to the local streaming speaker AND to web voice, so it still works on
+# a headless box, which speaks only through the browser.
+# Measure with `bun run bench/tts-coalesce-bench.ts` before turning it on.
+# tts_coalesce:
+#   enabled: true
+#   max_chars: 240          # cap on a merged chunk
+#   passthrough_first: 1    # sentences sent alone first, protects time-to-first-audio
+
 # Local conversational router/summarizer. Install Ollama and pull this exact
 # model before the first start (`ollama pull qwen3.5:4b`), or replace this block
 # with a llama-cpp, MLX, remote, or OpenAI-compatible provider.

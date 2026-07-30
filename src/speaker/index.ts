@@ -20,5 +20,12 @@ export function createStreamingSpeaker(
   hub: AecAudioHub | null = null,
 ): StreamingTTSSpeaker | null {
   if (!config.ttsEnabled) return null;
-  return new StreamingTTSSpeaker(ttsProvider, audioPlayer, new SystemSpeaker(), hub);
+  return new StreamingTTSSpeaker(
+    ttsProvider,
+    audioPlayer,
+    new SystemSpeaker(),
+    hub,
+    undefined,
+    config.ttsCoalesce,
+  );
 }

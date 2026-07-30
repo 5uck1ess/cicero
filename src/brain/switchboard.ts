@@ -439,6 +439,13 @@ export class SwitchboardBrain implements Brain {
     return this.active ? this.lanes[this.active]?.voice : undefined;
   }
 
+  discardControlTurnVoices(turnSignal: AbortSignal): void {
+    const queue = this.rollcall;
+    // A late render failure from an older turn must not clear its replacement.
+    if (!queue || queue.turn.callerSignal !== turnSignal) return;
+    this.discardRollcall(new Error("control turn audio consumer stopped"));
+  }
+
   /**
    * Install one control turn's voice lease. A newer control response owns the
    * singleton activeLaneVoice() channel, so it also cancels an older standup's
