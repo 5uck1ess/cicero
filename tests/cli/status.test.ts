@@ -157,6 +157,11 @@ describe("configured CLI status", () => {
     const lines = await collectStatus(config, {
       platform: "darwin",
       inspectDaemon: () => Promise.resolve({ kind: "absent" }),
+      // Every other test in this file stubs this. Left out, the default reads
+      // the real ~/.cicero/web-voice/pairing.json, so this test passes on a
+      // clean checkout and fails on any machine that actually runs Cicero --
+      // an extra "Phone pairing" line the expectation below does not list.
+      readPairingState: () => null,
       probe: (request) => {
         requests.push(request);
         return Promise.resolve(true);
