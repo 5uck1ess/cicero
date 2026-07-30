@@ -13,6 +13,76 @@ import {
   type TurnProcess,
 } from "../src/brain/subprocess-cli";
 
+type FakeTurnProcess = TurnProcess & {
+  stdout: ReadableStream<Uint8Array>;
+  stderr: ReadableStream<Uint8Array>;
+};
+
+function controlledTurnProcess(pid: number) {
+  let resolveExit!: (code: number) => void;
+  let stdoutController!: ReadableStreamDefaultController<Uint8Array>;
+  let stderrController!: ReadableStreamDefaultController<Uint8Array>;
+  let stdoutSettled = false;
+  let finished = false;
+  const proc: FakeTurnProcess = {
+    pid,
+    exited: new Promise<number>((resolve) => { resolveExit = resolve; }),
+    stdout: new ReadableStream<Uint8Array>({
+      start(controller) { stdoutController = controller; },
+    }),
+    stderr: new ReadableStream<Uint8Array>({
+      start(controller) { stderrController = controller; },
+    }),
+    kill() {},
+  };
+  return {
+    proc,
+    failStdout(error: unknown) {
+      stdoutSettled = true;
+      stdoutController.error(error);
+    },
+    finish() {
+      if (finished) return;
+      finished = true;
+      if (!stdoutSettled) stdoutController.close();
+      stderrController.close();
+      resolveExit(0);
+    },
+  };
+}
+
+function reapFailingBrain(
+  proc: FakeTurnProcess,
+  finishTurn: () => void,
+  reapFailure: Error,
+) {
+  const brain = new SubprocessCLIBrain({
+    name: "test",
+    binary: "unused",
+    args: [],
+    rememberTurns: false,
+  });
+  let terminationCalls = 0;
+  const injected = brain as unknown as {
+    spawnProc: () => FakeTurnProcess;
+    terminateTurnProcess: (proc: TurnProcess) => Promise<void>;
+  };
+  injected.spawnProc = () => proc;
+  injected.terminateTurnProcess = () => {
+    terminationCalls++;
+    finishTurn();
+    return Promise.reject(reapFailure);
+  };
+  return { brain, terminationCalls: () => terminationCalls };
+}
+
+function captureConsoleLogs(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...values: unknown[]): void => { lines.push(values.map(String).join(" ")); };
+  return { lines, restore: () => { console.log = original; } };
+}
+
 test("SubprocessCLIBrain spawns the configured binary with prompt", async () => {
   const brain = new SubprocessCLIBrain({ name: "test", binary: "echo", args: ["--print"] });
   await brain.start();
@@ -223,6 +293,67 @@ test("sendStream abort kills a silent subprocess while next() is pending", async
   controller.abort(new Error("stop stream"));
 
   await expect(pending).rejects.toThrow("stop stream");
+});
+
+test("send keeps the caller abort reason when reap confirmation fails", async () => {
+  const turn = controlledTurnProcess(987_654_316);
+  const reapFailure = new Error("fixture tree reap was not confirmed");
+  const injected = reapFailingBrain(turn.proc, turn.finish, reapFailure);
+  const controller = new AbortController();
+  const abortReason = new Error("fixture caller abort");
+  const captured = captureConsoleLogs();
+  try {
+    const pending = injected.brain.send("ignored", { signal: controller.signal });
+    controller.abort(abortReason);
+    await expect(pending).rejects.toBe(abortReason);
+  } finally {
+    captured.restore();
+  }
+
+  expect(injected.terminationCalls()).toBe(1);
+  const reapLogs = captured.lines.filter((line) => line.includes(reapFailure.message));
+  expect(reapLogs).toHaveLength(1);
+  expect(reapLogs[0]).toContain(`turn process ${turn.proc.pid}`);
+});
+
+test("sendStream keeps the caller abort reason when reap confirmation fails", async () => {
+  const turn = controlledTurnProcess(987_654_315);
+  const reapFailure = new Error("fixture streaming tree reap was not confirmed");
+  const injected = reapFailingBrain(turn.proc, turn.finish, reapFailure);
+  const controller = new AbortController();
+  const abortReason = new Error("fixture streaming caller abort");
+  const captured = captureConsoleLogs();
+  try {
+    const iterator = injected.brain.sendStream("ignored", { signal: controller.signal })[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    controller.abort(abortReason);
+    await expect(pending).rejects.toBe(abortReason);
+  } finally {
+    captured.restore();
+  }
+
+  expect(injected.terminationCalls()).toBe(1);
+  const reapLogs = captured.lines.filter((line) => line.includes(reapFailure.message));
+  expect(reapLogs).toHaveLength(1);
+  expect(reapLogs[0]).toContain(`turn process ${turn.proc.pid}`);
+});
+
+test("a non-abort pipe teardown still propagates a reap failure", async () => {
+  const turn = controlledTurnProcess(987_654_314);
+  const pipeFailure = new Error("fixture stdout read failed before teardown");
+  const reapFailure = new Error("fixture non-abort tree reap was not confirmed");
+  const injected = reapFailingBrain(turn.proc, turn.finish, reapFailure);
+  turn.failStdout(pipeFailure);
+  const captured = captureConsoleLogs();
+  try {
+    await expect(injected.brain.send("ignored")).rejects.toBe(reapFailure);
+  } finally {
+    captured.restore();
+  }
+
+  expect(injected.terminationCalls()).toBe(1);
+  expect(captured.lines.some((line) => line.includes(reapFailure.message))).toBe(true);
+  expect(captured.lines.some((line) => line.includes(pipeFailure.message))).toBe(false);
 });
 
 test.skipIf(process.platform === "win32")("a completed CLI turn reaps descendants that inherited its pipes", async () => {
