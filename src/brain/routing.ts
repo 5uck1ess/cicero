@@ -100,6 +100,7 @@ export class RoutingBrain implements Brain {
 
   get sendToTab(): Brain["sendToTab"] { return bindBrainCapability(this.current, "sendToTab"); }
   get switchTab(): Brain["switchTab"] { return bindBrainCapability(this.current, "switchTab"); }
+  get dropDeferredWork(): Brain["dropDeferredWork"] { return bindBrainCapability(this.current, "dropDeferredWork"); }
   get getTargetTab(): Brain["getTargetTab"] { return bindBrainCapability(this.current, "getTargetTab"); }
   get activeLane(): Brain["activeLane"] { return bindBrainCapability(this.current, "activeLane"); }
   get transferTo(): Brain["transferTo"] { return bindBrainCapability(this.current, "transferTo"); }

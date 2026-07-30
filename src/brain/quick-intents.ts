@@ -102,6 +102,7 @@ export class QuickIntentsBrain implements Brain {
   }
   get sendToTab(): Brain["sendToTab"] { return bindBrainCapability(this.inner, "sendToTab"); }
   get switchTab(): Brain["switchTab"] { return bindBrainCapability(this.inner, "switchTab"); }
+  get dropDeferredWork(): Brain["dropDeferredWork"] { return bindBrainCapability(this.inner, "dropDeferredWork"); }
   get getTargetTab(): Brain["getTargetTab"] { return bindBrainCapability(this.inner, "getTargetTab"); }
   get activeLane(): Brain["activeLane"] { return bindBrainCapability(this.inner, "activeLane"); }
   get transferTo(): Brain["transferTo"] { return bindBrainCapability(this.inner, "transferTo"); }

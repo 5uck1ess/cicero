@@ -2,12 +2,6 @@ import { existsSync, readFileSync, rmSync, watch } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "node:os";
 import type { RuntimeConfig } from "./config";
-import {
-  DAEMON_STOPPING,
-  LOCAL_TURN_BARGE_IN,
-  LOCAL_TURN_STOPPED,
-  LOCAL_TURN_SUPERSEDED,
-} from "./types";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
 import { registerKnownSecrets, clearKnownSecrets } from "./redact";
 import { log, logStep, logError } from "./logger";
@@ -1568,6 +1562,7 @@ export class CiceroDaemon {
         // deferred) becomes one-shot brain context, so "call me" or "what do
         // we do about that?" right after an announcement lands on-topic.
         onNotified: (text) => this.brain.injectContext(notificationTurnContext(text, new Date())),
+        onConversationEnded: () => { this.dropDeferredBrainWork(); },
         onDictate: async () => {
           if (!this.dictation) throw new Error("dictation is not enabled on this daemon");
           await this.dictation.toggle();
@@ -1898,7 +1893,12 @@ export class CiceroDaemon {
       });
       this.conversational.onStopCommand(() => {
         this.pendingRecovery = null;
-        this.activeLocalTurn?.abort(LOCAL_TURN_STOPPED);
+        this.activeLocalTurn?.abort("stop command");
+        // A stop-class barge-in fires the interrupt callback first, so this
+        // controller is usually already aborted with "barge-in" and the reason
+        // above never lands. Telling the brain directly is what actually calls
+        // off work it was holding for this conversation.
+        this.dropDeferredBrainWork();
       });
     }
     // Headless: skip starting any local-mic capture (clap, conversational, hotkey).
@@ -1978,7 +1978,7 @@ export class CiceroDaemon {
   }
 
   private dispatchCommand(text: string): Promise<void> {
-    this.activeLocalTurn?.abort(LOCAL_TURN_SUPERSEDED);
+    this.activeLocalTurn?.abort("superseded by a newer local turn");
     const controller = new AbortController();
     this.activeLocalTurn = controller;
     let task!: Promise<void>;
@@ -2080,8 +2080,18 @@ export class CiceroDaemon {
     // mid-way through saying; the live speaking-text provider goes empty the
     // moment the speaker is interrupted below.
     this.conversational?.noteInterrupted(spoken.join(" "));
-    this.activeLocalTurn?.abort(LOCAL_TURN_BARGE_IN);
+    this.activeLocalTurn?.abort("barge-in");
     this.streamingSpeaker.interrupt();
+  }
+
+  /**
+   * Tell the brain that work it deferred for this conversation must not be
+   * carried into a later turn. Fire-and-forget: a brain without the capability
+   * has nothing deferred, and a throw here must not take down a stop or a
+   * shutdown.
+   */
+  private dropDeferredBrainWork(): void {
+    try { this.brain.dropDeferredWork?.(); } catch { /* best-effort */ }
   }
 
   private finalizeStreamingTurn(text: string, result: RouterResult, signal: AbortSignal): boolean {
@@ -2858,8 +2868,9 @@ export class CiceroDaemon {
       log("info", `Shutdown voice-input cancellation failed: ${error instanceof Error ? error.message : String(error)}`);
     });
     this.lifecycleAbort.abort();
-    this.activeLocalTurn?.abort(DAEMON_STOPPING);
+    this.activeLocalTurn?.abort("daemon stopping");
     this.activeLocalTurn = null;
+    this.dropDeferredBrainWork();
     this.lifecycle = "stopping";
     const stopping = this.stopAfterStartup(this.startPromise, ingressStop);
     this.stopPromise = stopping;

@@ -1,12 +1,6 @@
 import { log } from "../logger";
 import { isConfirmationNonce } from "../brain/approval";
 import type { Brain } from "../types";
-import {
-  TURN_ABORTED_BY_CLIENT,
-  TURN_SUPERSEDED_BY_NEWER,
-  VOICE_SERVER_SHUTTING_DOWN,
-  VOICE_SOCKET_CLOSED,
-} from "../types";
 import { presentedToken, tokenMatches } from "../http-auth";
 import { PAGE } from "./page";
 import { MANIFEST, ICON_SVG } from "./pwa";
@@ -102,6 +96,14 @@ export interface WebVoiceServerOptions {
    * audioBase64} to every connected voice client — Cicero speaks up unprompted
    * ("PR #142 is up") instead of only answering. Optional.
    */
+  /**
+   * This voice conversation is over — the socket closed, or the server is
+   * shutting down. The daemon uses it to tell the brain to drop work it was
+   * holding for the conversation, which the turn's abort reason cannot convey:
+   * the page sends `abort` and then closes, and the first abort fixes the
+   * reason, so the close is invisible to anything reading it. Fire-and-forget.
+   */
+  onConversationEnded?: () => void;
   /**
    * Toggle native dictation on the daemon. Separate from onNotify because it
    * neither renders nor fans out — it starts or ends a local capture.
@@ -808,7 +810,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     // Latest input wins on this socket only. Its current sink is immediately
     // invalidated, so even a handler that emits after observing the abort
     // cannot leak stale text/audio into the replacement turn.
-    abortTurn(ws.data.current, TURN_SUPERSEDED_BY_NEWER);
+    abortTurn(ws.data.current, "superseded by a newer turn");
     ws.data.pending = { input, turnId };
     if (ws.data.busy) return; // the running drain loop will pick it up
     ws.data.busy = true;
@@ -823,7 +825,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           controller,
           signal: AbortSignal.any([controller.signal, shutdownController.signal]),
         };
-        if (shutdownController.signal.aborted) abortTurn(state, VOICE_SERVER_SHUTTING_DOWN);
+        if (shutdownController.signal.aborted) abortTurn(state, "web voice server shutting down");
         ws.data.current = state;
         // Any in-flight speculation belongs to exactly one turn: a WAV turn
         // gets to adopt it; a typed turn (different input entirely) kills it.
@@ -1443,10 +1445,10 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                   protocolError(ws, "abort requires a valid turn id");
                   return;
                 }
-                if (ws.data.current?.turnId === msg.turnId) abortTurn(ws.data.current, TURN_ABORTED_BY_CLIENT);
+                if (ws.data.current?.turnId === msg.turnId) abortTurn(ws.data.current, "turn aborted by client");
                 if (ws.data.pending?.turnId === msg.turnId) ws.data.pending = null;
               } else if (ws.data.current) {
-                abortTurn(ws.data.current, TURN_ABORTED_BY_CLIENT);
+                abortTurn(ws.data.current, "turn aborted by client");
               }
               return;
             }
@@ -1562,7 +1564,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         close(ws) {
           if (ws.data.pendingClientSlot) pendingClients = Math.max(0, pendingClients - 1);
           clients.delete(ws);
-          abortTurn(ws.data.current, VOICE_SOCKET_CLOSED);
+          abortTurn(ws.data.current, "voice socket closed");
+          try { opts.onConversationEnded?.(); } catch { /* fire-and-forget */ }
           ws.data.pending = null;
           ws.data.latestProbeTurnId = null;
           const spec = ws.data.spec;
@@ -1628,13 +1631,14 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       // request into dependencies after shutdown has begun.
       accepting = false;
       if (!shutdownController.signal.aborted) {
-        shutdownController.abort(new Error(VOICE_SERVER_SHUTTING_DOWN));
+        shutdownController.abort(new Error("web voice server shutting down"));
       }
+      try { opts.onConversationEnded?.(); } catch { /* fire-and-forget */ }
       pendingClients = 0;
       parked.length = 0;
 
       for (const ws of clients) {
-        abortTurn(ws.data.current, VOICE_SERVER_SHUTTING_DOWN);
+        abortTurn(ws.data.current, "web voice server shutting down");
         ws.data.pending = null;
         ws.data.latestProbeTurnId = null;
         const spec = ws.data.spec;

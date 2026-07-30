@@ -1156,3 +1156,110 @@ describe("CiceroDaemon lifecycle", () => {
     }
   });
 });
+
+describe("deferred brain work", () => {
+  /**
+   * Override the capability on the daemon's REAL composed brain rather than
+   * replacing the brain: shutdown needs the rest of it, and the wrappers expose
+   * this as a getter-only accessor, so a plain assignment would throw.
+   */
+  function spyOnDropDeferredWork(daemon: CiceroDaemon, spy: () => void): void {
+    const brain = (daemon as unknown as { brain: object }).brain;
+    Object.defineProperty(brain, "dropDeferredWork", { value: spy, configurable: true });
+  }
+
+  function startableDaemon(home: string, capture?: (opts: Record<string, unknown>) => void): CiceroDaemon {
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.dashboard = { enabled: false };
+    config.raw.tts_enabled = false;
+    config.raw.web_voice = {
+      enabled: true,
+      port: 0,
+      token: "test-token-that-is-long-enough",
+      tls: { enabled: false },
+    };
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+    };
+    return new CiceroDaemon(config, {
+      pidFile: join(home, "cicero.pid"),
+      webVoiceServerStarter: (opts: unknown) => {
+        capture?.(opts as Record<string, unknown>);
+        return {
+          scheme: "http",
+          port: 18_446,
+          clientCount: () => 0,
+          notify: () => Promise.resolve(null),
+          stop: () => Promise.resolve(),
+        };
+      },
+      providerFactory: () => ({
+        stt: { name: "t-stt", transcribe: () => Promise.resolve(null), health: () => Promise.resolve(true) },
+        tts: { name: "t-tts", generateAudio: () => Promise.resolve(new ArrayBuffer(0)), health: () => Promise.resolve(true) },
+        llm: { name: "t-llm", chatCompletion: () => Promise.resolve("ok"), health: () => Promise.resolve(true) },
+      }),
+    });
+  }
+
+  test("stopping the daemon tells the brain to drop work it deferred", async () => {
+    // A wiring test, and the wiring IS the fix: for a spoken "stop" the abort
+    // reason is already fixed as the barge-in by the time the stop command
+    // arrives, so this out-of-band notification is the only thing that calls
+    // the work off. There is no brain-injection seam on DaemonOptions, so the
+    // composed brain is swapped after start — move this onto a seam if one is
+    // added later.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-stop-"));
+    const daemon = startableDaemon(home);
+    let dropped = 0;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      await daemon.stop();
+      expect(dropped).toBe(1);
+    } finally {
+      await daemon.stop().catch(() => { /* already stopped */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a voice conversation ending tells the brain to drop work it deferred", async () => {
+    // The browser's Stop aborts the turn and then closes the socket. The close
+    // is what means "conversation over", and it reaches the brain only through
+    // this callback.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-conv-"));
+    let serverOptions: Record<string, unknown> | null = null;
+    const daemon = startableDaemon(home, (opts) => { serverOptions = opts; });
+    let dropped = 0;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      const ended = (serverOptions as unknown as { onConversationEnded?: () => void } | null)?.onConversationEnded;
+      expect(typeof ended).toBe("function");
+      ended?.();
+      expect(dropped).toBe(1);
+    } finally {
+      await daemon.stop().catch(() => { /* best effort */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a throwing dropDeferredWork does not wedge daemon shutdown", async () => {
+    // Fire-and-forget: one bad brain must not block a shutdown.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-throw-"));
+    const daemon = startableDaemon(home);
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { throw new Error("brain exploded"); });
+      await daemon.stop();
+    } finally {
+      await daemon.stop().catch(() => { /* already stopped */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

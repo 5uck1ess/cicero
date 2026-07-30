@@ -507,6 +507,21 @@ export interface Brain {
   restart(): Promise<void>;
   health(): Promise<boolean>;
   /** Lane switchboard: name of the pinned lane, or null at the front desk. */
+  /**
+   * Deferred work this brain is holding on the current conversation's behalf —
+   * a cold transfer that is still starting, say — must not be carried into a
+   * later turn. The transport calls this when the conversation ends or the
+   * operator calls the work off.
+   *
+   * It exists because a turn's abort reason cannot answer that question. The
+   * reason is fixed by the FIRST abort, while the disposition is often decided
+   * by a later event on the same turn: the browser sends `abort` and then
+   * closes its socket, and a spoken "stop" reaches the daemon as a barge-in
+   * followed by a stop command. Classifying by reason silently kept a transfer
+   * alive across both. Optional; brains holding nothing deferred omit it.
+   */
+  dropDeferredWork?(): void;
+
   activeLane?(): string | null;
   /** Lane switchboard: pin a lane by name/alias (typed dial-back routing).
    * Resolves the employee's working name, or null when nobody matched.
@@ -565,81 +580,4 @@ export interface TerminalAdapter {
   spawnTab(opts: SpawnTabOptions): Promise<Tab>;
   closeTab(id: string): Promise<void>;
   health(): Promise<{ ok: boolean; reason?: string }>;
-}
-
-/*
- * Turn-cancellation reasons a transport can raise, and — the part that matters —
- * whether each one means the CONVERSATION is continuing or going away. Both
- * voice surfaces are covered: the browser (src/web-voice/server.ts) and the
- * local microphone (src/daemon.ts).
- *
- * A brain needs that distinction, not the wording. `SwitchboardBrain` keeps a
- * pending cold transfer alive across a cancellation that leaves the speaker on
- * the line, so the next turn can finish the handoff, and drops it when the
- * conversation itself ends. Both failure modes are silent and neither is
- * cosmetic: classify a barge-in as terminal and transfers are discarded exactly
- * as in the incident this behaviour was written to fix; classify a teardown as
- * continuing and a stale ask can pin a lane in some later conversation that
- * never requested it.
- *
- * They live here because the transport and the brain have to agree, and they
- * previously agreed only by the same string literal being typed out in two
- * files.
- */
-
-/** A queued turn on the SAME connection superseded this one. */
-export const TURN_SUPERSEDED_BY_NEWER = "superseded by a newer turn";
-/**
- * The client asked to abort the active turn. Push-to-talk raises this BEFORE it
- * has the replacement audio to send, and the first abort fixes the reason, so a
- * later supersession cannot overwrite it — an ordinary barge-in arrives here,
- * not under TURN_SUPERSEDED_BY_NEWER.
- */
-export const TURN_ABORTED_BY_CLIENT = "turn aborted by client";
-/** The voice socket closed: this conversation is over. */
-export const VOICE_SOCKET_CLOSED = "voice socket closed";
-/** The voice server is shutting down: every conversation is over. */
-export const VOICE_SERVER_SHUTTING_DOWN = "web voice server shutting down";
-
-/*
- * The local microphone surface is a second transport with the same contract. It
- * aborts with bare strings rather than Errors, which is why the predicate below
- * accepts both.
- */
-
-/** A newer spoken turn arrived while this one was still running. */
-export const LOCAL_TURN_SUPERSEDED = "superseded by a newer local turn";
-/** The operator spoke over the reply — a barge-in, the speaker is still there. */
-export const LOCAL_TURN_BARGE_IN = "barge-in";
-/**
- * The operator said "stop". They are still on the line, but unlike a barge-in
- * this is an explicit cancellation of the work in flight, so a transfer they no
- * longer want must not survive it.
- */
-export const LOCAL_TURN_STOPPED = "stop command";
-/** The daemon is shutting down: every conversation is over. */
-export const DAEMON_STOPPING = "daemon stopping";
-
-const CONTINUING_CANCELLATION_REASONS: ReadonlySet<string> = new Set([
-  TURN_SUPERSEDED_BY_NEWER,
-  TURN_ABORTED_BY_CLIENT,
-  LOCAL_TURN_SUPERSEDED,
-  LOCAL_TURN_BARGE_IN,
-]);
-
-/**
- * True when a cancellation ends the TURN but not the conversation — the speaker
- * is still there and another turn is coming.
- *
- * Unrecognised reasons are treated as terminal on purpose. Of the two ways to be
- * wrong, dropping a transfer costs the user one repeated request inside a live
- * conversation, while retaining one can act on a later, unrelated conversation's
- * behalf. If you add a transport cancellation that leaves the speaker on the
- * line, add it here — otherwise transfers will quietly stop surviving it.
- */
-export function turnCancellationContinuesConversation(reason: unknown): boolean {
-  const message = reason instanceof Error
-    ? reason.message
-    : typeof reason === "string" ? reason : null;
-  return message !== null && CONTINUING_CANCELLATION_REASONS.has(message);
 }

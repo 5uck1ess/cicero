@@ -1,5 +1,4 @@
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
-import { turnCancellationContinuesConversation } from "../types";
 import { dialBackMemo, matchCallMe, SpeculativeSideEffectError } from "../call-intent";
 import { log } from "../logger";
 import { BrainTurnContext } from "./turn-context";
@@ -204,7 +203,7 @@ const STRICT_VERB = "let me (?:talk|speak) (?:to|with)|switch(?: me)?(?: over)? 
 // fall through to the classifier instead of dead-ending at the roster.
 const LOOSE_VERB = "(?:talk|speak) (?:to|with)|put|get me|give me|pass me (?:over |through )?to|hand me (?:over )?to|patch me (?:through |over )?to";
 const PIN_RE = new RegExp(`^${LEAD_IN}${ASK_WRAP}(?:(${STRICT_VERB})|(?:${LOOSE_VERB}))\\s+(?:the\\s+)?(?!me\\b|you\\b|us\\b)(.{1,60}?)(?:\\s+on(?: the line)?)?(?:\\s+please)?$`, "i");
-const RELEASE_RE = new RegExp(`^${LEAD_IN}(?:thanks\\s+|thank you\\s+)?(?:(?:go |switch )?back to (?:you|cicero|jarvis)|(?:cicero|jarvis) come back|switch back|that(?:'s| is) all(?: for now)?|hang up|end (?:the )?(?:call|transfer))(?:\\s+please)?$`, "i");
+const RELEASE_RE = new RegExp(`^${LEAD_IN}(?:thanks\\s+|thank you\\s+)?(?:(?:go |switch )?back to (?:you|cicero|jarvis)|(?:cicero|jarvis) come back|switch back|that(?:'s| is) all(?: for now)?|hang up|end (?:the )?(?:call|transfer)|never\\s?mind(?: (?:about )?(?:that|it))?|forget (?:it|that))(?:\\s+please)?$`, "i");
 // Roll call: every employee checks in, each sentence rendered in that lane's
 // own voice (the voice queue below feeds activeLaneVoice per sentence).
 // "Group call" style requests land here too — there's no conference mode, so
@@ -605,16 +604,11 @@ export class SwitchboardBrain implements Brain {
   }
 
   /**
-   * True when this turn was cancelled but the conversation carries on, so a
-   * pending cold transfer should wait for the successor turn instead of being
-   * dropped. Both signals are consulted: a switchboard-internal supersession
-   * aborts `signal`, while a transport barge-in aborts `callerSignal`.
+   * The conversation ended, or the operator called the work off. A transfer
+   * that is still starting must not steer whatever is said next.
    */
-  private isContinuingCancellation(turn: AcceptedTurn): boolean {
-    if (turn.signal.reason instanceof SwitchboardTurnSupersededError) return true;
-    if (turnCancellationContinuesConversation(turn.signal.reason)) return true;
-    return turn.callerSignal?.aborted === true
-      && turnCancellationContinuesConversation(turn.callerSignal.reason);
+  dropDeferredWork(): void {
+    this.clearPendingTransfer();
   }
 
   private clearPendingTransfer(expected?: PendingTransfer): void {
@@ -628,14 +622,14 @@ export class SwitchboardBrain implements Brain {
     pending.detachAbort();
     pending.owner = turn;
     pending.disposition = "owned";
+    // Any cancellation of the owning turn parks the transfer for the next turn
+    // to adopt. Whether the conversation is actually over is not knowable from
+    // the abort reason — see Brain.dropDeferredWork, which is how a transport
+    // says so.
     const onAbort = (): void => {
       if (this.pendingTransfer !== pending || pending.owner !== turn) return;
-      if (this.isContinuingCancellation(turn)) {
-        pending.disposition = "awaiting-successor";
-        pending.detachAbort();
-      } else {
-        this.clearPendingTransfer(pending);
-      }
+      pending.disposition = "awaiting-successor";
+      pending.detachAbort();
     };
     turn.signal.addEventListener("abort", onAbort, { once: true });
     turn.callerSignal?.addEventListener("abort", onAbort, { once: true });

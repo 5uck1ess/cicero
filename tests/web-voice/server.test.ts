@@ -92,6 +92,7 @@ function start(opts: {
   confirmations?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["confirmations"]>;
   shutdownDrainTimeoutMs?: number;
   vadDir?: string;
+  onConversationEnded?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onConversationEnded"]>;
 } = {}): string {
   handle = startWebVoiceServer({
     host: "127.0.0.1",
@@ -114,6 +115,7 @@ function start(opts: {
     confirmations: opts.confirmations,
     shutdownDrainTimeoutMs: opts.shutdownDrainTimeoutMs,
     vadDir: opts.vadDir,
+    onConversationEnded: opts.onConversationEnded,
   });
   if (!handle) throw new Error("server failed to start");
   return `http://127.0.0.1:${handle.port}`;
@@ -2055,4 +2057,40 @@ test("/vad serves only whitelisted, present assets — unauthenticated, immutabl
 test("/vad without a configured directory stays 404", async () => {
   const base = start({});
   expect((await fetch(`${base}/vad/ort.wasm.min.js`)).status).toBe(404);
+});
+
+test("a closed voice socket reports the conversation as ended", async () => {
+  // The page's Stop button aborts the active turn and THEN closes the socket.
+  // The abort reason is fixed by the first call, so the close is invisible to
+  // anything reading it — a brain holding deferred work for this conversation
+  // has to be told out of band, or it carries that work into the next one.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; } });
+  const ws = await connect(base);
+  expect(ended).toBe(0);
+  ws.close();
+  await Bun.sleep(50);
+  expect(ended).toBe(1);
+});
+
+test("shutting the voice server down reports the conversation as ended", async () => {
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; } });
+  const ws = await connect(base);
+  await handle!.stop();
+  handle = null;
+  try { ws.close(); } catch { /* already gone */ }
+  expect(ended).toBeGreaterThanOrEqual(1);
+  expect(base).toContain("127.0.0.1");
+});
+
+test("a throwing conversation-ended hook does not break socket teardown", async () => {
+  // Fire-and-forget: a brain that throws here must not take the socket handler
+  // down with it, or one bad brain wedges every disconnect.
+  const base = start({ onConversationEnded: () => { throw new Error("brain exploded"); } });
+  const ws = await connect(base);
+  ws.close();
+  await Bun.sleep(50);
+  const res = await fetch(`${base}/api/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  expect(res.status).toBeLessThan(500);
 });
