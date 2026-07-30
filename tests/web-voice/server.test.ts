@@ -657,6 +657,64 @@ test("activeJobCount exposes an operator chat lease and re-reports departure whe
   expect(ended).toBe(2);
 });
 
+test("a replacement socket does not leave its predecessor's ending owed to a later chat", async () => {
+  // The first departure was remembered while synthesis ran, but its replacement
+  // arrived before that job drained and later delivered its own ending directly.
+  // Keeping the first debt after both events makes an unrelated socketless chat
+  // report a second ending and discard work belonging to the new conversation.
+  const sayEntered = deferred();
+  const releaseSay = deferred();
+  let ended = 0;
+  const base = start({
+    onConversationEnded: () => { ended++; },
+    onSay: async () => {
+      sayEntered.resolve();
+      await releaseSay.promise;
+      return wav();
+    },
+    onChat: async () => "later work stays parked",
+  });
+  const first = await connect(base);
+  const say = fetch(base + "/api/say", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "hold the old job" }),
+  });
+  await sayEntered.promise;
+  first.send(JSON.stringify({ type: "bye" }));
+  const firstDetachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < firstDetachedBy) await Bun.sleep(5);
+  expect(ended).toBe(1);
+
+  const replacement = await connect(base);
+  // The client sees its socket open when the handshake response arrives, which
+  // is before the server has run its own open handler and counted it. Draining
+  // the held job on that window is the ordinary departure-then-drain case, not
+  // the replacement case this test is about.
+  const replacementAttachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() === 0 && Date.now() < replacementAttachedBy) await Bun.sleep(5);
+  expect(handle!.clientCount()).toBe(1);
+  releaseSay.resolve();
+  expect((await say).status).toBe(200);
+  expect(ended).toBe(1);
+
+  replacement.send(JSON.stringify({ type: "bye" }));
+  const replacementDetachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < replacementDetachedBy) await Bun.sleep(5);
+  expect(ended).toBe(2);
+
+  const chat = await fetch(base + "/api/chat", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "park work for the later conversation" }),
+  });
+  expect(chat.status).toBe(200);
+  expect(handle!.activeJobCount()).toBe(0);
+  expect(ended).toBe(2);
+  first.close();
+  replacement.close();
+});
+
 test("overlapping jobs re-report a departure once when the last lease releases", async () => {
   // The first release still leaves an HTTP input surface alive. Consuming the
   // remembered ending there either ends too early or leaves the last route

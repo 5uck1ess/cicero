@@ -1443,6 +1443,13 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           }
           sockets.add(ws);
           clients.add(ws);
+          // An ending remembered while a job was still running is owed only
+          // until somebody is listening again. A socket can replace the one
+          // that departed before that job drains, and the drain then declines
+          // to consume the ending because a client is attached — so without
+          // this the debt outlives its own conversation and is finally paid by
+          // an unrelated later turn, whose deferred work it discards.
+          endReportedDuringJob = false;
           if (ws.data.protocol === 2) {
             sendJson(ws, {
               type: "hello",
