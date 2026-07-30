@@ -362,8 +362,9 @@ export interface BrainConfig {
   // agent (tools + memory). Instant utilities (time, battery, mute, stop) stay local.
   // Trade-off: every turn pays the agent's latency (and, for a cloud brain, cost).
   agent_first?: boolean;
-  // Speak a short, varied "let me think…" filler at the start of a brain turn to
-  // cover the agent's thinking latency (it plays while the agent generates). Default on.
+  // Speak cached, varied "let me think…" audio during a slow brain turn,
+  // including bounded reassurances until content arrives. Default on; false
+  // disables both the initial filler and its reassurances.
   thinking_filler?: boolean;
 }
 
