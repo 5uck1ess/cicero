@@ -326,6 +326,26 @@ describe("updateConfigFields", () => {
     expect(readdirSync(dir)).toEqual(["config.yaml"]);
   });
 
+  test("a partial owner publication is cleaned up before a later same-process rewrite", () => {
+    let ownerWriteFailed = false;
+    expect(() => acquireConfigUpdateLock(path, {
+      writeFileSync: (lockPath, data, options) => {
+        if (lockPath.endsWith(".owner.json")) {
+          ownerWriteFailed = true;
+          writeFileSync(lockPath, data.slice(0, -1), options);
+          throw Object.assign(new Error("synthetic partial owner write"), { code: "ENOSPC" });
+        }
+        writeFileSync(lockPath, data, options);
+      },
+    })).toThrow("synthetic partial owner write");
+    expect(ownerWriteFailed).toBe(true);
+
+    updateConfigFields({ voice: "partial-publication-recovered" }, path);
+
+    expect(parseYaml(readFileSync(path, "utf8")).voice).toBe("partial-publication-recovered");
+    expect(readdirSync(dir)).toEqual(["config.yaml"]);
+  });
+
   test("a writer that lost its lease cannot publish its prepared rewrite", () => {
     writeFileSync(path, "voice: retained\n");
 

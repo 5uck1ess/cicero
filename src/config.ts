@@ -50,7 +50,6 @@ interface ConfigUpdateLeaseState {
 
 interface ConfigLockCleanupObligation {
   path: string;
-  owner?: ConfigUpdateLockOwner;
   lease?: ConfigUpdateLeaseState;
 }
 
@@ -61,8 +60,14 @@ export interface ConfigUpdateLock {
 }
 
 export interface ConfigUpdateLockOptions {
-  /** Internal filesystem injection used by focused lease-cleanup regressions. */
+  /** Internal test-only filesystem injection used by focused lock regressions. */
   unlinkSync?: (path: string) => void;
+  /** Internal test-only filesystem injection used by focused lock regressions. */
+  writeFileSync?: (
+    path: string,
+    data: string,
+    options: { flag: "wx"; mode: number },
+  ) => void;
 }
 
 const configLockWaiter = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
@@ -107,22 +112,26 @@ function settleConfigLockCleanup(obligation: ConfigLockCleanupObligation): void 
   }
 }
 
+/*
+ * Every obligation path is `${configPath}.update-lock-${pid}-${uuid}.*` built from
+ * one acquisition's own freshly generated, never-reused token, so no other
+ * participant can ever hold that exact path. Unlinking it therefore needs no
+ * identity check: whatever is there — a complete owner record, a half-written one
+ * from a failed publication, or nothing — is ours to remove. Reading the file to
+ * confirm identity first is what latched a corrupt record forever, because an
+ * unparseable file could never satisfy the check and so was never unlinked.
+ * Displacing a lease held by a DIFFERENT process is prevented by
+ * reclaimableConfigLock, which still requires a dead PID; that is a separate path.
+ */
 function tryConfigLockCleanup(
   obligation: ConfigLockCleanupObligation,
   unlinkPath: (path: string) => void,
 ): boolean {
-  if (obligation.owner) {
-    try {
-      const current: unknown = JSON.parse(readFileSync(obligation.path, "utf8"));
-      if (!validConfigLockOwner(current, obligation.owner)) return false;
-    } catch (error: unknown) {
-      return errorCode(error) === "ENOENT";
-    }
-  }
   try {
     unlinkPath(obligation.path);
     return true;
   } catch (error: unknown) {
+    // Already gone counts as cleaned; anything else stays pending and is retried.
     return errorCode(error) === "ENOENT";
   }
 }
@@ -367,10 +376,11 @@ export function acquireConfigUpdateLock(
     cleanupPaths: new Set(),
   };
   const unlinkPath = options.unlinkSync ?? unlinkSync;
+  const writePath = options.writeFileSync ?? writeFileSync;
 
   liveConfigUpdateLeases.set(token, lease);
   try {
-    writeFileSync(choosingPath, "", { flag: "wx", mode: PRIVATE_FILE_MODE });
+    writePath(choosingPath, "", { flag: "wx", mode: PRIVATE_FILE_MODE });
     const initial = scanConfigLocks(configPath);
     const highestTicket = initial.owners.reduce(
       (highest, entry) => Math.max(highest, entry.owner.ticket),
@@ -385,7 +395,7 @@ export function acquireConfigUpdateLock(
       acquiredAtMs: Date.now(),
       ticket: highestTicket + 1,
     };
-    writeFileSync(ownerPath, JSON.stringify(owner), {
+    writePath(ownerPath, JSON.stringify(owner), {
       flag: "wx",
       mode: PRIVATE_FILE_MODE,
     });
@@ -418,10 +428,7 @@ export function acquireConfigUpdateLock(
           release(): void {
             if (!liveConfigUpdateLeases.has(token)) return;
             lease.usable = false;
-            attemptConfigLockCleanups(
-              [{ path: ownerPath, owner: owner!, lease }],
-              unlinkPath,
-            );
+            attemptConfigLockCleanups([{ path: ownerPath, lease }], unlinkPath);
           },
         };
       }
@@ -436,9 +443,11 @@ export function acquireConfigUpdateLock(
     }
   } catch (error: unknown) {
     lease.usable = false;
+    // Both paths are this acquisition's own; the owner file may be absent, complete,
+    // or a half-written prefix from a failed publication. All three are removable.
     attemptConfigLockCleanups([
       { path: choosingPath, lease },
-      { path: ownerPath, owner, lease },
+      { path: ownerPath, lease },
     ], unlinkPath);
     throw error;
   }
