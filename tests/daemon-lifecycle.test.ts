@@ -1168,7 +1168,11 @@ describe("deferred brain work", () => {
     Object.defineProperty(brain, "dropDeferredWork", { value: spy, configurable: true });
   }
 
-  function startableDaemon(home: string, capture?: (opts: Record<string, unknown>) => void): CiceroDaemon {
+  function startableDaemon(
+    home: string,
+    capture?: (opts: Record<string, unknown>) => void,
+    clientCount: () => number = () => 0,
+  ): CiceroDaemon {
     const config = loadConfig({}, { home });
     config.raw.headless = true;
     config.raw.dashboard = { enabled: false };
@@ -1194,7 +1198,7 @@ describe("deferred brain work", () => {
         return {
           scheme: "http",
           port: 18_446,
-          clientCount: () => 0,
+          clientCount,
           notify: () => Promise.resolve(null),
           stop: () => Promise.resolve(),
         };
@@ -1259,6 +1263,68 @@ describe("deferred brain work", () => {
       await daemon.stop();
     } finally {
       await daemon.stop().catch(() => { /* already stopped */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("putting the microphone down with nobody else connected drops deferred work", async () => {
+    // Every way of deactivating the mic — "stop listening", the hotkey, the
+    // dashboard, a clap, a capture failure — funnels through the same
+    // deactivation callback, so this covers all of them.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-deact-"));
+    const daemon = startableDaemon(home);
+    let dropped = 0;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      (daemon as unknown as { handleVoiceDeactivated: () => void }).handleVoiceDeactivated();
+      expect(dropped).toBe(1);
+    } finally {
+      await daemon.stop().catch(() => { /* best effort */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("putting the microphone down while a browser is connected keeps deferred work", async () => {
+    // Cicero is one assistant behind every surface. The operator who walked
+    // away from the microphone is still on the line in the browser, and the
+    // transfer they asked for is still theirs.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-deact-web-"));
+    const daemon = startableDaemon(home, undefined, () => 1);
+    let dropped = 0;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      (daemon as unknown as { handleVoiceDeactivated: () => void }).handleVoiceDeactivated();
+      expect(dropped).toBe(0);
+    } finally {
+      await daemon.stop().catch(() => { /* best effort */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("the last browser closing while the microphone is live keeps deferred work", async () => {
+    // The mirror image: an idle PWA being closed must not call off a transfer
+    // the operator is waiting on at the microphone.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-close-mic-"));
+    let serverOptions: Record<string, unknown> | null = null;
+    const daemon = startableDaemon(home, (opts) => { serverOptions = opts; });
+    let dropped = 0;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      (daemon as unknown as { voiceDesiredActive: boolean }).voiceDesiredActive = true;
+      const ended = (serverOptions as unknown as { onConversationEnded?: () => void } | null)?.onConversationEnded;
+      expect(typeof ended).toBe("function");
+      ended?.();
+      expect(dropped).toBe(0);
+
+      // ...and once the microphone is down too, the conversation really is over.
+      (daemon as unknown as { voiceDesiredActive: boolean }).voiceDesiredActive = false;
+      ended?.();
+      expect(dropped).toBe(1);
+    } finally {
+      await daemon.stop().catch(() => { /* best effort */ });
       rmSync(home, { recursive: true, force: true });
     }
   });

@@ -462,6 +462,30 @@ test("'never mind' calls off a transfer that is still coming", async () => {
   }
 });
 
+test("'never mind' spoken to somebody on the line goes to them, not the switchboard", async () => {
+  // "never mind" cancels a transfer that has not connected yet. Once the coder
+  // has picked up it is something the user is saying TO the coder ("never mind,
+  // I'll do it myself"), and hanging up on them instead loses the utterance.
+  // Explicit release phrases still release.
+  const calls: string[] = [];
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    coder: { brain: fakeBrain("coder", calls) },
+  });
+  try {
+    await sb.start();
+    expect(await sb.send("talk to the coder")).toBe("Coder here.");
+    expect(sb.activeLane()).toBe("coder");
+
+    expect(await sb.send("never mind")).toBe("coder reply");
+    expect(sb.activeLane()).toBe("coder");
+
+    expect(await sb.send("that's all")).toBe("Back with you.");
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
 test("'that's all' releases an active lane and cancels a pending cold transfer", async () => {
   const calls: string[] = [];
   const cold = coldLane(calls);

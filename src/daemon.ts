@@ -1562,7 +1562,7 @@ export class CiceroDaemon {
         // deferred) becomes one-shot brain context, so "call me" or "what do
         // we do about that?" right after an announcement lands on-topic.
         onNotified: (text) => this.brain.injectContext(notificationTurnContext(text, new Date())),
-        onConversationEnded: () => { this.dropDeferredBrainWork(); },
+        onConversationEnded: () => { this.noteInputSurfaceDeparted(); },
         onDictate: async () => {
           if (!this.dictation) throw new Error("dictation is not enabled on this daemon");
           await this.dictation.toggle();
@@ -2094,6 +2094,29 @@ export class CiceroDaemon {
     try { this.brain.dropDeferredWork?.(); } catch { /* best-effort */ }
   }
 
+  /**
+   * True while the operator can still say something. Cicero is one assistant
+   * behind every surface — the same brain, switchboard and active lane — so a
+   * conversation is not over because one way in went away, only when the last
+   * one does.
+   */
+  private anyInputSurfaceActive(): boolean {
+    if (this.voiceDesiredActive) return true;
+    return (this.webVoice?.clientCount() ?? 0) > 0;
+  }
+
+  /**
+   * One way in went away (a browser closed, the microphone was deactivated).
+   * Deferred work belongs to the conversation, not to the surface that happened
+   * to carry it, so it survives while any other surface can still adopt it —
+   * otherwise closing an idle tab called off a transfer the operator was
+   * waiting on at the microphone, and vice versa.
+   */
+  private noteInputSurfaceDeparted(): void {
+    if (this.anyInputSurfaceActive()) return;
+    this.dropDeferredBrainWork();
+  }
+
   private finalizeStreamingTurn(text: string, result: RouterResult, signal: AbortSignal): boolean {
     if (signal.aborted || !this.streamingSpeaker) return false;
     this.conversational?.noteSpoken(this.streamingSpeaker.getSnapshot().spoken.join(" "));
@@ -2571,6 +2594,11 @@ export class CiceroDaemon {
     this.voiceDesiredActive = false;
     dashBus.setVoiceActive(false);
     this.beginVoiceInputHandoff();
+    // Every way of putting the microphone down lands here — "stop listening",
+    // the hotkey, the dashboard, a clap, a capture failure — so this is the one
+    // place that has to notice, rather than a list of them that will be
+    // incomplete again next time.
+    this.noteInputSurfaceDeparted();
   }
 
   /**

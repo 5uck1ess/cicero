@@ -215,7 +215,12 @@ const STRICT_VERB = "let me (?:talk|speak) (?:to|with)|switch(?: me)?(?: over)? 
 // fall through to the classifier instead of dead-ending at the roster.
 const LOOSE_VERB = "(?:talk|speak) (?:to|with)|put|get me|give me|pass me (?:over |through )?to|hand me (?:over )?to|patch me (?:through |over )?to";
 const PIN_RE = new RegExp(`^${LEAD_IN}${ASK_WRAP}(?:(${STRICT_VERB})|(?:${LOOSE_VERB}))\\s+(?:the\\s+)?(?!me\\b|you\\b|us\\b)(.{1,60}?)(?:\\s+on(?: the line)?)?(?:\\s+please)?$`, "i");
-const RELEASE_RE = new RegExp(`^${LEAD_IN}(?:thanks\\s+|thank you\\s+)?(?:(?:go |switch )?back to (?:you|cicero|jarvis)|(?:cicero|jarvis) come back|switch back|that(?:'s| is) all(?: for now)?|hang up|end (?:the )?(?:call|transfer)|never\\s?mind(?: (?:about )?(?:that|it))?|forget (?:it|that))(?:\\s+please)?$`, "i");
+const RELEASE_RE = new RegExp(`^${LEAD_IN}(?:thanks\\s+|thank you\\s+)?(?:(?:go |switch )?back to (?:you|cicero|jarvis)|(?:cicero|jarvis) come back|switch back|that(?:'s| is) all(?: for now)?|hang up|end (?:the )?(?:call|transfer))(?:\\s+please)?$`, "i");
+// Calling off a transfer that has not connected yet. Deliberately NOT part of
+// RELEASE_RE: with somebody already on the line, "never mind" is something the
+// user is saying TO them ("never mind, I'll do it myself"), not an instruction
+// to hang up. It only means "cancel" while the line is still ringing.
+const CANCEL_PENDING_RE = new RegExp(`^${LEAD_IN}(?:never\\s?mind(?: (?:about )?(?:that|it))?|forget (?:it|that))(?:\\s+please)?$`, "i");
 // Roll call: every employee checks in, each sentence rendered in that lane's
 // own voice (the voice queue below feeds activeLaneVoice per sentence).
 // "Group call" style requests land here too — there's no conference mode, so
@@ -1115,6 +1120,10 @@ export class SwitchboardBrain implements Brain {
     const m = normalizeUtterance(message);
     if (ROLLCALL_RE.test(m)) return this.doRollcall(turn);
     if (RELEASE_RE.test(m)) return this.doRelease(turn);
+    // Only while nobody has picked up: see CANCEL_PENDING_RE.
+    if (this.active === null && this.pendingTransfer !== null && CANCEL_PENDING_RE.test(m)) {
+      return this.doRelease(turn);
+    }
     // Spoken dial-back ("call me", "have ada call me") — must beat PIN_RE:
     // "have ada call me" would otherwise read as a transfer to "ada call".
     if (this.callMe) {
