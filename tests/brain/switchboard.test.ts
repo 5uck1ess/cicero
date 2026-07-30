@@ -226,6 +226,138 @@ test("a lane that fails to start reports it and stays unpinned", async () => {
   expect(await sb.send("hello")).toBe("front reply");
 });
 
+/** A lane whose start hangs until the returned release() is called. */
+function coldLane(calls: string[], name = "worker") {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let starts = 0;
+  const brain: Brain = {
+    ...fakeBrain(name, calls),
+    start: async () => { starts++; await gate; calls.push(`${name}:start`); },
+  };
+  return { brain, release: () => release(), startCount: () => starts };
+}
+
+test("a transfer talked over during a cold start is not silently dropped", async () => {
+  // Live incident 2026-07-30: "get Rick" started a 14-second ACP lane cold
+  // start with no further speech to cover it. The user spoke into the silence,
+  // that barge-in superseded the pending transfer, and the request evaporated —
+  // the lane came up and sat there while every later turn went to the front
+  // desk. The superseded turn must still reject (late work must never publish
+  // into a newer turn), but the front desk must stop pretending it was never
+  // asked.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    // The barge-in still supersedes: the invariant is preserved.
+    expect(await settlesWithin(sb.send("hello?"), "barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+    await expect(transfer).rejects.toThrow("superseded by a newer accepted turn");
+    expect(sb.activeLane()).toBeNull(); // nothing pinned late by the dead turn
+
+    cold.release();
+    await Bun.sleep(0);
+    // With the lane up, the NEXT turn completes the pin itself.
+    expect(await settlesWithin(sb.send("you there?"), "pin")).toBe("Worker here.");
+    expect(sb.activeLane()).toBe("worker");
+    // Resolved once — a later turn is an ordinary lane turn, not another ack.
+    expect(await sb.send("what's up")).toBe("worker reply");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a pending cold transfer that fails to start reports it instead of stalling", async () => {
+  // The "still coming" ack must never outlive the start it describes, or the
+  // user is told to hold for a lane that is never going to arrive.
+  const calls: string[] = [];
+  let failStart!: (e: Error) => void;
+  const gate = new Promise<void>((_, reject) => { failStart = reject; });
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    worker: { brain: { ...fakeBrain("worker", calls), start: () => gate } },
+  });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("hello?"), "barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+    await expect(transfer).rejects.toThrow("superseded by a newer accepted turn");
+
+    failStart(new Error("worker down"));
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("you there?"), "failure ack"))
+      .toBe("I couldn't reach worker right now.");
+    expect(sb.activeLane()).toBeNull();
+    expect(await sb.send("hello")).toBe("front reply"); // cleared, not sticky
+  } finally {
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("'never mind' calls off a transfer that is still coming", async () => {
+  // The hold must be cancellable, or it is the one state the user cannot exit.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* superseded below */ });
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("hello?"), "barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+    await expect(transfer).rejects.toThrow("superseded by a newer accepted turn");
+
+    expect(await settlesWithin(sb.send("that's all"), "cancel"))
+      .toBe("Alright — I'll leave Worker out of it.");
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await sb.send("you there?")).toBe("front reply"); // stays at the front desk
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a newer transfer replaces a pending cold one — no stale lane arrives", async () => {
+  // "get the worker… no, the coder" must not leave the worker queued to seize
+  // the line the moment its slow start lands.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    worker: { brain: cold.brain },
+    coder: { brain: fakeBrain("coder", calls) },
+  });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* superseded below */ });
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("talk to the coder"), "second transfer")).toBe("Coder here.");
+    expect(sb.activeLane()).toBe("coder");
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await sb.send("still there?")).toBe("coder reply"); // coder keeps the line
+    expect(sb.activeLane()).toBe("coder");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
 test("'that's all' at the front desk is a normal turn, not a release ack", async () => {
   const calls: string[] = [];
   const sb = board(calls);
