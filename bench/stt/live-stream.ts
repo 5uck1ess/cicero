@@ -34,8 +34,32 @@ export interface LiveStreamResult {
   finalAfterAudioMs: number;
 }
 
+export interface LiveStreamResponseLimits {
+  maxHeaderBytes: number;
+  maxChunkBytes: number;
+  maxEventBytes: number;
+  maxBodyBytes: number;
+}
+
+export interface LiveStreamOptions {
+  timeoutMs?: number;
+  limits?: Partial<LiveStreamResponseLimits>;
+  /** Injectable monotonic clock for deterministic timing regressions. */
+  now?: () => number;
+}
+
 const DEFAULT_CHUNK_MS = 100;
 const DEFAULT_TIMEOUT_MS = 180_000;
+// Bench responses are transcript text, so 64 KiB of headers, 4 MiB per HTTP
+// chunk, 1 MiB per SSE event, and 16 MiB overall are generous while still
+// bounding every unit retained from a remote provider.
+const DEFAULT_RESPONSE_LIMITS: LiveStreamResponseLimits = {
+  maxHeaderBytes: 64 * 1024,
+  maxChunkBytes: 4 * 1024 * 1024,
+  maxEventBytes: 1024 * 1024,
+  maxBodyBytes: 16 * 1024 * 1024,
+};
+const MAX_CHUNK_LINE_BYTES = 128;
 
 /** Float samples in [-1,1] → little-endian 16-bit PCM, the endpoint's default format. */
 function toS16le(samples: Float32Array): Uint8Array {
@@ -54,59 +78,166 @@ function toS16le(samples: Float32Array): Uint8Array {
  * split on event boundaries.
  */
 class ChunkedResponseReader {
-  private buf = new Uint8Array(0);
-  private headersDone = false;
-  private decoder = new TextDecoder();
+  private state: "headers" | "size" | "size-lf" | "data" | "data-cr" | "data-lf" | "done" = "headers";
+  private header = new Uint8Array(1024);
+  private headerLength = 0;
+  private headerEndMatched = 0;
+  private sizeLine = new Uint8Array(32);
+  private sizeLineLength = 0;
+  private chunkRemaining = 0;
+  private bodyBytes = 0;
+  private readonly decoder = new TextDecoder();
   status = 0;
+
+  constructor(private readonly limits: LiveStreamResponseLimits) {}
 
   /** Returns any newly decoded body text. Throws on a malformed response. */
   push(chunk: Uint8Array): string {
-    const merged = new Uint8Array(this.buf.length + chunk.length);
-    merged.set(this.buf);
-    merged.set(chunk, this.buf.length);
-    this.buf = merged;
+    const text: string[] = [];
+    let offset = 0;
+    while (offset < chunk.length && this.state !== "done") {
+      const byte = chunk[offset]!;
+      if (this.state === "headers") {
+        this.appendHeaderByte(byte);
+        offset++;
+        continue;
+      }
+      if (this.state === "size") {
+        if (byte === CR) {
+          this.state = "size-lf";
+        } else {
+          this.appendSizeByte(byte);
+        }
+        offset++;
+        continue;
+      }
+      if (this.state === "size-lf") {
+        if (byte !== LF) throw new Error("malformed chunk size line in response");
+        const tail = this.startChunk();
+        if (tail) text.push(tail);
+        offset++;
+        continue;
+      }
+      if (this.state === "data") {
+        const take = Math.min(this.chunkRemaining, chunk.length - offset);
+        text.push(this.decoder.decode(chunk.subarray(offset, offset + take), { stream: true }));
+        this.chunkRemaining -= take;
+        this.bodyBytes += take;
+        offset += take;
+        if (this.chunkRemaining === 0) this.state = "data-cr";
+        continue;
+      }
+      if (this.state === "data-cr") {
+        if (byte !== CR) throw new Error("response chunk is missing its trailing CRLF");
+        this.state = "data-lf";
+        offset++;
+        continue;
+      }
+      if (byte !== LF) throw new Error("response chunk is missing its trailing CRLF");
+      this.state = "size";
+      offset++;
+    }
+    return text.join("");
+  }
 
-    if (!this.headersDone) {
-      const end = indexOfSequence(this.buf, HEADER_END);
-      if (end < 0) return "";
-      const head = this.decoder.decode(this.buf.subarray(0, end));
-      this.status = Number(head.split("\n", 1)[0]?.split(" ")[1] ?? 0);
-      // A non-2xx reply is a plain buffered error body, not a chunked stream;
-      // surface its text rather than failing to de-frame it.
+  private appendHeaderByte(byte: number): void {
+    if (this.headerLength === this.header.length) {
+      const capacity = Math.min(
+        this.limits.maxHeaderBytes + HEADER_END.length,
+        this.header.length * 2,
+      );
+      if (capacity <= this.header.length) {
+        throw new RangeError(
+          `response header section exceeds ${this.limits.maxHeaderBytes}-byte limit`,
+        );
+      }
+      const grown = new Uint8Array(capacity);
+      grown.set(this.header);
+      this.header = grown;
+    }
+    this.header[this.headerLength++] = byte;
+    if (byte === HEADER_END[this.headerEndMatched]) {
+      this.headerEndMatched++;
+    } else {
+      this.headerEndMatched = byte === HEADER_END[0] ? 1 : 0;
+    }
+    if (this.headerEndMatched === HEADER_END.length) {
+      const sectionLength = this.headerLength - HEADER_END.length;
+      if (sectionLength > this.limits.maxHeaderBytes) {
+        throw new RangeError(
+          `response header section exceeds ${this.limits.maxHeaderBytes}-byte limit`,
+        );
+      }
+      const head = this.decoder.decode(this.header.subarray(0, sectionLength));
+      const statusLine = head.split("\r\n", 1)[0] ?? "";
+      const match = /^HTTP\/\d(?:\.\d)?\s+(\d{3})(?:\s|$)/.exec(statusLine);
+      if (!match) throw new Error("server returned a malformed HTTP status line");
+      this.status = Number(match[1]);
       if (this.status < 200 || this.status >= 300) {
-        throw new Error(`server returned ${this.status}: ${this.decoder.decode(this.buf.subarray(end + HEADER_END.length)).trim() || head.split("\n")[0]}`);
+        throw new Error(`server returned HTTP ${this.status}`);
       }
-      this.buf = this.buf.slice(end + HEADER_END.length);
-      this.headersDone = true;
+      this.header = new Uint8Array(0);
+      this.state = "size";
+    } else if (this.headerLength - this.headerEndMatched > this.limits.maxHeaderBytes) {
+      throw new RangeError(
+        `response header section exceeds ${this.limits.maxHeaderBytes}-byte limit`,
+      );
     }
+  }
 
-    let text = "";
-    for (;;) {
-      const nl = indexOfSequence(this.buf, CRLF);
-      if (nl < 0) return text;
-      const size = parseInt(this.decoder.decode(this.buf.subarray(0, nl)).split(";")[0]!.trim(), 16);
-      if (!Number.isFinite(size) || size < 0) throw new Error("malformed chunk size in response");
-      if (size === 0) {
-        this.buf = new Uint8Array(0);
-        return text;
-      }
-      const dataStart = nl + CRLF.length;
-      if (this.buf.length < dataStart + size + CRLF.length) return text; // wait for the rest
-      text += this.decoder.decode(this.buf.subarray(dataStart, dataStart + size));
-      this.buf = this.buf.slice(dataStart + size + CRLF.length);
+  private appendSizeByte(byte: number): void {
+    if (this.sizeLineLength >= MAX_CHUNK_LINE_BYTES) {
+      throw new RangeError(
+        `response chunk-size line exceeds ${MAX_CHUNK_LINE_BYTES}-byte limit`,
+      );
     }
+    if (this.sizeLineLength === this.sizeLine.length) {
+      const grown = new Uint8Array(Math.min(MAX_CHUNK_LINE_BYTES, this.sizeLine.length * 2));
+      grown.set(this.sizeLine);
+      this.sizeLine = grown;
+    }
+    this.sizeLine[this.sizeLineLength++] = byte;
+  }
+
+  private startChunk(): string {
+    const line = new TextDecoder().decode(this.sizeLine.subarray(0, this.sizeLineLength));
+    const token = line.split(";", 1)[0]!.trim();
+    if (!/^[0-9a-f]+$/i.test(token)) throw new Error("malformed chunk size in response");
+    const size = Number.parseInt(token, 16);
+    if (!Number.isSafeInteger(size)) throw new Error("malformed chunk size in response");
+    if (size > this.limits.maxChunkBytes) {
+      throw new RangeError(
+        `response chunk exceeds ${this.limits.maxChunkBytes}-byte limit (declared ${size} bytes)`,
+      );
+    }
+    if (this.bodyBytes + size > this.limits.maxBodyBytes) {
+      throw new RangeError(
+        `response decoded body exceeds ${this.limits.maxBodyBytes}-byte limit`,
+      );
+    }
+    this.sizeLineLength = 0;
+    if (size === 0) {
+      this.state = "done";
+      return this.decoder.decode();
+    }
+    this.chunkRemaining = size;
+    this.state = "data";
+    return "";
   }
 }
 
-const CRLF = new Uint8Array([13, 10]);
+const CR = 13;
+const LF = 10;
 const HEADER_END = new Uint8Array([13, 10, 13, 10]);
 
-function indexOfSequence(haystack: Uint8Array, needle: Uint8Array): number {
-  outer: for (let i = 0; i + needle.length <= haystack.length; i++) {
-    for (let j = 0; j < needle.length; j++) if (haystack[i + j] !== needle[j]) continue outer;
-    return i;
+function responseLimits(overrides: Partial<LiveStreamResponseLimits> = {}): LiveStreamResponseLimits {
+  const limits = { ...DEFAULT_RESPONSE_LIMITS, ...overrides };
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new RangeError(`${name} must be a positive safe integer`);
+    }
   }
-  return -1;
+  return limits;
 }
 
 /**
@@ -116,7 +247,17 @@ function indexOfSequence(haystack: Uint8Array, needle: Uint8Array): number {
  * duration, which is what makes the timings mean anything — a model can't be
  * credited with a partial it only produced because the whole file arrived at once.
  */
-export async function transcribeLive(audioPath: string, c: StreamCandidate): Promise<LiveStreamResult> {
+export async function transcribeLive(
+  audioPath: string,
+  c: StreamCandidate,
+  options: LiveStreamOptions = {},
+): Promise<LiveStreamResult> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("timeoutMs must be a positive finite number");
+  }
+  const limits = responseLimits(options.limits);
+  const now = options.now ?? (() => performance.now());
   const { samples, sampleRate } = decodeWav(await Bun.file(audioPath).arrayBuffer());
   const pcm = toS16le(samples);
   const audioMs = (samples.length / sampleRate) * 1000;
@@ -133,9 +274,12 @@ export async function transcribeLive(audioPath: string, c: StreamCandidate): Pro
   const path = `${c.path ?? "/v1/audio/transcriptions/live"}?${query}`;
   const host = c.host ?? "127.0.0.1";
 
-  const reader = new ChunkedResponseReader();
+  const reader = new ChunkedResponseReader(limits);
+  const eventEncoder = new TextEncoder();
   let sse = "";
+  let sseBytes = 0;
   let firstDeltaMs: number | null = null;
+  let lastDeltaMs: number | null = null;
   let deltasDuringAudio = 0;
   let deltas = 0;
   let doneMs: number | null = null;
@@ -143,31 +287,97 @@ export async function transcribeLive(audioPath: string, c: StreamCandidate): Pro
   let joined = "";
   let t0 = 0; // set when the first PCM byte goes out
   let failure: Error | null = null;
-  let settle: (() => void) | null = null;
-  const closed = new Promise<void>((resolve) => { settle = resolve; });
-  let drained: (() => void) | null = null;
+  let resolveClosed!: () => void;
+  let closedSettled = false;
+  const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
+  let drainWaiter: { resolve: () => void; reject: (error: Error) => void } | null = null;
+  let paceWaiter: {
+    timer: ReturnType<typeof setTimeout>;
+    reject: (error: Error) => void;
+  } | null = null;
+  let requestBodyDone = false;
 
-  const consumeEvents = (): void => {
+  const settleClosed = (): void => {
+    if (closedSettled) return;
+    closedSettled = true;
+    resolveClosed();
+  };
+
+  const rejectPending = (error: Error): void => {
+    if (drainWaiter) {
+      const waiter = drainWaiter;
+      drainWaiter = null;
+      waiter.reject(error);
+    }
+    if (paceWaiter) {
+      const waiter = paceWaiter;
+      paceWaiter = null;
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+  };
+
+  const abortSocket = (socket: { terminate(): void }, error: Error): void => {
+    failure ??= error;
+    // Bun's terminate() is the forceful full close; end() only closes writes.
+    socket.terminate();
+    rejectPending(failure);
+    settleClosed();
+  };
+
+  const consumeEvent = (block: string): void => {
+    const payload = block.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+    if (!payload || payload === "[DONE]") return;
+    let event: { type?: string; delta?: string; text?: string; error?: { message?: string } };
+    try { event = JSON.parse(payload); } catch { return; }
+    if (event.error) {
+      failure ??= new Error(event.error.message ?? "stream error");
+      return;
+    }
+    const at = now() - t0;
+    if (event.type === "transcript.text.delta") {
+      deltas++;
+      joined += event.delta ?? "";
+      firstDeltaMs ??= at;
+      lastDeltaMs = at;
+      if (at < audioMs) deltasDuringAudio++;
+    } else if (event.type === "transcript.text.done") {
+      doneMs ??= at;
+      finalText = event.text ?? "";
+    }
+  };
+
+  const appendEventFragment = (fragment: string): void => {
+    if (fragment.length > limits.maxEventBytes - sseBytes) {
+      throw new RangeError(`SSE event exceeds ${limits.maxEventBytes}-byte limit`);
+    }
+    const bytes = eventEncoder.encode(fragment).byteLength;
+    if (sseBytes + bytes > limits.maxEventBytes) {
+      throw new RangeError(`SSE event exceeds ${limits.maxEventBytes}-byte limit`);
+    }
+    sse += fragment;
+    sseBytes += bytes;
+  };
+
+  const consumeEvents = (text: string): void => {
+    let offset = 0;
+    if (sse.endsWith("\n") && text.startsWith("\n")) {
+      consumeEvent(sse.slice(0, -1));
+      sse = "";
+      sseBytes = 0;
+      offset = 1;
+    }
     for (;;) {
-      const end = sse.indexOf("\n\n");
-      if (end < 0) return;
-      const block = sse.slice(0, end);
-      sse = sse.slice(end + 2);
-      const payload = block.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
-      if (!payload || payload === "[DONE]") continue;
-      let event: { type?: string; delta?: string; text?: string; error?: { message?: string } };
-      try { event = JSON.parse(payload); } catch { continue; }
-      if (event.error) { failure ??= new Error(event.error.message ?? "stream error"); continue; }
-      const at = performance.now() - t0;
-      if (event.type === "transcript.text.delta") {
-        deltas++;
-        joined += event.delta ?? "";
-        firstDeltaMs ??= at;
-        if (at < audioMs) deltasDuringAudio++;
-      } else if (event.type === "transcript.text.done") {
-        doneMs ??= at;
-        finalText = event.text ?? "";
+      const end = text.indexOf("\n\n", offset);
+      if (end < 0) {
+        appendEventFragment(text.slice(offset));
+        return;
       }
+      appendEventFragment(text.slice(offset, end));
+      consumeEvent(sse);
+      sse = "";
+      sseBytes = 0;
+      offset = end + 2;
     }
   };
 
@@ -175,17 +385,29 @@ export async function transcribeLive(audioPath: string, c: StreamCandidate): Pro
     hostname: host,
     port: c.port,
     socket: {
-      data: (_s, chunk) => {
+      data: (s, chunk) => {
         try {
-          sse += reader.push(chunk);
-          consumeEvents();
+          consumeEvents(reader.push(chunk));
+          if (failure) abortSocket(s, failure);
         } catch (err: unknown) {
-          failure ??= err instanceof Error ? err : new Error(String(err));
+          abortSocket(s, err instanceof Error ? err : new Error(String(err)));
         }
       },
-      drain: () => { drained?.(); drained = null; },
-      close: () => settle?.(),
-      error: (_s, err) => { failure ??= err instanceof Error ? err : new Error(String(err)); settle?.(); },
+      drain: () => {
+        const waiter = drainWaiter;
+        drainWaiter = null;
+        waiter?.resolve();
+      },
+      close: () => {
+        if (!requestBodyDone) {
+          failure ??= new Error("connection closed before request body completed");
+          rejectPending(failure);
+        }
+        settleClosed();
+      },
+      error: (s, err) => {
+        abortSocket(s, err instanceof Error ? err : new Error(String(err)));
+      },
     },
   });
 
@@ -193,17 +415,30 @@ export async function transcribeLive(audioPath: string, c: StreamCandidate): Pro
   const writeAll = async (data: Uint8Array | string): Promise<void> => {
     let payload = typeof data === "string" ? new TextEncoder().encode(data) : data;
     while (payload.length) {
+      if (failure) throw failure;
       const n = socket.write(payload);
       if (n >= payload.length) return;
       payload = payload.subarray(Math.max(n, 0));
-      await new Promise<void>((resolve) => { drained = resolve; });
+      await new Promise<void>((resolve, reject) => {
+        drainWaiter = { resolve, reject };
+      });
     }
   };
 
+  const waitForPace = async (ms: number): Promise<void> => {
+    if (failure) throw failure;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        paceWaiter = null;
+        resolve();
+      }, ms);
+      paceWaiter = { timer, reject };
+    });
+  };
+
   const timeout = setTimeout(() => {
-    failure ??= new Error(`no response within ${DEFAULT_TIMEOUT_MS} ms`);
-    socket.end();
-  }, DEFAULT_TIMEOUT_MS);
+    abortSocket(socket, new Error(`no response within ${timeoutMs} ms`));
+  }, timeoutMs);
 
   try {
     await writeAll(
@@ -211,7 +446,7 @@ export async function transcribeLive(audioPath: string, c: StreamCandidate): Pro
       `Transfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nAccept: text/event-stream\r\n\r\n`,
     );
 
-    t0 = performance.now();
+    t0 = now();
     for (let off = 0; off < pcm.length && !failure; off += chunkBytes) {
       const slice = pcm.subarray(off, Math.min(off + chunkBytes, pcm.length));
       await writeAll(`${slice.length.toString(16)}\r\n`);
@@ -221,15 +456,19 @@ export async function transcribeLive(audioPath: string, c: StreamCandidate): Pro
         // Sleep until this chunk's audio would have finished playing, so the
         // server never sees samples earlier than a live microphone would deliver.
         const playedMs = ((off + slice.length) / 2 / sampleRate) * 1000;
-        const wait = t0 + playedMs - performance.now();
-        if (wait > 0) await Bun.sleep(wait);
+        const wait = t0 + playedMs - now();
+        if (wait > 0) await waitForPace(wait);
       }
     }
     await writeAll("0\r\n\r\n");
+    requestBodyDone = true;
     await closed;
   } finally {
     clearTimeout(timeout);
-    socket.end();
+    const cleanupError = failure ?? new Error("live transcription request ended");
+    rejectPending(cleanupError);
+    settleClosed();
+    socket.terminate();
   }
 
   if (failure) throw failure;
@@ -242,8 +481,9 @@ export async function transcribeLive(audioPath: string, c: StreamCandidate): Pro
     firstDeltaMs,
     deltasDuringAudio,
     deltas,
-    // Falling back to firstDelta keeps the row honest for a server that streams
-    // deltas but never sends the terminal event, rather than reporting a 0.
-    finalAfterAudioMs: (doneMs ?? firstDeltaMs ?? audioMs) - audioMs,
+    // Without a terminal event, the last delta is the best available finish
+    // estimate. A negative value is still meaningful when that final available
+    // delta genuinely arrived before the audio itself finished.
+    finalAfterAudioMs: (doneMs ?? lastDeltaMs ?? audioMs) - audioMs,
   };
 }
