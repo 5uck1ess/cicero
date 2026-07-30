@@ -136,6 +136,13 @@ interface StreamStats {
   finalAfterAudioMs: number; // median; negative = transcript done before the audio ended
   deltasDuringAudio: number; // summed over clips (first run)
   deltas: number;            // summed over clips (first run)
+  /**
+   * The audio was fed at real time. When it was not (`pace: "fast"`), every
+   * latency here is measured against a clock the model never had to keep, so
+   * they are withheld rather than printed — a fast probe answers "does it
+   * respond at all", not "how quickly does it answer a speaker".
+   */
+  paced: boolean;
 }
 
 interface Row {
@@ -248,6 +255,11 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
     if (clipTotal.length) totals.push(median(clipTotal));
   }
 
+  // A fast upload finishes long before the clip would have been spoken, so
+  // "before the audio ended" is measured against an instant that never
+  // happened: a 10s clip answered at 100ms records -9,900ms time-to-final and
+  // counts every delta as arriving "during" audio. Those are not latencies.
+  const paced = c.pace !== "fast";
   return {
     ...emptyRow(c.name, true),
     meanWerPct: wers.length ? wers.reduce((a, b) => a + b, 0) / wers.length : NaN,
@@ -257,9 +269,10 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
     streaming: {
       // NaN, not 0, when a model emitted no partial at all — 0 would read as
       // "instant" in a latency column, which is the opposite of what happened.
-      firstDeltaMs: firstDeltas.length ? median(firstDeltas) : NaN,
-      finalAfterAudioMs: median(finals),
-      deltasDuringAudio,
+      firstDeltaMs: paced && firstDeltas.length ? median(firstDeltas) : NaN,
+      finalAfterAudioMs: paced ? median(finals) : NaN,
+      deltasDuringAudio: paced ? deltasDuringAudio : NaN,
+      paced,
       deltas,
     },
   };
@@ -368,8 +381,12 @@ export function renderStreamingTable(rows: Row[]): string {
   const sep = "|---|---:|---:|---:|---:|---:|---:|";
   const lines = avail.map((r) => {
     const s = r.streaming!;
-    const during = s.deltas ? `${s.deltasDuringAudio} / ${s.deltas}` : "0";
-    return `| ${r.name} | ${fmt(r.meanWerPct)} | ${fmt(s.firstDeltaMs, 0)} | ${during} | ${fmt(s.finalAfterAudioMs, 0)} | ${r.errors} | ${r.clips} |`;
+    const during = !s.paced ? "n/a"
+      : s.deltas ? `${s.deltasDuringAudio} / ${s.deltas}` : "0";
+    // A fast probe is still a real accuracy measurement, so it is ranked — but
+    // it is named as what it is, because every latency on its row is withheld.
+    const name = s.paced ? r.name : `${r.name} (fast probe)`;
+    return `| ${name} | ${fmt(r.meanWerPct)} | ${fmt(s.firstDeltaMs, 0)} | ${during} | ${fmt(s.finalAfterAudioMs, 0)} | ${r.errors} | ${r.clips} |`;
   });
   return [
     "### Streaming (real-time feed, `/v1/audio/transcriptions/live`)",
@@ -381,6 +398,11 @@ export function renderStreamingTable(rows: Row[]): string {
     + " relative to the last sample (negative = done before the audio ended). `n/a` first delta"
     + " means the model emitted no partial at all — it buffers internally and behaves like a"
     + " batch model over this endpoint._",
+    "",
+    "_A `(fast probe)` row was fed as quickly as the socket accepted it rather than at real"
+    + " time, so its latency columns are withheld: they would be measured against a clock the"
+    + " model never had to keep. Its WER is a real measurement. Re-run it without"
+    + " `\"pace\": \"fast\"` to get latencies._",
   ].join("\n");
 }
 

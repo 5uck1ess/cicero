@@ -104,3 +104,36 @@ test("a clip whose every run succeeds is scored", async () => {
     rmSync(wav.dir, { recursive: true, force: true });
   }
 }, 15_000);
+
+test("a fast probe reports no streaming latency at all", async () => {
+  const wav = writeWavFixture(0.08, 8_000);
+  const server = listenPerConnection([goodResponse]);
+  const clip: Clip = { name: "clip1", path: wav.path, reference: "hello world", durationSec: 0.08 };
+  try {
+    const row = await benchStreamCandidate({ ...candidate(server.port), pace: "fast" }, [clip], 1);
+    expect(row.clips).toBe(1);
+    expect(row.meanWerPct).toBe(0); // accuracy is still a real measurement
+    expect(row.streaming?.paced).toBe(false);
+    expect(row.streaming?.firstDeltaMs).toBeNaN();
+    expect(row.streaming?.finalAfterAudioMs).toBeNaN();
+    expect(row.streaming?.deltasDuringAudio).toBeNaN();
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 15_000);
+
+test("a real-time candidate still reports its streaming latency", async () => {
+  // The other side: withholding must be tied to pace, not applied everywhere.
+  const wav = writeWavFixture(0.08, 8_000);
+  const server = listenPerConnection([goodResponse]);
+  const clip: Clip = { name: "clip1", path: wav.path, reference: "hello world", durationSec: 0.08 };
+  try {
+    const row = await benchStreamCandidate(candidate(server.port), [clip], 1);
+    expect(row.streaming?.paced).toBe(true);
+    expect(Number.isNaN(row.streaming!.finalAfterAudioMs)).toBe(false);
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 15_000);

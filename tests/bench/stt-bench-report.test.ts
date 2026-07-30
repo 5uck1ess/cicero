@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { median, renderTable, renderStreamingTable } from "../../bench/stt-bench";
 
-const streamStats = { firstDeltaMs: 120, finalAfterAudioMs: 300, deltasDuringAudio: 4, deltas: 6 };
+const streamStats = { firstDeltaMs: 120, finalAfterAudioMs: 300, deltasDuringAudio: 4, deltas: 6, paced: true };
 
 test("median reports no samples as n/a rather than zero", () => {
   // Every caller feeds this into a latency column. Returning 0 for "we never
@@ -39,7 +39,7 @@ test("a streaming candidate whose every clip failed is reported, not ranked firs
   const table = renderStreamingTable([
     {
       name: "broken-stream", available: true, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN,
-      errors: 2, clips: 0, streaming: { firstDeltaMs: NaN, finalAfterAudioMs: NaN, deltasDuringAudio: 0, deltas: 0 },
+      errors: 2, clips: 0, streaming: { firstDeltaMs: NaN, finalAfterAudioMs: NaN, deltasDuringAudio: 0, deltas: 0, paced: true },
     },
     {
       name: "working-stream", available: true, meanWerPct: 8, warmMs: 5_000, coldMs: 5_000, rtf: 1,
@@ -58,7 +58,7 @@ test("an all-failed streaming candidate is still reported when nothing succeeded
   const table = renderStreamingTable([
     {
       name: "broken-stream", available: true, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN,
-      errors: 1, clips: 0, streaming: { firstDeltaMs: NaN, finalAfterAudioMs: NaN, deltasDuringAudio: 0, deltas: 0 },
+      errors: 1, clips: 0, streaming: { firstDeltaMs: NaN, finalAfterAudioMs: NaN, deltasDuringAudio: 0, deltas: 0, paced: true },
     },
   ]);
   expect(table).toContain("broken-stream");
@@ -94,4 +94,35 @@ test("writing a report creates the archive directory it needs", async () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a fast probe is ranked on accuracy but never reports a latency", () => {
+  // pace:"fast" uploads the whole clip as quickly as the socket takes it, so
+  // "before the audio ended" is measured against an instant that never
+  // happened — a 10s clip answered at 100ms records -9,900ms time-to-final and
+  // counts every delta as arriving during audio. Those numbers went into a
+  // table headed "Streaming (real-time feed)" with nothing marking them.
+  const table = renderStreamingTable([
+    {
+      name: "probe", available: true, meanWerPct: 5, warmMs: 900, coldMs: 900, rtf: 0.1,
+      errors: 0, clips: 2,
+      streaming: { firstDeltaMs: NaN, finalAfterAudioMs: NaN, deltasDuringAudio: NaN, deltas: 3, paced: false },
+    },
+    {
+      name: "real", available: true, meanWerPct: 9, warmMs: 5_000, coldMs: 5_000, rtf: 1,
+      errors: 0, clips: 2, streaming: streamStats,
+    },
+  ]);
+  const rows = table.split("\n").filter((l) => l.startsWith("| ") && !l.startsWith("| Candidate"));
+  expect(rows).toHaveLength(2);
+  // Ranked on WER like any other row — accuracy does not depend on pacing.
+  expect(rows[0]).toContain("probe (fast probe)");
+  expect(rows[1]).toContain("real");
+  // ...but every latency column on that row is withheld, not printed.
+  expect(rows[0]).not.toContain("-9900");
+  expect(rows[0]!.match(/n\/a/g) ?? []).toHaveLength(3);
+  expect(table).toContain("Re-run it without");
+  // The genuinely paced row still reports its numbers.
+  expect(rows[1]).toContain("120");
+  expect(rows[1]).toContain("4 / 6");
 });
