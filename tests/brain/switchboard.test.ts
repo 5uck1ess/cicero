@@ -1886,6 +1886,12 @@ test("transferTo caller cancellation cannot pin a lane after a late start", asyn
   releaseStart();
   await Bun.sleep(0);
   expect(sb.activeLane()).toBeNull();
+  // The revealing turn: checking only the instant after startup missed that a
+  // cancelled programmatic transfer could still be adopted by whatever the
+  // operator said next. transferTo's signal is documented to prevent a LATE
+  // pin, not merely to abandon its own turn.
+  expect(await sb.send("hello?")).toBe("front reply");
+  expect(sb.activeLane()).toBeNull();
   await sb.stop();
 });
 

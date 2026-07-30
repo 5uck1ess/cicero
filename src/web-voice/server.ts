@@ -97,8 +97,9 @@ export interface WebVoiceServerOptions {
    * ("PR #142 is up") instead of only answering. Optional.
    */
   /**
-   * This voice conversation is over — the socket closed, or the server is
-   * shutting down. The daemon uses it to tell the brain to drop work it was
+   * This voice conversation is over — the LAST voice socket closed, or the
+   * server is shutting down. Every browser shares one brain and active lane, so
+   * this fires once for the shared conversation, not once per socket. The daemon uses it to tell the brain to drop work it was
    * holding for the conversation, which the turn's abort reason cannot convey:
    * the page sends `abort` and then closes, and the first abort fixes the
    * reason, so the close is invisible to anything reading it. Fire-and-forget.
@@ -1565,7 +1566,14 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           if (ws.data.pendingClientSlot) pendingClients = Math.max(0, pendingClients - 1);
           clients.delete(ws);
           abortTurn(ws.data.current, "voice socket closed");
-          try { opts.onConversationEnded?.(); } catch { /* fire-and-forget */ }
+          // Every connected browser reaches the same brain, switchboard and
+          // active lane (docs/web-voice.md, "Deliberate multi-client
+          // boundary") — they are one conversation on several screens. It ends
+          // when the last of them leaves, so reporting it per socket would let
+          // one browser closing call off work another is still waiting on.
+          if (clients.size === 0) {
+            try { opts.onConversationEnded?.(); } catch { /* fire-and-forget */ }
+          }
           ws.data.pending = null;
           ws.data.latestProbeTurnId = null;
           const spec = ws.data.spec;

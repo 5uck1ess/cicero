@@ -2094,3 +2094,20 @@ test("a throwing conversation-ended hook does not break socket teardown", async 
   const res = await fetch(`${base}/api/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
   expect(res.status).toBeLessThan(500);
 });
+
+test("one browser leaving does not end a conversation another is still in", async () => {
+  // Every connected browser reaches the same brain, switchboard and active lane
+  // (docs/web-voice.md, "Deliberate multi-client boundary"): one conversation on
+  // several screens. Reporting its end per socket let one browser closing call
+  // off a cold transfer another was still waiting on.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; } });
+  const first = await connect(base);
+  const second = await connect(base);
+  first.close();
+  await Bun.sleep(50);
+  expect(ended).toBe(0);
+  second.close();
+  await Bun.sleep(50);
+  expect(ended).toBe(1);
+});

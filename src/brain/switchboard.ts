@@ -83,8 +83,20 @@ interface AcceptedTurn {
   detachCaller: () => void;
 }
 
+/**
+ * Who asked for the transfer, which decides what a cancellation means.
+ *
+ * A conversational ask survives cancellation: the operator is mid-conversation
+ * and the next thing they say should still reach the lane they asked for. A
+ * programmatic ask does not: `transferTo`'s signal is documented to cancel
+ * startup AND prevent a late pin, so its caller must be able to call the whole
+ * thing off, not merely abandon this turn.
+ */
+type TransferOrigin = "conversation" | "programmatic";
+
 interface PendingTransfer {
   readonly lane: string;
+  readonly origin: TransferOrigin;
   /** The accepted turn whose cancellation disposition controls this ask. */
   owner: AcceptedTurn;
   /** Retained only while waiting for the continuing conversation's next turn. */
@@ -437,7 +449,7 @@ export class SwitchboardBrain implements Brain {
         }
       }
 
-      await this.pinLane(lane, turn, context);
+      await this.pinLane(lane, turn, context, "programmatic");
       this.assertAcceptedTurn(turn);
       if (this.active !== lane) return null; // lane failed to start — pin never took
       return workingName(lane, this.lanes[lane]);
@@ -622,12 +634,17 @@ export class SwitchboardBrain implements Brain {
     pending.detachAbort();
     pending.owner = turn;
     pending.disposition = "owned";
-    // Any cancellation of the owning turn parks the transfer for the next turn
-    // to adopt. Whether the conversation is actually over is not knowable from
-    // the abort reason — see Brain.dropDeferredWork, which is how a transport
-    // says so.
+    // Cancelling the owning turn parks a conversational transfer for the next
+    // turn to adopt. Whether the conversation is actually over is not knowable
+    // from the abort reason — see Brain.dropDeferredWork, which is how a
+    // transport says so. A programmatic transfer is the opposite: its caller's
+    // signal is documented to prevent a late pin, so cancellation is final.
     const onAbort = (): void => {
       if (this.pendingTransfer !== pending || pending.owner !== turn) return;
+      if (pending.origin === "programmatic") {
+        this.clearPendingTransfer(pending);
+        return;
+      }
       pending.disposition = "awaiting-successor";
       pending.detachAbort();
     };
@@ -640,10 +657,11 @@ export class SwitchboardBrain implements Brain {
     if (turn.signal.aborted || turn.callerSignal?.aborted) onAbort();
   }
 
-  private setPendingTransfer(lane: string, turn: AcceptedTurn): void {
+  private setPendingTransfer(lane: string, turn: AcceptedTurn, origin: TransferOrigin): void {
     this.clearPendingTransfer();
     const pending: PendingTransfer = {
       lane,
+      origin,
       owner: turn,
       disposition: "owned",
       detachAbort: () => {},
@@ -992,6 +1010,7 @@ export class SwitchboardBrain implements Brain {
     lane: string,
     turn: AcceptedTurn,
     explicitContext: string | null = null,
+    origin: TransferOrigin = "conversation",
   ): Promise<string> {
     this.assertAcceptedTurn(turn);
     const def = this.lanes[lane];
@@ -1019,7 +1038,7 @@ export class SwitchboardBrain implements Brain {
         // seconds and the user, hearing silence, speaks again. Record the ask
         // BEFORE waiting so a barge-in that kills this turn cannot erase the
         // fact that a transfer was requested.
-        this.setPendingTransfer(lane, turn);
+        this.setPendingTransfer(lane, turn, origin);
         await raceWithSignal(this.startLane(lane), turn.signal);
         this.assertAcceptedTurn(turn);
       }
