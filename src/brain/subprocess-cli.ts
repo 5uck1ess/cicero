@@ -202,6 +202,33 @@ export class SubprocessCLIBrain implements Brain {
   /** Called after a turn's subprocess exits 0 — hook for session tracking. */
   protected onTurnComplete(): void {}
 
+  private terminateTurnProcess(proc: TurnProcess): Promise<void> {
+    return terminateTurn(proc);
+  }
+
+  private async awaitCancellation(
+    proc: TurnProcess,
+    cancellation: Promise<void>,
+    signal: AbortSignal | undefined,
+    reporting: { failureLogged: boolean },
+  ): Promise<void> {
+    try {
+      await cancellation;
+    } catch (error: unknown) {
+      if (!signal?.aborted) throw error;
+      // The caller's abort reason owns the rejection, but an unconfirmed release
+      // remains an operator-visible fail-closed condition.
+      if (!reporting.failureLogged) {
+        reporting.failureLogged = true;
+        log(
+          "error",
+          `Brain (${this.config.name}) abort cleanup failed for turn process ${proc.pid}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
   private resolvedBinary(env: Record<string, string | undefined>): string {
     return resolveCommandBinary(this.config.binary, env);
   }
@@ -251,8 +278,9 @@ export class SubprocessCLIBrain implements Brain {
       options.signal?.throwIfAborted();
       const proc = this.spawnProc(message, options);
       let cancellation: Promise<void> | null = null;
+      const cancellationReporting = { failureLogged: false };
       const cancel = () => {
-        cancellation ??= terminateTurn(proc);
+        cancellation ??= this.terminateTurnProcess(proc);
         void cancellation.catch(() => {});
       };
       options.signal?.addEventListener("abort", cancel, { once: true });
@@ -284,8 +312,16 @@ export class SubprocessCLIBrain implements Brain {
           readPipe(proc.stderr as ReadableStream<Uint8Array>),
           ownedExit,
         ]);
-        if (cancellation) await cancellation;
+        if (cancellation) await this.awaitCancellation(proc, cancellation, options.signal, cancellationReporting);
         if (pipeFailure && !options.signal?.aborted) throw pipeError;
+      } catch (error: unknown) {
+        if (options.signal?.aborted) {
+          if (cancellation) {
+            await this.awaitCancellation(proc, cancellation, options.signal, cancellationReporting);
+          }
+          options.signal.throwIfAborted();
+        }
+        throw error;
       } finally {
         options.signal?.removeEventListener("abort", cancel);
       }
@@ -312,8 +348,9 @@ export class SubprocessCLIBrain implements Brain {
     let completed = false;
     let streamError: unknown;
     let cancellation: Promise<void> | null = null;
+    const cancellationReporting = { failureLogged: false };
     const cancel = () => {
-      cancellation ??= terminateTurn(proc);
+      cancellation ??= this.terminateTurnProcess(proc);
       void cancellation.catch(() => {});
     };
     const stderrPromise = new Response(proc.stderr).text();
@@ -336,8 +373,20 @@ export class SubprocessCLIBrain implements Brain {
     } finally {
       if (!completed || options.signal?.aborted) cancel();
       try {
-        if (cancellation) await cancellation;
-        [exitCode, stderr] = await Promise.all([ownedExit, stderrPromise]);
+        try {
+          if (cancellation) {
+            await this.awaitCancellation(proc, cancellation, options.signal, cancellationReporting);
+          }
+          [exitCode, stderr] = await Promise.all([ownedExit, stderrPromise]);
+        } catch (error: unknown) {
+          if (options.signal?.aborted) {
+            if (cancellation) {
+              await this.awaitCancellation(proc, cancellation, options.signal, cancellationReporting);
+            }
+            options.signal.throwIfAborted();
+          }
+          throw error;
+        }
       } finally {
         options.signal?.removeEventListener("abort", cancel);
       }

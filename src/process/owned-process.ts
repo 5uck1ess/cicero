@@ -224,14 +224,16 @@ async function terminateWindowsTree(
 ): Promise<void> {
   // Enumerate the tree before killing the root. Once the root disappears,
   // Windows cannot rediscover arbitrary descendants without a Job Object.
-  const gracefulTreeTargeted = graceMs > 0 && await runWindowsTaskkill(proc.pid, false);
-  if (gracefulTreeTargeted) {
+  const graceful = graceMs > 0
+    ? await runWindowsTaskkill(proc.pid, false)
+    : { outcome: "failed" as const, code: null };
+  if (graceful.outcome === "targeted") {
     const gracefulExit = await processExitWithin(proc.exited, graceMs);
     if (gracefulExit.kind === "exited") return;
   }
 
-  const forcedTreeTargeted = await runWindowsTaskkill(proc.pid, true);
-  if (!forcedTreeTargeted) {
+  const forced = await runWindowsTaskkill(proc.pid, true);
+  if (windowsForcedKillNeeded(forced.outcome)) {
     try { proc.kill("SIGKILL"); } catch { /* already exited */ }
   }
   const finalExit = await processExitWithin(proc.exited, reapTimeoutMs);
@@ -245,9 +247,54 @@ async function terminateWindowsTree(
   if (finalExit.kind === "timeout") {
     throw new OwnedProcessReapError(proc.pid, "leader did not reap after forced tree termination");
   }
-  if (!forcedTreeTargeted) {
-    throw new OwnedProcessReapError(proc.pid, "Windows tree targeting failed; only the leader was reaped");
+  if (!windowsTreeAccountedFor(graceful.outcome, forced.outcome)) {
+    // Report what taskkill actually said. "Targeting failed" alone gives an
+    // operator holding a possibly-leaked child nothing to act on, and nothing to
+    // tell apart a missing PID from a refused kill.
+    throw new OwnedProcessReapError(
+      proc.pid,
+      "Windows tree targeting failed; only the leader was reaped "
+      + `(graceful taskkill ${describeTaskkill(graceful)}, forced ${describeTaskkill(forced)})`,
+    );
   }
+}
+
+/**
+ * Whether the leader still needs a direct SIGKILL after the forced taskkill pass.
+ *
+ * Anything but a pass that reached the tree does, which is what main has always
+ * done — it tested `taskkill`'s exit code for zero, so both a missing PID and a
+ * refused kill fell through to this. Narrowing it to only a refused kill skipped
+ * the call for exit 128, and `proc.kill()` is also what reaps Bun's own child
+ * handle: without it `proc.exited` can stay pending, the bounded observation below
+ * times out, and a caller still reading inherited pipes can be left waiting.
+ *
+ * The accounting verdict is a separate question with a different answer, so it is
+ * a separate function; conflating the two is how the divergence happened.
+ */
+export function windowsForcedKillNeeded(forced: WindowsTaskkillOutcome): boolean {
+  return forced !== "targeted";
+}
+
+/**
+ * Whether the tree is accounted for, given how each taskkill pass ended and a
+ * leader already confirmed exited.
+ *
+ * Split out as a pure decision because the surrounding function only runs on
+ * win32 — the platform check is inline — so this is the only part of the Windows
+ * reaper a test on another OS can reach. Real taskkill behavior is covered by
+ * the Windows CI job.
+ */
+export function windowsTreeAccountedFor(
+  graceful: WindowsTaskkillOutcome,
+  forced: WindowsTaskkillOutcome,
+): boolean {
+  if (forced === "targeted") return true;
+  // A forced pass that found no PID after a graceful pass that DID reach the
+  // tree: that pass signalled every process then in it, so nothing was left
+  // unsignalled, and the leader exited between the grace timeout and this call —
+  // which happens often enough to matter.
+  return forced === "absent" && graceful === "targeted";
 }
 
 function signalPosixTree(proc: OwnedProcess, signal: "SIGTERM" | "SIGKILL"): void {
@@ -274,7 +321,32 @@ async function waitForPosixGroupExit(pid: number, timeoutMs: number): Promise<bo
   return true;
 }
 
-async function runWindowsTaskkill(pid: number, force: boolean): Promise<boolean> {
+/**
+ * Whether `taskkill` reached the tree.
+ *
+ * `absent` is deliberately not `failed`: taskkill exits non-zero both when it
+ * could not reach the process and when no leader carries that PID any more.
+ * Keeping them distinct preserves the exit-code diagnostic and lets a prior
+ * targeted pass account for the tree; absence alone proves nothing about
+ * descendants.
+ */
+export type WindowsTaskkillOutcome = "targeted" | "absent" | "failed";
+
+/** taskkill's exit code when no process carries the requested PID. */
+const WINDOWS_TASKKILL_NOT_FOUND = 128;
+
+/** The outcome plus the exit code it was derived from, for diagnostics. */
+export interface WindowsTaskkillResult {
+  outcome: WindowsTaskkillOutcome;
+  /** taskkill's exit code, or null when it could not be run at all. */
+  code: number | null;
+}
+
+function describeTaskkill(result: WindowsTaskkillResult): string {
+  return result.code === null ? `${result.outcome} (not run)` : `${result.outcome} (exit ${result.code})`;
+}
+
+async function runWindowsTaskkill(pid: number, force: boolean): Promise<WindowsTaskkillResult> {
   const args = ["taskkill", "/PID", String(pid), "/T", ...(force ? ["/F"] : [])];
   try {
     const helper = Bun.spawn(args, {
@@ -285,9 +357,14 @@ async function runWindowsTaskkill(pid: number, force: boolean): Promise<boolean>
       killSignal: "SIGKILL",
       windowsHide: true,
     });
-    return await helper.exited === 0;
+    const code = await helper.exited;
+    if (code === 0) return { outcome: "targeted", code };
+    // Matched on the exit code rather than the message: taskkill's "not found"
+    // text is localized, so parsing stderr would silently stop recognizing it
+    // on a non-English Windows.
+    return { outcome: code === WINDOWS_TASKKILL_NOT_FOUND ? "absent" : "failed", code };
   } catch {
-    return false;
+    return { outcome: "failed", code: null };
   }
 }
 
