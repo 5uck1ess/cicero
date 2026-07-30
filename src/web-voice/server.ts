@@ -61,6 +61,8 @@ interface WsData {
   pendingClientSlot: boolean;
   sessionId: string;
   protocol: 1 | 2;
+  /** The page says this connection continues a conversation rather than starting one. */
+  resume: boolean;
   busy: boolean;               // a turn is being processed right now
   // Latest input waiting to be processed (barge-in wins): a captured
   // utterance WAV, or a typed message ({type:"text"} control frame).
@@ -1043,6 +1045,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // pipeline but stay out of the persisted chat history.
           const record = url.searchParams.get("record") !== "0";
           const protocol = url.searchParams.get("protocol") === "2" ? 2 : 1;
+          // Set by the page's automatic reconnect paths only; see the `open`
+          // handler for what the difference decides.
+          const resume = url.searchParams.get("resume") === "1";
           pendingClients += 1;
           let upgraded = false;
           try {
@@ -1051,6 +1056,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 pendingClientSlot: true,
                 sessionId: crypto.randomUUID(),
                 protocol,
+                resume,
                 busy: false,
                 pending: null,
                 current: null,
@@ -1399,6 +1405,20 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           if (!accepting) {
             ws.close(1012, "Server shutting down");
             return;
+          }
+          // A closed socket cannot say why it closed, and the page cannot tell
+          // us either while it is between reconnect attempts: pressing Stop
+          // during the backoff has no open socket to send the goodbye on. So the
+          // page states which kind of connection this is instead. An operator
+          // pressing Start is a new conversation, and any conversation still
+          // sitting out its grace is over — otherwise its deferred cold transfer
+          // survived the Stop and steered the conversation that replaced it.
+          // Only when nobody else is attached: the timer is deliberately left
+          // armed while clients are connected (it re-checks on fire), so without
+          // that condition a second device pressing Start would end a
+          // conversation the first one is still in.
+          if (!ws.data.resume && clients.size === 0 && conversationEndTimer !== null) {
+            endConversationNow();
           }
           clients.add(ws);
           if (ws.data.protocol === 2) {

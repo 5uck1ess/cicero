@@ -12,6 +12,20 @@ test("web-voice page script parses and opts into the identity-safe protocol", ()
   expect(script).toContain('history.replaceState(null, ""');
 });
 
+test("automatic reconnects identify resumes while Start opens a new conversation", () => {
+  const script = PAGE.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "";
+  // These are source-level guards because this test cannot execute the page.
+  // Automatic recovery must preserve the waiting conversation, while an
+  // operator pressing Start must end any old conversation still in its grace.
+  const schedule = script.slice(script.indexOf("function scheduleReconnect"), script.indexOf("function retryNow"));
+  const retry = script.slice(script.indexOf("function retryNow"), script.indexOf('window.addEventListener("online"'));
+  const start = script.slice(script.indexOf("async function startConversation"), script.indexOf("function stopConversation"));
+  expect(schedule).toContain("connectWs(true)");
+  expect(retry).toContain("connectWs(true)");
+  expect(start).toContain("connectWs();");
+  expect(start).not.toContain("connectWs(true)");
+});
+
 test("orb scales with the viewport instead of a fixed pixel size", () => {
   expect(PAGE).toContain("#orb { width:clamp(230px, 80vmin, calc(100dvh - 260px)); aspect-ratio:1/1;");
   expect(PAGE).not.toContain("width:230px; height:230px");

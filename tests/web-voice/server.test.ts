@@ -139,9 +139,9 @@ function connectV2(base: string): Promise<{ ws: WebSocket; sessionId: string }> 
   });
 }
 
-function connect(base: string): Promise<WebSocket> {
+function connect(base: string, resume = false): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN);
+    const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN + (resume ? "&resume=1" : ""));
     const timer = setTimeout(() => reject(new Error("socket open timeout")), 3_000);
     ws.onopen = () => { clearTimeout(timer); resolve(ws); };
     ws.onerror = () => { clearTimeout(timer); reject(new Error("socket open failed")); };
@@ -2124,12 +2124,65 @@ test("a dropped socket does not end the conversation while the page reconnects",
   first.close();
   await Bun.sleep(60);
   expect(ended).toBe(0);          // still within the grace
-  const second = await connect(base); // ...and the page comes back
+  const second = await connect(base, true); // ...and the page comes back
   await Bun.sleep(400);
   expect(ended).toBe(0);          // the reconnect cancelled the ending outright
   second.close();
   await Bun.sleep(400);
   expect(ended).toBe(1);          // nobody came back this time
+});
+
+test("a fresh connection during the grace ends the conversation that was waiting", async () => {
+  // Pressing Start after an explicit Stop attempted during reconnect backoff is
+  // a new conversation. The old grace must end promptly or its deferred cold
+  // transfer survives into the new conversation and can pin the shared lane.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const first = await connect(base);
+  first.close();
+  await Bun.sleep(30);
+  expect(ended).toBe(0);
+  const fresh = await connect(base);
+  await Bun.sleep(30);
+  expect(ended).toBe(1);
+  fresh.close();
+});
+
+test("a resume connection during the grace does not end the conversation", async () => {
+  // An automatic reconnect continues the same conversation after an ordinary
+  // network drop. Ending it on arrival would discard deferred work the operator
+  // is still waiting for even though the page never stopped.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const first = await connect(base);
+  first.close();
+  await Bun.sleep(30);
+  expect(ended).toBe(0);
+  const resumed = await connect(base, true);
+  await Bun.sleep(30);
+  expect(ended).toBe(0);
+  resumed.close();
+});
+
+test("a second device starting does not end the conversation another is still in", async () => {
+  // A resume deliberately leaves the grace timer armed — it re-checks the room
+  // when it fires — so a client can be attached with a timer still pending. A
+  // fresh connection arriving in that state is a second screen joining, not a
+  // restart of an abandoned conversation, and ending the conversation there
+  // would call off a cold transfer the reconnected page is still waiting on.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const first = await connect(base);
+  first.close();
+  await Bun.sleep(30);
+  const resumed = await connect(base, true);   // the page comes back; timer still armed
+  await Bun.sleep(30);
+  expect(ended).toBe(0);
+  const second = await connect(base);          // another device presses Start
+  await Bun.sleep(30);
+  expect(ended).toBe(0);
+  resumed.close();
+  second.close();
 });
 
 test("saying goodbye ends the conversation without waiting out the grace", async () => {

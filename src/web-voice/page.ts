@@ -736,21 +736,25 @@ function scheduleReconnect() {
   const delay = [1000, 2000, 5000][Math.min(reconnectAttempt, 2)];
   reconnectAttempt++;
   setStatus("reconnecting… (attempt " + reconnectAttempt + ")");
-  reconnectTimer = setTimeout(() => { reconnectTimer = null; if (convOn) connectWs(); }, delay);
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; if (convOn) connectWs(true); }, delay);
 }
 // Coming back online / to the foreground: retry immediately, not on the timer.
 function retryNow() {
   if (!convOn || (ws && ws.readyState <= 1)) return;
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  connectWs();
+  connectWs(true);
 }
 window.addEventListener("online", retryNow);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { retryNow(); requestWakeLock(); } });
 
-function connectWs() {
+// The resume flag separates an automatic reconnect from the operator pressing Start.
+// The server cannot tell them apart from the socket alone, and Stop pressed
+// during the backoff has no open socket to send its goodbye on — so a restart
+// would otherwise inherit the stopped conversation's deferred work.
+function connectWs(resume = false) {
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   wsSessionId = "";
-  const sock = new WebSocket(scheme + "//" + location.host + "/ws?protocol=2&token=" + encodeURIComponent(TOKEN));
+  const sock = new WebSocket(scheme + "//" + location.host + "/ws?protocol=2&token=" + encodeURIComponent(TOKEN) + (resume ? "&resume=1" : ""));
   ws = sock;
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { setDot(true); setStatus("connected — securing session…"); };
