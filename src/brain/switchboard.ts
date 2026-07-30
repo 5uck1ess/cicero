@@ -344,6 +344,12 @@ function normalizeRef(raw: string): string {
 export class SwitchboardBrain implements Brain {
   /** Pinned lane name, or null = the front desk (primary). */
   private active: string | null = null;
+  /**
+   * A cold transfer can pin after its microphone has gone inactive but before
+   * the last live turn settles. The later conversation-end drop must release
+   * that pin without changing the persistence of an ordinary warm transfer.
+   */
+  private activeFromDeferredTransfer = false;
   private started = new Set<string>();
   /**
    * A transfer whose lane was still cold when its turn ended. The request is
@@ -632,7 +638,11 @@ export class SwitchboardBrain implements Brain {
     // alone would still let it pin the lane seconds later — steering a
     // conversation that had already ended. See pinLane.
     this.deferredGeneration++;
-    this.clearPendingTransfer();
+    if (this.activeFromDeferredTransfer) {
+      this.releaseActiveLane(false);
+    } else {
+      this.clearPendingTransfer();
+    }
   }
 
   /**
@@ -916,7 +926,23 @@ export class SwitchboardBrain implements Brain {
       }
       return null; // "that's all" mid-chat with Cicero is just a turn
     }
+    const dropped = this.pendingTransfer?.lane ?? null;
+    this.releaseActiveLane(true);
+    return dropped === null
+      ? "Back with you."
+      : `Back with you — and I'll leave ${workingName(dropped, this.lanes[dropped])} out of it.`;
+  }
+
+  /**
+   * `memo` is false when the conversation itself ended rather than returning to
+   * the front desk. The note below says the user came back to the main line,
+   * which did not happen, and it would carry the finished conversation's tail
+   * into whichever unrelated conversation answered next — the same leak across
+   * a conversation boundary that dropping the transfer exists to prevent.
+   */
+  private releaseActiveLane(memo: boolean): void {
     const released = this.active;
+    if (released === null) return;
     const dropped = this.pendingTransfer?.lane ?? null;
     this.clearPendingTransfer();
     log("info", `switchboard: released ${released} — back to the front desk`);
@@ -924,6 +950,7 @@ export class SwitchboardBrain implements Brain {
       log("info", `switchboard: dropped the pending transfer to ${dropped}`);
     }
     this.active = null;
+    this.activeFromDeferredTransfer = false;
     // The front desk never heard the lane conversation, so the memo carries
     // the tail of what it missed (the mirror of the handoff briefing a lane
     // gets on transfer). Recipient-neutral facts only: the one-shot channel
@@ -936,10 +963,9 @@ export class SwitchboardBrain implements Brain {
           .join("\n")}`
       : "";
     this.laneLog = [];
-    this.leaveMemo(`System note: the user just ended a side conversation with ${name} and returned to the main line.${recap}`);
-    return dropped === null
-      ? "Back with you."
-      : `Back with you — and I'll leave ${workingName(dropped, this.lanes[dropped])} out of it.`;
+    if (memo) {
+      this.leaveMemo(`System note: the user just ended a side conversation with ${name} and returned to the main line.${recap}`);
+    }
   }
 
   /**
@@ -1085,6 +1111,7 @@ export class SwitchboardBrain implements Brain {
     // pin of some other lane, which is the user changing their mind ("get the
     // worker… no, the coder"). Only supersession leaves it standing, and that
     // path rethrows above without reaching here.
+    const deferred = this.pendingTransfer?.lane === lane;
     this.clearPendingTransfer();
     this.assertAcceptedTurn(turn);
     if (!this.started.has(lane)) return `I couldn't reach ${lane} right now.`;
@@ -1104,6 +1131,7 @@ export class SwitchboardBrain implements Brain {
     // only an actual change of counterpart starts a fresh recap tail.
     if (this.active !== lane) this.laneLog = [];
     this.active = lane;
+    this.activeFromDeferredTransfer = deferred;
     log("info", `switchboard: pinned to ${lane}`);
     return def.greeting ?? `${lane[0].toUpperCase()}${lane.slice(1)} here.`;
   }
@@ -1816,6 +1844,7 @@ export class SwitchboardBrain implements Brain {
     // Reset routing before awaiting cleanup so no caller can observe or reuse a
     // stopped lane if start() is called again on this Switchboard instance.
     this.active = null;
+    this.activeFromDeferredTransfer = false;
     this.started.clear();
     this.personaInstalled.clear();
     // A transfer asked for before this boundary is void: the lane it named no
@@ -1896,7 +1925,10 @@ export class SwitchboardBrain implements Brain {
           } catch (err: unknown) {
             this.started.delete(name);
             this.personaInstalled.delete(name);
-            if (this.active === name) this.active = null;
+            if (this.active === name) {
+              this.active = null;
+              this.activeFromDeferredTransfer = false;
+            }
             await this.stopLane(name).catch((error: unknown) => {
               this.logLaneCleanupFailure(name, error);
             });

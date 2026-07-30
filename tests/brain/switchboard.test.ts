@@ -408,6 +408,85 @@ test("a cold transfer called off mid-start does not pin the lane it was starting
   }
 });
 
+test("ending a conversation releases a deferred transfer that already pinned", async () => {
+  // The microphone can go inactive while its last local turn still keeps the
+  // conversation live. If the cold start pins during that turn, the eventual
+  // conversation-end drop must release the pin too or the next conversation
+  // bypasses the front desk and reaches the old worker.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    cold.release();
+    expect(await transfer).toBe("Worker here.");
+    expect(sb.activeLane()).toBe("worker");
+
+    sb.dropDeferredWork();
+
+    expect(sb.activeLane()).toBeNull();
+    expect(await sb.send("new conversation")).toBe("front reply");
+    expect(calls).not.toContain("worker:send:new conversation");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("ending a conversation leaves the front desk no memo about it", async () => {
+  // Releasing a lane normally tells whoever answers next that the user came
+  // back from a side conversation, and carries its last exchanges along. After
+  // a conversation ends nobody came back, and that recap would be the finished
+  // conversation's tail arriving inside an unrelated later one.
+  const calls: string[] = [];
+  const injected: string[] = [];
+  const front = { ...fakeBrain("front", calls), injectContext: (context: string) => injected.push(context) };
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(front, { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    cold.release();
+    expect(await transfer).toBe("Worker here.");
+
+    sb.dropDeferredWork();
+    expect(await sb.send("new conversation")).toBe("front reply");
+    expect(injected.join("\n")).not.toContain("returned to the main line");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("ending a conversation does not release an ordinary explicit transfer", async () => {
+  // A deliberate transfer to an already-started lane is the existing sticky
+  // product behavior. Conversation cleanup must not mistake that live pin for
+  // deferred work merely because both routes select the same employee.
+  const calls: string[] = [];
+  const sb = board(calls);
+  try {
+    await sb.start();
+    await sb.send("talk to the coder");
+    await sb.send("back to cicero");
+
+    expect(await sb.send("talk to the coder")).toBe("Coder here.");
+    expect(sb.activeLane()).toBe("coder");
+
+    sb.dropDeferredWork();
+
+    expect(sb.activeLane()).toBe("coder");
+    expect(await sb.send("new conversation")).toBe("coder reply");
+    expect(calls).toContain("coder:send:new conversation");
+  } finally {
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
 test("a cold transfer nobody called off still pins the lane", async () => {
   // The other direction: refusing a late pin must be tied to the drop, not
   // applied to every start that takes a while.
