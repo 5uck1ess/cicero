@@ -328,6 +328,9 @@ export class SwitchboardBrain implements Brain {
   private rollcall: RollcallVoiceQueue | null = null;
   /** True when the last turn was answered lexically (ack/roll call/standup). */
   private control = false;
+  /** A rejected classifier label must not return through a front-desk reply
+   * that parrots the same group-action trigger later in the turn. */
+  private refusedGroupAction = false;
   /** The group action "again" repeats; cleared when a normal brain turn intervenes. */
   private lastGroupAction: "rollcall" | "standup" | null = null;
   /** The most recent real exchange, for handoff briefings on transfer. */
@@ -1116,15 +1119,32 @@ export class SwitchboardBrain implements Brain {
     if (!label) return null;
     // The classifier sometimes labels a bare "what's the status?" as a team
     // standup (seen live 2026-07-11 — the front desk hijacked a question meant
-    // for the pinned lane). Group actions demand a group word — or the action's
-    // own name — in the actual utterance; a caller who literally said "roll
-    // call" cannot be a hallucinated label (live miss 2026-07-12: "yes, initiate
-    // roll call" was discarded here and the persona apologized instead).
-    const group = /\b(?:every(?:one|body)|team|office|all|each|agents?|staff|group|hands)\b/i;
+    // for the pinned lane). Group actions demand a group word, a request frame
+    // bound to the action name, or confirmation that repeats the name. Ambiguous
+    // verbs need an article because "have roll call me back" was an STT rendering
+    // of a named dial-back, and any utterance the dial-back matcher recognizes
+    // must win even when it also contains group evidence.
+    // "hands" only counts as a group in "hands on deck". Bare, it admitted any
+    // sentence the word wandered into — "take roll call off my hands" named no
+    // group at all and still fanned out to every lane. "all hands" keeps
+    // working through the "all" branch.
+    const group = /\b(?:every(?:one|body)|team|office|all|each|agents?|staff|group|hands\s+on\s+deck)\b/i;
     const literal = label === "rollcall" ? /\broll\s?-?calls?\b/i : /\bstand\s?-?ups?\b/i;
-    if ((label === "standup" || label === "rollcall") && !group.test(utterance) && !literal.test(utterance)) {
-      log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" names no group — ignoring`);
-      return null;
+    const request = new RegExp(String.raw`\b(?:(?:run|do|start|begin|initiate|hold)(?:\s+(?:a|an|the|another))?|(?:have|take|get)\s+(?:a|an|the|another)|(?:i\s+want|i(?:['’]d|\s+would)\s+like|i\s+need|can\s+you|could\s+you|would\s+you)(?:\s+(?:a|an|the|another))?|give\s+me(?:\s+(?:a|an|the|another))?|let['’]s\s+(?:do|have)(?:\s+(?:a|an|the|another))?)\s+${literal.source}`, "i");
+    const confirmation = /^\s*(?:yes|yeah|yep|correct|right)\b|\bthat['’]s\s+what\s+i\s+(?:just\s+)?said\b/i;
+    if (label === "standup" || label === "rollcall") {
+      if (matchCallMe(utterance)) {
+        this.refusedGroupAction = true;
+        log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" is a dial-back request — ignoring`);
+        return null;
+      }
+      if (!group.test(utterance) && !request.test(utterance)
+        && !(confirmation.test(utterance) && literal.test(utterance))
+      ) {
+        this.refusedGroupAction = true;
+        log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" has no group request or confirmation — ignoring`);
+        return null;
+      }
     }
     if (label === "standup") return "standup";
     if (label === "rollcall") return this.doRollcall(turn);
@@ -1506,14 +1526,20 @@ export class SwitchboardBrain implements Brain {
   private replyTrigger(reply: string): "standup" | "rollcall" | null {
     if (this.active !== null) return null; // only the front desk drives the board
     const r = normalizeUtterance(reply);
-    if (/^(?:status from every(?:one|body)|standup)$/.test(r)) return "standup";
-    if (/^roll\s?-?call$/.test(r)) return "rollcall";
-    return null;
+    const trigger = /^(?:status from every(?:one|body)|standup)$/.test(r)
+      ? "standup"
+      : /^roll\s?-?call$/.test(r) ? "rollcall" : null;
+    if (trigger !== null && this.refusedGroupAction) {
+      log("info", `switchboard: front desk replied ${trigger} after the classifier label was refused — ignoring`);
+      return null;
+    }
+    return trigger;
   }
 
   send(message: string, options?: BrainTurnOptions): Promise<string> {
     return this.runAcceptedTurn(options, async (turn, turnOptions) => {
       this.control = false;
+      this.refusedGroupAction = false;
       const routed = await this.controlPlane(message, turn, turnOptions);
       this.assertAcceptedTurn(turn);
       if (routed === "standup") {
@@ -1564,6 +1590,7 @@ export class SwitchboardBrain implements Brain {
     turn: AcceptedTurn,
   ): AsyncIterable<string> {
     this.control = false;
+    this.refusedGroupAction = false;
     const routed = await this.controlPlane(message, turn, turnOptions);
     this.assertAcceptedTurn(turn);
     if (routed === "standup") {

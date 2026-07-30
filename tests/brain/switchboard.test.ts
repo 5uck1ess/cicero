@@ -1352,6 +1352,20 @@ function classifierBoard(calls: string[], label: string | (() => Promise<string>
   return { sb: new SwitchboardBrain(fakeBrain("front", calls), lanes, wrapped), prompts };
 }
 
+function magicRollcallFront(calls: string[], streaming = false): Brain {
+  return {
+    ...fakeBrain("front", calls),
+    send: async (m: string) => { calls.push(`front:send:${m}`); return "roll call"; },
+    ...(streaming ? {
+      sendStream: async function* (m: string) {
+        calls.push(`front:stream:${m}`);
+        yield "roll ";
+        yield "call";
+      },
+    } : {}),
+  };
+}
+
 test("classifier routes phrasings the patterns miss", async () => {
   const calls: string[] = [];
   const { sb, prompts } = classifierBoard(calls, "transfer:coder");
@@ -1621,6 +1635,172 @@ test("classifier rollcall with the literal phrase but no group word is honored (
     expect(await sb.send(c)).toContain("checking in.");
     expect(sb.wasControlTurn()).toBe(true);
   }
+});
+
+test("classifier-labeled bare group-action names are ignored (2026-07-30 live regression)", async () => {
+  for (const [utterance, label] of [
+    ["The roll call.", "rollcall"],
+    ["the standup.", "standup"],
+  ] as const) {
+    const calls: string[] = [];
+    const { sb } = classifierBoard(calls, label);
+    await sb.start();
+    expect(await sb.send(utterance)).toBe("front reply");
+    expect(sb.wasControlTurn()).toBe(false);
+  }
+});
+
+test("a refused classifier rollcall cannot return through the front-desk reply", async () => {
+  const calls: string[] = [];
+  const lanes: Record<string, LaneDef> = {
+    coder: { brain: fakeBrain("coder", calls) },
+    think: { brain: fakeBrain("think", calls) },
+  };
+  const sb = new SwitchboardBrain(magicRollcallFront(calls), lanes, async () => "rollcall");
+  await sb.start();
+
+  expect(await sb.send("The roll call.")).toBe("roll call");
+  expect(sb.wasControlTurn()).toBe(false);
+  expect(calls.some((call) => call.startsWith("coder:send:") || call.startsWith("think:send:"))).toBe(false);
+});
+
+test("a refused classifier rollcall cannot return through a streamed front-desk reply", async () => {
+  const calls: string[] = [];
+  const lanes: Record<string, LaneDef> = {
+    coder: { brain: fakeBrain("coder", calls) },
+    think: { brain: fakeBrain("think", calls) },
+  };
+  const sb = new SwitchboardBrain(magicRollcallFront(calls, true), lanes, async () => "rollcall");
+  await sb.start();
+  let out = "";
+  for await (const chunk of sb.sendStream("The roll call.")) out += chunk;
+
+  expect(out).toBe("roll call");
+  expect(sb.wasControlTurn()).toBe(false);
+  expect(calls.some((call) => call.startsWith("coder:send:") || call.startsWith("think:send:"))).toBe(false);
+});
+
+test("a streamed front-desk rollcall reply still promotes when nothing was refused", async () => {
+  // The positive twin of the streaming refusal above, and it earns its place:
+  // wedging the streaming path into a permanently-refused state broke no test
+  // without it, so the promotion that path is supposed to perform had no cover
+  // at all.
+  const calls: string[] = [];
+  const lanes: Record<string, LaneDef> = {
+    coder: { brain: fakeBrain("coder", calls) },
+    think: { brain: fakeBrain("think", calls) },
+  };
+  const sb = new SwitchboardBrain(magicRollcallFront(calls, true), lanes, async () => "none");
+  await sb.start();
+  let out = "";
+  for await (const chunk of sb.sendStream("Check whether they should respond.")) out += chunk;
+
+  expect(out).toBe("Coder checking in. Think checking in.");
+  expect(sb.wasControlTurn()).toBe(true);
+});
+
+test("a front-desk rollcall reply still promotes when no classifier label was refused", async () => {
+  const calls: string[] = [];
+  const lanes: Record<string, LaneDef> = {
+    coder: { brain: fakeBrain("coder", calls) },
+    think: { brain: fakeBrain("think", calls) },
+  };
+  let classifications = 0;
+  const sb = new SwitchboardBrain(
+    magicRollcallFront(calls),
+    lanes,
+    async () => classifications++ === 0 ? "none" : "rollcall",
+  );
+  await sb.start();
+
+  expect(await sb.send("Check whether they should respond.")).toBe("Coder checking in. Think checking in.");
+  expect(sb.wasControlTurn()).toBe(true);
+  expect(await sb.send("The roll call.")).toBe("roll call");
+  expect(sb.wasControlTurn()).toBe(false);
+});
+
+test("a dial-back veto also blocks a front-desk group-action reply", async () => {
+  const calls: string[] = [];
+  const lanes: Record<string, LaneDef> = {
+    coder: { brain: fakeBrain("coder", calls) },
+    think: { brain: fakeBrain("think", calls) },
+  };
+  const sb = new SwitchboardBrain(magicRollcallFront(calls), lanes, async () => "rollcall");
+  await sb.start();
+
+  expect(await sb.send("Have everyone call me back.")).toBe("roll call");
+  expect(sb.wasControlTurn()).toBe(false);
+});
+
+test("a refused group action does not suppress a front-desk trigger on a later turn", async () => {
+  const calls: string[] = [];
+  const lanes: Record<string, LaneDef> = {
+    coder: { brain: fakeBrain("coder", calls) },
+    think: { brain: fakeBrain("think", calls) },
+  };
+  const sb = new SwitchboardBrain(magicRollcallFront(calls), lanes, async () => "rollcall");
+  await sb.start();
+
+  expect(await sb.send("The roll call.")).toBe("roll call");
+  expect(await sb.send("Hello.")).toBe("Coder checking in. Think checking in.");
+  expect(sb.wasControlTurn()).toBe(true);
+});
+
+test("classifier group-action request framing distinguishes commands from ambiguous bare verbs", async () => {
+  const requests = [
+    ["run the roll call", "rollcall"],
+    ["do the roll call", "rollcall"],
+    ["start a roll call", "rollcall"],
+    ["begin roll call", "rollcall"],
+    ["initiate the roll call", "rollcall"],
+    ["hold a roll call", "rollcall"],
+    ["have the roll call", "rollcall"],
+    ["have a roll call", "rollcall"],
+    ["take a roll call", "rollcall"],
+    ["I'd like a roll call", "rollcall"],
+    ["I need a roll call", "rollcall"],
+    ["give me a roll call", "rollcall"],
+    ["let's have the standup", "standup"],
+    ["Right, standup", "standup"],
+    ["That's what I said: standup", "standup"],
+  ] as const;
+  for (const [utterance, label] of requests) {
+    const calls: string[] = [];
+    const { sb } = classifierBoard(calls, label);
+    await sb.start();
+    const reply = await sb.send(utterance);
+    expect(label === "rollcall" ? reply.includes("checking in.") : reply.startsWith("Getting status from the team.")).toBe(true);
+    expect(sb.wasControlTurn()).toBe(true);
+  }
+  for (const utterance of [
+    "have roll call me back",
+    "take roll call off my hands",
+  ]) {
+    const calls: string[] = [];
+    const { sb } = classifierBoard(calls, "rollcall");
+    await sb.start();
+    expect(await sb.send(utterance)).toBe("front reply");
+    expect(sb.wasControlTurn()).toBe(false);
+  }
+});
+
+test("classifier group-action evidence yields to dial-back readings and requires a named confirmation", async () => {
+  for (const utterance of [
+    "yes, check on that",
+    "right, transfer the status",
+    "yeah, check the build",
+  ]) {
+    const calls: string[] = [];
+    const { sb } = classifierBoard(calls, "rollcall");
+    await sb.start();
+    expect(await sb.send(utterance)).toBe("front reply");
+    expect(sb.wasControlTurn()).toBe(false);
+  }
+  const calls: string[] = [];
+  const { sb } = classifierBoard(calls, "rollcall");
+  await sb.start();
+  expect(await sb.send("have everyone call me back")).toBe("front reply");
+  expect(sb.wasControlTurn()).toBe(false);
 });
 
 test("'do another roll call' matches lexically — no classifier round-trip", async () => {
