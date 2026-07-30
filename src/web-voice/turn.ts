@@ -216,15 +216,20 @@ export interface WebStreamDeps {
   /** Optional per-daemon-session voice controls for instant spoken commands. */
   voice?: VoiceControlOptions;
   /**
-   * Optional instant filler to cover the brain's time-to-first-token. Called
-   * once per turn (after the transcript, before the brain) and, if it returns a
-   * pre-rendered clip, played ONLY when the brain's first sentence hasn't
-   * arrived within {@link WebStreamDeps.fillerDelayMs} — a fast reply gets
-   * natural silence, not a verbal tic. Omit it (the default) for no filler.
+   * Optional cached filler picker to cover the brain's time-to-first-sentence.
+   * Called before the brain and again only when a slow turn needs another
+   * reassurance. Every returned clip MUST already be rendered; this path never
+   * synthesizes filler audio. The first clip plays only after
+   * {@link WebStreamDeps.fillerDelayMs}, so a fast reply gets natural silence.
+   * Omit it (the default) for no filler or reassurance.
    */
   filler?: (transcript?: string) => PreparedFiller | undefined;
   /** How long the reply may take before the filler speaks (default 1200ms; 0 = immediately). */
   fillerDelayMs?: number;
+  /** Delay between cached reassurances after the first filler (default 4000ms). */
+  fillerReassuranceIntervalMs?: number;
+  /** Maximum further reassurances after the first filler (default 3; 0 disables repeats). */
+  fillerMaxReassurances?: number;
   /** Optional TLDR gate — see {@link TldrOptions}. Omit to speak every sentence. */
   tldr?: TldrOptions;
   /**
@@ -266,6 +271,12 @@ export interface WebStreamDeps {
   /** Per-invocation daemon snapshot. Captured only when this path starts the brain. */
   operationalContext?: (signal?: AbortSignal) => Promise<string | null>;
 }
+
+export const DEFAULT_FILLER_DELAY_MS = 1_200;
+export const DEFAULT_FILLER_REASSURANCE_INTERVAL_MS = 4_000;
+export const DEFAULT_FILLER_MAX_REASSURANCES = 3;
+export const MAX_FILLER_REASSURANCES_PER_TURN = 10;
+const DISTINCT_FILLER_PICK_ATTEMPTS = 2;
 
 /**
  * Long-turn parking: when the brain hasn't produced its FIRST sentence within
@@ -1073,11 +1084,14 @@ async function streamReply(
   if (deps.signal?.aborted || sink.aborted()) return;
 
   let fillerTimer: ReturnType<typeof setTimeout> | undefined;
+  let fillerCancelled = false;
   const cancelFiller = () => {
+    fillerCancelled = true;
     if (fillerTimer !== undefined) { clearTimeout(fillerTimer); fillerTimer = undefined; }
   };
   const turnAbort = pretokens ? null : new AbortController();
   const abortFromTransport = (): void => {
+    cancelFiller();
     if (turnAbort && !turnAbort.signal.aborted) turnAbort.abort(deps.signal?.reason);
   };
   if (deps.signal) {
@@ -1090,24 +1104,68 @@ async function streamReply(
     // it's cached), but only speak it if the brain's first sentence hasn't shown
     // up within the gate. A fast reply gets natural silence instead of a filler
     // on every turn, which reads as a scripted tic in real conversation.
-    const fillerCandidate = deps.filler?.(transcript);
-    let filler: PreparedFiller | undefined;
-    if (fillerCandidate?.audio.byteLength) {
+    const admitFiller = (candidate: PreparedFiller | undefined): PreparedFiller | undefined => {
+      if (!candidate?.audio.byteLength) return undefined;
       try {
-        admitProviderAudio(fillerCandidate.audio);
-        filler = fillerCandidate;
+        return { text: candidate.text, audio: admitProviderAudio(candidate.audio) };
       } catch {
         // Optional cached filler is corrupt/oversized; the real reply continues.
+        return undefined;
       }
-    }
-    if (filler && !sink.aborted()) {
+    };
+    const firstFiller = admitFiller(deps.filler?.(transcript));
+    const reassuranceIntervalMs = boundedFillerInterval(
+      deps.fillerReassuranceIntervalMs,
+    );
+    const maxReassurances = boundedFillerReassurances(
+      deps.fillerMaxReassurances,
+    );
+    let lastFillerText: string | undefined;
+    let reassurancesSpoken = 0;
+    const nextDistinctFiller = (): PreparedFiller | undefined => {
+      for (let attempt = 0; attempt < DISTINCT_FILLER_PICK_ATTEMPTS; attempt++) {
+        const candidate = admitFiller(deps.filler?.(transcript));
+        if (candidate && candidate.text !== lastFillerText) return candidate;
+      }
+      return undefined;
+    };
+    const armFiller = (clip: PreparedFiller, delayMs: number, reassurance: boolean): void => {
+      if (fillerCancelled || deps.signal?.aborted || sink.aborted()) {
+        cancelFiller();
+        return;
+      }
       fillerTimer = setTimeout(() => {
         fillerTimer = undefined;
-        if (sink.aborted()) return;
-        sink.sentence(filler.text);
-        sink.audio(filler.audio);
-        timer.mark("filler_audio");
-      }, deps.fillerDelayMs ?? 1200);
+        if (fillerCancelled || deps.signal?.aborted || sink.aborted()) {
+          cancelFiller();
+          return;
+        }
+        sink.sentence(clip.text);
+        if (deps.signal?.aborted || sink.aborted()) {
+          cancelFiller();
+          return;
+        }
+        sink.audio(clip.audio);
+        lastFillerText = clip.text;
+        if (reassurance) reassurancesSpoken += 1;
+        timer.mark(reassurance ? "reassurance_audio" : "filler_audio");
+        if (reassurancesSpoken >= maxReassurances) return;
+        const next = nextDistinctFiller();
+        if (next) {
+          const durationMs = wavDurationMs(clip.audio);
+          // A malformed header cannot safely extend the pacing delay, but an
+          // optional reassurance must not break the chain after audio emission.
+          // Falling back preserves the configured interval used before duration
+          // awareness instead of throwing or silently ending slow-turn coverage.
+          const nextDelayMs = durationMs === null
+            ? reassuranceIntervalMs
+            : Math.max(reassuranceIntervalMs, Math.ceil(durationMs));
+          armFiller(next, nextDelayMs, true);
+        }
+      }, delayMs);
+    };
+    if (firstFiller) {
+      armFiller(firstFiller, boundedFillerDelay(deps.fillerDelayMs), false);
     }
 
     // Mark the brain's first token (time-to-first-token) as it flows past. For a
@@ -1141,7 +1199,12 @@ async function streamReply(
     let parked = false;
     let parkDeadline = 0;
     const parkedTexts: string[] = [];
-    const stopConsuming = () => deps.signal?.aborted === true || (parked ? Date.now() > parkDeadline : sink.aborted());
+    const stopConsuming = () => {
+      const stopped = deps.signal?.aborted === true
+        || (parked ? Date.now() > parkDeadline : sink.aborted());
+      if (stopped) cancelFiller();
+      return stopped;
+    };
     const consumption = (async () => {
       const trimmed = (async function* (): AsyncGenerator<string> {
         for await (const raw of segmentSentences(abortable(
@@ -1151,9 +1214,11 @@ async function streamReply(
           pretokens !== undefined,
           deps.trackBackground,
         ))) {
-          cancelFiller(); // the real reply arrived — an unfired filler stays silent
           const sentence = raw.trim();
-          if (sentence) yield sentence;
+          if (sentence) {
+            cancelFiller(); // first real content owns the floor from here on
+            yield sentence;
+          }
         }
       })();
       // One chunk per synthesis call, but still one `parts` entry per sentence:
@@ -1318,6 +1383,30 @@ async function streamReply(
       deps.signal?.removeEventListener("abort", abortFromTransport);
     }
   }
+}
+
+function boundedFillerDelay(value: number | undefined): number {
+  const delay = value ?? DEFAULT_FILLER_DELAY_MS;
+  if (!Number.isSafeInteger(delay) || delay < 0 || delay > 2_147_483_647) {
+    throw new RangeError("filler delay must be an integer between 0 and 2147483647ms");
+  }
+  return delay;
+}
+
+function boundedFillerInterval(value: number | undefined): number {
+  const interval = value ?? DEFAULT_FILLER_REASSURANCE_INTERVAL_MS;
+  if (!Number.isSafeInteger(interval) || interval <= 0 || interval > 2_147_483_647) {
+    throw new RangeError("filler reassurance interval must be an integer between 1 and 2147483647ms");
+  }
+  return interval;
+}
+
+function boundedFillerReassurances(value: number | undefined): number {
+  const count = value ?? DEFAULT_FILLER_MAX_REASSURANCES;
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new RangeError("filler reassurance count must be a non-negative integer");
+  }
+  return Math.min(count, MAX_FILLER_REASSURANCES_PER_TURN);
 }
 
 export async function captureOperationalContext(

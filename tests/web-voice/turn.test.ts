@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { afterEach, test, expect, jest } from "bun:test";
 import { OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS, silenceWavLike, SPEAKER_BEAT_MS, processWebTurn, streamWebTurn, streamWebTextTurn, isExpandRequest, isRepeatRequest, isResumeRequest, applyVoiceControl, concatWavs, type WebTurnDeps, type WebStreamDeps, type WebReplySink } from "../../src/web-voice/turn";
 
 async function* tokens(...parts: string[]) { for (const p of parts) yield p; }
@@ -17,6 +17,10 @@ function capturingSink(abortWhen?: (c: SinkCalls) => boolean) {
   return { sink, calls };
 }
 interface SinkCalls { transcript: string[]; sentence: string[]; audio: number; control: Array<{ type: string; delta?: number; volume?: number; rate?: number }>; done: number; error: string[]; }
+
+afterEach(() => {
+  jest.useRealTimers();
+});
 
 function streamDeps(over: Partial<{ transcript: string; stream: string[]; reply: string }> = {}): WebStreamDeps {
   return {
@@ -271,6 +275,273 @@ test("streamWebTurn stays silent (no filler) when the reply beats the gate", asy
   expect(calls.sentence).toEqual(["Hello there."]); // no verbal tic on a fast turn
   expect(calls.audio).toBe(1);
   expect(calls.done).toBe(1);
+});
+
+test("streamWebTurn repeats cached reassurances while the turn is pending", async () => {
+  jest.useFakeTimers();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const lines = ["Still working.", "Still working.", "One more moment.", "Almost there."];
+  let picks = 0;
+  let syntheses = 0;
+  const deps: WebStreamDeps = {
+    ...streamDeps(),
+    brain: {
+      send: async () => "",
+      sendStream: () => (async function* () {
+        started();
+        await gate;
+        yield "Finished.";
+      })(),
+    },
+    tts: { generateAudio: async () => { syntheses += 1; return tinyWav([9]); } },
+    filler: () => ({ text: lines[picks++] ?? "Almost there.", audio: tinyWav([picks]) }),
+    fillerDelayMs: 5,
+    fillerReassuranceIntervalMs: 10,
+    fillerMaxReassurances: 3,
+  };
+  const { sink, calls } = capturingSink();
+  const running = streamWebTextTurn("do the slow thing", deps, sink);
+  await waiting;
+
+  jest.advanceTimersByTime(25);
+  expect(calls.sentence).toEqual(["Still working.", "One more moment.", "Almost there."]);
+  expect(calls.audio).toBe(3);
+
+  release();
+  await running;
+  expect(calls.sentence).toEqual(["Still working.", "One more moment.", "Almost there.", "Finished."]);
+  expect(syntheses).toBe(1); // content only; every reassurance used cached audio
+});
+
+test("streamWebTurn waits for a long reassurance clip to finish before emitting another", async () => {
+  jest.useFakeTimers();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const lines = ["Long clip.", "Next clip."];
+  let picks = 0;
+  const deps: WebStreamDeps = {
+    ...streamDeps(),
+    brain: {
+      send: async () => "",
+      sendStream: () => (async function* () {
+        started();
+        await gate;
+        yield "Done.";
+      })(),
+    },
+    filler: () => ({
+      text: lines[picks]!,
+      audio: pcm8Wav(picks++ === 0 ? 320 : 1),
+    }),
+    fillerDelayMs: 5,
+    fillerReassuranceIntervalMs: 10,
+    fillerMaxReassurances: 1,
+  };
+  const { sink, calls } = capturingSink();
+  const running = streamWebTextTurn("keep working", deps, sink);
+  await waiting;
+
+  jest.advanceTimersByTime(44);
+  expect(calls.sentence).toEqual(["Long clip."]);
+  jest.advanceTimersByTime(1);
+  expect(calls.sentence).toEqual(["Long clip.", "Next clip."]);
+
+  release();
+  await running;
+  expect(calls.sentence.at(-1)).toBe("Done.");
+});
+
+test("streamWebTurn returns to the configured interval after a shorter reassurance clip", async () => {
+  jest.useFakeTimers();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const lines = ["Long clip.", "Short clip.", "Following clip."];
+  const frames = [160, 8, 8];
+  let picks = 0;
+  const deps: WebStreamDeps = {
+    ...streamDeps(),
+    brain: {
+      send: async () => "",
+      sendStream: () => (async function* () {
+        started();
+        await gate;
+        yield "Done.";
+      })(),
+    },
+    filler: () => {
+      const index = picks++;
+      return { text: lines[index]!, audio: pcm8Wav(frames[index]!) };
+    },
+    fillerDelayMs: 5,
+    fillerReassuranceIntervalMs: 10,
+    fillerMaxReassurances: 2,
+  };
+  const { sink, calls } = capturingSink();
+  const running = streamWebTextTurn("keep working", deps, sink);
+  await waiting;
+
+  jest.advanceTimersByTime(25);
+  expect(calls.sentence).toEqual(["Long clip.", "Short clip."]);
+  jest.advanceTimersByTime(9);
+  expect(calls.sentence).toEqual(["Long clip.", "Short clip."]);
+  jest.advanceTimersByTime(1);
+  expect(calls.sentence).toEqual(["Long clip.", "Short clip.", "Following clip."]);
+
+  release();
+  await running;
+  expect(calls.sentence.at(-1)).toBe("Done.");
+});
+
+test("streamWebTurn enforces the reassurance cap", async () => {
+  jest.useFakeTimers();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const lines = ["First.", "Second.", "Third.", "Fourth."];
+  let picks = 0;
+  const deps: WebStreamDeps = {
+    ...streamDeps(),
+    brain: {
+      send: async () => "",
+      sendStream: () => (async function* () {
+        started();
+        await gate;
+        yield "Done.";
+      })(),
+    },
+    filler: () => ({ text: lines[picks++]!, audio: tinyWav([picks]) }),
+    fillerDelayMs: 5,
+    fillerReassuranceIntervalMs: 10,
+    fillerMaxReassurances: 1,
+  };
+  const { sink, calls } = capturingSink();
+  const running = streamWebTextTurn("keep working", deps, sink);
+  await waiting;
+
+  jest.advanceTimersByTime(1_000);
+  expect(calls.sentence).toEqual(["First.", "Second."]);
+  expect(picks).toBe(2);
+
+  release();
+  await running;
+  expect(calls.sentence).toEqual(["First.", "Second.", "Done."]);
+});
+
+test("streamWebTurn clears filler timers when aborted mid-wait", async () => {
+  jest.useFakeTimers();
+  const controller = new AbortController();
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const lines = ["Working.", "Still working.", "Nearly there."];
+  let picks = 0;
+  const deps: WebStreamDeps = {
+    ...streamDeps(),
+    signal: controller.signal,
+    brain: {
+      send: async () => "",
+      sendStream: (_text, options) => (async function* () {
+        started();
+        await new Promise<void>((resolve) => {
+          if (options?.signal?.aborted) resolve();
+          else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      })(),
+    },
+    filler: () => ({ text: lines[picks++]!, audio: tinyWav([picks]) }),
+    fillerDelayMs: 5,
+    fillerReassuranceIntervalMs: 50,
+    fillerMaxReassurances: 3,
+  };
+  const { sink, calls } = capturingSink();
+  const running = streamWebTextTurn("wait for this", deps, sink);
+  await waiting;
+
+  // The chain has to be RUNNING when the abort lands, or the test proves
+  // nothing: aborting after a single filler leaves one clip spoken under the
+  // old one-shot behavior too. Two clips is what says a timer was armed, and
+  // the count below is what says the cancel latched instead of re-arming.
+  jest.advanceTimersByTime(55);
+  expect(calls.sentence).toEqual(["Working.", "Still working."]);
+  controller.abort(new Error("caller left"));
+  await running;
+  jest.advanceTimersByTime(10_000);
+
+  expect(calls.sentence).toEqual(["Working.", "Still working."]);
+  expect(calls.audio).toBe(2);
+});
+
+test("streamWebTurn emits no filler or reassurance when a fast reply beats the gate", async () => {
+  // This is a forward guard for fast turns, not evidence that reassurances repeat:
+  // both the old one-shot filler and the repeating chain must leave a fast reply unchanged.
+  jest.useFakeTimers();
+  const lines = ["Thinking.", "Still thinking."];
+  let picks = 0;
+  const deps: WebStreamDeps = {
+    ...streamDeps({ stream: ["Immediate reply."] }),
+    filler: () => ({ text: lines[picks++]!, audio: tinyWav([picks]) }),
+    fillerDelayMs: 50,
+    fillerReassuranceIntervalMs: 50,
+    fillerMaxReassurances: 3,
+  };
+  const { sink, calls } = capturingSink();
+
+  await streamWebTextTurn("quick question", deps, sink);
+  jest.advanceTimersByTime(10_000);
+
+  expect(calls.sentence).toEqual(["Immediate reply."]);
+  expect(calls.audio).toBe(1);
+  expect(picks).toBe(1);
+});
+
+test("streamWebTurn stops a running reassurance chain at the first content sentence", async () => {
+  // The discriminating half of the fast-reply guard above. A reply that beats
+  // the first filler looks identical under both implementations, so the rule
+  // that actually needs proving is the other one: once the chain is speaking,
+  // the first real sentence has to stop it — and arrive exactly once itself.
+  jest.useFakeTimers();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const lines = ["Thinking.", "Still thinking.", "Nearly there."];
+  let picks = 0;
+  const deps: WebStreamDeps = {
+    ...streamDeps(),
+    brain: {
+      send: async () => "",
+      sendStream: () => (async function* () {
+        started();
+        await gate;
+        yield "Here is the answer.";
+      })(),
+    },
+    filler: () => ({ text: lines[picks++]!, audio: tinyWav([picks]) }),
+    fillerDelayMs: 5,
+    fillerReassuranceIntervalMs: 50,
+    fillerMaxReassurances: 3,
+  };
+  const { sink, calls } = capturingSink();
+  const running = streamWebTextTurn("take your time", deps, sink);
+  await waiting;
+
+  jest.advanceTimersByTime(55);
+  expect(calls.sentence).toEqual(["Thinking.", "Still thinking."]);
+
+  release();
+  await running;
+  jest.advanceTimersByTime(10_000);
+
+  expect(calls.sentence).toEqual(["Thinking.", "Still thinking.", "Here is the answer."]);
+  expect(calls.sentence.filter((sentence) => sentence === "Here is the answer.")).toHaveLength(1);
+  expect(calls.audio).toBe(3);
 });
 
 test("streaming turns reject malformed provider audio before forwarding it", async () => {
