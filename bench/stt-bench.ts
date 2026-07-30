@@ -147,6 +147,13 @@ interface StreamStats {
 
 interface Row {
   name: string;
+  /**
+   * Which table this row belongs in. Explicit rather than inferred from the
+   * presence of `streaming`, because a candidate that never started has no
+   * metrics to infer from — an unreachable streaming server was being listed
+   * as skipped under the batch heading.
+   */
+  kind: "batch" | "stream";
   available: boolean;
   meanWerPct: number;
   warmMs: number;       // median warm transcribe time
@@ -157,8 +164,8 @@ interface Row {
   streaming?: StreamStats;
 }
 
-const emptyRow = (name: string, available: boolean): Row =>
-  ({ name, available, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN, errors: 0, clips: 0 });
+const emptyRow = (name: string, available: boolean, kind: Row["kind"]): Row =>
+  ({ name, kind, available, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN, errors: 0, clips: 0 });
 
 /*
  * A candidate host that silently drops SYNs would otherwise hold this probe for
@@ -208,7 +215,7 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
   const host = c.host ?? "127.0.0.1";
   if (!(await portOpen(host, c.port))) {
     console.warn(`  ⚠️  ${c.name}: nothing listening on ${host}:${c.port} — skipping`);
-    return emptyRow(c.name, false);
+    return emptyRow(c.name, false, "stream");
   }
 
   const wers: number[] = [];
@@ -261,7 +268,7 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
   // counts every delta as arriving "during" audio. Those are not latencies.
   const paced = c.pace !== "fast";
   return {
-    ...emptyRow(c.name, true),
+    ...emptyRow(c.name, true, "stream"),
     meanWerPct: wers.length ? wers.reduce((a, b) => a + b, 0) / wers.length : NaN,
     warmMs: median(totals),
     errors,
@@ -282,7 +289,7 @@ async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promis
   if (c.kind === "stream") return benchStreamCandidate(c, clips, runs);
 
   const runner = await makeRunner(c);
-  if (!runner) return emptyRow(c.name, false);
+  if (!runner) return emptyRow(c.name, false, "batch");
 
   const wers: number[] = [];
   const warmTimes: number[] = [];
@@ -322,6 +329,7 @@ async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promis
 
   return {
     name: c.name,
+    kind: "batch",
     available: true,
     meanWerPct: wers.length ? wers.reduce((a, b) => a + b, 0) / wers.length : NaN,
     warmMs: median(warmTimes),
@@ -340,30 +348,37 @@ const fmt = (n: number, d = 1) => (Number.isFinite(n) ? n.toFixed(d) : "n/a");
  * in put it at the top of a table sorted ascending — a candidate that produced
  * nothing rendered as the most accurate one.
  */
-const ranked = (rows: Row[], streaming: boolean): Row[] =>
-  rows.filter((r) => r.available && !!r.streaming === streaming && r.clips > 0)
+const ranked = (rows: Row[], kind: Row["kind"]): Row[] =>
+  rows.filter((r) => r.kind === kind && r.available && r.clips > 0)
     .sort((a, b) => a.meanWerPct - b.meanWerPct);
 
 /** Reachable, but every run failed — reported, never ranked. */
-const allFailed = (rows: Row[], streaming: boolean): Row[] =>
-  rows.filter((r) => r.available && !!r.streaming === streaming && r.clips === 0);
+const allFailed = (rows: Row[], kind: Row["kind"]): Row[] =>
+  rows.filter((r) => r.kind === kind && r.available && r.clips === 0);
+
+/** Never started at all — listed under its own kind's table, not somebody else's. */
+const skipped = (rows: Row[], kind: Row["kind"]): Row[] =>
+  rows.filter((r) => r.kind === kind && !r.available);
+
+const skippedLine = (r: Row): string =>
+  `- ${r.name} (unavailable — server down or command missing)`;
 
 const failedLine = (r: Row): string =>
   `- ${r.name} (reachable, but every clip failed — ${r.errors} ${r.errors === 1 ? "error" : "errors"}; no metrics)`;
 
 export function renderTable(rows: Row[]): string {
-  const avail = ranked(rows, false);
+  const avail = ranked(rows, "batch");
   const header = "| Candidate | WER % | warm ms | cold ms | RTF | errors | clips |";
   const sep = "|---|---:|---:|---:|---:|---:|---:|";
   const lines = avail.map((r) =>
     `| ${r.name} | ${fmt(r.meanWerPct)} | ${fmt(r.warmMs, 0)} | ${fmt(r.coldMs, 0)} | ${r.rtf ? fmt(r.rtf, 3) : "n/a"} | ${r.errors} | ${r.clips} |`,
   );
-  const failed = allFailed(rows, false).map(failedLine);
-  const skipped = rows.filter((r) => !r.available).map((r) => `- ${r.name} (unavailable — server down or command missing)`);
+  const failed = allFailed(rows, "batch").map(failedLine);
+  const notStarted = skipped(rows, "batch").map(skippedLine);
   return [
     header, sep, ...lines,
     ...(failed.length ? ["", "**Failed:**", ...failed] : []),
-    ...(skipped.length ? ["", "**Skipped:**", ...skipped] : []),
+    ...(notStarted.length ? ["", "**Skipped:**", ...notStarted] : []),
   ].join("\n");
 }
 
@@ -374,9 +389,10 @@ export function renderTable(rows: Row[]): string {
  * audio, which is the number a live loop actually waits out.
  */
 export function renderStreamingTable(rows: Row[]): string {
-  const avail = ranked(rows, true);
-  const failed = allFailed(rows, true);
-  if (!avail.length && !failed.length) return "";
+  const avail = ranked(rows, "stream");
+  const failed = allFailed(rows, "stream");
+  const notStarted = skipped(rows, "stream");
+  if (!avail.length && !failed.length && !notStarted.length) return "";
   const header = "| Candidate | WER % | first delta ms | deltas during audio | final after audio ms | errors | clips |";
   const sep = "|---|---:|---:|---:|---:|---:|---:|";
   const lines = avail.map((r) => {
@@ -393,6 +409,7 @@ export function renderStreamingTable(rows: Row[]): string {
     "",
     header, sep, ...lines,
     ...(failed.length ? ["", "**Failed:**", ...failed.map(failedLine)] : []),
+    ...(notStarted.length ? ["", "**Skipped:**", ...notStarted.map(skippedLine)] : []),
     "",
     "_`first delta` is from the first PCM byte; `final after audio` is `transcript.text.done`"
     + " relative to the last sample (negative = done before the audio ended). `n/a` first delta"

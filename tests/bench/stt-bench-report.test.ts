@@ -20,9 +20,9 @@ test("a candidate whose every clip failed is reported, not ranked first", () => 
   // nothing. errors/clips columns alone did not stop it being read as the
   // winner of the table.
   const table = renderTable([
-    { name: "broken", available: true, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN, errors: 3, clips: 0 },
-    { name: "working", available: true, meanWerPct: 12.5, warmMs: 400, coldMs: 900, rtf: 0.4, errors: 0, clips: 3 },
-    { name: "missing", available: false, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN, errors: 0, clips: 0 },
+    { name: "broken", kind: "batch", available: true, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN, errors: 3, clips: 0 },
+    { name: "working", kind: "batch", available: true, meanWerPct: 12.5, warmMs: 400, coldMs: 900, rtf: 0.4, errors: 0, clips: 3 },
+    { name: "missing", kind: "batch", available: false, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN, errors: 0, clips: 0 },
   ]);
   const lines = table.split("\n");
   const rows = lines.filter((l) => l.startsWith("| ") && !l.startsWith("| Candidate"));
@@ -38,11 +38,11 @@ test("a candidate whose every clip failed is reported, not ranked first", () => 
 test("a streaming candidate whose every clip failed is reported, not ranked first", () => {
   const table = renderStreamingTable([
     {
-      name: "broken-stream", available: true, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN,
+      name: "broken-stream", kind: "stream", available: true, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN,
       errors: 2, clips: 0, streaming: { firstDeltaMs: NaN, finalAfterAudioMs: NaN, deltasDuringAudio: 0, deltas: 0, paced: true },
     },
     {
-      name: "working-stream", available: true, meanWerPct: 8, warmMs: 5_000, coldMs: 5_000, rtf: 1,
+      name: "working-stream", kind: "stream", available: true, meanWerPct: 8, warmMs: 5_000, coldMs: 5_000, rtf: 1,
       errors: 0, clips: 3, streaming: streamStats,
     },
   ]);
@@ -57,7 +57,7 @@ test("an all-failed streaming candidate is still reported when nothing succeeded
   // so a total streaming failure disappeared from the report entirely.
   const table = renderStreamingTable([
     {
-      name: "broken-stream", available: true, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN,
+      name: "broken-stream", kind: "stream", available: true, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN,
       errors: 1, clips: 0, streaming: { firstDeltaMs: NaN, finalAfterAudioMs: NaN, deltasDuringAudio: 0, deltas: 0, paced: true },
     },
   ]);
@@ -67,9 +67,9 @@ test("an all-failed streaming candidate is still reported when nothing succeeded
 
 test("batch and streaming candidates stay in their own tables", () => {
   const rows = [
-    { name: "batch", available: true, meanWerPct: 10, warmMs: 300, coldMs: 800, rtf: 0.3, errors: 0, clips: 2 },
+    { name: "batch", kind: "batch", available: true, meanWerPct: 10, warmMs: 300, coldMs: 800, rtf: 0.3, errors: 0, clips: 2 },
     {
-      name: "stream", available: true, meanWerPct: 9, warmMs: 4_000, coldMs: 4_000, rtf: 1,
+      name: "stream", kind: "stream", available: true, meanWerPct: 9, warmMs: 4_000, coldMs: 4_000, rtf: 1,
       errors: 0, clips: 2, streaming: streamStats,
     },
   ];
@@ -104,12 +104,12 @@ test("a fast probe is ranked on accuracy but never reports a latency", () => {
   // table headed "Streaming (real-time feed)" with nothing marking them.
   const table = renderStreamingTable([
     {
-      name: "probe", available: true, meanWerPct: 5, warmMs: 900, coldMs: 900, rtf: 0.1,
+      name: "probe", kind: "stream", available: true, meanWerPct: 5, warmMs: 900, coldMs: 900, rtf: 0.1,
       errors: 0, clips: 2,
       streaming: { firstDeltaMs: NaN, finalAfterAudioMs: NaN, deltasDuringAudio: NaN, deltas: 3, paced: false },
     },
     {
-      name: "real", available: true, meanWerPct: 9, warmMs: 5_000, coldMs: 5_000, rtf: 1,
+      name: "real", kind: "stream", available: true, meanWerPct: 9, warmMs: 5_000, coldMs: 5_000, rtf: 1,
       errors: 0, clips: 2, streaming: streamStats,
     },
   ]);
@@ -125,4 +125,24 @@ test("a fast probe is ranked on accuracy but never reports a latency", () => {
   // The genuinely paced row still reports its numbers.
   expect(rows[1]).toContain("120");
   expect(rows[1]).toContain("4 / 6");
+});
+
+test("an unreachable streaming server is skipped under Streaming, not Batch", () => {
+  // A candidate that never started has no metrics, so a renderer that decides
+  // where a row belongs by looking for streaming stats put an unreachable
+  // audio.cpp under "Batch (whole-clip transcribe)" — the one heading it can
+  // never belong to.
+  const rows = [
+    { name: "closed stream", kind: "stream" as const, available: false, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN, errors: 0, clips: 0 },
+    { name: "missing binary", kind: "batch" as const, available: false, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN, errors: 0, clips: 0 },
+  ];
+  const batch = renderTable(rows);
+  expect(batch).toContain("- missing binary (unavailable");
+  expect(batch).not.toContain("closed stream");
+
+  const streaming = renderStreamingTable(rows);
+  expect(streaming).toContain("- closed stream (unavailable");
+  expect(streaming).not.toContain("missing binary");
+  // The streaming table has to appear at all for that line to be readable.
+  expect(streaming).toContain("Streaming (real-time feed");
 });

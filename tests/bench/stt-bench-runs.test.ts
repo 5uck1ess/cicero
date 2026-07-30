@@ -137,3 +137,16 @@ test("a real-time candidate still reports its streaming latency", async () => {
     rmSync(wav.dir, { recursive: true, force: true });
   }
 }, 15_000);
+
+test("an unreachable streaming candidate is still identified as streaming", async () => {
+  // Straight through the real aggregation path: the probe fails, and the row it
+  // returns must still know which table it belongs in.
+  const clip: Clip = { name: "clip1", path: "/nonexistent.wav", reference: "hello", durationSec: 1 };
+  const row = await benchStreamCandidate(
+    { name: "closed stream", kind: "stream", model: "test-model", host: "127.0.0.1", port: 1 },
+    [clip],
+    1,
+  );
+  expect(row.available).toBe(false);
+  expect(row.kind).toBe("stream");
+}, 15_000);
