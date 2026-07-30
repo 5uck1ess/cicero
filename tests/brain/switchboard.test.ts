@@ -1623,6 +1623,58 @@ test("classifier rollcall with the literal phrase but no group word is honored (
   }
 });
 
+test("classifier-labeled bare group-action names are ignored (2026-07-30 live regression)", async () => {
+  for (const [utterance, label] of [
+    ["The roll call.", "rollcall"],
+    ["the standup.", "standup"],
+  ] as const) {
+    const calls: string[] = [];
+    const { sb } = classifierBoard(calls, label);
+    await sb.start();
+    expect(await sb.send(utterance)).toBe("front reply");
+    expect(sb.wasControlTurn()).toBe(false);
+  }
+});
+
+test("classifier group-action labels require a request or confirmation", async () => {
+  const requests = [
+    ["run the roll call", "rollcall"],
+    ["do the roll call", "rollcall"],
+    ["start a roll call", "rollcall"],
+    ["begin roll call", "rollcall"],
+    ["initiate the roll call", "rollcall"],
+    ["hold a roll call", "rollcall"],
+    ["have the roll call", "rollcall"],
+    ["take a roll call", "rollcall"],
+    ["give me a roll call", "rollcall"],
+    ["let's have the standup", "standup"],
+    ["Right, standup", "standup"],
+    ["That's what I said: standup", "standup"],
+  ] as const;
+  for (const [utterance, label] of requests) {
+    const calls: string[] = [];
+    const { sb } = classifierBoard(calls, label);
+    await sb.start();
+    const reply = await sb.send(utterance);
+    expect(label === "rollcall" ? reply.includes("checking in.") : reply.startsWith("Getting status from the team.")).toBe(true);
+    expect(sb.wasControlTurn()).toBe(true);
+  }
+});
+
+test("classifier confirmation without the named group action remains a normal brain turn", async () => {
+  for (const utterance of [
+    "yes, check on that",
+    "right, transfer the status",
+    "yeah, check the build",
+  ]) {
+    const calls: string[] = [];
+    const { sb } = classifierBoard(calls, "rollcall");
+    await sb.start();
+    expect(await sb.send(utterance)).toBe("front reply");
+    expect(sb.wasControlTurn()).toBe(false);
+  }
+});
+
 test("'do another roll call' matches lexically — no classifier round-trip", async () => {
   const calls: string[] = [];
   const { sb, prompts } = classifierBoard(calls, "none");

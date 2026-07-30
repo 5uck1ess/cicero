@@ -1116,14 +1116,16 @@ export class SwitchboardBrain implements Brain {
     if (!label) return null;
     // The classifier sometimes labels a bare "what's the status?" as a team
     // standup (seen live 2026-07-11 — the front desk hijacked a question meant
-    // for the pinned lane). Group actions demand a group word — or the action's
-    // own name — in the actual utterance; a caller who literally said "roll
-    // call" cannot be a hallucinated label (live miss 2026-07-12: "yes, initiate
-    // roll call" was discarded here and the persona apologized instead).
+    // for the pinned lane). Group actions demand a group word, an explicit
+    // request bound to the action name, or confirmation of a prior request.
     const group = /\b(?:every(?:one|body)|team|office|all|each|agents?|staff|group|hands)\b/i;
     const literal = label === "rollcall" ? /\broll\s?-?calls?\b/i : /\bstand\s?-?ups?\b/i;
-    if ((label === "standup" || label === "rollcall") && !group.test(utterance) && !literal.test(utterance)) {
-      log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" names no group — ignoring`);
+    const request = new RegExp(String.raw`\b(?:(?:run|do|start|begin|initiate|hold|have|take)(?:\s+(?:a|an|the|another))?|give\s+me(?:\s+(?:a|an|the|another))?|let['’]s\s+(?:do|have)(?:\s+(?:a|an|the|another))?)\s+${literal.source}`, "i");
+    const confirmation = /^\s*(?:yes|yeah|yep|correct|right)\b|\bthat['’]s\s+what\s+i\s+(?:just\s+)?said\b/i;
+    if ((label === "standup" || label === "rollcall") && !group.test(utterance)
+      && !request.test(utterance) && !(confirmation.test(utterance) && literal.test(utterance))
+    ) {
+      log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" has no group request or confirmation — ignoring`);
       return null;
     }
     if (label === "standup") return "standup";
