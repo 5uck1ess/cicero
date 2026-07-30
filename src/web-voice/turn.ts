@@ -3,6 +3,7 @@ import type { Brain } from "../types";
 import type { STTProvider } from "../backends/stt/provider";
 import type { TTSProvider } from "../backends/tts/provider";
 import { segmentSentences } from "../speaker/sentence-stream";
+import { coalesceSentenceGroups, type CoalesceOptions, type CoalescedChunk } from "../speaker/coalesce";
 import { newTurnTimer } from "../timing";
 import { log } from "../logger";
 import type { PreparedFiller } from "../speaker/filler-bank";
@@ -34,6 +35,10 @@ export interface WebTurnDeps {
   tts: Pick<TTSProvider, "generateAudio">;
   /** Optional TLDR gate — see {@link TldrOptions}. Omit to speak every sentence. */
   tldr?: TldrOptions;
+  /** Optional sentence coalescing before synthesis. Omit for one call per sentence. */
+  coalesce?: CoalesceOptions;
+  /** Optional lane-switchboard cleanup for a coalesced control turn. */
+  discardControlTurnVoices?: Brain["discardControlTurnVoices"];
   /** Optional input-side tone tag — see {@link ToneOptions}. Omit for untagged turns. */
   tone?: ToneOptions;
   /**
@@ -93,6 +98,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
   // the brain input waits for it at most the grace window past the transcript.
   const tonePending = beginOwnedTone(deps.tone, wav, "web turn tone classification");
   let tmpFile: string | undefined;
+  let brainTurnSignal: AbortSignal | undefined;
   try {
     tmpFile = await writeSecureTempAudio(wav, { prefix: "cicero-web" });
     throwIfTurnAborted(deps.signal);
@@ -116,6 +122,21 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     if (deps.tldr?.pending && isExpandRequest(transcript)) {
       const detail = deps.tldr.pending();
       if (detail) {
+        if (deps.coalesce) {
+          const parts = new WavPartsBuilder(
+            maxAudioBytes,
+            retainedWavPartsLimit(maxAudioBytes),
+          );
+          const sentences = nonEmptySentences(segmentSentences(oneChunk(detail)));
+          for await (const chunk of sentenceGroups(sentences, deps.coalesce, deps.signal)) {
+            throwIfTurnAborted(deps.signal);
+            const providerAudio = await deps.tts.generateAudio(chunk.text);
+            throwIfTurnAborted(deps.signal);
+            const part = admitProviderAudio(providerAudio, maxAudioBytes);
+            if (part.byteLength > 0) parts.append(part);
+          }
+          return { transcript, reply: detail, audio: parts.finish() };
+        }
         const providerAudio = await deps.tts.generateAudio(detail);
         throwIfTurnAborted(deps.signal);
         const audio = admitProviderAudio(providerAudio, maxAudioBytes);
@@ -131,6 +152,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     throwIfTurnAborted(deps.signal);
     const systemContext = await captureOperationalContext(deps.operationalContext, deps.signal);
     throwIfTurnAborted(deps.signal);
+    brainTurnSignal = deps.signal;
     const reply = (await deps.brain.send(
       tag ? `${transcript}\n\n${tag}` : transcript,
       { signal: deps.signal, systemContext: systemContext ?? undefined },
@@ -139,9 +161,9 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     if (!reply) return { transcript, reply: "", audio: EMPTY };
 
     // The reply text stays complete (logs, history); only the VOICE is gated.
-    // Rendered sentence-by-sentence like the streaming path, so per-sentence
-    // voice resolution (lane voices, the roll call) works on this path too,
-    // then concatenated into the single WAV this API returns.
+    // Control turns stay sentence-by-sentence so roll-call voices remain
+    // aligned. Ordinary replies may share calls, then every returned clip is
+    // concatenated into the single WAV this API returns.
     const control = deps.brain.wasControlTurn?.() ?? false;
     const spoken = control ? reply : await gateForSpeech(reply, deps.tldr);
     // Validate and budget every provider result before retaining the next one.
@@ -151,11 +173,18 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
       maxAudioBytes,
       retainedWavPartsLimit(maxAudioBytes),
     );
-    for await (const raw of segmentSentences(oneChunk(spoken))) {
+    const sentences = nonEmptySentences(segmentSentences(oneChunk(spoken)));
+    // Control turns can change lane voice at every sentence. Everything else
+    // returns one composed WAV, so sharing a synthesis call changes no delivery
+    // boundary visible to this endpoint.
+    const chunks = sentenceGroups(
+      sentences,
+      control ? undefined : deps.coalesce,
+      deps.signal,
+    );
+    for await (const chunk of chunks) {
       throwIfTurnAborted(deps.signal);
-      const s = raw.trim();
-      if (!s) continue;
-      const providerAudio = await deps.tts.generateAudio(s);
+      const providerAudio = await deps.tts.generateAudio(chunk.text);
       throwIfTurnAborted(deps.signal);
       const part = admitProviderAudio(providerAudio, maxAudioBytes);
       if (part.byteLength > 0) {
@@ -173,6 +202,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     if (error instanceof Error) throw error;
     throw new Error("web voice turn failed", { cause: error });
   } finally {
+    discardCoalescedControlTurnVoices(deps, brainTurnSignal);
     await retainOwnedTone(tonePending, deps.trackBackground, deps.signal);
     if (tmpFile) await unlink(tmpFile).catch(() => { /* best-effort cleanup */ });
   }
@@ -197,6 +227,18 @@ export interface WebStreamDeps {
   fillerDelayMs?: number;
   /** Optional TLDR gate — see {@link TldrOptions}. Omit to speak every sentence. */
   tldr?: TldrOptions;
+  /**
+   * Optional sentence coalescing before synthesis — see {@link CoalesceOptions}.
+   *
+   * A headless box speaks entirely through here, never through the local
+   * streaming speaker, so without this `tts_coalesce` would be configurable and
+   * inert on the one deployment that most wants it: web voice pays real
+   * per-call overhead against a hosted or cold engine. Omit for one call per
+   * sentence, which is the default.
+   */
+  coalesce?: CoalesceOptions;
+  /** Optional lane-switchboard cleanup for a coalesced control turn. */
+  discardControlTurnVoices?: Brain["discardControlTurnVoices"];
   /** Optional interruption recovery — see {@link InterruptRecovery}. Omit to forget interrupted replies. */
   recover?: InterruptRecovery;
   /** Optional completed-reply replay — see {@link LastReplyOptions}. */
@@ -438,6 +480,36 @@ export interface WebReplySink {
 
 async function* oneChunk(text: string): AsyncGenerator<string> {
   yield text;
+}
+
+async function* nonEmptySentences(sentences: AsyncIterable<string>): AsyncGenerator<string> {
+  for await (const raw of sentences) {
+    const sentence = raw.trim();
+    if (sentence) yield sentence;
+  }
+}
+
+function sentenceGroups(
+  sentences: AsyncIterable<string>,
+  coalesce?: CoalesceOptions,
+  cancel?: AbortSignal,
+): AsyncIterable<CoalescedChunk> {
+  if (coalesce) return coalesceSentenceGroups(sentences, coalesce, cancel);
+  return (async function* (): AsyncGenerator<CoalescedChunk> {
+    for await (const sentence of sentences) {
+      yield { text: sentence, parts: [sentence] };
+    }
+  })();
+}
+
+function discardCoalescedControlTurnVoices(
+  deps: {
+    coalesce?: CoalesceOptions;
+    discardControlTurnVoices?: Brain["discardControlTurnVoices"];
+  },
+  turnSignal?: AbortSignal,
+): void {
+  if (deps.coalesce && turnSignal) deps.discardControlTurnVoices?.(turnSignal);
 }
 
 /** Keep a batch brain call lazy so abort polling starts while it is pending. */
@@ -904,18 +976,21 @@ export async function streamWebTextTurn(text: string, deps: WebStreamDeps, sink:
 
 async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink): Promise<string[]> {
   const spokenTexts: string[] = [];
-  for await (const raw of segmentSentences(oneChunk(text))) {
+  const chunks = sentenceGroups(
+    nonEmptySentences(segmentSentences(oneChunk(text))),
+    deps.coalesce,
+    deps.signal,
+  );
+  for await (const chunk of chunks) {
     if (sink.aborted()) break;
-    const s = raw.trim();
-    if (!s) continue;
-    sink.sentence(s);
+    for (const part of chunk.parts) sink.sentence(part);
     const audio = admitProviderAudio(
-      await deps.tts.generateAudio(s, undefined, { speed: deps.voice?.state.rate }),
+      await deps.tts.generateAudio(chunk.text, undefined, { speed: deps.voice?.state.rate }),
     );
     if (sink.aborted()) break;
     if (audio.byteLength > 0) {
       sink.audio(audio);
-      spokenTexts.push(s);
+      spokenTexts.push(...chunk.parts);
     }
   }
   sink.done();
@@ -1068,41 +1143,83 @@ async function streamReply(
     const parkedTexts: string[] = [];
     const stopConsuming = () => deps.signal?.aborted === true || (parked ? Date.now() > parkDeadline : sink.aborted());
     const consumption = (async () => {
-      for await (const raw of segmentSentences(abortable(
-        tokens,
-        stopConsuming,
-        () => turnAbort?.abort(),
-        pretokens !== undefined,
-        deps.trackBackground,
-      ))) {
-        cancelFiller(); // the real reply arrived — an unfired filler stays silent
-        const sentence = raw.trim();
-        if (!sentence) continue;
-        if (parked) { parkedTexts.push(sentence); continue; }
+      const trimmed = (async function* (): AsyncGenerator<string> {
+        for await (const raw of segmentSentences(abortable(
+          tokens,
+          stopConsuming,
+          () => turnAbort?.abort(),
+          pretokens !== undefined,
+          deps.trackBackground,
+        ))) {
+          cancelFiller(); // the real reply arrived — an unfired filler stays silent
+          const sentence = raw.trim();
+          if (sentence) yield sentence;
+        }
+      })();
+      // One chunk per synthesis call, but still one `parts` entry per sentence:
+      // the pane, the TLDR count, and barge-in recovery are all per-sentence
+      // facts and must not change just because two sentences shared a call.
+      const chunks = sentenceGroups(trimmed, deps.coalesce, turnAbort?.signal);
+
+      for await (const chunk of chunks) {
+        if (parked) { parkedTexts.push(...chunk.parts); continue; }
         if (sink.aborted()) break;
         if (!firstSentence) { firstSentence = true; timer.mark("first_sentence"); }
         control ??= deps.brain.wasControlTurn?.() ?? false;
-        sink.sentence(sentence);
-        if (deps.tldr && !control && spoken >= deps.tldr.cap) {
-          gated.push(sentence); // pane gets the text; the voice stays quiet
-          continue;
-        }
-        const audio = admitProviderAudio(
-          await deps.tts.generateAudio(sentence, undefined, { speed: deps.voice?.state.rate }),
-        );
-        if (sink.aborted() && !parked) break;
-        if (audio.byteLength > 0) {
-          if (!firstAudio) { firstAudio = true; timer.mark("first_audio"); }
-          // Control turns hand the floor between speakers each sentence — give
-          // the next voice a human beat instead of cutting in mid-breath.
-          if (control && spoken > 0) {
-            const beat = silenceWavLike(SPEAKER_BEAT_MS, audio);
-            if (beat.byteLength > 0) sink.audio(beat);
+        for (const part of chunk.parts) sink.sentence(part);
+
+        let stop = false;
+        const render = async (call: { text: string; parts: string[] }): Promise<void> => {
+          const audio = admitProviderAudio(
+            await deps.tts.generateAudio(call.text, undefined, { speed: deps.voice?.state.rate }),
+          );
+          if (sink.aborted() && !parked) { stop = true; return; }
+          if (audio.byteLength > 0) {
+            if (!firstAudio) { firstAudio = true; timer.mark("first_audio"); }
+            // Control turns hand the floor between speakers each sentence — give
+            // the next voice a human beat instead of cutting in mid-breath.
+            if (control && spoken > 0) {
+              const beat = silenceWavLike(SPEAKER_BEAT_MS, audio);
+              if (beat.byteLength > 0) sink.audio(beat);
+            }
+            sink.audio(audio);
+            spoken += call.parts.length;
+            spokenTexts.push(...call.parts);
           }
-          sink.audio(audio);
-          spoken++;
-          spokenTexts.push(sentence);
+        };
+
+        if (control) {
+          // A roll call queues one lane voice per sentence and laneTts shifts one
+          // off PER CALL. Merging would speak two lanes in the first one's voice
+          // and leave the third queued — for the NEXT reply, which would then
+          // answer in a voice nobody asked for. It also drops the inter-speaker
+          // beat inside the chunk. Control turns are never merged.
+          for (const part of chunk.parts) {
+            await render({ text: part, parts: [part] });
+            if (stop) break;
+          }
+        } else if (deps.tldr) {
+          // The cap counts audio that was actually emitted. Work through a
+          // straddling chunk one cap-sized slice at a time: an empty render
+          // leaves room for the following slice instead of gating it unheard.
+          let offset = 0;
+          while (offset < chunk.parts.length && !stop) {
+            const room = deps.tldr.cap - spoken;
+            if (room <= 0) {
+              gated.push(...chunk.parts.slice(offset));
+              break;
+            }
+            const parts = chunk.parts.slice(offset, offset + room);
+            const text = offset === 0 && parts.length === chunk.parts.length
+              ? chunk.text
+              : parts.join(" ");
+            offset += parts.length;
+            await render({ text, parts });
+          }
+        } else {
+          await render({ text: chunk.text, parts: chunk.parts });
         }
+        if (stop) break;
       }
     })();
 
@@ -1142,9 +1259,12 @@ async function streamReply(
         detached = true;
         const background = consumption
           .catch(() => { /* brain died mid-background — deliver what we have */ })
-          .then(() => deps.signal?.aborted
-            ? undefined
-            : parkCfg.onParked(parkedTexts.join(" "), transcript))
+          .then(() => {
+            discardCoalescedControlTurnVoices(deps, turnAbort?.signal);
+            return deps.signal?.aborted
+              ? undefined
+              : parkCfg.onParked(parkedTexts.join(" "), transcript);
+          })
           .finally(() => { deps.signal?.removeEventListener("abort", abortFromTransport); });
         if (deps.trackBackground) {
           if (!deps.trackBackground(background)) {
@@ -1193,7 +1313,10 @@ async function streamReply(
     throw new Error("streaming web reply failed", { cause: error });
   } finally {
     cancelFiller(); // turn over (or failed) — never speak a filler after the fact
-    if (!detached) deps.signal?.removeEventListener("abort", abortFromTransport);
+    if (!detached) {
+      discardCoalescedControlTurnVoices(deps, turnAbort?.signal);
+      deps.signal?.removeEventListener("abort", abortFromTransport);
+    }
   }
 }
 

@@ -291,7 +291,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     "voice_ref_text", "barge_in_enabled", "full_duplex", "aec", "silence_duration",
     "silence_threshold", "phonetic_aliases", "brain", "servers", "actions", "deployment", "stt",
     "stt_fallback", "tts", "tts_fallback", "llm", "classifier", "compute", "sidecar", "dashboard", "web_voice",
-    "notify", "headless", "turn", "tone", "clap", "vad", "earcons", "intent_judge",
+    "notify", "headless", "turn", "tone", "clap", "vad", "earcons", "tts_coalesce", "intent_judge",
   ], issues);
 
   for (const key of RETIRED_TOP_LEVEL_KEYS) {
@@ -928,6 +928,23 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       "enabled", "hangover_ms", "open_factor", "min_speech_ms", "calibration_ms", "preroll_ms",
     ], issues);
   }
+  // checkRecord, not isRecord: `tts_coalesce: true` is a plausible typo for
+  // `tts_coalesce: {enabled: true}`, and silently reading it as "off" would look
+  // exactly like the feature not working.
+  if (config.tts_coalesce !== undefined && checkRecord(config.tts_coalesce, "tts_coalesce", issues)) {
+    checkKnownKeys(config.tts_coalesce, "tts_coalesce", [
+      "enabled", "max_chars", "passthrough_first",
+    ], issues);
+    checkOptionalBoolean(config.tts_coalesce, "enabled", "tts_coalesce", issues);
+    // The cap is what keeps a merged chunk from taking longer to synthesize than
+    // the audio playing ahead of it, so it is bounded on both ends: too small and
+    // nothing ever merges, too large and the speaker can starve mid-reply.
+    checkOptionalInteger(config.tts_coalesce, "max_chars", "tts_coalesce", issues, { min: 40, max: 2_000 });
+    // Zero is legal and means "merge from the very first sentence" — measurably
+    // worse for time-to-first-audio, but it is the operator's call to make.
+    checkOptionalInteger(config.tts_coalesce, "passthrough_first", "tts_coalesce", issues, { min: 0, max: 10 });
+  }
+
   if (isRecord(config.intent_judge)) {
     checkKnownKeys(config.intent_judge, "intent_judge", [
       "enabled", "hot_window_ms", "min_confidence", "context_turns", "timeout_ms",

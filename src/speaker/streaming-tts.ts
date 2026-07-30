@@ -8,6 +8,7 @@ import { log } from "../logger";
 import { AecReleaseUnconfirmedError, type AecAudioHub, pcm16kFromWav } from "../platform/aec-hub";
 import { AudioReleaseUnconfirmedError } from "../platform/owned-audio-player";
 import { terminateDirectChild, type DirectChildProcess } from "../process/direct-child";
+import { coalesceSentences, type CoalesceOptions } from "./coalesce";
 
 interface PreparedSentence {
   text: string;
@@ -42,6 +43,15 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
   // the mic cancels it) instead of afplay.
   private readonly hub: AecAudioHub | null;
   private readonly spawnPlayer: SpawnPlayer;
+  /** Merge already-available sentences into fewer synthesis calls. Off unless configured. */
+  private readonly coalesce: CoalesceOptions | null;
+  /**
+   * Cancels the current turn's read-ahead. Owned here rather than inside
+   * speakStream because the events that end a turn — interrupt, stop, a
+   * superseding turn — happen outside it, and a coalescer parked on the brain
+   * cannot be reached by anything the turn body does.
+   */
+  private turnCancel: AbortController | null = null;
   private readonly playerReleases = new Map<InterruptiblePlayer, Promise<void>>();
   /** Exact children whose release has not yet been positively observed. */
   private readonly unreleasedPlayers = new Set<InterruptiblePlayer>();
@@ -53,23 +63,55 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     fallback: Speaker,
     hub: AecAudioHub | null = null,
     spawnPlayer: SpawnPlayer = (command) => Bun.spawn(command, { stdout: "ignore", stderr: "ignore" }),
+    coalesce: CoalesceOptions | null = null,
   ) {
     super(provider, audioPlayer, fallback);
     this.hub = hub;
     this.spawnPlayer = spawnPlayer;
+    this.coalesce = coalesce;
+  }
+
+  /**
+   * Retire the current turn: bump the epoch AND release its read-ahead.
+   *
+   * These have to happen together. The epoch alone only stops output from being
+   * published; it does not reach a coalescer parked waiting on the brain, whose
+   * cleanup would then never run.
+   */
+  private supersedeTurn(): number {
+    this.turnCancel?.abort();
+    this.turnCancel = null;
+    return ++this.epoch;
   }
 
   async speakStream(sentences: AsyncIterable<string>): Promise<void> {
     if (this.stopped) return;
     await this.retryUnconfirmedOutputRelease();
-    const epoch = ++this.epoch; // claim the speaker; supersedes any prior turn
+    const epoch = this.supersedeTurn(); // claim the speaker; supersedes any prior turn
     const stale = () => this.epoch !== epoch;
     // A generic fallback is not interruptible through Speaker, so a replacement
     // turn must wait for its exact output ownership to finish instead of
     // starting a raw player on top of a still-speaking system child.
     await this.waitForFallbackOutput();
     if (this.stopped || stale()) return;
-    const iterator = sentences[Symbol.asyncIterator]();
+    // Coalescing sits here so every local streaming producer gets one policy.
+    // Web voice bypasses the host speaker and applies the same option in its
+    // turn pipeline.
+    // It costs barge-in granularity: an interrupted merged chunk reports as one
+    // pending item, so getSnapshot() can no longer say which of its sentences
+    // were actually heard. That's the trade the config flag buys.
+    // The coalescer reads ahead, so it can be parked waiting on the brain when
+    // this turn is torn down. return() cannot reach it there — it queues behind
+    // the pending read — so teardown aborts this instead, which releases the
+    // wait and lets the generator run its own cleanup.
+    const coalesceAbort = this.coalesce ? new AbortController() : null;
+    const source = this.coalesce
+      ? coalesceSentences(sentences, this.coalesce, coalesceAbort!.signal)
+      : sentences;
+    // Published so interrupt/stop/the next turn can reach it. This turn already
+    // holds the epoch, so nothing else owns the slot.
+    this.turnCancel = coalesceAbort;
+    const iterator = source[Symbol.asyncIterator]();
     this.playing = true;
     this.spoken = [];
     this.inFlight = null;
@@ -131,6 +173,14 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
         log("warn", `Streaming TTS error: ${msg}`);
       }
     } finally {
+      // Before the iterator dance below: a parked coalescer cannot observe
+      // return(), and this is the signal that frees it. Harmless once it has
+      // finished on its own.
+      coalesceAbort?.abort();
+      // Release the slot only if it is still ours — a superseding turn has
+      // already installed its own controller, and clearing it here would leave
+      // that turn's read-ahead unreachable.
+      if (this.turnCancel === coalesceAbort) this.turnCancel = null;
       if (!sourceFinished) {
         const pendingRead = sourceReadAhead;
         const closeIterator = async () => {
@@ -168,7 +218,7 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
   interrupt(): void {
     // Bump the epoch so the in-flight turn's loops go stale and exit — and stay
     // stale forever, so a follow-up turn can't accidentally revive this one.
-    this.epoch++;
+    this.supersedeTurn();
     const player = this.currentPlayer;
     this.currentPlayer = null;
     if (player) {
@@ -189,7 +239,7 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
   async stop(): Promise<void> {
     // Revoke the stream synchronously so a killed platform player cannot take
     // the normal playback-error path and restart the sentence in fallback TTS.
-    this.epoch += 1;
+    this.supersedeTurn();
     const player = this.currentPlayer;
     this.currentPlayer = null;
     this.playing = false;

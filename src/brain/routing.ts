@@ -105,6 +105,7 @@ export class RoutingBrain implements Brain {
   get transferTo(): Brain["transferTo"] { return bindBrainCapability(this.current, "transferTo"); }
   get setCallMeHandler(): Brain["setCallMeHandler"] { return bindBrainCapability(this.current, "setCallMeHandler"); }
   get activeLaneVoice(): Brain["activeLaneVoice"] { return bindBrainCapability(this.current, "activeLaneVoice"); }
+  get discardControlTurnVoices(): Brain["discardControlTurnVoices"] { return bindBrainCapability(this.current, "discardControlTurnVoices"); }
   get wasControlTurn(): Brain["wasControlTurn"] { return bindBrainCapability(this.current, "wasControlTurn"); }
 
   /**

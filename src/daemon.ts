@@ -1206,6 +1206,7 @@ export class CiceroDaemon {
           return this.providers.tts.generateAudio(clean, this.brain.activeLaneVoice?.(), options);
         },
       };
+      const discardControlTurnVoices = this.brain.discardControlTurnVoices?.bind(this.brain);
       const voiceState: VoiceControlState = { ...DEFAULT_VOICE_CONTROL_STATE };
       // TLDR speech gate (on by default): long replies get their first sentences
       // spoken verbatim, the rest text-only, plus one spoken summary line.
@@ -1482,6 +1483,8 @@ export class CiceroDaemon {
           brain: this.brain,
           tts: laneTts,
           tldr,
+          coalesce: this.config.ttsCoalesce ?? undefined,
+          discardControlTurnVoices,
           tone,
           maxAudioBytes: MAX_TURN_AUDIO_BYTES,
           signal: options?.signal,
@@ -1522,7 +1525,7 @@ export class CiceroDaemon {
         // than a beat of silence).
         onStreamTurn: async (wav, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTurn(wav, deps, sink, options.spec);
               return;
@@ -1538,7 +1541,7 @@ export class CiceroDaemon {
         // Typed input (the text box next to the mic): same pipeline minus STT.
         onTextTurn: async (text, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, recover, lastReply, park: makePark(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTextTurn(text, deps, sink);
               return;

@@ -1505,6 +1505,30 @@ describe("Config — fail-fast validation", () => {
   });
 });
 
+describe("Config — TTS coalescing", () => {
+  test("is off unless explicitly enabled", () => {
+    expect(loadConfig().ttsCoalesce).toBeNull();
+    expect(loadYaml("tts_coalesce:\n  max_chars: 300")().ttsCoalesce).toBeNull();
+  });
+
+  test("resolves configured values, defaulting the rest", () => {
+    const config = loadYaml("tts_coalesce:\n  enabled: true\n  max_chars: 300")();
+    expect(config.ttsCoalesce).toEqual({ maxChars: 300, passthroughFirst: 1 });
+  });
+
+  test("rejects a non-mapping tts_coalesce instead of reading it as off", () => {
+    // `tts_coalesce: true` is the plausible typo for `{enabled: true}`; silently
+    // treating it as off would look exactly like the feature not working.
+    expect(loadYaml("tts_coalesce: true")).toThrow(/tts_coalesce/);
+  });
+
+  test("rejects unknown keys and out-of-range bounds", () => {
+    expect(loadYaml("tts_coalesce:\n  enabled: true\n  max_char: 300")).toThrow(/tts_coalesce/);
+    expect(loadYaml("tts_coalesce:\n  enabled: true\n  max_chars: 1")).toThrow(/max_chars/);
+    expect(loadYaml("tts_coalesce:\n  enabled: true\n  passthrough_first: -1")).toThrow(/passthrough_first/);
+  });
+});
+
 describe("Config — dictation", () => {
   test("accepts the documented shape", () => {
     expect(loadYaml([
