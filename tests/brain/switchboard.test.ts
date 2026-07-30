@@ -1866,6 +1866,87 @@ test("classifier callme:<employee> routes the named pickup", async () => {
   expect(rang).toEqual(["coder"]);
 });
 
+test("a classifier dial-back survives its own handler pinning the lane", async () => {
+  // Live incident 2026-07-30: "I can't talk to Rick have him call mw" routed to
+  // callme:think, the phone rang and the lane was pinned — then the user got
+  // "(Cicero unreachable: switchboard turn superseded by a newer accepted
+  // turn)" instead of the ack. The real daemon handler calls transferTo() to
+  // decide who picks up, and that is itself a public turn, so it superseded
+  // the very turn that invoked it. Every other dial-back test uses an inert
+  // handler, which is why nothing caught it. A control action delegating to
+  // another public entry point must not cancel its own caller.
+  const calls: string[] = [];
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    think: { brain: fakeBrain("think", calls) },
+  }, async () => "callme:think");
+  sb.setCallMeHandler(async (who) => {
+    const name = await sb.transferTo(who ?? "think");
+    return `Ringing you now — ${name} will pick up.`;
+  });
+  try {
+    await sb.start();
+    expect(await sb.send("I can't talk to Rick have him call me")).toBe(
+      "Ringing you now — Think will pick up.",
+    );
+    expect(sb.activeLane()).toBe("think");
+  } finally {
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a spoken dial-back survives its own handler pinning the lane", async () => {
+  // Same defect on the lexical path: it reaches the daemon handler too, and
+  // the outer runAcceptedTurn asserts the turn before it returns. Telegram's
+  // typed "call me" masks this by intercepting before the brain, so voice is
+  // where it bites.
+  const calls: string[] = [];
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    think: { brain: fakeBrain("think", calls) },
+  });
+  sb.setCallMeHandler(async (who) => {
+    const name = await sb.transferTo(who ?? "think");
+    return `Ringing you now — ${name} will pick up.`;
+  });
+  try {
+    await sb.start();
+    expect(await sb.send("have think call me")).toBe(
+      "Ringing you now — Think will pick up.",
+    );
+  } finally {
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a barge-in during a dial-back still supersedes the dialing turn", async () => {
+  // The delegation window must be scoped to the handler's OWN async context.
+  // A concurrent public turn is not delegation — it is the user interrupting,
+  // and it has to take the lease. If it were allowed to adopt the dialing turn
+  // instead, two utterances would share one lease and the barge-in would never
+  // cancel the dial.
+  const calls: string[] = [];
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    think: { brain: fakeBrain("think", calls) },
+  });
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  sb.setCallMeHandler(async () => {
+    await held;
+    return "Ringing you now.";
+  });
+  try {
+    await sb.start();
+    const dialing = sb.send("call me");
+    await Bun.sleep(5); // let the turn reach the held handler
+    const bargeIn = sb.send("actually never mind");
+    expect(await settlesWithin(bargeIn, "barge-in")).toBe("front reply");
+    release();
+    await expect(dialing).rejects.toThrow("superseded by a newer accepted turn");
+  } finally {
+    release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
 test("hallucinated callme labels are ignored without call vocabulary", async () => {
   // Mirror of the group-word guard: the classifier alone must never be able
   // to dial the user's phone from an utterance that mentions no call.
@@ -1969,14 +2050,15 @@ test("the speculative refusal reaches sendStream, the speculator's own entry poi
   expect(rang).toEqual([]);
 });
 
-test("the dial sites pass the handler exactly what they always did", async () => {
+test("both dial sites hand the handler the turn signal and nothing more", async () => {
   // Guards against re-introducing the regression this PR briefly shipped:
   // forwarding the whole turn options to the handler. The refusal above the
-  // dial needs `options`; the HANDLER must keep its original arguments, because
-  // it pins the named lane by calling transferTo() back into this switchboard
-  // and that admission supersedes the turn it was called from. (That
-  // re-entrancy defect is pre-existing and tracked separately — this test only
-  // pins the argument contract.)
+  // dial needs `options`; the handler gets ONLY `{ signal }` so a cancelled
+  // turn stops the dial-back's own work without leaking `speculative` (which
+  // would make the handler refuse a dial the site already approved).
+  // Both sites now match: the classifier path used to withhold the signal
+  // because the handler's transferTo() re-entry superseded the turn — the
+  // delegation window fixes that cause, so it no longer has to.
   const seen: Array<{ who?: string; keys: string[] }> = [];
   const lexical = board([]);
   lexical.setCallMeHandler(async (who, options) => {
@@ -1998,7 +2080,7 @@ test("the dial sites pass the handler exactly what they always did", async () =>
 
   expect(seen).toEqual([
     { who: undefined, keys: ["signal"] }, // lexical: the turn signal, nothing else
-    { who: "coder", keys: [] },           // classifier: no options at all
+    { who: "coder", keys: ["signal"] },   // classifier: the same, no more
   ]);
 });
 
