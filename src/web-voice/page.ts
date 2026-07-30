@@ -813,7 +813,7 @@ async function ensureAudio() {
   }
 }
 
-async function startConversation() {
+async function startConversation(resume = false) {
   if (!TOKEN) {
     setStatus("authorization required — reopen the tokened Cicero URL once");
     return;
@@ -821,7 +821,7 @@ async function startConversation() {
   if (!(await ensureAudio())) return;
   if (audioCtx.state === "suspended") { try { await audioCtx.resume(); } catch (e) { /* ignore */ } }
   convOn = true; toggleLabel.textContent = "Stop conversation"; toggle.classList.add("on");
-  connectWs();
+  connectWs(resume);
   requestWakeLock();
 }
 
@@ -1065,7 +1065,7 @@ renderAuto();
         return;
       }
     }
-    await startConversation();
+    await startConversation(true);
     if (!convOn) {
       revealAutoStartFallback(); // preserve ensureAudio's useful mic error
       return;

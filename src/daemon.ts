@@ -1989,7 +1989,13 @@ export class CiceroDaemon {
         }
       })
       .finally(() => {
-        if (this.activeLocalTurn === controller) this.activeLocalTurn = null;
+        if (this.activeLocalTurn === controller) {
+          this.activeLocalTurn = null;
+          // A browser departure may have been suppressed while this turn was
+          // still the conversation. Re-evaluate at the owned completion point
+          // so its deferred work does not survive after the turn itself ends.
+          this.noteInputSurfaceDeparted();
+        }
         this.localTurnTasks.delete(task);
       });
     this.localTurnTasks.add(task);
@@ -2095,13 +2101,19 @@ export class CiceroDaemon {
   }
 
   /**
-   * True while the operator can still say something. Cicero is one assistant
-   * behind every surface — the same brain, switchboard and active lane — so a
-   * conversation is not over because one way in went away, only when the last
-   * one does.
+   * True while an operator surface or its accepted turn is still active. Cicero
+   * is one assistant behind every surface — the same brain, switchboard and
+   * active lane — so a conversation is not over because one way in went away,
+   * only when the last surface and its owned work are done.
    */
   private anyInputSurfaceActive(): boolean {
     if (this.voiceDesiredActive) return true;
+    // A running turn is the conversation even if the surface that delivered
+    // it has just gone away. Ignoring that interval let the last browser close
+    // call off a cold transfer while the local or operator-chat turn was still
+    // waiting to adopt it.
+    if (this.activeLocalTurn !== null) return true;
+    if ((this.webVoice?.activeJobCount() ?? 0) > 0) return true;
     // Not `clientCount() > 0`: a browser that dropped its socket is still in the
     // conversation for the length of its reconnect grace, and counting it as
     // gone let a microphone deactivation during that window call off work the

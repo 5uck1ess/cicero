@@ -12,18 +12,24 @@ test("web-voice page script parses and opts into the identity-safe protocol", ()
   expect(script).toContain('history.replaceState(null, ""');
 });
 
-test("automatic reconnects identify resumes while Start opens a new conversation", () => {
+test("automatic recovery identifies resumes while Start opens a new conversation", () => {
   const script = PAGE.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "";
   // These are source-level guards because this test cannot execute the page.
-  // Automatic recovery must preserve the waiting conversation, while an
-  // operator pressing Start must end any old conversation still in its grace.
+  // Backoff recovery and reload auto-start must preserve the waiting
+  // conversation, while an operator pressing Start must end any old
+  // conversation still in its grace.
   const schedule = script.slice(script.indexOf("function scheduleReconnect"), script.indexOf("function retryNow"));
   const retry = script.slice(script.indexOf("function retryNow"), script.indexOf('window.addEventListener("online"'));
   const start = script.slice(script.indexOf("async function startConversation"), script.indexOf("function stopConversation"));
+  const click = script.slice(script.indexOf('toggle.addEventListener("click"'), script.indexOf("// Push-to-talk controls"));
+  const autoStart = script.slice(script.indexOf("(async function autoStartOnLoad"), script.indexOf("</script>"));
   expect(schedule).toContain("connectWs(true)");
   expect(retry).toContain("connectWs(true)");
-  expect(start).toContain("connectWs();");
-  expect(start).not.toContain("connectWs(true)");
+  expect(start).toContain("async function startConversation(resume = false)");
+  expect(start).toContain("connectWs(resume)");
+  expect(click).toContain("startConversation()");
+  expect(click).not.toContain("startConversation(true)");
+  expect(autoStart).toContain("await startConversation(true)");
 });
 
 test("orb scales with the viewport instead of a fixed pixel size", () => {

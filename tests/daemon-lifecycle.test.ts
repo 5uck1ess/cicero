@@ -1027,6 +1027,7 @@ describe("CiceroDaemon lifecycle", () => {
         scheme: "http",
         port: 18_443,
         clientCount: () => 0,
+        activeJobCount: () => 0,
         conversationLive: () => false,
         notify: () => Promise.resolve(null),
         stop: () => Promise.resolve(),
@@ -1120,6 +1121,7 @@ describe("CiceroDaemon lifecycle", () => {
         scheme: "http",
         port: 18_444,
         clientCount: () => 0,
+        activeJobCount: () => 0,
         conversationLive: () => false,
         notify: () => Promise.resolve(null),
         stop: () => Promise.resolve(),
@@ -1178,7 +1180,7 @@ describe("deferred brain work", () => {
   function startableDaemon(
     home: string,
     capture?: (opts: Record<string, unknown>) => void,
-    webVoiceState: { clients?: number; live?: boolean } = {},
+    webVoiceState: { clients?: number; live?: boolean; activeJobs?: number } = {},
   ): CiceroDaemon {
     const config = loadConfig({}, { home });
     config.raw.headless = true;
@@ -1206,6 +1208,7 @@ describe("deferred brain work", () => {
           scheme: "http",
           port: 18_446,
           clientCount: () => webVoiceState.clients ?? 0,
+          activeJobCount: () => webVoiceState.activeJobs ?? 0,
           conversationLive: () => webVoiceState.live ?? (webVoiceState.clients ?? 0) > 0,
           notify: () => Promise.resolve(null),
           stop: () => Promise.resolve(),
@@ -1348,6 +1351,76 @@ describe("deferred brain work", () => {
 
       // ...and once the microphone is down too, the conversation really is over.
       (daemon as unknown as { voiceDesiredActive: boolean }).voiceDesiredActive = false;
+      ended?.();
+      expect(dropped).toBe(1);
+    } finally {
+      await daemon.stop().catch(() => { /* best effort */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("the last browser leaving while a local turn runs keeps deferred work until the turn finishes", async () => {
+    // The local turn itself is the remaining conversation. Looking only at mic
+    // intent and web sockets dropped its transfer even though its owned command
+    // had not returned yet.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-close-local-turn-"));
+    let serverOptions: Record<string, unknown> | null = null;
+    const daemon = startableDaemon(home, (opts) => { serverOptions = opts; });
+    let dropped = 0;
+    let releaseTurn!: () => void;
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let dispatched: Promise<void> | null = null;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      const state = daemon as unknown as {
+        handleCommand: (text: string, signal: AbortSignal) => Promise<void>;
+        dispatchCommand: (text: string) => Promise<void>;
+      };
+      state.handleCommand = async () => {
+        markStarted();
+        await turnGate;
+      };
+      dispatched = state.dispatchCommand("wait for the worker");
+      await started;
+
+      const ended = (serverOptions as unknown as { onConversationEnded?: () => void } | null)?.onConversationEnded;
+      expect(typeof ended).toBe("function");
+      ended?.();
+      expect(dropped).toBe(0);
+
+      releaseTurn();
+      await dispatched;
+      expect(dropped).toBe(1);
+    } finally {
+      releaseTurn();
+      await dispatched?.catch(() => {});
+      await daemon.stop().catch(() => { /* best effort */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("the last browser leaving during an operator chat job keeps deferred work until its lease releases", async () => {
+    // /api/chat holds the server's existing foreground job lease across
+    // brain.send(). If the daemon ignores that lease, a simultaneous browser
+    // departure calls off work the operator chat is still waiting to adopt.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-close-chat-job-"));
+    let serverOptions: Record<string, unknown> | null = null;
+    const webVoiceState = { clients: 0, live: false, activeJobs: 1 };
+    const daemon = startableDaemon(home, (opts) => { serverOptions = opts; }, webVoiceState);
+    let dropped = 0;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      const ended = (serverOptions as unknown as { onConversationEnded?: () => void } | null)?.onConversationEnded;
+      expect(typeof ended).toBe("function");
+      ended?.();
+      expect(dropped).toBe(0);
+
+      webVoiceState.activeJobs = 0;
+      // The real server reuses this callback when the /api/chat lease releases.
       ended?.();
       expect(dropped).toBe(1);
     } finally {
