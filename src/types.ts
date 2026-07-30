@@ -522,6 +522,8 @@ export interface Brain {
   setCallMeHandler?(handler: (who?: string, options?: BrainTurnOptions) => Promise<string>): void;
   /** Lane switchboard: TTS voice override for the current speaker (undefined = default voice). */
   activeLaneVoice?(): string | undefined;
+  /** Lane switchboard: discard queued control-turn voices owned by this exact caller signal. */
+  discardControlTurnVoices?(turnSignal: AbortSignal): void;
   /**
    * Unattended background turn (scheduled prompts). Not a spoken turn: lane
    * switchboards skip the control plane and never move the pinned lane;

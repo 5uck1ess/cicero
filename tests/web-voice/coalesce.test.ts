@@ -1,6 +1,8 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { SwitchboardBrain } from "../../src/brain/switchboard";
+import type { Brain } from "../../src/types";
 import {
   processWebTurn,
   streamWebTurn,
@@ -90,10 +92,14 @@ test("coalescing does not change what the transcript pane shows", async () => {
 // Off by default, and the default is one call per sentence — the behavior every
 // existing web-voice test asserts.
 test("with no coalesce configured every sentence is its own call", async () => {
-  const { deps, sink, synthesized, spoken } = harness();
+  let discards = 0;
+  const { deps, sink, synthesized, spoken } = harness({
+    discardControlTurnVoices: () => { discards += 1; },
+  });
   await streamWebTurn(new ArrayBuffer(8), deps, sink);
   expect(synthesized).toEqual(["One.", "Two.", "Three.", "Four.", "Five."]);
   expect(spoken).toEqual(["One.", "Two.", "Three.", "Four.", "Five."]);
+  expect(discards).toBe(0);
 });
 
 test("coalescing also applies when details replays a stored remainder", async () => {
@@ -186,6 +192,51 @@ test("a control turn is never merged, so the lane voice queue stays in step", as
   expect(voices).toEqual([]);
 });
 
+test("a failed coalesced control render cannot leak a lane voice into the next turn", async () => {
+  const transcripts = ["roll call", "louder"];
+  const usedFor: string[] = [];
+  let fail = true;
+  const primary: Brain = {
+    start: async () => {},
+    stop: async () => {},
+    send: async () => "Louder.",
+    sendStream: () => tokens("Louder."),
+    injectContext: () => {},
+    restart: async () => {},
+    health: async () => true,
+  };
+  const switchboard = new SwitchboardBrain(primary, {
+    coder: { brain: primary, voice: "voice-coder" },
+    think: { brain: primary, voice: "voice-think" },
+  });
+  const { deps, sink } = harness({
+    stt: { transcribe: async () => transcripts.shift() ?? "" },
+    brain: switchboard,
+    tts: {
+      generateAudio: async (text: string) => {
+        usedFor.push(`${switchboard.activeLaneVoice() ?? "NONE"}:${text}`);
+        await Bun.sleep(SYNTH_MS);
+        if (fail) {
+          fail = false;
+          throw new Error("synthesis failed");
+        }
+        return tinyWav();
+      },
+    },
+    voice: { state: { volume: 1, rate: 1 } },
+    coalesce: { maxChars: 240, passthroughFirst: 0 },
+    discardControlTurnVoices: switchboard.discardControlTurnVoices.bind(switchboard),
+  } as unknown as Partial<WebStreamDeps>);
+
+  await streamWebTurn(new ArrayBuffer(8), deps, sink);
+  await streamWebTurn(new ArrayBuffer(8), deps, sink);
+
+  expect(usedFor).toEqual([
+    "voice-coder:Coder checking in.",
+    "NONE:Louder.",
+  ]);
+});
+
 // The TLDR cap counts sentences, so a chunk may not straddle it. Codex's case:
 // cap 4, one passthrough sentence, then a single seven-sentence chunk — which
 // spoke all eight, gated nothing, and emitted no coda.
@@ -239,8 +290,11 @@ test("the daemon passes the configured coalesce to every browser entry point", (
   const source = readFileSync(join(import.meta.dir, "../../src/daemon.ts"), "utf8");
   const singleWavCall = source.slice(source.indexOf("onTurn: async (wav, options)"));
   expect(singleWavCall.slice(0, singleWavCall.indexOf("onTurnProbe")).includes("coalesce: this.config.ttsCoalesce")).toBe(true);
+  expect(singleWavCall.slice(0, singleWavCall.indexOf("onTurnProbe")).includes("discardControlTurnVoices")).toBe(true);
   const streamCall = source.slice(source.indexOf("onStreamTurn: async (wav, sink, options)"));
   expect(streamCall.slice(0, streamCall.indexOf("onSpeculate")).includes("coalesce: this.config.ttsCoalesce")).toBe(true);
+  expect(streamCall.slice(0, streamCall.indexOf("onSpeculate")).includes("discardControlTurnVoices")).toBe(true);
   const textCall = source.slice(source.indexOf("onTextTurn:"));
   expect(textCall.slice(0, 2_000).includes("coalesce: this.config.ttsCoalesce")).toBe(true);
+  expect(textCall.slice(0, 2_000).includes("discardControlTurnVoices")).toBe(true);
 });

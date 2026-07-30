@@ -37,6 +37,8 @@ export interface WebTurnDeps {
   tldr?: TldrOptions;
   /** Optional sentence coalescing before synthesis. Omit for one call per sentence. */
   coalesce?: CoalesceOptions;
+  /** Optional lane-switchboard cleanup for a coalesced control turn. */
+  discardControlTurnVoices?: Brain["discardControlTurnVoices"];
   /** Optional input-side tone tag — see {@link ToneOptions}. Omit for untagged turns. */
   tone?: ToneOptions;
   /**
@@ -96,6 +98,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
   // the brain input waits for it at most the grace window past the transcript.
   const tonePending = beginOwnedTone(deps.tone, wav, "web turn tone classification");
   let tmpFile: string | undefined;
+  let brainTurnSignal: AbortSignal | undefined;
   try {
     tmpFile = await writeSecureTempAudio(wav, { prefix: "cicero-web" });
     throwIfTurnAborted(deps.signal);
@@ -149,6 +152,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     throwIfTurnAborted(deps.signal);
     const systemContext = await captureOperationalContext(deps.operationalContext, deps.signal);
     throwIfTurnAborted(deps.signal);
+    brainTurnSignal = deps.signal;
     const reply = (await deps.brain.send(
       tag ? `${transcript}\n\n${tag}` : transcript,
       { signal: deps.signal, systemContext: systemContext ?? undefined },
@@ -198,6 +202,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     if (error instanceof Error) throw error;
     throw new Error("web voice turn failed", { cause: error });
   } finally {
+    discardCoalescedControlTurnVoices(deps, brainTurnSignal);
     await retainOwnedTone(tonePending, deps.trackBackground, deps.signal);
     if (tmpFile) await unlink(tmpFile).catch(() => { /* best-effort cleanup */ });
   }
@@ -232,6 +237,8 @@ export interface WebStreamDeps {
    * sentence, which is the default.
    */
   coalesce?: CoalesceOptions;
+  /** Optional lane-switchboard cleanup for a coalesced control turn. */
+  discardControlTurnVoices?: Brain["discardControlTurnVoices"];
   /** Optional interruption recovery — see {@link InterruptRecovery}. Omit to forget interrupted replies. */
   recover?: InterruptRecovery;
   /** Optional completed-reply replay — see {@link LastReplyOptions}. */
@@ -493,6 +500,16 @@ function sentenceGroups(
       yield { text: sentence, parts: [sentence] };
     }
   })();
+}
+
+function discardCoalescedControlTurnVoices(
+  deps: {
+    coalesce?: CoalesceOptions;
+    discardControlTurnVoices?: Brain["discardControlTurnVoices"];
+  },
+  turnSignal?: AbortSignal,
+): void {
+  if (deps.coalesce && turnSignal) deps.discardControlTurnVoices?.(turnSignal);
 }
 
 /** Keep a batch brain call lazy so abort polling starts while it is pending. */
@@ -1242,9 +1259,12 @@ async function streamReply(
         detached = true;
         const background = consumption
           .catch(() => { /* brain died mid-background — deliver what we have */ })
-          .then(() => deps.signal?.aborted
-            ? undefined
-            : parkCfg.onParked(parkedTexts.join(" "), transcript))
+          .then(() => {
+            discardCoalescedControlTurnVoices(deps, turnAbort?.signal);
+            return deps.signal?.aborted
+              ? undefined
+              : parkCfg.onParked(parkedTexts.join(" "), transcript);
+          })
           .finally(() => { deps.signal?.removeEventListener("abort", abortFromTransport); });
         if (deps.trackBackground) {
           if (!deps.trackBackground(background)) {
@@ -1293,7 +1313,10 @@ async function streamReply(
     throw new Error("streaming web reply failed", { cause: error });
   } finally {
     cancelFiller(); // turn over (or failed) — never speak a filler after the fact
-    if (!detached) deps.signal?.removeEventListener("abort", abortFromTransport);
+    if (!detached) {
+      discardCoalescedControlTurnVoices(deps, turnAbort?.signal);
+      deps.signal?.removeEventListener("abort", abortFromTransport);
+    }
   }
 }
 
