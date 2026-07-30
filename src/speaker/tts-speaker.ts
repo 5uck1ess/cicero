@@ -39,6 +39,8 @@ export class TTSSpeaker implements Speaker {
   /** Coalesces cleanup retries across concurrent speak/stop entry points. */
   private outputStopTask: Promise<void> | null = null;
   private readonly stopController = new AbortController();
+  /** Monotonic local-turn fence; a newer speak can never revive older work. */
+  private turnEpoch = 0;
 
   constructor(provider: TTSProvider, audioPlayer: AudioPlayer, fallback: Speaker) {
     this.provider = provider;
@@ -46,31 +48,34 @@ export class TTSSpeaker implements Speaker {
     this.fallback = fallback;
   }
 
-  async speak(text: string): Promise<void> {
-    if (this.stopped) return;
+  async speak(text: string, signal?: AbortSignal): Promise<void> {
+    const epoch = ++this.turnEpoch;
+    const stale = (): boolean =>
+      this.stopped || this.turnEpoch !== epoch || signal?.aborted === true;
+    if (stale()) return;
     await this.retryUnconfirmedOutputRelease();
     await this.waitForFallbackOutput();
-    if (this.stopped) return;
+    if (stale()) return;
     // Pin one generation for this whole utterance: a live swap mid-speak must not
     // move the second chunk onto a different provider than the first.
     const pin = this.pinTurnProvider();
     try {
       const healthy = await pin.provider.health();
-      if (this.stopped) return;
+      if (stale()) return;
       if (this.outputReleaseFailure) throw this.outputReleaseFailure;
       if (!healthy) {
         log("warn", `${pin.provider.name} unavailable, falling back`);
-        return this.speakFallbackOutput(text);
+        return this.speakFallbackOutput(text, stale, signal);
       }
 
       const sentences = this.splitSentences(text);
       if (sentences.length > 2 && text.length > 300) {
-        await this.speakChunked(sentences, pin.provider);
+        await this.speakChunked(sentences, pin.provider, stale);
       } else {
-        await this.speakSingle(text, pin.provider);
+        await this.speakSingle(text, pin.provider, stale);
       }
     } catch (err: unknown) {
-      if (this.stopped) return;
+      if (stale()) return;
       const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof AudioReleaseUnconfirmedError) {
         this.outputReleaseFailure = err;
@@ -78,7 +83,7 @@ export class TTSSpeaker implements Speaker {
         throw err;
       }
       log("warn", `TTS failed, using fallback: ${msg}`);
-      return this.speakFallbackOutput(text);
+      return this.speakFallbackOutput(text, stale, signal);
     } finally {
       pin.release();
     }
@@ -90,12 +95,16 @@ export class TTSSpeaker implements Speaker {
   }
 
   /** Invoke the fallback once and retain fatal ownership uncertainty globally. */
-  protected speakFallbackOutput(text: string): Promise<void> {
+  protected speakFallbackOutput(
+    text: string,
+    stale: () => boolean = () => this.stopped,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const ready = this.fallbackOutputTail;
     const task = ready.then(async () => {
-      if (this.stopped) return;
+      if (stale()) return;
       if (this.outputReleaseFailure) throw this.outputReleaseFailure;
-      await this.fallback.speak(text);
+      await this.fallback.speak(text, signal);
     }).catch((error: unknown) => {
       if (error instanceof AudioReleaseUnconfirmedError) {
         this.outputReleaseFailure = error;
@@ -114,24 +123,32 @@ export class TTSSpeaker implements Speaker {
     await this.retryUnconfirmedOutputRelease();
   }
 
-  private async speakSingle(text: string, provider: TTSProvider = this.provider): Promise<void> {
+  private async speakSingle(
+    text: string,
+    provider: TTSProvider,
+    stale: () => boolean,
+  ): Promise<void> {
     const audioData = await this.generateAudio(text, provider);
-    if (this.stopped) return;
+    if (stale()) return;
     log("info", `${provider.name}: ${audioData.byteLength} bytes`);
-    await this.playAudio(audioData);
+    await this.playAudio(audioData, stale);
   }
 
-  private async speakChunked(sentences: string[], provider: TTSProvider = this.provider): Promise<void> {
+  private async speakChunked(
+    sentences: string[],
+    provider: TTSProvider,
+    stale: () => boolean,
+  ): Promise<void> {
     log("info", `${provider.name}: chunked mode (${sentences.length} sentences)`);
     const firstAudio = await this.generateAudio(sentences[0], provider);
-    if (this.stopped) return;
+    if (stale()) return;
     const remaining = sentences.slice(1).join(" ");
     const [, restAudio] = await Promise.all([
-      this.playAudio(firstAudio),
+      this.playAudio(firstAudio, stale),
       remaining ? this.generateAudio(remaining, provider) : Promise.resolve(null),
     ]);
-    if (restAudio && !this.stopped) {
-      await this.playAudio(restAudio);
+    if (restAudio && !stale()) {
+      await this.playAudio(restAudio, stale);
     }
   }
 
@@ -145,13 +162,17 @@ export class TTSSpeaker implements Speaker {
     }
   }
 
-  protected async playAudio(audioData: ArrayBuffer): Promise<void> {
+  protected async playAudio(
+    audioData: ArrayBuffer,
+    stale: () => boolean = () => this.stopped,
+  ): Promise<void> {
     if (audioData.byteLength === 0) return;
     await this.waitForFallbackOutput();
-    if (this.stopped) return;
+    if (stale()) return;
     let tmpFile: string | undefined;
     try {
       tmpFile = await writeSecureTempAudio(audioData, { prefix: "cicero-tts" });
+      if (stale()) return;
       await this.audioPlayer.play(tmpFile);
     } finally {
       if (tmpFile) await unlink(tmpFile).catch(() => { /* best-effort cleanup */ });

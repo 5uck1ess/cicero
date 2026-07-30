@@ -36,19 +36,22 @@ its inference request cannot switch models; reconfigure the remote server, then
 swap without a model. Cicero constructs and starts
 the complete configured provider, including its fallback, then requires warmup
 and a healthy primary before cutover. Local managed replacements that would
-collide with the live provider are staged on a free loopback port. New work uses
-the replacement after cutover; work already holding the old generation is
-allowed to finish before that generation is stopped.
+collide with the live provider are staged on a free loopback port. A staged
+startup never adopts a listener that appeared on that port after selection; it
+discards that candidate and retries on another dynamically selected port.
+New work uses the replacement after cutover; work already holding the old
+generation is allowed to finish before that generation is stopped.
 When the requested backend is the configured fallback, Cicero promotes that
 full block and rotates the old primary into the fallback seat; it does not run
 or persist two copies of the promoted backend.
 
 Only a successful readiness gate is written to `~/.cicero/config.yaml`, using
-the same atomic private-file update as other configuration commands. A startup,
-warmup, health, or persistence failure cleans up the candidate and leaves both
-the active provider and config unchanged. One swap may run at a time across
-both roles, preventing simultaneous STT/TTS writes from racing the shared
-config file. A concurrent
+the same atomic private-file update as other configuration commands. Those
+whole-file rewrites share a bounded, crash-recoverable cross-process lease, so a
+concurrent command such as `cicero voice use` merges after the swap instead of
+renaming an older snapshot over it. A startup, warmup, health, or persistence
+failure cleans up the candidate and leaves both the active provider and config
+unchanged. One swap may run at a time across both roles. A concurrent
 request exits non-zero with `another provider swap is already in progress`.
 The command's success line names the active backend/model and says
 `Config persisted`; preparation and persistence failures explicitly say the

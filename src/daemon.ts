@@ -51,6 +51,10 @@ import type { TTSProvider, TTSProviderConfig } from "./backends/tts/provider";
 import { sttDefaultPort } from "./backends/stt/provider";
 import { ttsDefaultPort } from "./backends/tts/provider";
 import { isLocalHost } from "./backends/net";
+import {
+  StagedManagedServerPortError,
+  withStagedManagedServerPorts,
+} from "./backends/managed-server";
 import { startRuntimeControl, type RuntimeControlHandle, type SwapRequest, type SwapResult, type SwapRole } from "./runtime-control";
 import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "./backends/llm/openai";
 import type { LLMProviderConfig } from "./backends/llm/provider";
@@ -273,6 +277,8 @@ export interface DaemonOptions {
   /** Candidate factories for live swaps. Defaults to the built-in registry. */
   sttProviderFactory?: (config: RuntimeConfig) => STTProvider;
   ttsProviderFactory?: (config: RuntimeConfig) => TTSProvider;
+  /** Loopback staging-port injection for live-swap tests/embedders. */
+  voiceSwapPortAllocator?: () => Promise<number>;
   /** Override persistence and runtime-control publication for tests/embedders. */
   configPath?: string;
   runtimeControlDescriptorPath?: string;
@@ -358,10 +364,39 @@ function managedVoiceEndpoint(role: SwapRole, selection: STTProviderConfig | TTS
   return port === undefined ? null : `local:${port}`;
 }
 
+function stagedManagedPorts(role: SwapRole, plan: VoiceProviderSwapPlan): ReadonlySet<number> {
+  const ports = new Set<number>();
+  for (const selection of [plan.selection, plan.fallback]) {
+    if (!selection) continue;
+    const endpoint = managedVoiceEndpoint(role, selection);
+    if (endpoint) ports.add(Number(endpoint.slice("local:".length)));
+  }
+  return ports;
+}
+
+function stagedPortFailure(error: unknown, seen = new Set<unknown>()): StagedManagedServerPortError | null {
+  if (error instanceof StagedManagedServerPortError) return error;
+  if ((typeof error !== "object" && typeof error !== "function") || error === null || seen.has(error)) {
+    return null;
+  }
+  seen.add(error);
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      const found = stagedPortFailure(nested, seen);
+      if (found) return found;
+    }
+  }
+  if (error instanceof Error && error.cause !== undefined) {
+    return stagedPortFailure(error.cause, seen);
+  }
+  return null;
+}
+
 export async function planVoiceProviderSwap(
   config: RuntimeConfig,
   request: SwapRequest,
   allocatePort: () => Promise<number> = availableLoopbackPort,
+  unavailablePorts: ReadonlySet<number> = new Set(),
 ): Promise<VoiceProviderSwapPlan> {
   if (request.model !== undefined && FIXED_MODEL_BACKENDS[request.role].has(request.backend)) {
     throw new Error(
@@ -459,6 +494,7 @@ export async function planVoiceProviderSwap(
     const endpoint = managedVoiceEndpoint(role, provider);
     if (endpoint) occupied.add(endpoint);
   }
+  for (const port of unavailablePorts) occupied.add(`local:${port}`);
 
   const stage = async <T extends STTProviderConfig | TTSProviderConfig>(role: SwapRole, value: T): Promise<T> => {
     const staged = { ...value };
@@ -2249,18 +2285,49 @@ export class CiceroDaemon {
     if (this.voiceSwapRunning) throw new Error("another provider swap is already in progress");
     this.voiceSwapRunning = true;
     try {
-      const plan = await planVoiceProviderSwap(this.config, request);
-      const selection = plan.selection;
-      const result: SwapResult = {
-        role: request.role,
-        backend: selection.backend ?? request.backend,
-        ...(selection.model ? { model: selection.model } : {}),
-        status: "active",
-      };
-      const candidateConfig = new RuntimeConfig(structuredClone(this.config.raw));
-      candidateConfig.setVoiceBackend(request.role, selection);
-      if (plan.fallback) candidateConfig.setVoiceFallback(request.role, plan.fallback);
+      const unavailablePorts = new Set<number>();
+      for (let attempt = 0; attempt < STAGING_PORT_ATTEMPTS; attempt += 1) {
+        try {
+          return await this.swapVoiceProviderAttempt(request, options, unavailablePorts);
+        } catch (error: unknown) {
+          const conflict = stagedPortFailure(error);
+          if (!conflict || attempt + 1 >= STAGING_PORT_ATTEMPTS) throw error;
+          unavailablePorts.add(conflict.port);
+          log(
+            "warn",
+            `staged ${request.role.toUpperCase()} port ${conflict.port} became unavailable; selecting another loopback port`,
+          );
+        }
+      }
+      throw new Error(`could not stage ${request.role.toUpperCase()} on a free loopback port`);
+    } finally {
+      this.voiceSwapRunning = false;
+    }
+  }
 
+  private async swapVoiceProviderAttempt(
+    request: SwapRequest,
+    options: { signal?: AbortSignal },
+    unavailablePorts: ReadonlySet<number>,
+  ): Promise<SwapResult> {
+    const plan = await planVoiceProviderSwap(
+      this.config,
+      request,
+      this.options.voiceSwapPortAllocator ?? availableLoopbackPort,
+      unavailablePorts,
+    );
+    const selection = plan.selection;
+    const result: SwapResult = {
+      role: request.role,
+      backend: selection.backend ?? request.backend,
+      ...(selection.model ? { model: selection.model } : {}),
+      status: "active",
+    };
+    const candidateConfig = new RuntimeConfig(structuredClone(this.config.raw));
+    candidateConfig.setVoiceBackend(request.role, selection);
+    if (plan.fallback) candidateConfig.setVoiceFallback(request.role, plan.fallback);
+
+    await withStagedManagedServerPorts(stagedManagedPorts(request.role, plan), async (guard) => {
       if (request.role === "stt") {
         const slot = this.sttSlot;
         if (!slot) throw new Error("STT provider slot is unavailable");
@@ -2276,7 +2343,7 @@ export class CiceroDaemon {
           );
           this.config.setVoiceBackend("stt", selection);
           if (plan.fallback) this.config.setVoiceFallback("stt", plan.fallback);
-        }, options);
+        }, { ...options, validatePrepared: () => guard.assertNoConflict() });
       } else {
         const slot = this.ttsSlot;
         if (!slot) throw new Error("TTS provider slot is unavailable");
@@ -2305,6 +2372,7 @@ export class CiceroDaemon {
             if (plan.fallback) this.config.setVoiceFallback("tts", plan.fallback);
           }, {
             ...options,
+            validatePrepared: () => guard.assertNoConflict(),
             onCutover: () => {
               cutOver = true;
               // Not awaited: the cutover must stay synchronous. The clear itself
@@ -2333,11 +2401,9 @@ export class CiceroDaemon {
           }
         }
       }
-      log("ok", `${request.role.toUpperCase()} swapped live to ${result.backend}${result.model ? ` (${result.model})` : ""}`);
-      return result;
-    } finally {
-      this.voiceSwapRunning = false;
-    }
+    });
+    log("ok", `${request.role.toUpperCase()} swapped live to ${result.backend}${result.model ? ` (${result.model})` : ""}`);
+    return result;
   }
 
   private async drainLocalTurns(): Promise<void> {
@@ -2620,7 +2686,7 @@ export class CiceroDaemon {
             if (this.conversational?.isActive() && this.streamingSpeaker) {
               await this.streamingSpeaker.speakStream(asyncOnce(textToSpeak));
             } else {
-              await this.speaker.speak(textToSpeak);
+              await this.speaker.speak(textToSpeak, signal);
             }
             // Streaming and non-streaming both land here; noted once for both.
             // Not when the turn was interrupted, though: barge-in aborts the
@@ -2638,7 +2704,7 @@ export class CiceroDaemon {
         this.conversational.playSound("error");
       }
       if (this.config.ttsEnabled) {
-        await this.speakAndNote("That command failed. Check the log for details.");
+        await this.speakAndNote("That command failed. Check the log for details.", signal);
       }
     }
   }
@@ -2683,14 +2749,14 @@ export class CiceroDaemon {
         const refusal =
           "Computer use is connected to a cloud model. Enable compute dot allow cloud in the config if you want file and command observations sent there.";
         log("warn", "Computer-use request refused: configured LLM is public/cloud and compute.allow_cloud is false");
-        if (this.config.ttsEnabled) await this.speakAndNote(refusal);
+        if (this.config.ttsEnabled) await this.speakAndNote(refusal, signal);
         return;
       }
       const result = await runVoiceAction(goal, {
         llm: this.providers.llm,
         speak: async (text) => {
           signal.throwIfAborted();
-          await this.speakAndNote(text);
+          await this.speakAndNote(text, signal);
           signal.throwIfAborted();
         },
         listenOnce: async () => {
@@ -2719,14 +2785,14 @@ export class CiceroDaemon {
       }
       if (this.config.ttsEnabled && result.summary) {
         log("speak", "Speaking action result...");
-        await this.speakAndNote(result.summary);
+        await this.speakAndNote(result.summary, signal);
       }
     } catch (err: unknown) {
       if (signal.aborted) return;
       logError("Computer-use failed", err instanceof Error ? err : new Error(String(err)));
       if (this.conversational?.isActive()) this.conversational.playSound("error");
       if (this.config.ttsEnabled) {
-        await this.speakAndNote("That action failed. Check the log for details.");
+        await this.speakAndNote("That action failed. Check the log for details.", signal);
       }
     }
   }
@@ -2784,13 +2850,13 @@ export class CiceroDaemon {
       const tabName = result.params.tab.replace(/\s*\btab\b\s*$/i, "").trim();
       if (isVagueTabName(tabName)) {
         if (this.config.ttsEnabled) {
-          await this.speakAndNote("Which tab? Say the tab name, like 'switch to sales'.");
+          await this.speakAndNote("Which tab? Say the tab name, like 'switch to sales'.", signal);
         }
         return true;
       }
       this.brain.switchTab(tabName);
       if (this.config.ttsEnabled) {
-        await this.speakAndNote(`Switched brain to ${tabName} tab.`);
+        await this.speakAndNote(`Switched brain to ${tabName} tab.`, signal);
       }
       return true;
     }
@@ -2801,7 +2867,7 @@ export class CiceroDaemon {
       const tabName = (result.params.tab || "").replace(/\s*\btab\b\s*$/i, "").trim();
       if (!tabName || isVagueTabName(tabName)) {
         if (this.config.ttsEnabled) {
-          await this.speakAndNote("Which tab? Say the tab name.");
+          await this.speakAndNote("Which tab? Say the tab name.", signal);
         }
         return true;
       }
@@ -2816,7 +2882,7 @@ export class CiceroDaemon {
         // Simple switch
         this.brain.switchTab(tabName);
         if (this.config.ttsEnabled) {
-          await this.speakAndNote(`Switched brain to ${tabName} tab.`);
+          await this.speakAndNote(`Switched brain to ${tabName} tab.`, signal);
         }
       }
       return true;
@@ -3256,9 +3322,9 @@ export class CiceroDaemon {
    * `this.speaker` were invisible to both, so the next utterance could be judged
    * without the speech it was answering.
    */
-  private async speakAndNote(text: string): Promise<void> {
-    await this.speaker.speak(text);
-    this.conversational?.noteSpoken(text);
+  private async speakAndNote(text: string, signal?: AbortSignal): Promise<void> {
+    await this.speaker.speak(text, signal);
+    if (!signal?.aborted) this.conversational?.noteSpoken(text);
   }
 
   async stop(): Promise<void> {

@@ -2,6 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -12,8 +13,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parse as parseYaml } from "yaml";
-import { loadConfig, updateConfigFields } from "../src/config";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { acquireConfigUpdateLock, loadConfig, updateConfigFields } from "../src/config";
 
 const mode = (file: string): number => statSync(file).mode & 0o777;
 
@@ -40,6 +41,80 @@ describe("updateConfigFields", () => {
     const parsed = parseYaml(await Bun.file(path).text());
     expect(parsed.voice).toBe("athena"); // overwritten
     expect(parsed.tts_enabled).toBe(true); // preserved
+  });
+
+  test("a concurrent config command reads after an in-progress swap commit", async () => {
+    updateConfigFields({
+      voice: "old-voice",
+      stt: { backend: "faster-whisper", model: "old-model" },
+    }, path);
+
+    const lock = acquireConfigUpdateLock(path);
+    const configModule = new URL("../src/config.ts", import.meta.url).href;
+    const child = Bun.spawn([
+      process.execPath,
+      "-e",
+      [
+        `import { updateConfigFields } from ${JSON.stringify(configModule)};`,
+        `process.stdout.write("ready\\n");`,
+        `updateConfigFields({ voice: "new-voice" }, process.env.CICERO_TEST_CONFIG_PATH);`,
+        `process.stdout.write("done\\n");`,
+      ].join("\n"),
+    ], {
+      env: { ...process.env, CICERO_TEST_CONFIG_PATH: path },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const reader = child.stdout.getReader();
+    const decoder = new TextDecoder();
+    let output = "";
+    try {
+      while (!output.includes("\n")) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        output += decoder.decode(chunk.value, { stream: true });
+      }
+      expect(output.split("\n")[0]).toBe("ready");
+
+      // Model the swap's atomic rename while it owns the same lease. The voice
+      // command cannot have taken its stale snapshot yet.
+      writeFileSync(path, stringifyYaml({
+        voice: "old-voice",
+        stt: { backend: "faster-whisper", model: "new-model" },
+      }));
+    } finally {
+      lock.release();
+    }
+    const exitCode = await child.exited;
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      output += decoder.decode(chunk.value, { stream: true });
+    }
+    output += decoder.decode();
+    reader.releaseLock();
+
+    expect(exitCode).toBe(0);
+    expect(output).toContain("done");
+    expect(parseYaml(readFileSync(path, "utf8"))).toMatchObject({
+      voice: "new-voice",
+      stt: { backend: "faster-whisper", model: "new-model" },
+    });
+  });
+
+  test("a crashed writer's stale lease does not block the next config update", () => {
+    const lockPath = `${path}.update-lock`;
+    mkdirSync(lockPath, { mode: 0o700 });
+    writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+      pid: 2_147_483_647,
+      token: "synthetic-stale-owner",
+      acquiredAtMs: 0,
+    }));
+
+    updateConfigFields({ voice: "recovered" }, path);
+
+    expect(parseYaml(readFileSync(path, "utf8")).voice).toBe("recovered");
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   test("deep-merges nested tts object", async () => {

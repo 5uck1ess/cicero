@@ -1,4 +1,12 @@
-import { readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { randomUUID } from "node:crypto";
 import { join, dirname } from "path";
 import { parse as parseYaml, parseDocument as parseYamlDocument, stringify as stringifyYaml } from "yaml";
@@ -24,6 +32,131 @@ import { webVoiceTokenProblem } from "./web-voice/startup-policy";
 
 const CONFIG_FILE = "config.yaml";
 const ACTIONS_FILE = "actions.yaml";
+const CONFIG_UPDATE_LOCK_WAIT_MS = 50;
+const CONFIG_UPDATE_LOCK_TIMEOUT_MS = 35_000;
+const CONFIG_UPDATE_LOCK_STALE_MS = 30_000;
+
+interface ConfigUpdateLockOwner {
+  pid: number;
+  token: string;
+  acquiredAtMs: number;
+}
+
+export interface ConfigUpdateLock {
+  release(): void;
+}
+
+const configLockWaiter = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: unknown) {
+    return errorCode(error) !== "ESRCH";
+  }
+}
+
+function staleConfigLock(lockPath: string, nowMs: number): boolean {
+  let ageMs: number;
+  try {
+    ageMs = Math.max(0, nowMs - statSync(lockPath).mtimeMs);
+  } catch {
+    return false;
+  }
+  try {
+    const owner = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8")) as Partial<ConfigUpdateLockOwner>;
+    if (
+      typeof owner.pid !== "number"
+      || !Number.isSafeInteger(owner.pid)
+      || owner.pid <= 0
+      || typeof owner.acquiredAtMs !== "number"
+    ) {
+      return ageMs >= CONFIG_UPDATE_LOCK_WAIT_MS * 2;
+    }
+    return !processIsAlive(owner.pid)
+      || nowMs - owner.acquiredAtMs >= CONFIG_UPDATE_LOCK_STALE_MS;
+  } catch {
+    // A creator can be between mkdir and owner publication. Only recover it
+    // after a short grace so a live writer is never mistaken for crash debris.
+    return ageMs >= CONFIG_UPDATE_LOCK_WAIT_MS * 2;
+  }
+}
+
+function removeStaleConfigLock(lockPath: string): void {
+  const quarantine = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+  try {
+    renameSync(lockPath, quarantine);
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") return;
+    throw error;
+  }
+  rmSync(quarantine, { recursive: true, force: true });
+}
+
+/**
+ * Serialize whole-file config rewrites across Cicero processes. The directory
+ * lease is crash-recoverable and time-bounded, so a dead writer cannot wedge
+ * later operator commands indefinitely.
+ */
+export function acquireConfigUpdateLock(
+  configPath: string = join(ciceroHome(), CONFIG_FILE),
+): ConfigUpdateLock {
+  ensurePrivateDirectorySync(dirname(configPath));
+  const lockPath = `${configPath}.update-lock`;
+  const token = randomUUID();
+  const deadlineMs = Date.now() + CONFIG_UPDATE_LOCK_TIMEOUT_MS;
+
+  while (true) {
+    try {
+      mkdirSync(lockPath, { mode: 0o700 });
+      const owner: ConfigUpdateLockOwner = { pid: process.pid, token, acquiredAtMs: Date.now() };
+      writeFileSync(join(lockPath, "owner.json"), JSON.stringify(owner), {
+        flag: "wx",
+        mode: PRIVATE_FILE_MODE,
+      });
+      let released = false;
+      return {
+        release(): void {
+          if (released) return;
+          released = true;
+          try {
+            const current = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8")) as Partial<ConfigUpdateLockOwner>;
+            if (current.token !== token) return;
+            rmSync(lockPath, { recursive: true, force: true });
+          } catch {
+            // A stale-lease recovery or prior release already removed it.
+          }
+        },
+      };
+    } catch (error: unknown) {
+      if (errorCode(error) !== "EEXIST") {
+        // If owner publication failed after mkdir, do not leave our empty
+        // directory blocking the next writer.
+        try { rmSync(lockPath, { recursive: true, force: true }); } catch { /* best-effort rollback */ }
+        throw error;
+      }
+    }
+
+    const nowMs = Date.now();
+    if (staleConfigLock(lockPath, nowMs)) {
+      removeStaleConfigLock(lockPath);
+      continue;
+    }
+    if (nowMs >= deadlineMs) {
+      throw new Error(
+        `Timed out waiting for another Cicero process to finish updating ${configPath}; retry the command.`,
+      );
+    }
+    Atomics.wait(configLockWaiter, 0, 0, Math.min(CONFIG_UPDATE_LOCK_WAIT_MS, deadlineMs - nowMs));
+  }
+}
 
 export const DEFAULT_CONFIG: CiceroConfig = {
   tts_enabled: true,
@@ -630,55 +763,60 @@ export function updateConfigFields(
   options: ConfigUpdateOptions = {},
 ): void {
   ensurePrivateDirectorySync(dirname(configPath));
-  let existing: Record<string, unknown> = {};
-  if (ensurePrivateFileIfExistsSync(configPath)) {
-    const original = readFileSync(configPath, "utf-8");
-    try {
-      const parsed = parseYaml(original);
-      existing = requireConfigMapping(
-        parsed === null && isBlankYamlDocument(original) ? {} : parsed,
-        configPath,
-      );
-    } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `Refusing to update ${configPath}: the existing file is not valid mapping YAML. `
-        + `Fix it manually or move it aside, then retry. The original file was not changed. ${detail}`,
-        { cause: error },
-      );
-    }
-  }
-  const incoming = fields as Record<string, unknown>;
-  for (const key of options.replaceTopLevel ?? []) {
-    const name = String(key);
-    const preserveRule = options.preserveTopLevelWhenSame?.find((rule) => rule.key === key);
-    const currentValue = existing[name];
-    const incomingValue = incoming[name];
-    const currentDiscriminator = preserveRule && isMapping(currentValue)
-      ? currentValue[preserveRule.discriminator]
-      : undefined;
-    const incomingDiscriminator = preserveRule && isMapping(incomingValue)
-      ? incomingValue[preserveRule.discriminator]
-      : undefined;
-    const preserve = currentDiscriminator !== undefined
-      && currentDiscriminator === incomingDiscriminator;
-    if (!preserve) delete existing[name];
-  }
-  for (const rule of options.clearNested ?? []) {
-    const currentValue = existing[String(rule.key)];
-    if (!isMapping(currentValue)) continue;
-    for (const field of rule.fields) delete currentValue[field];
-  }
-  const merged = deepMerge(existing, fields);
-  const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
+  const lock = acquireConfigUpdateLock(configPath);
   try {
-    writeFileSync(tmp, stringifyYaml(merged), { flag: "wx", mode: PRIVATE_FILE_MODE });
-    ensurePrivateFileSync(tmp);
-    renameSync(tmp, configPath);
-    ensurePrivateFileSync(configPath);
-  } catch (error: unknown) {
-    try { unlinkSync(tmp); } catch { /* absent after rename, or best-effort cleanup */ }
-    throw error;
+    let existing: Record<string, unknown> = {};
+    if (ensurePrivateFileIfExistsSync(configPath)) {
+      const original = readFileSync(configPath, "utf-8");
+      try {
+        const parsed = parseYaml(original);
+        existing = requireConfigMapping(
+          parsed === null && isBlankYamlDocument(original) ? {} : parsed,
+          configPath,
+        );
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Refusing to update ${configPath}: the existing file is not valid mapping YAML. `
+          + `Fix it manually or move it aside, then retry. The original file was not changed. ${detail}`,
+          { cause: error },
+        );
+      }
+    }
+    const incoming = fields as Record<string, unknown>;
+    for (const key of options.replaceTopLevel ?? []) {
+      const name = String(key);
+      const preserveRule = options.preserveTopLevelWhenSame?.find((rule) => rule.key === key);
+      const currentValue = existing[name];
+      const incomingValue = incoming[name];
+      const currentDiscriminator = preserveRule && isMapping(currentValue)
+        ? currentValue[preserveRule.discriminator]
+        : undefined;
+      const incomingDiscriminator = preserveRule && isMapping(incomingValue)
+        ? incomingValue[preserveRule.discriminator]
+        : undefined;
+      const preserve = currentDiscriminator !== undefined
+        && currentDiscriminator === incomingDiscriminator;
+      if (!preserve) delete existing[name];
+    }
+    for (const rule of options.clearNested ?? []) {
+      const currentValue = existing[String(rule.key)];
+      if (!isMapping(currentValue)) continue;
+      for (const field of rule.fields) delete currentValue[field];
+    }
+    const merged = deepMerge(existing, fields);
+    const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      writeFileSync(tmp, stringifyYaml(merged), { flag: "wx", mode: PRIVATE_FILE_MODE });
+      ensurePrivateFileSync(tmp);
+      renameSync(tmp, configPath);
+      ensurePrivateFileSync(configPath);
+    } catch (error: unknown) {
+      try { unlinkSync(tmp); } catch { /* absent after rename, or best-effort cleanup */ }
+      throw error;
+    }
+  } finally {
+    lock.release();
   }
 }
 
@@ -696,58 +834,63 @@ export function setWebVoiceToken(
   const problem = webVoiceTokenProblem(token);
   if (problem) throw new Error(`web_voice.token ${problem}`);
   ensurePrivateDirectorySync(dirname(configPath));
-  const original = ensurePrivateFileIfExistsSync(configPath)
-    ? readFileSync(configPath, "utf8")
-    : "";
-  let updated: string;
-  const lines = original.split("\n");
-  const webVoiceLine = lines.findIndex((line) => /^web_voice\s*:\s*(?:#.*)?\r?$/.test(line));
-  if (webVoiceLine >= 0) {
-    let blockEnd = lines.length;
-    for (let index = webVoiceLine + 1; index < lines.length; index += 1) {
-      const line = lines[index]!;
-      if (line.trim() === "" || /^\s+#/.test(line)) continue;
-      if (!/^\s/.test(line)) {
-        blockEnd = index;
-        break;
-      }
-    }
-    const tokenLine = lines.findIndex((line, index) => (
-      index > webVoiceLine
-      && index < blockEnd
-      && /^\s+token\s*:/.test(line)
-    ));
-    if (tokenLine >= 0) {
-      const match = lines[tokenLine]!.match(/^(\s+token\s*:\s*)([^#\r]*?)(\s+#.*)?(\r?)$/);
-      if (!match) throw new Error(`Refusing to update ${configPath}: web_voice.token uses an unsupported YAML form`);
-      lines[tokenLine] = `${match[1]}${JSON.stringify(token)}${match[3] ?? ""}${match[4] ?? ""}`;
-    } else {
-      const indentation = lines
-        .slice(webVoiceLine + 1, blockEnd)
-        .map((line) => line.match(/^(\s+)\S/))
-        .find((match) => match)?.[1] ?? "  ";
-      const carriageReturn = lines[webVoiceLine]!.endsWith("\r") ? "\r" : "";
-      lines.splice(webVoiceLine + 1, 0, `${indentation}token: ${JSON.stringify(token)}${carriageReturn}`);
-    }
-    updated = lines.join("\n");
-  } else {
-    const document = parseYamlDocument(original || "{}\n");
-    if (document.errors.length > 0) {
-      throw new Error(`Refusing to update ${configPath}: the existing file is not valid YAML`);
-    }
-    document.setIn(["web_voice", "token"], token);
-    updated = String(document);
-  }
-
-  const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
+  const lock = acquireConfigUpdateLock(configPath);
   try {
-    writeFileSync(tmp, updated, { flag: "wx", mode: PRIVATE_FILE_MODE });
-    ensurePrivateFileSync(tmp);
-    renameSync(tmp, configPath);
-    ensurePrivateFileSync(configPath);
-  } catch (error: unknown) {
-    try { unlinkSync(tmp); } catch { /* absent after rename, or best-effort cleanup */ }
-    throw error;
+    const original = ensurePrivateFileIfExistsSync(configPath)
+      ? readFileSync(configPath, "utf8")
+      : "";
+    let updated: string;
+    const lines = original.split("\n");
+    const webVoiceLine = lines.findIndex((line) => /^web_voice\s*:\s*(?:#.*)?\r?$/.test(line));
+    if (webVoiceLine >= 0) {
+      let blockEnd = lines.length;
+      for (let index = webVoiceLine + 1; index < lines.length; index += 1) {
+        const line = lines[index]!;
+        if (line.trim() === "" || /^\s+#/.test(line)) continue;
+        if (!/^\s/.test(line)) {
+          blockEnd = index;
+          break;
+        }
+      }
+      const tokenLine = lines.findIndex((line, index) => (
+        index > webVoiceLine
+        && index < blockEnd
+        && /^\s+token\s*:/.test(line)
+      ));
+      if (tokenLine >= 0) {
+        const match = lines[tokenLine]!.match(/^(\s+token\s*:\s*)([^#\r]*?)(\s+#.*)?(\r?)$/);
+        if (!match) throw new Error(`Refusing to update ${configPath}: web_voice.token uses an unsupported YAML form`);
+        lines[tokenLine] = `${match[1]}${JSON.stringify(token)}${match[3] ?? ""}${match[4] ?? ""}`;
+      } else {
+        const indentation = lines
+          .slice(webVoiceLine + 1, blockEnd)
+          .map((line) => line.match(/^(\s+)\S/))
+          .find((match) => match)?.[1] ?? "  ";
+        const carriageReturn = lines[webVoiceLine]!.endsWith("\r") ? "\r" : "";
+        lines.splice(webVoiceLine + 1, 0, `${indentation}token: ${JSON.stringify(token)}${carriageReturn}`);
+      }
+      updated = lines.join("\n");
+    } else {
+      const document = parseYamlDocument(original || "{}\n");
+      if (document.errors.length > 0) {
+        throw new Error(`Refusing to update ${configPath}: the existing file is not valid YAML`);
+      }
+      document.setIn(["web_voice", "token"], token);
+      updated = String(document);
+    }
+
+    const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      writeFileSync(tmp, updated, { flag: "wx", mode: PRIVATE_FILE_MODE });
+      ensurePrivateFileSync(tmp);
+      renameSync(tmp, configPath);
+      ensurePrivateFileSync(configPath);
+    } catch (error: unknown) {
+      try { unlinkSync(tmp); } catch { /* absent after rename, or best-effort cleanup */ }
+      throw error;
+    }
+  } finally {
+    lock.release();
   }
 }
 

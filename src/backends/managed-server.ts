@@ -1,4 +1,5 @@
 import { log } from "../logger";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   BoundedCommandError,
   runBoundedCommand,
@@ -33,7 +34,7 @@ export interface ManagedProcess {
   supervisorTask?: Promise<void> | null;
 }
 
-interface StartOpts {
+export interface StartOpts {
   name: string;
   port: number;
   command: string[];
@@ -61,6 +62,10 @@ interface StartOpts {
    * without this the configured port is silently ignored.
    */
   env?: Record<string, string>;
+  /** Fetch injection for deterministic startup/ownership tests. */
+  fetcher?: typeof fetch;
+  /** Owned-process injection for deterministic startup/ownership tests. */
+  spawner?: typeof spawnOwnedProcess;
 }
 
 const REVIVE_BACKOFF_MS = [1000, 5000, 15000];
@@ -74,6 +79,63 @@ const DOCKER_STOP_TIMEOUT_MS = 10_000;
 const DOCKER_OUTPUT_LIMIT_BYTES = 4 * 1024;
 const DOCKER_CONTAINER_ID_PATTERN = /^[a-f0-9]{64}$/;
 const stderrTailCaptures = new WeakMap<ManagedSubprocess, StderrTailCapture>();
+
+export type StagedManagedServerPortOutcome = "adoption-refused" | "bind-failed";
+
+export class StagedManagedServerPortError extends Error {
+  constructor(
+    readonly port: number,
+    readonly outcome: StagedManagedServerPortOutcome,
+  ) {
+    super(
+      outcome === "adoption-refused"
+        ? `staged provider port ${port} was occupied by a healthy process Cicero did not start`
+        : `staged provider could not bind loopback port ${port}`,
+    );
+    this.name = "StagedManagedServerPortError";
+  }
+}
+
+interface StagedManagedServerState {
+  ports: ReadonlySet<number>;
+  conflicts: Map<number, StagedManagedServerPortOutcome>;
+}
+
+export interface StagedManagedServerGuard {
+  assertNoConflict(): void;
+}
+
+const stagedManagedServerState = new AsyncLocalStorage<StagedManagedServerState>();
+
+/**
+ * Mark managed servers started while preparing a live swap as spawn-only.
+ * Ordinary daemon startup keeps its deliberate healthy-server adoption.
+ */
+export function withStagedManagedServerPorts<T>(
+  ports: ReadonlySet<number>,
+  work: (guard: StagedManagedServerGuard) => Promise<T>,
+): Promise<T> {
+  const state: StagedManagedServerState = { ports, conflicts: new Map() };
+  const guard: StagedManagedServerGuard = {
+    assertNoConflict(): void {
+      const first = state.conflicts.entries().next().value as
+        | [number, StagedManagedServerPortOutcome]
+        | undefined;
+      if (first) throw new StagedManagedServerPortError(first[0], first[1]);
+    },
+  };
+  return stagedManagedServerState.run(state, () => work(guard));
+}
+
+function stagedPortError(
+  port: number,
+  outcome: StagedManagedServerPortOutcome,
+): StagedManagedServerPortError | null {
+  const state = stagedManagedServerState.getStore();
+  if (!state?.ports.has(port)) return null;
+  if (!state.conflicts.has(port)) state.conflicts.set(port, outcome);
+  return new StagedManagedServerPortError(port, outcome);
+}
 
 interface StderrTailCapture {
   lines: string[];
@@ -162,7 +224,7 @@ async function runSupervisor(
       log("error", `${opts.name} server exited unexpectedly (code ${code}) — reviving in ${delay / 1000}s (attempt ${attempt + 1}/${REVIVE_BACKOFF_MS.length})`);
       if (!(await waitForLifecycleDelay(delay, signal)) || mp.stopping) return;
 
-      const next = spawnOwnedProcess(opts.command, {
+      const next = (opts.spawner ?? spawnOwnedProcess)(opts.command, {
         stdout: "ignore",
         stderr: "pipe",
         env: { ...process.env, ...opts.env },
@@ -178,6 +240,7 @@ async function runSupervisor(
         opts.timeoutMs ?? 60000,
         opts.intervalMs ?? 1000,
         signal,
+        opts.fetcher,
       );
 
       if (outcome === "stopped" || signal.aborted || mp.stopping) {
@@ -241,21 +304,27 @@ async function checkHealth(
   url: string,
   timeoutMs: number = PROVIDER_TIMEOUT_MS.health,
   signal?: AbortSignal,
+  fetcher: typeof fetch = fetch,
 ): Promise<boolean> {
   if (signal?.aborted) return false;
   try {
-    const probe = fetch(url, { signal: providerSignal(timeoutMs, signal) }).then((res) => responseIsOk(res));
+    const probe = fetcher(url, { signal: providerSignal(timeoutMs, signal) }).then((res) => responseIsOk(res));
     return signal ? await valueOrAbort(probe, signal, false) : await probe;
   } catch {
     return false;
   }
 }
 
-async function waitForHealth(url: string, timeoutMs: number, intervalMs: number): Promise<boolean> {
+async function waitForHealth(
+  url: string,
+  timeoutMs: number,
+  intervalMs: number,
+  fetcher: typeof fetch = fetch,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const probeBudgetMs = Math.max(1, Math.min(PROVIDER_TIMEOUT_MS.health, deadline - Date.now()));
-    if (await checkHealth(url, probeBudgetMs)) return true;
+    if (await checkHealth(url, probeBudgetMs, undefined, fetcher)) return true;
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
     await Bun.sleep(Math.min(Math.max(0, intervalMs), remainingMs));
@@ -274,6 +343,7 @@ async function waitForHealthOrExit(
   timeoutMs: number,
   intervalMs: number,
   signal?: AbortSignal,
+  fetcher: typeof fetch = fetch,
 ): Promise<"healthy" | "exited" | "timeout" | "stopped"> {
   // Install the exit observer as soon as readiness begins. Polling only Bun's
   // nullable exitCode fields leaves a rejected `exited` promise unhandled and
@@ -290,7 +360,7 @@ async function waitForHealthOrExit(
     if (signal?.aborted) return "stopped";
     if (processExited()) return "exited";
     const probeBudgetMs = Math.max(1, Math.min(PROVIDER_TIMEOUT_MS.health, deadline - Date.now()));
-    const healthy = await checkHealth(url, probeBudgetMs, signal);
+    const healthy = await checkHealth(url, probeBudgetMs, signal, fetcher);
     if (processExited()) return "exited";
     if (healthy) return "healthy";
     if (signal?.aborted) return "stopped";
@@ -398,7 +468,9 @@ function collectStderrTail(proc: ManagedSubprocess, maxLines = 40): StderrTailCa
 export async function startManagedServer(opts: StartOpts): Promise<ManagedProcess | null> {
   const { name, port, command, healthUrl, timeoutMs = 60000, intervalMs = 1000, mode = "process" } = opts;
 
-  if (await checkHealth(healthUrl)) {
+  if (await checkHealth(healthUrl, PROVIDER_TIMEOUT_MS.health, undefined, opts.fetcher)) {
+    const conflict = stagedPortError(port, "adoption-refused");
+    if (conflict) throw conflict;
     log("ok", `${name} server already running on :${port}`);
     return { proc: null, port, managed: false, mode };
   }
@@ -448,7 +520,7 @@ export async function startManagedServer(opts: StartOpts): Promise<ManagedProces
       return null;
     }
 
-    const healthy = await waitForHealth(healthUrl, timeoutMs, intervalMs);
+    const healthy = await waitForHealth(healthUrl, timeoutMs, intervalMs, opts.fetcher);
     if (healthy) {
       log("ok", `${name} server ready on :${port} (docker: ${containerId.substring(0, 12)})`);
       return { proc: null, containerId, dockerCommand, port, managed: true, mode };
@@ -466,16 +538,27 @@ export async function startManagedServer(opts: StartOpts): Promise<ManagedProces
     return null;
   }
 
-  const proc = spawnOwnedProcess(command, {
+  const proc = (opts.spawner ?? spawnOwnedProcess)(command, {
     stdout: "ignore", stderr: "pipe", env: { ...process.env, ...opts.env },
-  });
+  }) as ManagedSubprocess;
   const stderrTail = collectStderrTail(proc);
 
-  const outcome = await waitForHealthOrExit(proc, healthUrl, timeoutMs, intervalMs, opts.signal);
+  const outcome = await waitForHealthOrExit(
+    proc,
+    healthUrl,
+    timeoutMs,
+    intervalMs,
+    opts.signal,
+    opts.fetcher,
+  );
   if (outcome === "healthy") {
     log("ok", `${name} server ready on :${port}`);
     const mp: ManagedProcess = { proc, port, managed: true, mode };
-    if (opts.supervise) superviseProcess(mp, opts);
+    if (opts.supervise) {
+      // A supervised lifetime must not retain the short staging transaction's
+      // async context after ownership has already been proven.
+      stagedManagedServerState.exit(() => superviseProcess(mp, opts));
+    }
     return mp;
   }
 
@@ -493,6 +576,21 @@ export async function startManagedServer(opts: StartOpts): Promise<ManagedProces
   stderrTailCaptures.delete(proc);
   if (stderrTail.lines.length > 0) {
     log("error", `${name} stderr (last ${stderrTail.lines.length} lines):\n  ${stderrTail.lines.join("\n  ")}`);
+  }
+  if (outcome === "exited") {
+    const listenerWonRace = await checkHealth(
+      healthUrl,
+      PROVIDER_TIMEOUT_MS.health,
+      undefined,
+      opts.fetcher,
+    );
+    const bindFailure = listenerWonRace || stderrTail.lines.some((line) =>
+      /EADDRINUSE|address already in use|failed to bind|bind(?:ing)?[^\n]*failed/i.test(line)
+    );
+    if (bindFailure) {
+      const conflict = stagedPortError(port, "bind-failed");
+      if (conflict) throw conflict;
+    }
   }
   return null;
 }

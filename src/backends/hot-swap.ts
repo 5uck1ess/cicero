@@ -181,7 +181,12 @@ export class ProviderSlot<T extends SwappableProvider> {
   async swap(
     candidate: T,
     persist: () => void | Promise<void>,
-    options: { signal?: AbortSignal; onCutover?: () => void } = {},
+    options: {
+      signal?: AbortSignal;
+      onCutover?: () => void;
+      /** Final candidate-specific gate immediately before persistence. */
+      validatePrepared?: () => void | Promise<void>;
+    } = {},
   ): Promise<void> {
     if (this.closed) {
       await this.stopProvider(candidate, "rejected candidate cleanup");
@@ -237,6 +242,7 @@ export class ProviderSlot<T extends SwappableProvider> {
         if (options.signal?.aborted) {
           throw new Error("swap request was cancelled before it was committed");
         }
+        await options.validatePrepared?.();
         await persist();
       } catch (error) {
         // A shutdown may already have claimed and reaped this candidate; then

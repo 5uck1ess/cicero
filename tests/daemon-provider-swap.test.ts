@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { randomInt } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProviderSlot } from "../src/backends/hot-swap";
+import {
+  StagedManagedServerPortError,
+  startManagedServer,
+} from "../src/backends/managed-server";
 import type { STTProvider } from "../src/backends/stt/provider";
 import type { TTSProvider } from "../src/backends/tts/provider";
 import { loadConfig, updateConfigFields, type RuntimeConfig } from "../src/config";
@@ -22,6 +27,42 @@ class FakeVoiceProvider implements STTProvider, TTSProvider {
   async stop(): Promise<void> { this.stops += 1; }
   async transcribe(): Promise<string> { return this.name; }
   async generateAudio(): Promise<ArrayBuffer> { return new ArrayBuffer(0); }
+}
+
+class StagedOwnershipProvider extends FakeVoiceProvider {
+  startOutcome: "adopted" | "adoption-refused" | "owned" | null = null;
+
+  constructor(
+    name: string,
+    readonly port: number,
+    private readonly compatibleListenerAlreadyThere: boolean,
+  ) {
+    super(name);
+  }
+
+  override async start(): Promise<void> {
+    this.starts += 1;
+    if (!this.compatibleListenerAlreadyThere) {
+      this.startOutcome = "owned";
+      return;
+    }
+    try {
+      const managed = await startManagedServer({
+        name: this.name,
+        port: this.port,
+        command: [process.execPath],
+        healthUrl: `http://127.0.0.1:${this.port}/health`,
+        fetcher: async () => new Response("compatible", { status: 200 }),
+      });
+      this.startOutcome = managed?.managed ? "owned" : "adopted";
+    } catch (error: unknown) {
+      if (error instanceof StagedManagedServerPortError) {
+        expect(error.outcome).toBe("adoption-refused");
+        this.startOutcome = "adoption-refused";
+      }
+      throw error;
+    }
+  }
 }
 
 interface SwapHarness {
@@ -176,3 +217,67 @@ describe(`${role.toUpperCase()} daemon swap transaction`, () => {
     });
   });
 }
+
+test("a compatible listener that steals a staged port is refused and the swap retries another port", async () => {
+  root = mkdtempSync(join(tmpdir(), "cicero-staged-port-swap-"));
+  const configPath = join(root, "config.yaml");
+  const used = new Set<number>();
+  const nextPort = (): number => {
+    let port: number;
+    do port = randomInt(20_000, 60_000);
+    while (used.has(port));
+    used.add(port);
+    return port;
+  };
+  const activePort = nextPort();
+  const stolenPort = nextPort();
+  const replacementPort = nextPort();
+  updateConfigFields({
+    stt: { backend: "faster-whisper", port: activePort, model: "old-model" },
+  }, configPath);
+  const config = loadConfig({}, { home: root });
+  const old = new FakeVoiceProvider("stt-old");
+  const candidates: StagedOwnershipProvider[] = [];
+  const ports = [stolenPort, replacementPort];
+  const daemon = new CiceroDaemon(config, {
+    configPath,
+    voiceSwapPortAllocator: async () => ports.shift()!,
+    sttProviderFactory: (candidateConfig) => {
+      const port = candidateConfig.sttBackend.port!;
+      const candidate = new StagedOwnershipProvider(
+        `candidate-${candidates.length + 1}`,
+        port,
+        candidates.length === 0,
+      );
+      candidates.push(candidate);
+      return candidate;
+    },
+  });
+  const state = daemon as unknown as SwapHarness;
+  state.running = true;
+  state.lifecycle = "running";
+  state.sttSlot = new ProviderSlot<STTProvider>(old);
+
+  const result = await state.swapVoiceProvider({
+    role: "stt",
+    backend: "faster-whisper",
+    model: "new-model",
+  });
+  const persisted = loadConfig({}, { home: root });
+
+  expect(result).toEqual({
+    role: "stt",
+    backend: "faster-whisper",
+    model: "new-model",
+    status: "active",
+  });
+  expect(candidates.map((candidate) => candidate.startOutcome)).toEqual([
+    "adoption-refused",
+    "owned",
+  ]);
+  expect(candidates[0]!.stops).toBe(1);
+  expect(persisted.sttBackend.port).toBe(replacementPort);
+  expect(persisted.sttBackend.port).not.toBe(stolenPort);
+  expect(state.sttSlot.providerName).toBe("candidate-2");
+  await state.sttSlot.stop();
+});
