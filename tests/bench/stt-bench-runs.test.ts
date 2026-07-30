@@ -72,6 +72,17 @@ function truncatedResponse(socket: Bun.Socket): void {
   socket.terminate();
 }
 
+function deltaOnlyResponse(socket: Bun.Socket): void {
+  socket.write(
+    "HTTP/1.1 200 OK\r\n" +
+    "Content-Type: text/event-stream\r\n" +
+    "Transfer-Encoding: chunked\r\n\r\n",
+  );
+  writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"hello world"}\n\n');
+  socket.write("0\r\n\r\n");
+  socket.end();
+}
+
 function errorResponse(message: string): (socket: Bun.Socket) => void {
   return (socket) => {
     socket.write(
@@ -137,6 +148,26 @@ test("a clip whose later run fails is an error, not a one-sample measurement", a
     expect(row.clips).toBe(0);
     expect(row.errors).toBe(1);
     // No fabricated metrics for a clip that never completed.
+    expect(row.meanWerPct).toBeNaN();
+    expect(row.streaming?.finalAfterAudioMs).toBeNaN();
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 15_000);
+
+test("a clip whose run omits the terminal event is an error and is not scored", async () => {
+  // Clean HTTP framing does not complete the documented event sequence. If the
+  // last delta were scored, the non-conforming server would be ranked using a
+  // finish timestamp necessarily earlier than the terminal event it omitted.
+  const wav = writeWavFixture(0.08, 8_000);
+  const server = listenPerConnection([deltaOnlyResponse]);
+  const clip: Clip = { name: "clip1", path: wav.path, reference: "hello world", durationSec: 0.08 };
+  try {
+    const row = await benchStreamCandidate(candidate(server.port), [clip], 1);
+    expect(row.available).toBe(true);
+    expect(row.clips).toBe(0);
+    expect(row.errors).toBe(1);
     expect(row.meanWerPct).toBeNaN();
     expect(row.streaming?.finalAfterAudioMs).toBeNaN();
   } finally {

@@ -97,6 +97,7 @@ test("live stream realtime pacing waits for each chunk's final sample", async ()
               "Transfer-Encoding: chunked\r\n\r\n",
             );
             writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"ok"}\n\n');
+            writeChunk(socket, 'data: {"type":"transcript.text.done","text":"ok"}\n\n');
             socket.write("0\r\n\r\n");
             socket.end();
           }
@@ -151,6 +152,7 @@ test("first-delta latency starts when the first PCM bytes are written", async ()
       "Transfer-Encoding: chunked\r\n\r\n",
     );
     writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"ok"}\n\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"ok"}\n\n');
     socket.write("0\r\n\r\n");
     socket.end();
   });
@@ -357,7 +359,10 @@ test("live stream completes and releases a persistent HTTP connection", async ()
   }
 }, 1_000);
 
-test("live stream without a terminal event uses the last delta for time-to-final", async () => {
+test("live stream rejects a cleanly framed response without a terminal event", async () => {
+  // A delta-only response has no time-to-final measurement: using its last
+  // partial would timestamp it earlier than a conforming server's terminal
+  // event and silently reward an incomplete application-level sequence.
   const server = listenAfterCompleteRequest((socket) => {
     socket.write(
       "HTTP/1.1 200 OK\r\n" +
@@ -370,20 +375,56 @@ test("live stream without a terminal event uses the last delta for time-to-final
     socket.end();
   });
   const wav = writeWavFixture(10);
-  const clock = [0, 0, 0, 1_000, 10_500];
+  try {
+    await expect(withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    )).rejects.toThrow("stream ended without a transcript.text.done terminal event");
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
+test("a terminal event remains the source of time-to-final", async () => {
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"hello"}\n\n');
+    writeChunk(socket, "data: [DONE]\n\n");
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"hello world"}\n\n');
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const incompleteServer = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, "data: [DONE]\n\n");
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.01);
+  const clock = [0, 0, 0, 100, 800];
   try {
     const result = await withGuard(
       transcribeLive(wav.path, candidate(server.port), {
         timeoutMs: 250,
-        now: () => clock.shift() ?? 10_500,
+        now: () => clock.shift() ?? 800,
       }),
     );
-    expect(result.audioMs).toBeCloseTo(10_000, 5);
-    expect(result.firstDeltaMs).toBeCloseTo(1_000, 5);
-    expect(result.finalAfterAudioMs).toBeCloseTo(10_500, 5);
-    expect(result.finalAfterAudioMs).not.toBeCloseTo(1_000, 5);
+    expect(result.text).toBe("hello world");
+    expect(result.finalAfterAudioMs).toBeCloseTo(800, 5);
+    await expect(withGuard(
+      transcribeLive(wav.path, candidate(incompleteServer.port), { timeoutMs: 250 }),
+    )).rejects.toThrow("stream ended without a transcript.text.done terminal event");
   } finally {
     server.stop(true);
+    incompleteServer.stop(true);
     rmSync(wav.dir, { recursive: true, force: true });
   }
 }, 1_000);

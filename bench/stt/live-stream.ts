@@ -18,7 +18,7 @@ import { sanitizeLabel } from "../../src/text-utils";
 import type { StreamCandidate } from "./types";
 
 export interface LiveStreamResult {
-  /** Final transcript from `transcript.text.done` (falls back to joined deltas). */
+  /** Final transcript from `transcript.text.done`. */
   text: string;
   /** Clip length in ms — the wall-clock budget a real-time feed spends uploading. */
   audioMs: number;
@@ -341,7 +341,6 @@ export async function transcribeLive(
   let sse = "";
   let sseBytes = 0;
   let firstDeltaAt: number | null = null;
-  let lastDeltaAt: number | null = null;
   const deltaTimes: number[] = [];
   let deltas = 0;
   let doneAt: number | null = null;
@@ -350,7 +349,6 @@ export async function transcribeLive(
   // empty final fall back to the partials, which records a stale mid-stream
   // guess as the model's answer.
   let finalText: string | null = null;
-  let joined = "";
   let paceStartedAt = 0;
   let firstPcmWrittenAt = 0;
   let lastPcmWrittenAt = 0;
@@ -416,9 +414,7 @@ export async function transcribeLive(
     const at = now();
     if (event.type === "transcript.text.delta") {
       deltas++;
-      joined += event.delta ?? "";
       firstDeltaAt ??= at;
-      lastDeltaAt = at;
       deltaTimes.push(at);
     } else if (event.type === "transcript.text.done") {
       // The last terminal event wins because its text is the transcript scored;
@@ -645,13 +641,19 @@ export async function transcribeLive(
   }
 
   if (failure) throw failure;
+  // Clean HTTP framing is not a complete transcription: a server that never
+  // sends the terminal event has no finish instant to measure, and scoring its
+  // last partial instead would time the finish earlier than a conforming
+  // server's terminal event, ranking the incomplete implementation ahead of
+  // the correct one. A run that cannot be measured is an error, not a number.
+  if (finalText === null || doneAt === null) {
+    throw new Error("stream ended without a transcript.text.done terminal event");
+  }
   // A terminal event wins even when it is empty: the model said it heard
   // nothing, and the partials it has already retracted are not a substitute.
-  const text = finalText ?? joined;
+  const text = finalText;
   if (!text.trim()) {
-    throw new Error(finalText === null
-      ? "stream closed without a transcript"
-      : "stream ended with an empty final transcript");
+    throw new Error("stream ended with an empty final transcript");
   }
 
   return {
@@ -660,9 +662,6 @@ export async function transcribeLive(
     firstDeltaMs: firstDeltaAt === null ? null : firstDeltaAt - firstPcmWrittenAt,
     deltasDuringAudio: deltaTimes.filter((at) => at < lastPcmWrittenAt).length,
     deltas,
-    // Without a terminal event, the last delta is the best available finish
-    // estimate. A negative value is still meaningful when that final available
-    // delta genuinely arrived before the audio itself finished.
-    finalAfterAudioMs: (doneAt ?? lastDeltaAt ?? lastPcmWrittenAt) - lastPcmWrittenAt,
+    finalAfterAudioMs: doneAt - lastPcmWrittenAt,
   };
 }
