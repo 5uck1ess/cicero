@@ -562,6 +562,45 @@ test("global admission returns 429 instead of spawning unbounded chat work", asy
   expect((await Promise.all(active)).every((response) => response.status === 200)).toBe(true);
 });
 
+test("a say job re-reports a departure that arrived while its lease was active", async () => {
+  // Say holds the same foreground lease as chat but has no route-specific
+  // completion path. Re-reporting at the route left a stopped conversation's
+  // cold transfer available for the next turn when speech synthesis finished.
+  const entered = deferred();
+  const release = deferred();
+  let ended = 0;
+  const base = start({
+    onConversationEnded: () => {
+      ended++;
+      throw new Error("ending hook stays fire-and-forget");
+    },
+    onSay: async () => {
+      entered.resolve();
+      await release.promise;
+      return wav();
+    },
+  });
+  const ws = await connect(base);
+  const request = fetch(base + "/api/say", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "hold this synthesis" }),
+  });
+  await entered.promise;
+  ws.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(ended).toBe(1);
+
+  release.resolve();
+  expect((await request).status).toBe(200);
+  expect(handle!.activeJobCount()).toBe(0);
+  expect(ended).toBe(2);
+  ws.close();
+  await Bun.sleep(30);
+  expect(ended).toBe(2);
+});
+
 test("a chat turn that saw no departure does not report a conversation ending", async () => {
   // The other side of the re-report above, and it earns its place: firing on
   // every release would end conversations that never ended. On a box driven
@@ -583,7 +622,7 @@ test("a chat turn that saw no departure does not report a conversation ending", 
 test("activeJobCount exposes an operator chat lease and re-reports departure when it releases", async () => {
   // This is the real lease used by /api/chat. Returning a disconnected counter
   // here would let the daemon declare the conversation over while brain.send()
-  // was still waiting on a cold transfer; omitting the completion callback
+  // was still waiting on a cold transfer; omitting the release-time re-report
   // would then retain that work forever.
   const entered = deferred();
   const release = deferred();
@@ -611,6 +650,60 @@ test("activeJobCount exposes an operator chat lease and re-reports departure whe
 
   release.resolve();
   expect((await request).status).toBe(200);
+  expect(handle!.activeJobCount()).toBe(0);
+  expect(ended).toBe(2);
+  ws.close();
+  await Bun.sleep(30);
+  expect(ended).toBe(2);
+});
+
+test("overlapping jobs re-report a departure once when the last lease releases", async () => {
+  // The first release still leaves an HTTP input surface alive. Consuming the
+  // remembered ending there either ends too early or leaves the last route
+  // unable to report it when that route has no completion callback of its own.
+  const chatEntered = deferred();
+  const sayEntered = deferred();
+  const releaseChat = deferred();
+  const releaseSay = deferred();
+  let ended = 0;
+  const base = start({
+    onConversationEnded: () => { ended++; },
+    onChat: async () => {
+      chatEntered.resolve();
+      await releaseChat.promise;
+      return "ok";
+    },
+    onSay: async () => {
+      sayEntered.resolve();
+      await releaseSay.promise;
+      return wav();
+    },
+  });
+  const ws = await connect(base);
+  const chatRequest = fetch(base + "/api/chat", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "first lease" }),
+  });
+  const sayRequest = fetch(base + "/api/say", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "last lease" }),
+  });
+  await Promise.all([chatEntered.promise, sayEntered.promise]);
+  expect(handle!.activeJobCount()).toBe(2);
+  ws.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(ended).toBe(1);
+
+  releaseChat.resolve();
+  expect((await chatRequest).status).toBe(200);
+  expect(handle!.activeJobCount()).toBe(1);
+  expect(ended).toBe(1);
+
+  releaseSay.resolve();
+  expect((await sayRequest).status).toBe(200);
   expect(handle!.activeJobCount()).toBe(0);
   expect(ended).toBe(2);
   ws.close();

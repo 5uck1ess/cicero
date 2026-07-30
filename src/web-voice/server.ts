@@ -598,6 +598,21 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   };
   const releaseJob = (): void => {
     activeJobs = Math.max(0, activeJobs - 1);
+    // Re-report only an ending that actually arrived while a job held the
+    // daemon back. Firing on every release would end conversations that never
+    // ended, and on a box driven entirely through the HTTP API that would drop
+    // a transfer parked by the turn that just finished. The latch is consumed
+    // before the fire-and-forget hook so this release path cannot report it
+    // twice even if the hook fails.
+    if (
+      activeJobs === 0 &&
+      endReportedDuringJob &&
+      clients.size === 0 &&
+      conversationEndTimer === null
+    ) {
+      endReportedDuringJob = false;
+      endConversationNow();
+    }
     resolveIfDrained();
   };
   const releaseSocketCallback = (): void => {
@@ -634,7 +649,6 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     req: Request,
     action: (signal: AbortSignal) => Promise<Response>,
     busyResponse: () => Response = unavailableResponse,
-    onReleased?: () => void,
   ): Promise<Response> => {
     if (!acquireJob()) {
       const response = busyResponse();
@@ -650,7 +664,6 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       throw new Error("web request handler failed", { cause: error });
     } finally {
       releaseJob();
-      onReleased?.();
     }
   };
   // Notifications that arrived with no client connected are parked and spoken
@@ -1238,18 +1251,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               log("error", `web-voice chat failed: ${message}`);
               return Response.json({ error: message }, { status: 500 });
             }
-          }, unavailableResponse, () => {
-            // A chat job is an input surface until its foreground lease is
-            // released. Re-report only an ending that actually arrived while
-            // this job held the daemon back: firing on every release would end
-            // conversations that never ended, and on a box driven entirely
-            // through /api/chat that would drop a transfer parked by the turn
-            // that just finished.
-            if (!endReportedDuringJob || activeJobs > 0) return;
-            if (clients.size !== 0 || conversationEndTimer !== null) return;
-            endReportedDuringJob = false;
-            endConversationNow();
-          });
+          }, unavailableResponse);
         }
 
         // Health-record ingest: one row or an array of rows, appended to
