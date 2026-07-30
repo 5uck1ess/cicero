@@ -1,4 +1,17 @@
 /**
+ * Make a value safe to interpolate into a log line: strip C0/C7F control
+ * characters (so a newline or terminal escape in an untrusted value can't
+ * forge log entries or emit control sequences) and length-cap it.
+ */
+export function sanitizeLabel(value: string, max: number): string {
+  const cleaned = Array.from(value, (ch) => {
+    const c = ch.codePointAt(0)!;
+    return c < 0x20 || c === 0x7f ? "\uFFFD" : ch; // strip C0/DEL controls
+  });
+  return cleaned.length > max ? cleaned.slice(0, max).join("") + "\u2026" : cleaned.join("");
+}
+
+/**
  * Strip leading filler words and trailing punctuation from voice input.
  * Used as a preprocessing step before intent classification.
  *

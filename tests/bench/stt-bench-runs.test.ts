@@ -72,6 +72,19 @@ function truncatedResponse(socket: Bun.Socket): void {
   socket.terminate();
 }
 
+function errorResponse(message: string): (socket: Bun.Socket) => void {
+  return (socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, `data: ${JSON.stringify({ error: { message } })}\n\n`);
+    socket.write("0\r\n\r\n");
+    socket.end();
+  };
+}
+
 function deltaResponse(socket: Bun.Socket): void {
   // Sending partials while the paced request is still uploading makes the
   // during-audio counter non-zero, so the rejection regression covers both
@@ -203,6 +216,41 @@ test("a real-time candidate still reports its streaming latency", async () => {
     expect(row.streaming?.paced).toBe(true);
     expect(Number.isNaN(row.streaming!.finalAfterAudioMs)).toBe(false);
   } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 15_000);
+
+test("remote SSE errors are terminal-safe without mangling ordinary messages", async () => {
+  // The transcription server is untrusted input (AGENTS.md), and its error text
+  // went straight into console.warn: an escaped ESC ]52 sequence in error.message
+  // survived JSON.parse as a real OSC 52 clipboard write on the operator's
+  // terminal, and an escaped newline let the server forge benchmark output
+  // lines. The ordinary message here is the other half — a sanitizer that
+  // mangles readable text would make the bench worse, not safer.
+  const wav = writeWavFixture(0.08, 8_000);
+  const malicious = `remote \u001b]52;c;Y2xpcGJvYXJk\u0007 forged\nline`;
+  const ordinary = "model rejected the requested language";
+  const server = listenPerConnection([errorResponse(malicious), errorResponse(ordinary)]);
+  const clips: Clip[] = [
+    { name: "hostile", path: wav.path, reference: "hello", durationSec: 0.08 },
+    { name: "ordinary", path: wav.path, reference: "hello", durationSec: 0.08 },
+  ];
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const row = await benchStreamCandidate(candidate(server.port), clips, 1);
+    expect(row.errors).toBe(2);
+    expect(warnings).toHaveLength(2);
+
+    const hostileCodes = Array.from(warnings[0]!, (ch) => ch.codePointAt(0)!);
+    expect(hostileCodes).not.toContain(0x1b);
+    expect(hostileCodes).not.toContain(0x07);
+    expect(hostileCodes).not.toContain(0x0a);
+    expect(warnings[1]).toBe(`  ⚠️  flaky / ordinary: ${ordinary}`);
+  } finally {
+    console.warn = warn;
     server.stop(true);
     rmSync(wav.dir, { recursive: true, force: true });
   }

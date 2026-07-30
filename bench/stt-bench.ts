@@ -30,11 +30,17 @@ import { decodeWav } from "../src/platform/wav";
 import { MlxWhisperProvider } from "../src/backends/stt/mlx-whisper";
 import { FasterWhisperProvider } from "../src/backends/stt/faster-whisper";
 import type { STTProvider } from "../src/backends/stt/provider";
+import { sanitizeLabel } from "../src/text-utils";
 import { wordErrorRate } from "./stt/wer";
 import { transcribeLive, type LiveStreamConnect } from "./stt/live-stream";
 import type { Candidate, Clip, ProviderCandidate, StreamCandidate } from "./stt/types";
 
 interface Args { clipsDir: string; candidatesFile: string; runs: number }
+
+const MAX_SURFACED_ERROR_CHARS = 512;
+
+const surfacedError = (error: unknown): string =>
+  sanitizeLabel(error instanceof Error ? error.message : String(error), MAX_SURFACED_ERROR_CHARS);
 
 function parseArgs(argv: string[]): Args {
   const get = (flag: string): string | undefined => {
@@ -252,7 +258,7 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
         }
       } catch (err: unknown) {
         failed = true;
-        console.warn(`  ⚠️  ${c.name} / ${clip.name}: ${err instanceof Error ? err.message : String(err)}`);
+        console.warn(`  ⚠️  ${c.name} / ${clip.name}: ${surfacedError(err)}`);
         break;
       }
     }
@@ -321,7 +327,7 @@ async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promis
         if (!text) failed = true;
       } catch (err: unknown) {
         failed = true;
-        console.warn(`  ⚠️  ${c.name} / ${clip.name}: ${err instanceof Error ? err.message : String(err)}`);
+        console.warn(`  ⚠️  ${c.name} / ${clip.name}: ${surfacedError(err)}`);
         break;
       }
     }

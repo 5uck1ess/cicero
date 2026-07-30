@@ -14,6 +14,7 @@
  * and will report 0 deltas-during-audio here. That is a real result, not a bug.
  */
 import { decodeWav } from "../../src/platform/wav";
+import { sanitizeLabel } from "../../src/text-utils";
 import type { StreamCandidate } from "./types";
 
 export interface LiveStreamResult {
@@ -76,6 +77,7 @@ const DEFAULT_RESPONSE_LIMITS: LiveStreamResponseLimits = {
   maxBodyBytes: 16 * 1024 * 1024,
 };
 const MAX_CHUNK_LINE_BYTES = 128;
+const MAX_REMOTE_ERROR_CHARS = 512;
 
 /** Float samples in [-1,1] → little-endian 16-bit PCM, the endpoint's default format. */
 function toS16le(samples: Float32Array): Uint8Array {
@@ -396,7 +398,10 @@ export async function transcribeLive(
     let event: { type?: string; delta?: string; text?: string; error?: { message?: string } };
     try { event = JSON.parse(payload); } catch { return false; }
     if (event.error) {
-      failure ??= new Error(event.error.message ?? "stream error");
+      // JSON decoding restores escaped controls from the remote body. Replace
+      // them before retaining the message so a later warning cannot forge a
+      // benchmark line or write a terminal control sequence.
+      failure ??= new Error(sanitizeLabel(event.error.message ?? "stream error", MAX_REMOTE_ERROR_CHARS));
       return true;
     }
     const at = now() - t0;
