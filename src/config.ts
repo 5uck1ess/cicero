@@ -1,14 +1,13 @@
 import {
-  mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from "fs";
 import { randomUUID } from "node:crypto";
-import { join, dirname } from "path";
+import { basename, join, dirname } from "path";
 import { parse as parseYaml, parseDocument as parseYamlDocument, stringify as stringifyYaml } from "yaml";
 import type { CiceroConfig, ActionConfig, SidecarConfig, DictationConfig } from "./types";
 import type { STTProviderConfig } from "./backends/stt/provider";
@@ -35,19 +34,23 @@ const CONFIG_FILE = "config.yaml";
 const ACTIONS_FILE = "actions.yaml";
 const CONFIG_UPDATE_LOCK_WAIT_MS = 50;
 const CONFIG_UPDATE_LOCK_TIMEOUT_MS = 35_000;
-const CONFIG_UPDATE_LOCK_STALE_MS = 30_000;
 
 interface ConfigUpdateLockOwner {
   pid: number;
   token: string;
   acquiredAtMs: number;
+  ticket: number;
 }
 
 export interface ConfigUpdateLock {
+  /** Fail closed unless this exact writer is still the elected lease owner. */
+  assertOwned(): void;
   release(): void;
 }
 
 const configLockWaiter = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+const CONFIG_LOCK_PARTICIPANT_PATTERN =
+  /^(?<prefix>.+\.update-lock-)(?<pid>[1-9]\d*)-(?<token>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?<kind>choosing|owner\.json)$/i;
 
 function errorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
@@ -64,98 +67,269 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-function staleConfigLock(lockPath: string, nowMs: number): boolean {
-  let ageMs: number;
-  try {
-    ageMs = Math.max(0, nowMs - statSync(lockPath).mtimeMs);
-  } catch {
-    return false;
+interface ConfigLockParticipant {
+  pid: number;
+  token: string;
+  choosingPath?: string;
+  ownerPath?: string;
+}
+
+interface ConfigLockScan {
+  choosing: ConfigLockParticipant[];
+  invalid: ConfigLockParticipant[];
+  owners: Array<{ participant: ConfigLockParticipant; owner: ConfigUpdateLockOwner }>;
+  legacyBlocked: boolean;
+}
+
+function configLockParticipant(path: string, configPath: string): {
+  pid: number;
+  token: string;
+  kind: "choosing" | "owner.json";
+} | null {
+  const match = basename(path).match(CONFIG_LOCK_PARTICIPANT_PATTERN);
+  const groups = match?.groups;
+  if (!groups || groups.prefix !== `${basename(configPath)}.update-lock-`) return null;
+  const pid = Number.parseInt(groups.pid!, 10);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  return {
+    pid,
+    token: groups.token!,
+    kind: groups.kind as "choosing" | "owner.json",
+  };
+}
+
+function validConfigLockOwner(
+  value: unknown,
+  participant: Pick<ConfigLockParticipant, "pid" | "token">,
+): value is ConfigUpdateLockOwner {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const owner = value as Partial<ConfigUpdateLockOwner>;
+  return owner.pid === participant.pid
+    && owner.token === participant.token
+    && typeof owner.acquiredAtMs === "number"
+    && Number.isFinite(owner.acquiredAtMs)
+    && typeof owner.ticket === "number"
+    && Number.isSafeInteger(owner.ticket)
+    && owner.ticket > 0;
+}
+
+/**
+ * A participant path contains a UUID and is never reused. Once its recorded
+ * PID is dead, unlinking this exact path cannot remove a successor's lease.
+ */
+function staleConfigLock(participant: ConfigLockParticipant): boolean {
+  return !processIsAlive(participant.pid);
+}
+
+function removeStaleConfigLock(participant: ConfigLockParticipant): void {
+  // Re-check immediately before removal. A PID that is still alive is never
+  // displaced merely because its rewrite took longer than expected.
+  if (!staleConfigLock(participant)) return;
+  for (const path of [participant.choosingPath, participant.ownerPath]) {
+    if (!path) continue;
+    try {
+      unlinkSync(path);
+    } catch (error: unknown) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
   }
+}
+
+function inspectLegacyConfigLock(configPath: string): "absent" | "blocked" | "removed" {
+  const lockPath = `${configPath}.update-lock`;
   try {
-    const owner = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8")) as Partial<ConfigUpdateLockOwner>;
+    const owner = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8")) as
+      Partial<ConfigUpdateLockOwner>;
     if (
       typeof owner.pid !== "number"
       || !Number.isSafeInteger(owner.pid)
       || owner.pid <= 0
-      || typeof owner.acquiredAtMs !== "number"
     ) {
-      return ageMs >= CONFIG_UPDATE_LOCK_WAIT_MS * 2;
+      return "blocked";
     }
-    return !processIsAlive(owner.pid)
-      || nowMs - owner.acquiredAtMs >= CONFIG_UPDATE_LOCK_STALE_MS;
-  } catch {
-    // A creator can be between mkdir and owner publication. Only recover it
-    // after a short grace so a live writer is never mistaken for crash debris.
-    return ageMs >= CONFIG_UPDATE_LOCK_WAIT_MS * 2;
+    if (processIsAlive(owner.pid)) return "blocked";
+    // New writers never reuse the legacy fixed path. Two recoverers may both
+    // target this dead directory, but neither can target a fresh unique lease.
+    rmSync(lockPath, { recursive: true, force: true });
+    return "removed";
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") return "absent";
+    // A legacy creator may have died between mkdir and owner publication.
+    // Its identity-free directory cannot be recovered without risking a live
+    // old writer, so fail closed instead of stealing it.
+    return "blocked";
   }
 }
 
-function removeStaleConfigLock(lockPath: string): void {
-  const quarantine = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+function scanConfigLocks(configPath: string): ConfigLockScan {
+  const directory = dirname(configPath);
+  const participants = new Map<string, ConfigLockParticipant>();
+  let entries: string[];
   try {
-    renameSync(lockPath, quarantine);
+    entries = readdirSync(directory);
   } catch (error: unknown) {
-    if (errorCode(error) === "ENOENT") return;
+    if (errorCode(error) === "ENOENT") {
+      return { choosing: [], invalid: [], owners: [], legacyBlocked: false };
+    }
     throw error;
   }
-  rmSync(quarantine, { recursive: true, force: true });
+  for (const entry of entries) {
+    const path = join(directory, entry);
+    const parsed = configLockParticipant(path, configPath);
+    if (!parsed) continue;
+    const key = `${parsed.pid}:${parsed.token}`;
+    const participant = participants.get(key) ?? { pid: parsed.pid, token: parsed.token };
+    if (parsed.kind === "choosing") participant.choosingPath = path;
+    else participant.ownerPath = path;
+    participants.set(key, participant);
+  }
+
+  const choosing: ConfigLockParticipant[] = [];
+  const invalid: ConfigLockParticipant[] = [];
+  const owners: ConfigLockScan["owners"] = [];
+  for (const participant of participants.values()) {
+    if (staleConfigLock(participant)) {
+      removeStaleConfigLock(participant);
+      continue;
+    }
+    if (participant.choosingPath) choosing.push(participant);
+    if (!participant.ownerPath) continue;
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(participant.ownerPath, "utf8"));
+      if (validConfigLockOwner(parsed, participant)) {
+        owners.push({ participant, owner: parsed });
+      } else {
+        invalid.push(participant);
+      }
+    } catch (error: unknown) {
+      if (errorCode(error) !== "ENOENT") invalid.push(participant);
+    }
+  }
+
+  const legacy = inspectLegacyConfigLock(configPath);
+  return {
+    choosing,
+    invalid,
+    owners,
+    legacyBlocked: legacy === "blocked",
+  };
+}
+
+function compareConfigLockOwners(left: ConfigUpdateLockOwner, right: ConfigUpdateLockOwner): number {
+  if (left.ticket !== right.ticket) return left.ticket - right.ticket;
+  return left.token.localeCompare(right.token);
+}
+
+function configLockIsOwned(configPath: string, expected: ConfigUpdateLockOwner): boolean {
+  const scan = scanConfigLocks(configPath);
+  const own = scan.owners.find(({ owner }) =>
+    owner.pid === expected.pid
+    && owner.token === expected.token
+    && owner.ticket === expected.ticket
+  );
+  if (!own || scan.legacyBlocked) return false;
+  return !scan.owners.some(({ owner }) =>
+    owner.token !== expected.token
+    && compareConfigLockOwners(owner, expected) < 0
+  );
+}
+
+function configLockOwnershipError(configPath: string): Error {
+  return new Error(
+    `Lost the config update lease before committing ${configPath}; retry the command.`,
+  );
 }
 
 /**
- * Serialize whole-file config rewrites across Cicero processes. The directory
- * lease is crash-recoverable and time-bounded, so a dead writer cannot wedge
- * later operator commands indefinitely.
+ * Serialize whole-file config rewrites across Cicero processes. The lease
+ * uses unique bakery tickets: concurrent recovery can only delete the
+ * exact dead participant it inspected, never a replacement writer's lease.
  */
 export function acquireConfigUpdateLock(
   configPath: string = join(ciceroHome(), CONFIG_FILE),
 ): ConfigUpdateLock {
   ensurePrivateDirectorySync(dirname(configPath));
-  const lockPath = `${configPath}.update-lock`;
   const token = randomUUID();
+  const participantBase = `${configPath}.update-lock-${process.pid}-${token}`;
+  const choosingPath = `${participantBase}.choosing`;
+  const ownerPath = `${participantBase}.owner.json`;
   const deadlineMs = Date.now() + CONFIG_UPDATE_LOCK_TIMEOUT_MS;
+  let owner: ConfigUpdateLockOwner | undefined;
 
-  while (true) {
-    try {
-      mkdirSync(lockPath, { mode: 0o700 });
-      const owner: ConfigUpdateLockOwner = { pid: process.pid, token, acquiredAtMs: Date.now() };
-      writeFileSync(join(lockPath, "owner.json"), JSON.stringify(owner), {
-        flag: "wx",
-        mode: PRIVATE_FILE_MODE,
-      });
-      let released = false;
-      return {
-        release(): void {
-          if (released) return;
-          released = true;
-          try {
-            const current = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8")) as Partial<ConfigUpdateLockOwner>;
-            if (current.token !== token) return;
-            rmSync(lockPath, { recursive: true, force: true });
-          } catch {
-            // A stale-lease recovery or prior release already removed it.
-          }
-        },
-      };
-    } catch (error: unknown) {
-      if (errorCode(error) !== "EEXIST") {
-        // If owner publication failed after mkdir, do not leave our empty
-        // directory blocking the next writer.
-        try { rmSync(lockPath, { recursive: true, force: true }); } catch { /* best-effort rollback */ }
-        throw error;
-      }
+  try {
+    writeFileSync(choosingPath, "", { flag: "wx", mode: PRIVATE_FILE_MODE });
+    const initial = scanConfigLocks(configPath);
+    const highestTicket = initial.owners.reduce(
+      (highest, entry) => Math.max(highest, entry.owner.ticket),
+      0,
+    );
+    if (highestTicket >= Number.MAX_SAFE_INTEGER) {
+      throw new Error(`Config update lease tickets are exhausted for ${configPath}`);
     }
+    owner = {
+      pid: process.pid,
+      token,
+      acquiredAtMs: Date.now(),
+      ticket: highestTicket + 1,
+    };
+    writeFileSync(ownerPath, JSON.stringify(owner), {
+      flag: "wx",
+      mode: PRIVATE_FILE_MODE,
+    });
+    unlinkSync(choosingPath);
 
-    const nowMs = Date.now();
-    if (staleConfigLock(lockPath, nowMs)) {
-      removeStaleConfigLock(lockPath);
-      continue;
-    }
-    if (nowMs >= deadlineMs) {
-      throw new Error(
-        `Timed out waiting for another Cicero process to finish updating ${configPath}; retry the command.`,
+    while (true) {
+      const scan = scanConfigLocks(configPath);
+      const own = scan.owners.find(({ owner: candidate }) =>
+        candidate.pid === owner!.pid
+        && candidate.token === owner!.token
+        && candidate.ticket === owner!.ticket
       );
+      const blockedByOwner = scan.owners.some(({ owner: candidate }) =>
+        candidate.token !== owner!.token
+        && compareConfigLockOwners(candidate, owner!) < 0
+      );
+      if (
+        own
+        && !scan.legacyBlocked
+        && scan.choosing.length === 0
+        && scan.invalid.length === 0
+        && !blockedByOwner
+      ) {
+        let released = false;
+        return {
+          assertOwned(): void {
+            if (released || !configLockIsOwned(configPath, owner!)) {
+              throw configLockOwnershipError(configPath);
+            }
+          },
+          release(): void {
+            if (released) return;
+            released = true;
+            try {
+              const current: unknown = JSON.parse(readFileSync(ownerPath, "utf8"));
+              if (!validConfigLockOwner(current, owner!)) return;
+              unlinkSync(ownerPath);
+            } catch {
+              // Dead-writer recovery or a prior release already removed it.
+            }
+          },
+        };
+      }
+
+      const nowMs = Date.now();
+      if (nowMs >= deadlineMs) {
+        throw new Error(
+          `Timed out waiting for another Cicero process to finish updating ${configPath}; retry the command.`,
+        );
+      }
+      Atomics.wait(configLockWaiter, 0, 0, Math.min(CONFIG_UPDATE_LOCK_WAIT_MS, deadlineMs - nowMs));
     }
-    Atomics.wait(configLockWaiter, 0, 0, Math.min(CONFIG_UPDATE_LOCK_WAIT_MS, deadlineMs - nowMs));
+  } catch (error: unknown) {
+    for (const path of [choosingPath, ownerPath]) {
+      try { unlinkSync(path); } catch { /* absent or best-effort rollback */ }
+    }
+    throw error;
   }
 }
 
@@ -766,6 +940,8 @@ export interface ConfigUpdateOptions {
     key: keyof CiceroConfig;
     fields: readonly string[];
   }[];
+  /** Internal final gate run synchronously at the config commit boundary. */
+  validateBeforeCommit?: () => void;
 }
 
 export function updateConfigFields(
@@ -820,6 +996,8 @@ export function updateConfigFields(
     try {
       writeFileSync(tmp, stringifyYaml(merged), { flag: "wx", mode: PRIVATE_FILE_MODE });
       ensurePrivateFileSync(tmp);
+      options.validateBeforeCommit?.();
+      lock.assertOwned();
       renameSync(tmp, configPath);
       ensurePrivateFileSync(configPath);
     } catch (error: unknown) {
@@ -894,6 +1072,7 @@ export function setWebVoiceToken(
     try {
       writeFileSync(tmp, updated, { flag: "wx", mode: PRIVATE_FILE_MODE });
       ensurePrivateFileSync(tmp);
+      lock.assertOwned();
       renameSync(tmp, configPath);
       ensurePrivateFileSync(configPath);
     } catch (error: unknown) {

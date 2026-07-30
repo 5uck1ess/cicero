@@ -2342,7 +2342,10 @@ export class CiceroDaemon {
               ...(plan.fallback ? { stt_fallback: plan.fallback as STTProviderConfig } : {}),
             },
             this.options.configPath,
-            { replaceTopLevel: plan.fallback ? ["stt", "stt_fallback"] : ["stt"] },
+            {
+              replaceTopLevel: plan.fallback ? ["stt", "stt_fallback"] : ["stt"],
+              validateBeforeCommit: () => guard.assertNoConflict(),
+            },
           );
           this.config.setVoiceBackend("stt", selection);
           if (plan.fallback) this.config.setVoiceFallback("stt", plan.fallback);
@@ -2369,7 +2372,10 @@ export class CiceroDaemon {
                 ...(plan.fallback ? { tts_fallback: plan.fallback as TTSProviderConfig } : {}),
               },
               this.options.configPath,
-              { replaceTopLevel: plan.fallback ? ["tts", "tts_fallback"] : ["tts"] },
+              {
+                replaceTopLevel: plan.fallback ? ["tts", "tts_fallback"] : ["tts"],
+                validateBeforeCommit: () => guard.assertNoConflict(),
+              },
             );
             this.config.setVoiceBackend("tts", selection);
             if (plan.fallback) this.config.setVoiceFallback("tts", plan.fallback);

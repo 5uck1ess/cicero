@@ -3,6 +3,7 @@ import { randomInt } from "node:crypto";
 import {
   StagedManagedServerPortError,
   startManagedServer,
+  stopManagedServer,
   type StartOpts,
   withStagedManagedServerPorts,
 } from "../../src/backends/managed-server";
@@ -60,4 +61,57 @@ test("staged startup distinguishes refused adoption from a bind race", async () 
   expect((adoption as StagedManagedServerPortError).outcome).toBe("adoption-refused");
   expect(bindFailure).toBeInstanceOf(StagedManagedServerPortError);
   expect((bindFailure as StagedManagedServerPortError).outcome).toBe("bind-failed");
+});
+
+test("the persistence guard observes a supervised staged child's death", async () => {
+  const port = randomInt(20_000, 60_000);
+  let exitCode: number | null = null;
+  let resolveExit!: (code: number) => void;
+  const exited = new Promise<number>((resolve) => { resolveExit = resolve; });
+  const fakeProcess = {
+    pid: 2_000_000_001,
+    exited,
+    get exitCode() { return exitCode; },
+    signalCode: null,
+    stderr: new ReadableStream<Uint8Array>({
+      start(controller) { controller.close(); },
+    }),
+    kill: () => {
+      if (exitCode !== null) return;
+      exitCode = 143;
+      resolveExit(exitCode);
+    },
+  };
+  let probes = 0;
+
+  const failure = await withStagedManagedServerPorts(new Set([port]), async (guard) => {
+    const managed = await startManagedServer({
+      name: "staged-supervised-death",
+      port,
+      command: [process.execPath],
+      healthUrl: `http://127.0.0.1:${port}/health`,
+      timeoutMs: 1_000,
+      intervalMs: 1,
+      supervise: true,
+      fetcher: async () => {
+        probes += 1;
+        return new Response(probes === 1 ? "not ready" : "compatible", {
+          status: probes === 1 ? 503 : 200,
+        });
+      },
+      spawner: (() => fakeProcess) as unknown as StartOpts["spawner"],
+    });
+    expect(managed?.managed).toBe(true);
+    exitCode = 1;
+    resolveExit(exitCode);
+    await Bun.sleep(0);
+    try {
+      guard.assertNoConflict();
+    } finally {
+      await stopManagedServer(managed!);
+    }
+  }).then(() => null, (error: unknown) => error);
+
+  expect(failure).toBeInstanceOf(StagedManagedServerPortError);
+  expect((failure as StagedManagedServerPortError).outcome).toBe("bind-failed");
 });

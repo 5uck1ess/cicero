@@ -98,6 +98,18 @@ test("an older completion cannot hide a newer live system voice from stop", asyn
   expect(second.signals).toEqual(["SIGTERM"]);
 });
 
+test("SystemSpeaker abort stops and reaps the exact speaking child", async () => {
+  const child = controlledChild(514);
+  const speaker = new SystemSpeaker("linux", queueSpawner([child]));
+  const turn = new AbortController();
+
+  const speaking = speaker.speak("retired turn", turn.signal);
+  turn.abort(new Error("turn superseded"));
+  await settlesWithin(speaking, "aborted system speech");
+
+  expect(child.signals).toEqual(["SIGTERM"]);
+});
+
 test("SystemSpeaker waits for SIGKILL reap instead of releasing audio ownership early", async () => {
   const child = controlledChild(505, false);
   const speaker = new SystemSpeaker("darwin", queueSpawner([child]));

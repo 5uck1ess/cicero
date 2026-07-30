@@ -38,7 +38,10 @@ the complete configured provider, including its fallback, then requires warmup
 and a healthy primary before cutover. Local managed replacements that would
 collide with the live provider are staged on a free loopback port. A staged
 startup never adopts a listener that appeared on that port after selection; it
-discards that candidate and retries on another dynamically selected port.
+discards that candidate and retries on another dynamically selected port. The
+same exact-child ownership check runs again at the config commit boundary, so a
+supervised staged child that dies during warmup cannot be replaced by an
+unrelated compatible listener and then persisted.
 New work uses the replacement after cutover; work already holding the old
 generation is allowed to finish before that generation is stopped.
 When the requested backend is the configured fallback, Cicero promotes that
@@ -49,9 +52,12 @@ Only a successful readiness gate is written to `~/.cicero/config.yaml`, using
 the same atomic private-file update as other configuration commands. Those
 whole-file rewrites share a bounded, crash-recoverable cross-process lease, so a
 concurrent command such as `cicero voice use` merges after the swap instead of
-renaming an older snapshot over it. A startup, warmup, health, or persistence
-failure cleans up the candidate and leaves both the active provider and config
-unchanged. One swap may run at a time across both roles. A concurrent
+renaming an older snapshot over it. Each writer has a unique lease record; only
+records belonging to dead PIDs are retired, and the elected writer re-verifies
+its exact record immediately before the atomic rename. A startup, warmup,
+health, or persistence failure cleans up the candidate and leaves both the
+active provider and config unchanged. One swap may run at a time across both
+roles. A concurrent
 request exits non-zero with `another provider swap is already in progress`.
 The command's success line names the active backend/model and says
 `Config persisted`; preparation and persistence failures explicitly say the

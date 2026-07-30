@@ -9,6 +9,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +18,15 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { acquireConfigUpdateLock, loadConfig, updateConfigFields } from "../src/config";
 
 const mode = (file: string): number => statSync(file).mode & 0o777;
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await Bun.sleep(10);
+  }
+  return predicate();
+}
 
 describe("updateConfigFields", () => {
   let dir: string;
@@ -115,6 +125,133 @@ describe("updateConfigFields", () => {
 
     expect(parseYaml(readFileSync(path, "utf8")).voice).toBe("recovered");
     expect(existsSync(lockPath)).toBe(false);
+  });
+
+  test("two racing stale takeovers serialize their config commits", async () => {
+    const lockPath = `${path}.update-lock`;
+    mkdirSync(lockPath, { mode: 0o700 });
+    writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+      pid: 2_147_483_647,
+      token: "synthetic-stale-owner",
+      acquiredAtMs: 0,
+    }));
+    writeFileSync(path, "{}\n");
+
+    const gate = join(dir, "lease-race");
+    const configModule = new URL("../src/config.ts", import.meta.url).href;
+    const yamlModule = new URL("../node_modules/yaml/dist/index.js", import.meta.url).href;
+    const script = [
+      `import { readFileSync, renameSync, writeFileSync } from "node:fs";`,
+      `import { acquireConfigUpdateLock } from ${JSON.stringify(configModule)};`,
+      `import { parse as parseYaml, stringify as stringifyYaml } from ${JSON.stringify(yamlModule)};`,
+      `const configPath = process.env.CICERO_TEST_CONFIG_PATH;`,
+      `const gate = process.env.CICERO_TEST_GATE;`,
+      `const label = process.env.CICERO_TEST_LABEL;`,
+      `const lock = acquireConfigUpdateLock(configPath);`,
+      `try {`,
+      `  await Bun.write(gate + "." + label + ".acquired", "ready");`,
+      `  while (!(await Bun.file(gate + "." + label + ".go").exists())) await Bun.sleep(5);`,
+      `  const snapshot = parseYaml(readFileSync(configPath, "utf8")) ?? {};`,
+      `  snapshot["writer_" + label] = true;`,
+      `  const temporary = configPath + ".tmp-" + label;`,
+      `  writeFileSync(temporary, stringifyYaml(snapshot), { flag: "wx" });`,
+      `  lock.assertOwned();`,
+      `  renameSync(temporary, configPath);`,
+      `  await Bun.write(gate + "." + label + ".committed", "done");`,
+      `} finally {`,
+      `  lock.release();`,
+      `}`,
+    ].join("\n");
+    const children = new Map(["b", "c"].map((label) => [
+      label,
+      Bun.spawn([process.execPath, "-e", script], {
+        env: {
+          ...process.env,
+          CICERO_TEST_CONFIG_PATH: path,
+          CICERO_TEST_GATE: gate,
+          CICERO_TEST_LABEL: label,
+        },
+        stdout: "ignore",
+        stderr: "pipe",
+      }),
+    ] as const));
+    const acquired = (label: string): boolean => existsSync(`${gate}.${label}.acquired`);
+
+    expect(await waitUntil(() => acquired("b") || acquired("c"))).toBe(true);
+    await Bun.sleep(150);
+    const first = acquired("b") ? "b" : "c";
+    const second = first === "b" ? "c" : "b";
+    const secondAcquiredBeforeRelease = acquired(second);
+
+    writeFileSync(`${gate}.${first}.go`, "go");
+    if (secondAcquiredBeforeRelease) writeFileSync(`${gate}.${second}.go`, "go");
+    expect(await children.get(first)!.exited).toBe(0);
+    if (!secondAcquiredBeforeRelease) {
+      expect(await waitUntil(() => acquired(second))).toBe(true);
+      writeFileSync(`${gate}.${second}.go`, "go");
+    }
+    expect(await children.get(second)!.exited).toBe(0);
+
+    expect(secondAcquiredBeforeRelease).toBe(false);
+    expect(existsSync(`${gate}.b.committed`)).toBe(true);
+    expect(existsSync(`${gate}.c.committed`)).toBe(true);
+    expect(parseYaml(readFileSync(path, "utf8"))).toEqual({
+      writer_b: true,
+      writer_c: true,
+    });
+  }, 10_000);
+
+  test("an old lease held by a live PID is not stolen", async () => {
+    const lockPath = `${path}.update-lock`;
+    mkdirSync(lockPath, { mode: 0o700 });
+    writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+      pid: process.pid,
+      token: "synthetic-live-owner",
+      acquiredAtMs: 0,
+    }));
+    const acquiredPath = join(dir, "live-owner-contender-acquired");
+    const configModule = new URL("../src/config.ts", import.meta.url).href;
+    const child = Bun.spawn([
+      process.execPath,
+      "-e",
+      [
+        `import { acquireConfigUpdateLock } from ${JSON.stringify(configModule)};`,
+        `const lock = acquireConfigUpdateLock(process.env.CICERO_TEST_CONFIG_PATH);`,
+        `await Bun.write(process.env.CICERO_TEST_ACQUIRED_PATH, "acquired");`,
+        `lock.release();`,
+      ].join("\n"),
+    ], {
+      env: {
+        ...process.env,
+        CICERO_TEST_CONFIG_PATH: path,
+        CICERO_TEST_ACQUIRED_PATH: acquiredPath,
+      },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+
+    await Bun.sleep(200);
+    expect(existsSync(acquiredPath)).toBe(false);
+    rmSync(lockPath, { recursive: true, force: true });
+    expect(await child.exited).toBe(0);
+    expect(existsSync(acquiredPath)).toBe(true);
+  }, 5_000);
+
+  test("a writer that lost its lease cannot publish its prepared rewrite", () => {
+    writeFileSync(path, "voice: retained\n");
+
+    expect(() => updateConfigFields({ voice: "must-not-commit" }, path, {
+      validateBeforeCommit: () => {
+        const owner = readdirSync(dir).find((entry) =>
+          entry.startsWith("config.yaml.update-lock-") && entry.endsWith(".owner.json")
+        );
+        expect(owner).toBeDefined();
+        unlinkSync(join(dir, owner!));
+      },
+    })).toThrow("Lost the config update lease before committing");
+
+    expect(readFileSync(path, "utf8")).toBe("voice: retained\n");
+    expect(readdirSync(dir)).toEqual(["config.yaml"]);
   });
 
   test("deep-merges nested tts object", async () => {

@@ -79,6 +79,8 @@ const DOCKER_STOP_TIMEOUT_MS = 10_000;
 const DOCKER_OUTPUT_LIMIT_BYTES = 4 * 1024;
 const DOCKER_CONTAINER_ID_PATTERN = /^[a-f0-9]{64}$/;
 const stderrTailCaptures = new WeakMap<ManagedSubprocess, StderrTailCapture>();
+const exitedManagedProcesses = new WeakSet<ManagedSubprocess>();
+const observedManagedProcesses = new WeakSet<ManagedSubprocess>();
 
 export type StagedManagedServerPortOutcome = "adoption-refused" | "bind-failed";
 
@@ -99,6 +101,10 @@ export class StagedManagedServerPortError extends Error {
 interface StagedManagedServerState {
   ports: ReadonlySet<number>;
   conflicts: Map<number, StagedManagedServerPortOutcome>;
+  ownedProcesses: Map<number, {
+    managed: ManagedProcess;
+    process: ManagedSubprocess;
+  }>;
 }
 
 export interface StagedManagedServerGuard {
@@ -115,9 +121,21 @@ export function withStagedManagedServerPorts<T>(
   ports: ReadonlySet<number>,
   work: (guard: StagedManagedServerGuard) => Promise<T>,
 ): Promise<T> {
-  const state: StagedManagedServerState = { ports, conflicts: new Map() };
+  const state: StagedManagedServerState = {
+    ports,
+    conflicts: new Map(),
+    ownedProcesses: new Map(),
+  };
   const guard: StagedManagedServerGuard = {
     assertNoConflict(): void {
+      for (const [port, ownership] of state.ownedProcesses) {
+        if (
+          ownership.managed.proc !== ownership.process
+          || managedProcessExited(ownership.process)
+        ) {
+          if (!state.conflicts.has(port)) state.conflicts.set(port, "bind-failed");
+        }
+      }
       const first = state.conflicts.entries().next().value as
         | [number, StagedManagedServerPortOutcome]
         | undefined;
@@ -135,6 +153,31 @@ function stagedPortError(
   if (!state?.ports.has(port)) return null;
   if (!state.conflicts.has(port)) state.conflicts.set(port, outcome);
   return new StagedManagedServerPortError(port, outcome);
+}
+
+function observeManagedProcess(proc: ManagedSubprocess): void {
+  if (observedManagedProcesses.has(proc)) return;
+  observedManagedProcesses.add(proc);
+  void proc.exited.then(
+    () => { exitedManagedProcesses.add(proc); },
+    () => { exitedManagedProcesses.add(proc); },
+  );
+}
+
+function managedProcessExited(proc: ManagedSubprocess): boolean {
+  return exitedManagedProcesses.has(proc)
+    || proc.exitCode !== null
+    || proc.signalCode !== null;
+}
+
+function registerStagedManagedProcess(
+  port: number,
+  managed: ManagedProcess,
+  proc: ManagedSubprocess,
+): void {
+  const state = stagedManagedServerState.getStore();
+  if (!state?.ports.has(port)) return;
+  state.ownedProcesses.set(port, { managed, process: proc });
 }
 
 interface StderrTailCapture {
@@ -230,6 +273,7 @@ async function runSupervisor(
         env: { ...process.env, ...opts.env },
         windowsHide: true,
       });
+      observeManagedProcess(next);
       // Publish ownership in the same synchronous turn as spawn. stop() can
       // always reach a revival child, including during readiness.
       mp.proc = next;
@@ -541,6 +585,7 @@ export async function startManagedServer(opts: StartOpts): Promise<ManagedProces
   const proc = (opts.spawner ?? spawnOwnedProcess)(command, {
     stdout: "ignore", stderr: "pipe", env: { ...process.env, ...opts.env },
   }) as ManagedSubprocess;
+  observeManagedProcess(proc);
   const stderrTail = collectStderrTail(proc);
 
   const outcome = await waitForHealthOrExit(
@@ -554,6 +599,7 @@ export async function startManagedServer(opts: StartOpts): Promise<ManagedProces
   if (outcome === "healthy") {
     log("ok", `${name} server ready on :${port}`);
     const mp: ManagedProcess = { proc, port, managed: true, mode };
+    registerStagedManagedProcess(port, mp, proc);
     if (opts.supervise) {
       // A supervised lifetime must not retain the short staging transaction's
       // async context after ownership has already been proven.

@@ -7,6 +7,9 @@ import { ProviderSlot } from "../src/backends/hot-swap";
 import {
   StagedManagedServerPortError,
   startManagedServer,
+  stopManagedServer,
+  type ManagedProcess,
+  type StartOpts,
 } from "../src/backends/managed-server";
 import type { STTProvider } from "../src/backends/stt/provider";
 import type { TTSProvider } from "../src/backends/tts/provider";
@@ -62,6 +65,71 @@ class StagedOwnershipProvider extends FakeVoiceProvider {
       }
       throw error;
     }
+  }
+}
+
+class SupervisedStagedProvider extends FakeVoiceProvider {
+  private managed: ManagedProcess | null = null;
+  private finishChild: ((code: number) => void) | null = null;
+
+  constructor(
+    name: string,
+    readonly port: number,
+    private readonly dieDuringWarmup: boolean,
+  ) {
+    super(name);
+  }
+
+  override async start(): Promise<void> {
+    this.starts += 1;
+    let exitCode: number | null = null;
+    let resolveExit!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => { resolveExit = resolve; });
+    const finish = (code: number): void => {
+      if (exitCode !== null) return;
+      exitCode = code;
+      resolveExit(code);
+    };
+    this.finishChild = finish;
+    const child = {
+      pid: 2_000_000_100 + this.port,
+      exited,
+      get exitCode() { return exitCode; },
+      signalCode: null,
+      stderr: new ReadableStream<Uint8Array>({
+        start(controller) { controller.close(); },
+      }),
+      kill: () => finish(143),
+    };
+    let probes = 0;
+    this.managed = await startManagedServer({
+      name: this.name,
+      port: this.port,
+      command: [process.execPath],
+      healthUrl: `http://127.0.0.1:${this.port}/health`,
+      timeoutMs: 1_000,
+      intervalMs: 1,
+      supervise: true,
+      fetcher: async () => {
+        probes += 1;
+        return new Response(probes === 1 ? "not ready" : "compatible", {
+          status: probes === 1 ? 503 : 200,
+        });
+      },
+      spawner: (() => child) as unknown as StartOpts["spawner"],
+    });
+  }
+
+  override async warmup(): Promise<void> {
+    this.warmups += 1;
+    if (!this.dieDuringWarmup) return;
+    this.finishChild?.(1);
+    await Bun.sleep(0);
+  }
+
+  override async stop(): Promise<void> {
+    this.stops += 1;
+    if (this.managed) await stopManagedServer(this.managed);
   }
 }
 
@@ -281,3 +349,50 @@ test("a compatible listener that steals a staged port is refused and the swap re
   expect(state.sttSlot.providerName).toBe("candidate-2");
   await state.sttSlot.stop();
 });
+
+test("a supervised staged child that dies during warmup is not persisted and retries another port", async () => {
+  root = mkdtempSync(join(tmpdir(), "cicero-supervised-staged-swap-"));
+  const configPath = join(root, "config.yaml");
+  const activePort = randomInt(20_000, 30_000);
+  const deadPort = randomInt(30_000, 40_000);
+  const replacementPort = randomInt(40_000, 50_000);
+  updateConfigFields({
+    stt: { backend: "faster-whisper", port: activePort, model: "old-model" },
+  }, configPath);
+  const config = loadConfig({}, { home: root });
+  const old = new FakeVoiceProvider("stt-old");
+  const candidates: SupervisedStagedProvider[] = [];
+  const ports = [deadPort, replacementPort];
+  const daemon = new CiceroDaemon(config, {
+    configPath,
+    voiceSwapPortAllocator: async () => ports.shift()!,
+    sttProviderFactory: (candidateConfig) => {
+      const candidate = new SupervisedStagedProvider(
+        `candidate-${candidates.length + 1}`,
+        candidateConfig.sttBackend.port!,
+        candidates.length === 0,
+      );
+      candidates.push(candidate);
+      return candidate;
+    },
+  });
+  const state = daemon as unknown as SwapHarness;
+  state.running = true;
+  state.lifecycle = "running";
+  state.sttSlot = new ProviderSlot<STTProvider>(old);
+
+  const result = await state.swapVoiceProvider({
+    role: "stt",
+    backend: "faster-whisper",
+    model: "new-model",
+  });
+  const persisted = loadConfig({}, { home: root });
+
+  expect(result.status).toBe("active");
+  expect(candidates).toHaveLength(2);
+  expect(candidates[0]!.stops).toBe(1);
+  expect(persisted.sttBackend.port).toBe(replacementPort);
+  expect(persisted.sttBackend.port).not.toBe(deadPort);
+  expect(state.sttSlot.providerName).toBe("candidate-2");
+  await state.sttSlot.stop();
+}, 10_000);
