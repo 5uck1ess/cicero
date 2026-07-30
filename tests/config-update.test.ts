@@ -237,6 +237,95 @@ describe("updateConfigFields", () => {
     expect(existsSync(acquiredPath)).toBe(true);
   }, 5_000);
 
+  test("a failed release cleanup is retried by a later same-process config rewrite", () => {
+    let failedOnce = false;
+    const lock = acquireConfigUpdateLock(path, {
+      unlinkSync: (lockPath) => {
+        if (!failedOnce && lockPath.endsWith(".owner.json")) {
+          failedOnce = true;
+          throw Object.assign(new Error("synthetic sharing violation"), { code: "EPERM" });
+        }
+        unlinkSync(lockPath);
+      },
+    });
+
+    lock.release();
+    expect(failedOnce).toBe(true);
+    expect(readdirSync(dir).some((entry) => entry.endsWith(".owner.json"))).toBe(true);
+
+    updateConfigFields({ voice: "recovered-without-restart" }, path);
+
+    expect(parseYaml(readFileSync(path, "utf8")).voice).toBe("recovered-without-restart");
+    expect(readdirSync(dir)).toEqual(["config.yaml"]);
+  });
+
+  test("a different live writer cannot take over an unconfirmed release", async () => {
+    let failedOnce = false;
+    const lock = acquireConfigUpdateLock(path, {
+      unlinkSync: (lockPath) => {
+        if (!failedOnce && lockPath.endsWith(".owner.json")) {
+          failedOnce = true;
+          throw Object.assign(new Error("synthetic sharing violation"), { code: "EPERM" });
+        }
+        unlinkSync(lockPath);
+      },
+    });
+    lock.release();
+
+    const acquiredPath = join(dir, "pending-cleanup-contender-acquired");
+    const configModule = new URL("../src/config.ts", import.meta.url).href;
+    const child = Bun.spawn([
+      process.execPath,
+      "-e",
+      [
+        `import { acquireConfigUpdateLock } from ${JSON.stringify(configModule)};`,
+        `const lock = acquireConfigUpdateLock(process.env.CICERO_TEST_CONFIG_PATH);`,
+        `await Bun.write(process.env.CICERO_TEST_ACQUIRED_PATH, "acquired");`,
+        `lock.release();`,
+      ].join("\n"),
+    ], {
+      env: {
+        ...process.env,
+        CICERO_TEST_CONFIG_PATH: path,
+        CICERO_TEST_ACQUIRED_PATH: acquiredPath,
+      },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+
+    await Bun.sleep(200);
+    expect(existsSync(acquiredPath)).toBe(false);
+
+    lock.release();
+    expect(await child.exited).toBe(0);
+    expect(existsSync(acquiredPath)).toBe(true);
+  }, 5_000);
+
+  test("a failed acquisition rollback cleanup is retried by a later same-process rewrite", () => {
+    let choosingFailure = false;
+    let ownerRollbackFailure = false;
+    expect(() => acquireConfigUpdateLock(path, {
+      unlinkSync: (lockPath) => {
+        if (!choosingFailure && lockPath.endsWith(".choosing")) {
+          choosingFailure = true;
+          throw Object.assign(new Error("synthetic choosing cleanup failure"), { code: "EPERM" });
+        }
+        if (!ownerRollbackFailure && lockPath.endsWith(".owner.json")) {
+          ownerRollbackFailure = true;
+          throw Object.assign(new Error("synthetic owner rollback failure"), { code: "EPERM" });
+        }
+        unlinkSync(lockPath);
+      },
+    })).toThrow("synthetic choosing cleanup failure");
+    expect(ownerRollbackFailure).toBe(true);
+    expect(readdirSync(dir).some((entry) => entry.endsWith(".owner.json"))).toBe(true);
+
+    updateConfigFields({ voice: "rollback-recovered" }, path);
+
+    expect(parseYaml(readFileSync(path, "utf8")).voice).toBe("rollback-recovered");
+    expect(readdirSync(dir)).toEqual(["config.yaml"]);
+  });
+
   test("a writer that lost its lease cannot publish its prepared rewrite", () => {
     writeFileSync(path, "voice: retained\n");
 

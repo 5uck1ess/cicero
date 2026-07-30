@@ -1,6 +1,7 @@
 import { unlink } from "node:fs/promises";
 import { DEFAULT_CLEANUP_TIMEOUT_MS } from "./backends/hot-swap";
 import { MANAGED_STARTUP_TIMEOUT_MS, PROVIDER_TIMEOUT_MS, readBoundedJson } from "./backends/http-transfer";
+import { CONFIG_UPDATE_LOCK_TIMEOUT_MS } from "./config";
 import { readRequestJsonLimited, RequestBodyTooLargeError } from "./http-request-body";
 import { readPrivateJson, writePrivateJson } from "./platform/private-json";
 import { ciceroPath } from "./platform/paths";
@@ -21,9 +22,10 @@ const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/;
  *                    role's own budget, and the client cannot know which role
  *                    it will be
  *   health()         PROVIDER_TIMEOUT_MS.health
+ *   persistence      CONFIG_UPDATE_LOCK_TIMEOUT_MS (config lease acquisition)
  *   cutover cleanup  DEFAULT_CLEANUP_TIMEOUT_MS   (retired generation drain)
  *
- * plus a margin for persistence (a config file write) and transport. Deriving it
+ * plus a margin for the config write itself and transport. Deriving it
  * this way is the point: the previous value was this constant plus a guessed 30s,
  * which a 290s start + 35s warmup + 2s health + 5s drain already overran.
  */
@@ -47,6 +49,7 @@ export function controlTimeoutMs(configuredProviderTimeoutsMs: readonly number[]
   return MANAGED_STARTUP_TIMEOUT_MS
     + warmup
     + PROVIDER_TIMEOUT_MS.health
+    + CONFIG_UPDATE_LOCK_TIMEOUT_MS
     + DEFAULT_CLEANUP_TIMEOUT_MS
     + 30_000;
 }

@@ -33,7 +33,7 @@ import { webVoiceTokenProblem } from "./web-voice/startup-policy";
 const CONFIG_FILE = "config.yaml";
 const ACTIONS_FILE = "actions.yaml";
 const CONFIG_UPDATE_LOCK_WAIT_MS = 50;
-const CONFIG_UPDATE_LOCK_TIMEOUT_MS = 35_000;
+export const CONFIG_UPDATE_LOCK_TIMEOUT_MS = 35_000;
 
 interface ConfigUpdateLockOwner {
   pid: number;
@@ -42,15 +42,35 @@ interface ConfigUpdateLockOwner {
   ticket: number;
 }
 
+interface ConfigUpdateLeaseState {
+  token: string;
+  usable: boolean;
+  cleanupPaths: Set<string>;
+}
+
+interface ConfigLockCleanupObligation {
+  path: string;
+  owner?: ConfigUpdateLockOwner;
+  lease?: ConfigUpdateLeaseState;
+}
+
 export interface ConfigUpdateLock {
   /** Fail closed unless this exact writer is still the elected lease owner. */
   assertOwned(): void;
   release(): void;
 }
 
+export interface ConfigUpdateLockOptions {
+  /** Internal filesystem injection used by focused lease-cleanup regressions. */
+  unlinkSync?: (path: string) => void;
+}
+
 const configLockWaiter = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 const CONFIG_LOCK_PARTICIPANT_PATTERN =
   /^(?<prefix>.+\.update-lock-)(?<pid>[1-9]\d*)-(?<token>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?<kind>choosing|owner\.json)$/i;
+const liveConfigUpdateLeases = new Map<string, ConfigUpdateLeaseState>();
+const pendingConfigLockCleanups = new Map<string, ConfigLockCleanupObligation>();
+let configLockExitCleanupInstalled = false;
 
 function errorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
@@ -64,6 +84,82 @@ function processIsAlive(pid: number): boolean {
     return true;
   } catch (error: unknown) {
     return errorCode(error) !== "ESRCH";
+  }
+}
+
+function updateConfigLockExitCleanup(): void {
+  if (pendingConfigLockCleanups.size > 0 && !configLockExitCleanupInstalled) {
+    configLockExitCleanupInstalled = true;
+    process.once("exit", cleanupPendingConfigLocksAtExit);
+  } else if (pendingConfigLockCleanups.size === 0 && configLockExitCleanupInstalled) {
+    process.removeListener("exit", cleanupPendingConfigLocksAtExit);
+    configLockExitCleanupInstalled = false;
+  }
+}
+
+function settleConfigLockCleanup(obligation: ConfigLockCleanupObligation): void {
+  pendingConfigLockCleanups.delete(obligation.path);
+  if (obligation.lease) {
+    obligation.lease.cleanupPaths.delete(obligation.path);
+    if (obligation.lease.cleanupPaths.size === 0) {
+      liveConfigUpdateLeases.delete(obligation.lease.token);
+    }
+  }
+}
+
+function tryConfigLockCleanup(
+  obligation: ConfigLockCleanupObligation,
+  unlinkPath: (path: string) => void,
+): boolean {
+  if (obligation.owner) {
+    try {
+      const current: unknown = JSON.parse(readFileSync(obligation.path, "utf8"));
+      if (!validConfigLockOwner(current, obligation.owner)) return false;
+    } catch (error: unknown) {
+      return errorCode(error) === "ENOENT";
+    }
+  }
+  try {
+    unlinkPath(obligation.path);
+    return true;
+  } catch (error: unknown) {
+    return errorCode(error) === "ENOENT";
+  }
+}
+
+function attemptConfigLockCleanups(
+  obligations: readonly ConfigLockCleanupObligation[],
+  unlinkPath: (path: string) => void,
+): void {
+  // Register the whole rollback before attempting any unlink. Otherwise the
+  // first successful path could make a partly published lease look fully clean.
+  for (const obligation of obligations) {
+    pendingConfigLockCleanups.set(obligation.path, obligation);
+    if (obligation.lease) obligation.lease.cleanupPaths.add(obligation.path);
+  }
+  for (const obligation of obligations) {
+    if (tryConfigLockCleanup(obligation, unlinkPath)) {
+      settleConfigLockCleanup(obligation);
+    }
+  }
+  updateConfigLockExitCleanup();
+}
+
+function retryPendingConfigLockCleanups(): void {
+  for (const obligation of [...pendingConfigLockCleanups.values()]) {
+    if (tryConfigLockCleanup(obligation, unlinkSync)) {
+      settleConfigLockCleanup(obligation);
+    }
+  }
+  updateConfigLockExitCleanup();
+}
+
+function cleanupPendingConfigLocksAtExit(): void {
+  configLockExitCleanupInstalled = false;
+  for (const obligation of [...pendingConfigLockCleanups.values()]) {
+    if (tryConfigLockCleanup(obligation, unlinkSync)) {
+      settleConfigLockCleanup(obligation);
+    }
   }
 }
 
@@ -113,26 +209,34 @@ function validConfigLockOwner(
     && owner.ticket > 0;
 }
 
-/**
- * A participant path contains a UUID and is never reused. Once its recorded
- * PID is dead, unlinking this exact path cannot remove a successor's lease.
- */
-function staleConfigLock(participant: ConfigLockParticipant): boolean {
-  return !processIsAlive(participant.pid);
+function reclaimableConfigLock(participant: ConfigLockParticipant): boolean {
+  if (participant.pid !== process.pid) return !processIsAlive(participant.pid);
+  /*
+   * UUID participant paths are never reused. This process alone may reclaim
+   * one of its paths when the ticket is absent from its live-lease map, because
+   * it knows that ticket is not held. Other processes still require a dead PID,
+   * and a cleanup failure stays in the map until unlink is confirmed, so neither
+   * a live lease nor an unconfirmed release is ever displaced based on age.
+   */
+  return !liveConfigUpdateLeases.has(participant.token);
 }
 
 function removeStaleConfigLock(participant: ConfigLockParticipant): void {
-  // Re-check immediately before removal. A PID that is still alive is never
-  // displaced merely because its rewrite took longer than expected.
-  if (!staleConfigLock(participant)) return;
+  // Re-check immediately before removal so a live ticket cannot be displaced.
+  if (!reclaimableConfigLock(participant)) return;
   for (const path of [participant.choosingPath, participant.ownerPath]) {
     if (!path) continue;
     try {
       unlinkSync(path);
+      const pending = pendingConfigLockCleanups.get(path);
+      if (pending) settleConfigLockCleanup(pending);
     } catch (error: unknown) {
       if (errorCode(error) !== "ENOENT") throw error;
+      const pending = pendingConfigLockCleanups.get(path);
+      if (pending) settleConfigLockCleanup(pending);
     }
   }
+  updateConfigLockExitCleanup();
 }
 
 function inspectLegacyConfigLock(configPath: string): "absent" | "blocked" | "removed" {
@@ -188,7 +292,7 @@ function scanConfigLocks(configPath: string): ConfigLockScan {
   const invalid: ConfigLockParticipant[] = [];
   const owners: ConfigLockScan["owners"] = [];
   for (const participant of participants.values()) {
-    if (staleConfigLock(participant)) {
+    if (reclaimableConfigLock(participant)) {
       removeStaleConfigLock(participant);
       continue;
     }
@@ -247,15 +351,24 @@ function configLockOwnershipError(configPath: string): Error {
  */
 export function acquireConfigUpdateLock(
   configPath: string = join(ciceroHome(), CONFIG_FILE),
+  options: ConfigUpdateLockOptions = {},
 ): ConfigUpdateLock {
   ensurePrivateDirectorySync(dirname(configPath));
+  retryPendingConfigLockCleanups();
   const token = randomUUID();
   const participantBase = `${configPath}.update-lock-${process.pid}-${token}`;
   const choosingPath = `${participantBase}.choosing`;
   const ownerPath = `${participantBase}.owner.json`;
   const deadlineMs = Date.now() + CONFIG_UPDATE_LOCK_TIMEOUT_MS;
   let owner: ConfigUpdateLockOwner | undefined;
+  const lease: ConfigUpdateLeaseState = {
+    token,
+    usable: true,
+    cleanupPaths: new Set(),
+  };
+  const unlinkPath = options.unlinkSync ?? unlinkSync;
 
+  liveConfigUpdateLeases.set(token, lease);
   try {
     writeFileSync(choosingPath, "", { flag: "wx", mode: PRIVATE_FILE_MODE });
     const initial = scanConfigLocks(configPath);
@@ -276,7 +389,7 @@ export function acquireConfigUpdateLock(
       flag: "wx",
       mode: PRIVATE_FILE_MODE,
     });
-    unlinkSync(choosingPath);
+    unlinkPath(choosingPath);
 
     while (true) {
       const scan = scanConfigLocks(configPath);
@@ -296,23 +409,19 @@ export function acquireConfigUpdateLock(
         && scan.invalid.length === 0
         && !blockedByOwner
       ) {
-        let released = false;
         return {
           assertOwned(): void {
-            if (released || !configLockIsOwned(configPath, owner!)) {
+            if (!lease.usable || !configLockIsOwned(configPath, owner!)) {
               throw configLockOwnershipError(configPath);
             }
           },
           release(): void {
-            if (released) return;
-            released = true;
-            try {
-              const current: unknown = JSON.parse(readFileSync(ownerPath, "utf8"));
-              if (!validConfigLockOwner(current, owner!)) return;
-              unlinkSync(ownerPath);
-            } catch {
-              // Dead-writer recovery or a prior release already removed it.
-            }
+            if (!liveConfigUpdateLeases.has(token)) return;
+            lease.usable = false;
+            attemptConfigLockCleanups(
+              [{ path: ownerPath, owner: owner!, lease }],
+              unlinkPath,
+            );
           },
         };
       }
@@ -326,9 +435,11 @@ export function acquireConfigUpdateLock(
       Atomics.wait(configLockWaiter, 0, 0, Math.min(CONFIG_UPDATE_LOCK_WAIT_MS, deadlineMs - nowMs));
     }
   } catch (error: unknown) {
-    for (const path of [choosingPath, ownerPath]) {
-      try { unlinkSync(path); } catch { /* absent or best-effort rollback */ }
-    }
+    lease.usable = false;
+    attemptConfigLockCleanups([
+      { path: choosingPath, lease },
+      { path: ownerPath, owner, lease },
+    ], unlinkPath);
     throw error;
   }
 }

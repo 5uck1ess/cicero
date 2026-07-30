@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CLEANUP_TIMEOUT_MS } from "../src/backends/hot-swap";
 import { MANAGED_STARTUP_TIMEOUT_MS, PROVIDER_TIMEOUT_MS } from "../src/backends/http-transfer";
+import { CONFIG_UPDATE_LOCK_TIMEOUT_MS } from "../src/config";
 import { writePrivateJson } from "../src/platform/private-json";
 import { CONTROL_TIMEOUT_MS, controlTimeoutMs, isSwapRequest, requestRuntimeSwap, startRuntimeControl, type RuntimeControlHandle } from "../src/runtime-control";
 
@@ -62,16 +63,20 @@ describe("runtime swap control", () => {
     expect(observed?.aborted).toBe(false);
   });
 
-  test("the client deadline outlasts a whole supported swap transaction", () => {
+  test("the client deadline outlasts every bounded server-side swap phase", () => {
     // Not just the cold start: the swap runs start → warmup → health → persist →
     // retired-generation cleanup back to back, and the abort is only honoured
-    // BEFORE persistence. A deadline that covers only startup still lets the CLI
+    // BEFORE persistence. A deadline that omits the config-lock wait still lets the CLI
     // report failure for a swap that commits — 290s start + 35s warmup + 2s health
     // + 5s drain overran the earlier 330s value. Each phase is bounded elsewhere,
-    // so the client budget must be at least their sum.
+    // so the client budget must exceed their sum — strictly, because a deadline
+    // equal to the sum fires exactly as the last phase completes, which is the
+    // false failure this test exists to prevent. The margin term in
+    // controlTimeoutMs() is what supplies that headroom.
     const worstCaseTransactionMs = MANAGED_STARTUP_TIMEOUT_MS
       + Math.max(PROVIDER_TIMEOUT_MS.tts, PROVIDER_TIMEOUT_MS.stt)
       + PROVIDER_TIMEOUT_MS.health
+      + CONFIG_UPDATE_LOCK_TIMEOUT_MS
       + DEFAULT_CLEANUP_TIMEOUT_MS;
     expect(CONTROL_TIMEOUT_MS).toBeGreaterThan(worstCaseTransactionMs);
   });
