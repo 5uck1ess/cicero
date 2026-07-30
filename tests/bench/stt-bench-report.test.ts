@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { median, renderTable, renderStreamingTable } from "../../bench/stt-bench";
 
 const streamStats = { firstDeltaMs: 120, finalAfterAudioMs: 300, deltasDuringAudio: 4, deltas: 6 };
@@ -74,4 +77,21 @@ test("batch and streaming candidates stay in their own tables", () => {
   expect(renderTable(rows)).not.toContain("| stream |");
   expect(renderStreamingTable(rows)).toContain("| stream |");
   expect(renderStreamingTable(rows)).not.toContain("| batch |");
+});
+
+test("writing a report creates the archive directory it needs", async () => {
+  // A RUNTIME-ASSUMPTION guard, not a bug fix. `bench/stt/results/` is
+  // gitignored and absent from a fresh checkout, and main() archives there
+  // without an explicit mkdir because Bun.write creates missing parents
+  // (verified on the pinned Bun 1.3.14 by running the real entry point in a
+  // fresh clone). If that ever changes, this fails here instead of the first
+  // time somebody benchmarks a new checkout.
+  const root = mkdtempSync(join(tmpdir(), "cicero-bench-report-"));
+  try {
+    const archivePath = join(root, "bench", "stt", "results", "2026-01-01T00-00-00-000Z.md");
+    await Bun.write(archivePath, "report");
+    expect(Bun.file(archivePath).size).toBeGreaterThan(0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
