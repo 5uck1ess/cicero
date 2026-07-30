@@ -103,6 +103,22 @@ function deltaResponse(socket: Bun.Socket): void {
   }, 10);
 }
 
+function finalOnlyResponse(socket: Bun.Socket): void {
+  // Answers on the same schedule as deltaResponse but sends no partials, and
+  // leaves the socket to the harness so the client can finish uploading. A
+  // responder that hangs up as soon as it has answered fails the run instead
+  // of measuring it, which is a different scenario entirely.
+  setTimeout(() => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"hello brave world"}\n\n');
+    socket.write("0\r\n\r\n");
+  }, 10);
+}
+
 function candidate(port: number): StreamCandidate {
   return { name: "flaky", kind: "stream", model: "test-model", port, host: "127.0.0.1", chunkMs: 50 };
 }
@@ -165,6 +181,27 @@ test("a fully measured clip reports its first run delta counts", async () => {
     expect(row.errors).toBe(0);
     expect(row.streaming?.deltas).toBe(3);
     expect(row.streaming?.deltasDuringAudio).toBe(3);
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 15_000);
+
+test("first-delta latency is withheld when any repetition has no partial", async () => {
+  const wav = writeWavFixture(0.2, 8_000);
+  const server = listenPerConnection([deltaResponse, finalOnlyResponse], true);
+  const clip: Clip = {
+    name: "clip1",
+    path: wav.path,
+    reference: "hello brave world",
+    durationSec: 0.2,
+  };
+  try {
+    // Both runs succeed — this is about a measured absence, not a failure.
+    const row = await benchStreamCandidate(candidate(server.port), [clip], 2);
+    expect(row.clips).toBe(1);
+    expect(row.errors).toBe(0);
+    expect(row.streaming?.firstDeltaMs).toBeNaN();
   } finally {
     server.stop(true);
     rmSync(wav.dir, { recursive: true, force: true });

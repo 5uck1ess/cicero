@@ -143,6 +143,33 @@ test("live stream realtime pacing waits for each chunk's final sample", async ()
   }
 }, 1_000);
 
+test("first-delta latency starts when the first PCM bytes are written", async () => {
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"ok"}\n\n');
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.01);
+  const clock = [0, 100, 105, 105];
+  try {
+    const result = await withGuard(
+      transcribeLive(wav.path, candidate(server.port), {
+        timeoutMs: 250,
+        now: () => clock.shift() ?? 105,
+      }),
+    );
+    expect(result.firstDeltaMs).toBe(5);
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
 /**
  * A peer that consumes the whole request and then neither answers nor closes —
  * and, crucially, tolerates the client's half-close. This has to be `node:net`
@@ -283,6 +310,53 @@ test("live stream rejects a response truncated before its zero chunk", async () 
   }
 }, 1_000);
 
+test("live stream completes and releases a persistent HTTP connection", async () => {
+  const sockets = new Set<NodeSocket>();
+  let resolveReleased!: () => void;
+  const released = new Promise<void>((resolve) => { resolveReleased = resolve; });
+  const server = createServer({ allowHalfOpen: true }, (socket) => {
+    sockets.add(socket);
+    let request = "";
+    socket.on("data", (data: Buffer) => {
+      request += data.toString("latin1");
+      if (!request.includes("0\r\n\r\n")) return;
+      socket.write(
+        "HTTP/1.1 200 OK\r\n" +
+        "Content-Type: text/event-stream\r\n" +
+        "Transfer-Encoding: chunked\r\n\r\n",
+      );
+      const event = 'data: {"type":"transcript.text.done","text":"kept alive"}\n\n';
+      socket.write(`${Buffer.byteLength(event).toString(16)}\r\n${event}\r\n0\r\n\r\n`);
+      request = "";
+    });
+    // A conformant persistent server leaves its write side open after the
+    // message terminator; the client must finish from framing and release it.
+    socket.on("end", () => {});
+    socket.on("error", () => {});
+    socket.on("close", () => {
+      sockets.delete(socket);
+      resolveReleased();
+    });
+  });
+  await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("test peer did not report a numeric port");
+  }
+  const wav = writeWavFixture(0.01);
+  try {
+    const result = await withGuard(
+      transcribeLive(wav.path, candidate(address.port), { timeoutMs: 250 }),
+    );
+    expect(result.text).toBe("kept alive");
+    await withGuard(released, 250);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => { server.close(() => resolve()); });
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
 test("live stream without a terminal event uses the last delta for time-to-final", async () => {
   const server = listenAfterCompleteRequest((socket) => {
     socket.write(
@@ -296,7 +370,7 @@ test("live stream without a terminal event uses the last delta for time-to-final
     socket.end();
   });
   const wav = writeWavFixture(10);
-  const clock = [0, 1_000, 10_500];
+  const clock = [0, 0, 0, 1_000, 10_500];
   try {
     const result = await withGuard(
       transcribeLive(wav.path, candidate(server.port), {
@@ -306,8 +380,8 @@ test("live stream without a terminal event uses the last delta for time-to-final
     );
     expect(result.audioMs).toBeCloseTo(10_000, 5);
     expect(result.firstDeltaMs).toBeCloseTo(1_000, 5);
-    expect(result.finalAfterAudioMs).toBeCloseTo(500, 5);
-    expect(result.finalAfterAudioMs).not.toBeCloseTo(-9_000, 5);
+    expect(result.finalAfterAudioMs).toBeCloseTo(10_500, 5);
+    expect(result.finalAfterAudioMs).not.toBeCloseTo(1_000, 5);
   } finally {
     server.stop(true);
     rmSync(wav.dir, { recursive: true, force: true });
@@ -367,6 +441,35 @@ test("a non-empty terminal transcript still wins over the partials", async () =>
   }
 }, 1_000);
 
+test("the last terminal transcript keeps the last terminal timestamp", async () => {
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"draft"}\n\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"corrected"}\n\n');
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.01);
+  const clock = [0, 0, 0, 100, 800];
+  try {
+    const result = await withGuard(
+      transcribeLive(wav.path, candidate(server.port), {
+        timeoutMs: 250,
+        now: () => clock.shift() ?? 800,
+      }),
+    );
+    expect(result.text).toBe("corrected");
+    expect(result.finalAfterAudioMs).toBeCloseTo(800, 5);
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
 test("the default deadline outlasts the longest clip decodeWav will accept", () => {
   // The feed is paced in real time, so a run cannot finish sooner than the clip
   // itself. A fixed 180s deadline failed every legal clip over three minutes
@@ -397,6 +500,31 @@ test("a final SSE event missing its blank line is still consumed", async () => {
       transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
     );
     expect(result.text).toBe("hello world");
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
+test("CRLF-framed SSE events are parsed separately", async () => {
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"hello "}\r\n\r\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"hello world"}\r\n\r\n');
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.01);
+  try {
+    const result = await withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    );
+    expect(result.text).toBe("hello world");
+    expect(result.deltas).toBe(1);
   } finally {
     server.stop(true);
     rmSync(wav.dir, { recursive: true, force: true });
@@ -494,8 +622,10 @@ test("the bench liveness probe gives up on a host that never connects", async ()
     timeoutMs: 30,
     connect: () => new Promise<Bun.Socket<undefined>>((resolve) => {
       setTimeout(() => {
-        released = true;
-        resolve({ terminate: () => {}, end: () => {} } as unknown as Bun.Socket<undefined>);
+        resolve({
+          terminate: () => { released = true; },
+          end: () => {},
+        } as unknown as Bun.Socket<undefined>);
       }, 120);
     }),
   });

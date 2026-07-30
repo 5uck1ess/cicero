@@ -273,7 +273,10 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
     deltasDuringAudio += clipDeltasDuringAudio;
     const { wer } = wordErrorRate(clip.reference, transcript);
     wers.push(wer * 100);
-    if (clipFirst.length) firstDeltas.push(median(clipFirst));
+    // A missing partial is a measured absence, not a sample to discard. Other
+    // latency columns include every successful repetition, so this clip only
+    // contributes first-delta latency when every repetition produced one.
+    if (clipFirst.length === runs) firstDeltas.push(median(clipFirst));
     if (clipFinal.length) finals.push(median(clipFinal));
     if (clipTotal.length) totals.push(median(clipTotal));
   }
@@ -292,7 +295,7 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
     streaming: {
       // NaN, not 0, when a model emitted no partial at all — 0 would read as
       // "instant" in a latency column, which is the opposite of what happened.
-      firstDeltaMs: paced && firstDeltas.length ? median(firstDeltas) : NaN,
+      firstDeltaMs: paced && firstDeltas.length === wers.length ? median(firstDeltas) : NaN,
       finalAfterAudioMs: paced ? median(finals) : NaN,
       deltasDuringAudio: paced ? deltasDuringAudio : NaN,
       paced,

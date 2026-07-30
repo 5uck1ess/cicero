@@ -22,7 +22,7 @@ export interface LiveStreamResult {
   text: string;
   /** Clip length in ms — the wall-clock budget a real-time feed spends uploading. */
   audioMs: number;
-  /** First `transcript.text.delta`, ms after real-time capture begins. null if none. */
+  /** First `transcript.text.delta`, ms after the first PCM byte is written. null if none. */
   firstDeltaMs: number | null;
   /** Deltas that landed before the clip's audio would have finished playing. */
   deltasDuringAudio: number;
@@ -340,22 +340,24 @@ export async function transcribeLive(
   const eventEncoder = new TextEncoder();
   let sse = "";
   let sseBytes = 0;
-  let firstDeltaMs: number | null = null;
-  let lastDeltaMs: number | null = null;
-  let deltasDuringAudio = 0;
+  let firstDeltaAt: number | null = null;
+  let lastDeltaAt: number | null = null;
+  const deltaTimes: number[] = [];
   let deltas = 0;
-  let doneMs: number | null = null;
+  let doneAt: number | null = null;
   // null (not "") so a terminal event carrying an empty transcript stays
   // distinguishable from no terminal event at all. Collapsing the two lets an
   // empty final fall back to the partials, which records a stale mid-stream
   // guess as the model's answer.
   let finalText: string | null = null;
   let joined = "";
-  let t0 = 0; // set when real-time capture begins
+  let paceStartedAt = 0;
+  let firstPcmWrittenAt = 0;
+  let lastPcmWrittenAt = 0;
   let failure: Error | null = null;
-  let resolveClosed!: () => void;
-  let closedSettled = false;
-  const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
+  let resolveResponse!: () => void;
+  let responseSettled = false;
+  const responseComplete = new Promise<void>((resolve) => { resolveResponse = resolve; });
   let drainWaiter: { resolve: () => void; reject: (error: Error) => void } | null = null;
   let paceWaiter: {
     timer: ReturnType<typeof setTimeout>;
@@ -363,10 +365,10 @@ export async function transcribeLive(
   } | null = null;
   let requestBodyDone = false;
 
-  const settleClosed = (): void => {
-    if (closedSettled) return;
-    closedSettled = true;
-    resolveClosed();
+  const settleResponse = (): void => {
+    if (responseSettled) return;
+    responseSettled = true;
+    resolveResponse();
   };
 
   const rejectPending = (error: Error): void => {
@@ -383,17 +385,24 @@ export async function transcribeLive(
     }
   };
 
+  let socketReleased = false;
+  const releaseSocket = (socket: { terminate(): void }): void => {
+    if (socketReleased) return;
+    socketReleased = true;
+    socket.terminate();
+  };
+
   const abortSocket = (socket: { terminate(): void }, error: Error): void => {
     failure ??= error;
     // Bun's terminate() is the forceful full close; end() only closes writes.
-    socket.terminate();
+    releaseSocket(socket);
     rejectPending(failure);
-    settleClosed();
+    settleResponse();
   };
 
   /** False only when the block carried a payload that could not be parsed. */
   const consumeEvent = (block: string): boolean => {
-    const payload = block.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+    const payload = block.split(/\r\n|\r|\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
     if (!payload || payload === "[DONE]") return true;
     let event: { type?: string; delta?: string; text?: string; error?: { message?: string } };
     try { event = JSON.parse(payload); } catch { return false; }
@@ -404,15 +413,17 @@ export async function transcribeLive(
       failure ??= new Error(sanitizeLabel(event.error.message ?? "stream error", MAX_REMOTE_ERROR_CHARS));
       return true;
     }
-    const at = now() - t0;
+    const at = now();
     if (event.type === "transcript.text.delta") {
       deltas++;
       joined += event.delta ?? "";
-      firstDeltaMs ??= at;
-      lastDeltaMs = at;
-      if (at < audioMs) deltasDuringAudio++;
+      firstDeltaAt ??= at;
+      lastDeltaAt = at;
+      deltaTimes.push(at);
     } else if (event.type === "transcript.text.done") {
-      doneMs ??= at;
+      // The last terminal event wins because its text is the transcript scored;
+      // replacing both fields keeps that transcript paired with its own timing.
+      doneAt = at;
       finalText = event.text ?? "";
     }
     return true;
@@ -458,21 +469,54 @@ export async function transcribeLive(
     sseBytes = 0;
   };
 
+  let pendingCr = false;
+  let pendingCrBelongsToEvent = false;
+  let lineHasContent = false;
+
   const consumeEvents = (text: string): void => {
     let offset = 0;
-    if (sse.endsWith("\n") && text.startsWith("\n")) {
-      takeEvent(sse.slice(0, -1));
-      offset = 1;
-    }
-    for (;;) {
-      const end = text.indexOf("\n\n", offset);
-      if (end < 0) {
-        appendEventFragment(text.slice(offset));
-        return;
+    if (pendingCr) {
+      if (text.charCodeAt(0) === LF) {
+        if (pendingCrBelongsToEvent) appendEventFragment("\n");
+        offset = 1;
       }
-      appendEventFragment(text.slice(offset, end));
-      takeEvent(sse);
-      offset = end + 2;
+      pendingCr = false;
+      pendingCrBelongsToEvent = false;
+    }
+
+    while (offset < text.length) {
+      let end = offset;
+      while (end < text.length) {
+        const code = text.charCodeAt(end);
+        if (code === CR || code === LF) break;
+        end++;
+      }
+      if (end > offset) {
+        appendEventFragment(text.slice(offset, end));
+        lineHasContent = true;
+      }
+      if (end === text.length) return;
+
+      const code = text.charCodeAt(end);
+      if (lineHasContent) {
+        appendEventFragment(code === CR ? "\r" : "\n");
+        lineHasContent = false;
+        if (code === CR) pendingCrBelongsToEvent = true;
+      } else {
+        takeEvent(sse);
+        pendingCrBelongsToEvent = false;
+      }
+      pendingCr = code === CR;
+      offset = end + 1;
+
+      if (pendingCr && offset < text.length) {
+        if (text.charCodeAt(offset) === LF) {
+          if (pendingCrBelongsToEvent) appendEventFragment("\n");
+          offset++;
+        }
+        pendingCr = false;
+        pendingCrBelongsToEvent = false;
+      }
     }
   };
 
@@ -514,7 +558,7 @@ export async function transcribeLive(
     } else {
       failure ??= error;
       rejectPending(failure);
-      settleClosed();
+      settleResponse();
     }
     rejectDeadline(failure ?? error);
   }, timeoutMs);
@@ -527,6 +571,13 @@ export async function transcribeLive(
         data: (s, chunk) => {
           try {
             consumeEvents(reader.push(chunk));
+            if (reader.complete) {
+              // HTTP/1.1 persistence leaves the socket open after the zero
+              // chunk and trailer terminator, so framing completion owns this
+              // signal rather than the transport's eventual close callback.
+              flushPendingEvent();
+              settleResponse();
+            }
             if (failure) abortSocket(s, failure);
           } catch (err: unknown) {
             abortSocket(s, err instanceof Error ? err : new Error(String(err)));
@@ -538,13 +589,14 @@ export async function transcribeLive(
           waiter?.resolve();
         },
         close: () => {
+          socketReleased = true;
           if (!requestBodyDone) {
             failure ??= new Error("connection closed before request body completed");
           } else if (!reader.complete) {
             failure ??= new Error("connection closed before response completed");
           }
           if (failure) rejectPending(failure);
-          settleClosed();
+          settleResponse();
         },
         error: (s, err) => {
           abortSocket(s, err instanceof Error ? err : new Error(String(err)));
@@ -564,30 +616,32 @@ export async function transcribeLive(
       `Transfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nAccept: text/event-stream\r\n\r\n`,
     );
 
-    t0 = now();
+    paceStartedAt = now();
     for (let off = 0; off < pcm.length && !failure; off += chunkBytes) {
       const slice = pcm.subarray(off, Math.min(off + chunkBytes, pcm.length));
       if (c.pace !== "fast") {
         // Wait until this chunk's final sample would have been captured before
         // sending it, so no sample arrives earlier than a live microphone could provide it.
         const playedMs = ((off + slice.length) / 2 / sampleRate) * 1000;
-        const wait = t0 + playedMs - now();
+        const wait = paceStartedAt + playedMs - now();
         if (wait > 0) await waitForPace(wait);
       }
       await writeAll(`${slice.length.toString(16)}\r\n`);
+      if (off === 0) firstPcmWrittenAt = now();
       await writeAll(slice);
+      if (off + slice.length === pcm.length) lastPcmWrittenAt = now();
       await writeAll("\r\n");
     }
     await writeAll("0\r\n\r\n");
     requestBodyDone = true;
-    await closed;
+    await responseComplete;
     flushPendingEvent();
   } finally {
     clearTimeout(timeout);
     const cleanupError = failure ?? new Error("live transcription request ended");
     rejectPending(cleanupError);
-    settleClosed();
-    socket?.terminate();
+    settleResponse();
+    if (socket) releaseSocket(socket);
   }
 
   if (failure) throw failure;
@@ -603,12 +657,12 @@ export async function transcribeLive(
   return {
     text: text.trim(),
     audioMs,
-    firstDeltaMs,
-    deltasDuringAudio,
+    firstDeltaMs: firstDeltaAt === null ? null : firstDeltaAt - firstPcmWrittenAt,
+    deltasDuringAudio: deltaTimes.filter((at) => at < lastPcmWrittenAt).length,
     deltas,
     // Without a terminal event, the last delta is the best available finish
     // estimate. A negative value is still meaningful when that final available
     // delta genuinely arrived before the audio itself finished.
-    finalAfterAudioMs: (doneMs ?? lastDeltaMs ?? audioMs) - audioMs,
+    finalAfterAudioMs: (doneAt ?? lastDeltaAt ?? lastPcmWrittenAt) - lastPcmWrittenAt,
   };
 }
