@@ -19,10 +19,11 @@ function writeChunk(socket: Bun.Socket, text: string): void {
  */
 function listenPerConnection(
   responders: Array<(socket: Bun.Socket) => void>,
+  respondAfterHeaders = false,
 ): Bun.TCPSocketListener<{ request: string; done: boolean }> {
-  // Indexed by completed REQUEST, not by connection: benchStreamCandidate opens
-  // and drops a liveness-probe connection first, which would otherwise shift
-  // every responder by one and silently test a different scenario.
+  // Indexed by HTTP requests, not connections: benchStreamCandidate opens and
+  // drops a liveness-probe connection first, which would otherwise shift every
+  // responder by one and silently test a different scenario.
   let requests = 0;
   return Bun.listen<{ request: string; done: boolean }>({
     hostname: "127.0.0.1",
@@ -33,10 +34,19 @@ function listenPerConnection(
       },
       data(socket, data) {
         socket.data.request += data.toString("latin1");
-        if (socket.data.done || !socket.data.request.includes("0\r\n\r\n")) return;
+        const requestComplete = socket.data.request.includes("0\r\n\r\n");
+        if (socket.data.done) {
+          if (respondAfterHeaders && requestComplete) socket.end();
+          return;
+        }
+        const responseReady = respondAfterHeaders
+          ? socket.data.request.includes("\r\n\r\n")
+          : requestComplete;
+        if (!responseReady) return;
         socket.data.done = true;
         const responder = responders[Math.min(requests++, responders.length - 1)];
         responder?.(socket);
+        if (respondAfterHeaders && requestComplete) socket.end();
       },
     },
   });
@@ -62,6 +72,24 @@ function truncatedResponse(socket: Bun.Socket): void {
   socket.terminate();
 }
 
+function deltaResponse(socket: Bun.Socket): void {
+  // Sending partials while the paced request is still uploading makes the
+  // during-audio counter non-zero, so the rejection regression covers both
+  // candidate-wide delta totals rather than only the total event count.
+  setTimeout(() => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"hello "}\n\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"brave "}\n\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"world"}\n\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"hello brave world"}\n\n');
+    socket.write("0\r\n\r\n");
+  }, 10);
+}
+
 function candidate(port: number): StreamCandidate {
   return { name: "flaky", kind: "stream", model: "test-model", port, host: "127.0.0.1", chunkMs: 50 };
 }
@@ -82,6 +110,48 @@ test("a clip whose later run fails is an error, not a one-sample measurement", a
     // No fabricated metrics for a clip that never completed.
     expect(row.meanWerPct).toBeNaN();
     expect(row.streaming?.finalAfterAudioMs).toBeNaN();
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 15_000);
+
+test("a rejected clip does not leak its first run delta counts", async () => {
+  const wav = writeWavFixture(0.2, 8_000);
+  const server = listenPerConnection([deltaResponse, truncatedResponse], true);
+  const clip: Clip = {
+    name: "clip1",
+    path: wav.path,
+    reference: "hello brave world",
+    durationSec: 0.2,
+  };
+  try {
+    const row = await benchStreamCandidate(candidate(server.port), [clip], 2);
+    expect(row.clips).toBe(0);
+    expect(row.errors).toBe(1);
+    expect(row.streaming?.deltas).toBe(0);
+    expect(row.streaming?.deltasDuringAudio).toBe(0);
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 15_000);
+
+test("a fully measured clip reports its first run delta counts", async () => {
+  const wav = writeWavFixture(0.2, 8_000);
+  const server = listenPerConnection([deltaResponse], true);
+  const clip: Clip = {
+    name: "clip1",
+    path: wav.path,
+    reference: "hello brave world",
+    durationSec: 0.2,
+  };
+  try {
+    const row = await benchStreamCandidate(candidate(server.port), [clip], 2);
+    expect(row.clips).toBe(1);
+    expect(row.errors).toBe(0);
+    expect(row.streaming?.deltas).toBe(3);
+    expect(row.streaming?.deltasDuringAudio).toBe(3);
   } finally {
     server.stop(true);
     rmSync(wav.dir, { recursive: true, force: true });

@@ -231,6 +231,12 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
     const clipFinal: number[] = [];
     const clipTotal: number[] = [];
     let transcript = "";
+    // Staged, not accumulated: run 0's counts belong to a clip that has not
+    // finished its repetitions yet, and folding them in here left the deltas of
+    // a clip rejected by a later failed run standing in the candidate's totals —
+    // a table reading "10 / 11" for a candidate that scored no clips at all.
+    let clipDeltasDuringAudio = 0;
+    let clipDeltas = 0;
     let failed = false;
     for (let r = 0; r < runs; r++) {
       const t0 = performance.now();
@@ -241,8 +247,8 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
         if (res.firstDeltaMs !== null) clipFirst.push(res.firstDeltaMs);
         if (r === 0) {
           transcript = res.text;
-          deltas += res.deltas;
-          deltasDuringAudio += res.deltasDuringAudio;
+          clipDeltas = res.deltas;
+          clipDeltasDuringAudio = res.deltasDuringAudio;
         }
       } catch (err: unknown) {
         failed = true;
@@ -255,6 +261,10 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
     // median over three, and reports errors=0 for a clip that errored.
     if (failed || !transcript) { errors++; continue; }
 
+    // Committed at the same point as the WER and latency medians below: past
+    // the rejection, where the clip is known to have completed every run.
+    deltas += clipDeltas;
+    deltasDuringAudio += clipDeltasDuringAudio;
     const { wer } = wordErrorRate(clip.reference, transcript);
     wers.push(wer * 100);
     if (clipFirst.length) firstDeltas.push(median(clipFirst));
