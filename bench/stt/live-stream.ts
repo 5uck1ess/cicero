@@ -84,7 +84,9 @@ function toS16le(samples: Float32Array): Uint8Array {
  * split on event boundaries.
  */
 class ChunkedResponseReader {
-  private state: "headers" | "size" | "size-lf" | "data" | "data-cr" | "data-lf" | "done" = "headers";
+  private state:
+    | "headers" | "size" | "size-lf" | "data" | "data-cr" | "data-lf"
+    | "trailer" | "trailer-lf" | "done" = "headers";
   private header = new Uint8Array(1024);
   private headerLength = 0;
   private headerEndMatched = 0;
@@ -92,6 +94,8 @@ class ChunkedResponseReader {
   private sizeLineLength = 0;
   private chunkRemaining = 0;
   private bodyBytes = 0;
+  private trailerBytes = 0;
+  private trailerLineLength = 0;
   private readonly decoder = new TextDecoder();
   status = 0;
 
@@ -140,6 +144,33 @@ class ChunkedResponseReader {
       if (this.state === "data-cr") {
         if (byte !== CR) throw new Error("response chunk is missing its trailing CRLF");
         this.state = "data-lf";
+        offset++;
+        continue;
+      }
+      if (this.state === "trailer") {
+        if (byte === CR) {
+          this.state = "trailer-lf";
+        } else {
+          this.trailerLineLength++;
+          this.trailerBytes++;
+          if (this.trailerBytes > this.limits.maxHeaderBytes) {
+            throw new RangeError(
+              `response trailer section exceeds ${this.limits.maxHeaderBytes}-byte limit`,
+            );
+          }
+        }
+        offset++;
+        continue;
+      }
+      if (this.state === "trailer-lf") {
+        if (byte !== LF) throw new Error("malformed trailer section in response");
+        if (this.trailerLineLength === 0) {
+          this.state = "done";
+          text.push(this.decoder.decode());
+        } else {
+          this.trailerLineLength = 0;
+          this.state = "trailer";
+        }
         offset++;
         continue;
       }
@@ -227,8 +258,14 @@ class ChunkedResponseReader {
     }
     this.sizeLineLength = 0;
     if (size === 0) {
-      this.state = "done";
-      return this.decoder.decode();
+      // RFC 9112 7.1: the zero chunk is followed by an optional trailer section
+      // and a final empty line. The response is NOT complete until that line
+      // arrives, and treating it as complete lets a peer that sends `0\r\n` and
+      // then FIN be recorded as a successful measurement.
+      this.trailerBytes = 0;
+      this.trailerLineLength = 0;
+      this.state = "trailer";
+      return "";
     }
     this.chunkRemaining = size;
     this.state = "data";

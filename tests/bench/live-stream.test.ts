@@ -334,3 +334,54 @@ test("the bench liveness probe gives up on a host that never connects", async ()
   await new Promise<void>((resolve) => { setTimeout(resolve, 150); });
   expect(released).toBe(true);
 }, 1_000);
+
+test("live stream rejects a response cut off inside the trailer section", async () => {
+  // RFC 9112 §7.1: a chunked body ends with the zero chunk, optional trailer
+  // fields, and a final empty line. A peer that sends `0\r\n` and then FIN has
+  // NOT finished, and treating it as finished silently records a truncated
+  // stream as a successful measurement.
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"partial accepted"}\n\n');
+    socket.write("0\r\n");   // zero chunk, but no terminating CRLF
+    socket.end();
+  });
+  const wav = writeWavFixture(0.01);
+  try {
+    await expect(withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    )).rejects.toThrow("connection closed before response completed");
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
+test("live stream accepts a response whose zero chunk carries trailer fields", async () => {
+  // The converse of the truncation case: trailers are legal, so consuming the
+  // trailer section must not turn a well-formed response into a failure.
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"all done"}\n\n');
+    socket.write("0\r\nX-Bench-Trailer: ok\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.01);
+  try {
+    const result = await withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    );
+    expect(result.text).toBe("all done");
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
