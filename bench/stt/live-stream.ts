@@ -21,7 +21,7 @@ export interface LiveStreamResult {
   text: string;
   /** Clip length in ms — the wall-clock budget a real-time feed spends uploading. */
   audioMs: number;
-  /** First `transcript.text.delta`, ms after the first PCM byte. null if none. */
+  /** First `transcript.text.delta`, ms after real-time capture begins. null if none. */
   firstDeltaMs: number | null;
   /** Deltas that landed before the clip's audio would have finished playing. */
   deltasDuringAudio: number;
@@ -46,7 +46,13 @@ export interface LiveStreamOptions {
   limits?: Partial<LiveStreamResponseLimits>;
   /** Injectable monotonic clock for deterministic timing regressions. */
   now?: () => number;
+  /** Injectable connector for deterministic connection-deadline regressions. */
+  connect?: LiveStreamConnect;
 }
+
+export type LiveStreamConnect = (
+  options: Bun.TCPSocketConnectOptions<undefined>,
+) => Promise<Bun.Socket<undefined>>;
 
 const DEFAULT_CHUNK_MS = 100;
 const DEFAULT_TIMEOUT_MS = 180_000;
@@ -90,6 +96,10 @@ class ChunkedResponseReader {
   status = 0;
 
   constructor(private readonly limits: LiveStreamResponseLimits) {}
+
+  get complete(): boolean {
+    return this.state === "done";
+  }
 
   /** Returns any newly decoded body text. Throws on a malformed response. */
   push(chunk: Uint8Array): string {
@@ -258,6 +268,8 @@ export async function transcribeLive(
   }
   const limits = responseLimits(options.limits);
   const now = options.now ?? (() => performance.now());
+  const connect: LiveStreamConnect =
+    options.connect ?? ((connectOptions) => Bun.connect(connectOptions));
   const { samples, sampleRate } = decodeWav(await Bun.file(audioPath).arrayBuffer());
   const pcm = toS16le(samples);
   const audioMs = (samples.length / sampleRate) * 1000;
@@ -285,7 +297,7 @@ export async function transcribeLive(
   let doneMs: number | null = null;
   let finalText = "";
   let joined = "";
-  let t0 = 0; // set when the first PCM byte goes out
+  let t0 = 0; // set when real-time capture begins
   let failure: Error | null = null;
   let resolveClosed!: () => void;
   let closedSettled = false;
@@ -381,42 +393,14 @@ export async function transcribeLive(
     }
   };
 
-  const socket = await Bun.connect({
-    hostname: host,
-    port: c.port,
-    socket: {
-      data: (s, chunk) => {
-        try {
-          consumeEvents(reader.push(chunk));
-          if (failure) abortSocket(s, failure);
-        } catch (err: unknown) {
-          abortSocket(s, err instanceof Error ? err : new Error(String(err)));
-        }
-      },
-      drain: () => {
-        const waiter = drainWaiter;
-        drainWaiter = null;
-        waiter?.resolve();
-      },
-      close: () => {
-        if (!requestBodyDone) {
-          failure ??= new Error("connection closed before request body completed");
-          rejectPending(failure);
-        }
-        settleClosed();
-      },
-      error: (s, err) => {
-        abortSocket(s, err instanceof Error ? err : new Error(String(err)));
-      },
-    },
-  });
+  let socket: Bun.Socket<undefined> | null = null;
 
   /** Bun's `write` does not buffer the remainder, so a short write must be re-driven. */
   const writeAll = async (data: Uint8Array | string): Promise<void> => {
     let payload = typeof data === "string" ? new TextEncoder().encode(data) : data;
     while (payload.length) {
       if (failure) throw failure;
-      const n = socket.write(payload);
+      const n = socket!.write(payload);
       if (n >= payload.length) return;
       payload = payload.subarray(Math.max(n, 0));
       await new Promise<void>((resolve, reject) => {
@@ -436,11 +420,62 @@ export async function transcribeLive(
     });
   };
 
+  let releaseLateSocket = false;
+  let rejectDeadline!: (error: Error) => void;
+  const deadline = new Promise<never>((_, reject) => { rejectDeadline = reject; });
   const timeout = setTimeout(() => {
-    abortSocket(socket, new Error(`no response within ${timeoutMs} ms`));
+    releaseLateSocket = true;
+    const error = new Error(`no response within ${timeoutMs} ms`);
+    if (socket) {
+      abortSocket(socket, error);
+    } else {
+      failure ??= error;
+      rejectPending(failure);
+      settleClosed();
+    }
+    rejectDeadline(failure ?? error);
   }, timeoutMs);
 
   try {
+    const connecting = connect({
+      hostname: host,
+      port: c.port,
+      socket: {
+        data: (s, chunk) => {
+          try {
+            consumeEvents(reader.push(chunk));
+            if (failure) abortSocket(s, failure);
+          } catch (err: unknown) {
+            abortSocket(s, err instanceof Error ? err : new Error(String(err)));
+          }
+        },
+        drain: () => {
+          const waiter = drainWaiter;
+          drainWaiter = null;
+          waiter?.resolve();
+        },
+        close: () => {
+          if (!requestBodyDone) {
+            failure ??= new Error("connection closed before request body completed");
+          } else if (!reader.complete) {
+            failure ??= new Error("connection closed before response completed");
+          }
+          if (failure) rejectPending(failure);
+          settleClosed();
+        },
+        error: (s, err) => {
+          abortSocket(s, err instanceof Error ? err : new Error(String(err)));
+        },
+      },
+    });
+    void connecting.then(
+      (connected) => {
+        if (releaseLateSocket) connected.terminate();
+      },
+      () => {},
+    );
+    socket = await Promise.race([connecting, deadline]);
+
     await writeAll(
       `POST ${path} HTTP/1.1\r\nHost: ${host}:${c.port}\r\n` +
       `Transfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nAccept: text/event-stream\r\n\r\n`,
@@ -449,16 +484,16 @@ export async function transcribeLive(
     t0 = now();
     for (let off = 0; off < pcm.length && !failure; off += chunkBytes) {
       const slice = pcm.subarray(off, Math.min(off + chunkBytes, pcm.length));
-      await writeAll(`${slice.length.toString(16)}\r\n`);
-      await writeAll(slice);
-      await writeAll("\r\n");
       if (c.pace !== "fast") {
-        // Sleep until this chunk's audio would have finished playing, so the
-        // server never sees samples earlier than a live microphone would deliver.
+        // Wait until this chunk's final sample would have been captured before
+        // sending it, so no sample arrives earlier than a live microphone could provide it.
         const playedMs = ((off + slice.length) / 2 / sampleRate) * 1000;
         const wait = t0 + playedMs - now();
         if (wait > 0) await waitForPace(wait);
       }
+      await writeAll(`${slice.length.toString(16)}\r\n`);
+      await writeAll(slice);
+      await writeAll("\r\n");
     }
     await writeAll("0\r\n\r\n");
     requestBodyDone = true;
@@ -468,7 +503,7 @@ export async function transcribeLive(
     const cleanupError = failure ?? new Error("live transcription request ended");
     rejectPending(cleanupError);
     settleClosed();
-    socket.terminate();
+    socket?.terminate();
   }
 
   if (failure) throw failure;

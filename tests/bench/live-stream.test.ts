@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { createServer, type Socket as NodeSocket } from "node:net";
 import { transcribeLive } from "../../bench/stt/live-stream";
+import { portOpen } from "../../bench/stt-bench";
 import type { StreamCandidate } from "../../bench/stt/types";
 import { writeWavFixture } from "../helpers/wav";
 
@@ -58,6 +59,88 @@ function writeChunk(socket: Bun.Socket, text: string): void {
   socket.write(bytes);
   socket.write("\r\n");
 }
+
+test("live stream realtime pacing waits for each chunk's final sample", async () => {
+  const arrivals: number[] = [];
+  let buffered = Buffer.alloc(0);
+  let headersRead = false;
+  let responded = false;
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      data(socket, data) {
+        buffered = Buffer.concat([buffered, data]);
+        if (!headersRead) {
+          const headerEnd = buffered.indexOf("\r\n\r\n");
+          if (headerEnd < 0) return;
+          headersRead = true;
+          buffered = buffered.subarray(headerEnd + 4);
+        }
+        for (;;) {
+          const lineEnd = buffered.indexOf("\r\n");
+          if (lineEnd < 0) return;
+          const size = Number.parseInt(buffered.subarray(0, lineEnd).toString("ascii"), 16);
+          const frameEnd = lineEnd + 2 + size + 2;
+          if (buffered.length < frameEnd) return;
+          buffered = buffered.subarray(frameEnd);
+          if (size > 0) {
+            arrivals.push(performance.now());
+            continue;
+          }
+          if (!responded) {
+            responded = true;
+            socket.write(
+              "HTTP/1.1 200 OK\r\n" +
+              "Content-Type: text/event-stream\r\n" +
+              "Transfer-Encoding: chunked\r\n\r\n",
+            );
+            writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"ok"}\n\n');
+            socket.write("0\r\n\r\n");
+            socket.end();
+          }
+          return;
+        }
+      },
+    },
+  });
+  const chunkMs = 40;
+  // 8 kHz is the lowest rate decodeWav accepts, and 80 ms of it is two 40 ms
+  // chunks — enough to check pacing without the test itself taking real time.
+  const wav = writeWavFixture(0.08, 8_000);
+  const realtimeCandidate: StreamCandidate = {
+    name: "local realtime test stream",
+    kind: "stream",
+    model: "test-model",
+    host: "127.0.0.1",
+    port: server.port,
+    chunkMs,
+  };
+  let captureStartedAt: number | undefined;
+  try {
+    const result = await withGuard(
+      transcribeLive(wav.path, realtimeCandidate, {
+        timeoutMs: 250,
+        now: () => {
+          const at = performance.now();
+          captureStartedAt ??= at;
+          return at;
+        },
+      }),
+    );
+    expect(result.text).toBe("ok");
+    expect(arrivals).toHaveLength(2);
+    if (captureStartedAt === undefined) throw new Error("capture clock was not read");
+    for (const [index, arrival] of arrivals.entries()) {
+      expect(arrival - captureStartedAt).toBeGreaterThanOrEqual(
+        (index + 1) * chunkMs - 3,
+      );
+    }
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
 
 /**
  * A peer that consumes the whole request and then neither answers nor closes —
@@ -133,6 +216,28 @@ test("live stream deadline releases a peer that never responds or closes", async
   }
 }, 1_000);
 
+test("live stream deadline includes connection establishment", async () => {
+  const wav = writeWavFixture(0.01);
+  let connectCalls = 0;
+  const startedAt = performance.now();
+  try {
+    await expect(withGuard(
+      transcribeLive(wav.path, candidate(0), {
+        timeoutMs: 30,
+        connect: () => {
+          connectCalls++;
+          return new Promise<Bun.Socket<undefined>>(() => {});
+        },
+      }),
+      250,
+    )).rejects.toThrow("no response within 30 ms");
+    expect(connectCalls).toBe(1);
+    expect(performance.now() - startedAt).toBeLessThan(200);
+  } finally {
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
 test("live stream rejects a response chunk above the configured limit", async () => {
   const server = listenAfterCompleteRequest((socket) => {
     socket.write(
@@ -150,6 +255,27 @@ test("live stream rejects a response chunk above the configured limit", async ()
         limits: { maxChunkBytes: 8 },
       }),
     )).rejects.toThrow("response chunk exceeds 8-byte limit");
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
+test("live stream rejects a response truncated before its zero chunk", async () => {
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"partial"}\n\n');
+    socket.end();
+  });
+  const wav = writeWavFixture(0.01);
+  try {
+    await expect(withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    )).rejects.toThrow("connection closed before response completed");
   } finally {
     server.stop(true);
     rmSync(wav.dir, { recursive: true, force: true });
@@ -185,4 +311,26 @@ test("live stream without a terminal event uses the last delta for time-to-final
     server.stop(true);
     rmSync(wav.dir, { recursive: true, force: true });
   }
+}, 1_000);
+
+test("the bench liveness probe gives up on a host that never connects", async () => {
+  // The probe runs before transcribeLive, so an unbounded connect here would
+  // hold the whole bench for the OS TCP timeout on a host that drops SYNs.
+  // Injected rather than pointed at a blackhole address, which is not portable.
+  let released = false;
+  const started = performance.now();
+  const open = await portOpen("192.0.2.1", 9, {
+    timeoutMs: 30,
+    connect: () => new Promise<Bun.Socket<undefined>>((resolve) => {
+      setTimeout(() => {
+        released = true;
+        resolve({ terminate: () => {}, end: () => {} } as unknown as Bun.Socket<undefined>);
+      }, 120);
+    }),
+  });
+  expect(open).toBe(false);
+  expect(performance.now() - started).toBeLessThan(100);
+  // The late socket must still be released rather than leaked.
+  await new Promise<void>((resolve) => { setTimeout(resolve, 150); });
+  expect(released).toBe(true);
 }, 1_000);

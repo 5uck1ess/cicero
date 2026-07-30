@@ -31,7 +31,7 @@ import { MlxWhisperProvider } from "../src/backends/stt/mlx-whisper";
 import { FasterWhisperProvider } from "../src/backends/stt/faster-whisper";
 import type { STTProvider } from "../src/backends/stt/provider";
 import { wordErrorRate } from "./stt/wer";
-import { transcribeLive } from "./stt/live-stream";
+import { transcribeLive, type LiveStreamConnect } from "./stt/live-stream";
 import type { Candidate, Clip, ProviderCandidate, StreamCandidate } from "./stt/types";
 
 interface Args { clipsDir: string; candidatesFile: string; runs: number }
@@ -150,13 +150,43 @@ interface Row {
 const emptyRow = (name: string, available: boolean): Row =>
   ({ name, available, meanWerPct: 0, warmMs: 0, coldMs: 0, rtf: 0, errors: 0, clips: 0 });
 
+/*
+ * A candidate host that silently drops SYNs would otherwise hold this probe for
+ * the OS TCP timeout — minutes, before the bench has measured anything. Five
+ * seconds is generous for a reachable host on a LAN or over a VPN, and a host
+ * slower than that is not one these timings would mean anything against.
+ */
+const PORT_PROBE_TIMEOUT_MS = 5_000;
+
 /** Cheap liveness probe — a stream candidate has no provider `health()` to ask. */
-async function portOpen(host: string, port: number): Promise<boolean> {
+export async function portOpen(
+  host: string,
+  port: number,
+  options: { timeoutMs?: number; connect?: LiveStreamConnect } = {},
+): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? PORT_PROBE_TIMEOUT_MS;
+  const connect = options.connect ?? ((connectOptions) => Bun.connect(connectOptions));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let expired = false;
+  const connecting = connect({ hostname: host, port, socket: { data: () => {} } });
+  // A socket that arrives after the probe gave up still has to be released, or
+  // the bench leaks one per unreachable candidate.
+  void connecting.then((sock) => { if (expired) sock.terminate(); }, () => {});
   try {
-    const sock = await Bun.connect({ hostname: host, port, socket: { data: () => {} } });
+    const sock = await Promise.race([
+      connecting,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          expired = true;
+          reject(new Error(`no connection to ${host}:${port} within ${timeoutMs} ms`));
+        }, timeoutMs);
+      }),
+    ]);
     sock.end();
     return true;
-  } catch { return false; }
+  } catch { return false; } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -372,7 +402,12 @@ async function main(): Promise<void> {
   console.log(`\nReport written to ${reportPath} (archived: ${archivePath})`);
 }
 
-main().catch((err: unknown) => {
-  console.error(`STT bench failed: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+// Only run the sweep when this file IS the entry point. Without the guard,
+// importing anything from here — as the liveness-probe regression does — starts
+// a whole bench run as a side effect of the import.
+if (import.meta.main) {
+  main().catch((err: unknown) => {
+    console.error(`STT bench failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}
