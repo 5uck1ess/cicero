@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
 import { dialBackMemo, matchCallMe, SpeculativeSideEffectError } from "../call-intent";
 import { log } from "../logger";
@@ -340,6 +341,11 @@ export class SwitchboardBrain implements Brain {
   private readonly standupLaneTimeoutMs: number;
   private acceptedTurnSequence = 0;
   private acceptedTurn: AcceptedTurn | null = null;
+  /** Carries the delegating turn to nested public calls made on the delegate's
+   * own async context — see delegateWithinTurn(). Deliberately NOT a plain
+   * field: a concurrent barge-in runs on a different context and must still be
+   * admitted as a newer turn that supersedes this one. */
+  private readonly delegation = new AsyncLocalStorage<AcceptedTurn>();
   private stopping = false;
   private lifecycleSequence = 0;
   private lifecycleBarrier: Promise<void> = Promise.resolve();
@@ -558,6 +564,36 @@ export class SwitchboardBrain implements Brain {
     return turn;
   }
 
+  /**
+   * A control action can only reach some behavior through another PUBLIC entry
+   * point: the daemon's dial-back handler calls transferTo() back into this
+   * switchboard to decide who picks up. That nested call used to be admitted as
+   * a brand-new turn, so it superseded the very turn that invoked it — the
+   * phone rang, the lane was pinned, and then the caller was handed
+   * "superseded by a newer accepted turn" instead of the ack (live incident
+   * 2026-07-30: "have him call me" answered with an unreachable error).
+   *
+   * Delegation therefore runs ON the caller's turn. The parent keeps sole
+   * ownership of the lease: the nested call neither settles nor aborts it, and
+   * a nested failure propagates so the parent's own handler decides.
+   */
+  private delegateWithinTurn<T>(turn: AcceptedTurn, body: () => Promise<T>): Promise<T> {
+    this.assertAcceptedTurn(turn);
+    return this.delegation.run(turn, body);
+  }
+
+  /**
+   * The turn a nested public call should adopt, or null for normal admission.
+   * Only the live lease is adoptable — once the parent is settled, aborted, or
+   * displaced by a genuinely newer turn, a nested call must take its chances
+   * with beginAcceptedTurn like any other caller.
+   */
+  private adoptableTurn(): AcceptedTurn | null {
+    const turn = this.delegation.getStore();
+    if (!turn || turn.settled || turn.signal.aborted) return null;
+    return this.acceptedTurn === turn ? turn : null;
+  }
+
   private assertAcceptedTurn(turn: AcceptedTurn): void {
     turn.signal.throwIfAborted();
     if (turn.settled || this.acceptedTurn?.sequence !== turn.sequence || this.acceptedTurn !== turn) {
@@ -643,6 +679,15 @@ export class SwitchboardBrain implements Brain {
     options: BrainTurnOptions | undefined,
     body: (turn: AcceptedTurn, options: BrainTurnOptions) => Promise<T>,
   ): Promise<T> {
+    // Nested delegation from a control action rides the caller's turn instead
+    // of superseding it. The parent owns begin/finish/abort, so this path only
+    // runs the body; a caller signal is still honored up front, but the turn's
+    // own signal governs the work (the delegate is part of that turn).
+    const adopted = this.adoptableTurn();
+    if (adopted) {
+      options?.signal?.throwIfAborted();
+      return body(adopted, this.optionsForTurn(adopted, options));
+    }
     const turn = this.beginAcceptedTurn(options);
     const turnOptions = this.optionsForTurn(turn, options);
     try {
@@ -970,7 +1015,8 @@ export class SwitchboardBrain implements Brain {
     if (RELEASE_RE.test(m)) return this.doRelease(turn);
     // Spoken dial-back ("call me", "have ada call me") — must beat PIN_RE:
     // "have ada call me" would otherwise read as a transfer to "ada call".
-    if (this.callMe) {
+    const dial = this.callMe;
+    if (dial) {
       const call = matchCallMe(m);
       if (call) {
         // Refuse below the selection, exactly like DialBackBrain: the lane
@@ -979,13 +1025,13 @@ export class SwitchboardBrain implements Brain {
         // callback is not retractable by the final utterance.
         if (options.speculative) throw new SpeculativeSideEffectError();
         log("info", `switchboard: dial-back requested${call.who ? ` — ${call.who}` : ""}`);
-        // Handler args deliberately unchanged by this PR: only `{ signal }`, as
-        // before. `options` is needed for the refusal above, NOT by the handler
-        // — forwarding it there regressed named dial-backs, and the underlying
-        // re-entrancy defect (the handler pins the lane by calling transferTo()
-        // back into this switchboard, whose admission supersedes the turn it was
-        // called from) is pre-existing and tracked separately.
-        const reply = await this.callMe(call.who, { signal: turn.signal });
+        // Handler args stay `{ signal }` only: `options` is needed for the
+        // refusal above, NOT by the handler — forwarding it there regressed
+        // named dial-backs. The handler pins the lane by calling transferTo()
+        // back into this switchboard, so it runs inside the delegation window
+        // that keeps that nested turn from superseding this one.
+        const reply = await this.delegateWithinTurn(turn, () =>
+          dial(call.who, { signal: turn.signal }));
         // Memo even if this turn was superseded meanwhile: the call was placed.
         this.leaveMemo(dialBackMemo(call.who));
         return reply;
@@ -1086,8 +1132,9 @@ export class SwitchboardBrain implements Brain {
     if (label === "callme" || label.startsWith("callme:")) {
       // Same hallucinated-label defense as the group actions: dialing the
       // user's phone demands call vocabulary in the actual utterance.
-      if (!this.callMe || !/\b(?:call|ring|phone|dial)\b/i.test(utterance)) {
-        if (this.callMe) log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" mentions no call — ignoring`);
+      const dial = this.callMe;
+      if (!dial || !/\b(?:call|ring|phone|dial)\b/i.test(utterance)) {
+        if (dial) log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" mentions no call — ignoring`);
         return null;
       }
       const who = label.startsWith("callme:") ? label.slice("callme:".length).trim() : "";
@@ -1095,8 +1142,12 @@ export class SwitchboardBrain implements Brain {
       // patterns miss ("phone me now"), so no phrase list can cover this.
       if (options.speculative) throw new SpeculativeSideEffectError();
       log("info", `switchboard: dial-back requested (classifier)${who ? ` — ${who}` : ""}`);
-      // Handler args unchanged by this PR — see the note on the lexical path.
-      const reply = await this.callMe(who || undefined);
+      // Handler args match the lexical path — see the note there. The turn
+      // signal was previously withheld here, so an aborted turn's dial-back
+      // kept doing board work; the delegation window is what stops the
+      // handler's transferTo() from superseding this turn.
+      const reply = await this.delegateWithinTurn(turn, () =>
+        dial(who || undefined, { signal: turn.signal }));
       // Memo before the turn assert: a superseding turn still needs to know.
       this.leaveMemo(dialBackMemo(who || undefined));
       this.assertAcceptedTurn(turn);
