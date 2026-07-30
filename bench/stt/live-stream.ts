@@ -55,7 +55,17 @@ export type LiveStreamConnect = (
 ) => Promise<Bun.Socket<undefined>>;
 
 const DEFAULT_CHUNK_MS = 100;
-const DEFAULT_TIMEOUT_MS = 180_000;
+// A real-time feed cannot finish sooner than the clip itself, so the deadline is
+// derived from the audio rather than fixed: decodeWav accepts up to
+// MAX_DECODED_WAV_DURATION_MS (5 min), and a fixed 180s ceiling failed every
+// legal clip longer than three minutes no matter how healthy the server was.
+// The grace covers connect, the server's own processing, and the trailing
+// response after the last sample.
+const DEFAULT_RESPONSE_GRACE_MS = 60_000;
+
+/** Default absolute deadline for one paced run of `audioMs` of audio. */
+export const liveStreamTimeoutMs = (audioMs: number): number =>
+  audioMs + DEFAULT_RESPONSE_GRACE_MS;
 // Bench responses are transcript text, so 64 KiB of headers, 4 MiB per HTTP
 // chunk, 1 MiB per SSE event, and 16 MiB overall are generous while still
 // bounding every unit retained from a remote provider.
@@ -299,8 +309,8 @@ export async function transcribeLive(
   c: StreamCandidate,
   options: LiveStreamOptions = {},
 ): Promise<LiveStreamResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+  if (options.timeoutMs !== undefined
+    && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
     throw new RangeError("timeoutMs must be a positive finite number");
   }
   const limits = responseLimits(options.limits);
@@ -310,6 +320,7 @@ export async function transcribeLive(
   const { samples, sampleRate } = decodeWav(await Bun.file(audioPath).arrayBuffer());
   const pcm = toS16le(samples);
   const audioMs = (samples.length / sampleRate) * 1000;
+  const timeoutMs = options.timeoutMs ?? liveStreamTimeoutMs(audioMs);
   const chunkMs = c.chunkMs ?? DEFAULT_CHUNK_MS;
   const chunkBytes = Math.max(2, Math.round((sampleRate * chunkMs) / 1000) * 2);
 
@@ -332,7 +343,11 @@ export async function transcribeLive(
   let deltasDuringAudio = 0;
   let deltas = 0;
   let doneMs: number | null = null;
-  let finalText = "";
+  // null (not "") so a terminal event carrying an empty transcript stays
+  // distinguishable from no terminal event at all. Collapsing the two lets an
+  // empty final fall back to the partials, which records a stale mid-stream
+  // guess as the model's answer.
+  let finalText: string | null = null;
   let joined = "";
   let t0 = 0; // set when real-time capture begins
   let failure: Error | null = null;
@@ -374,14 +389,15 @@ export async function transcribeLive(
     settleClosed();
   };
 
-  const consumeEvent = (block: string): void => {
+  /** False only when the block carried a payload that could not be parsed. */
+  const consumeEvent = (block: string): boolean => {
     const payload = block.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
-    if (!payload || payload === "[DONE]") return;
+    if (!payload || payload === "[DONE]") return true;
     let event: { type?: string; delta?: string; text?: string; error?: { message?: string } };
-    try { event = JSON.parse(payload); } catch { return; }
+    try { event = JSON.parse(payload); } catch { return false; }
     if (event.error) {
       failure ??= new Error(event.error.message ?? "stream error");
-      return;
+      return true;
     }
     const at = now() - t0;
     if (event.type === "transcript.text.delta") {
@@ -393,6 +409,23 @@ export async function transcribeLive(
     } else if (event.type === "transcript.text.done") {
       doneMs ??= at;
       finalText = event.text ?? "";
+    }
+    return true;
+  };
+
+  /**
+   * The HTTP body can end cleanly while the last SSE event is still missing its
+   * blank-line terminator. Dropping that residual silently rewrote the run's
+   * result to whatever the previous delta said — a truncated stream scored as a
+   * complete one. Consume it if it is whole, and fail the run if it is not.
+   */
+  const flushPendingEvent = (): void => {
+    if (!sse.trim()) return;
+    const block = sse;
+    sse = "";
+    sseBytes = 0;
+    if (!consumeEvent(block)) {
+      failure ??= new Error("response ended mid-event");
     }
   };
 
@@ -535,6 +568,7 @@ export async function transcribeLive(
     await writeAll("0\r\n\r\n");
     requestBodyDone = true;
     await closed;
+    flushPendingEvent();
   } finally {
     clearTimeout(timeout);
     const cleanupError = failure ?? new Error("live transcription request ended");
@@ -544,8 +578,14 @@ export async function transcribeLive(
   }
 
   if (failure) throw failure;
-  const text = finalText || joined;
-  if (!text.trim()) throw new Error("stream closed without a transcript");
+  // A terminal event wins even when it is empty: the model said it heard
+  // nothing, and the partials it has already retracted are not a substitute.
+  const text = finalText ?? joined;
+  if (!text.trim()) {
+    throw new Error(finalText === null
+      ? "stream closed without a transcript"
+      : "stream ended with an empty final transcript");
+  }
 
   return {
     text: text.trim(),

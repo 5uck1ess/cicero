@@ -120,8 +120,11 @@ async function makeRunner(
   };
 }
 
-const median = (xs: number[]): number => {
-  if (!xs.length) return 0;
+export const median = (xs: number[]): number => {
+  // NaN, not 0, for no samples. Every consumer of this is a latency or accuracy
+  // column, where 0 reads as "instant" or "perfect" — the opposite of "we never
+  // got a measurement". `fmt` renders non-finite as "n/a".
+  if (!xs.length) return NaN;
   const s = [...xs].sort((a, b) => a - b);
   const mid = Math.floor(s.length / 2);
   return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
@@ -148,7 +151,7 @@ interface Row {
 }
 
 const emptyRow = (name: string, available: boolean): Row =>
-  ({ name, available, meanWerPct: 0, warmMs: 0, coldMs: 0, rtf: 0, errors: 0, clips: 0 });
+  ({ name, available, meanWerPct: NaN, warmMs: NaN, coldMs: NaN, rtf: NaN, errors: 0, clips: 0 });
 
 /*
  * A candidate host that silently drops SYNs would otherwise hold this probe for
@@ -194,7 +197,7 @@ export async function portOpen(
  * a real-time feed spends at least the clip's duration per run, so a 75s clip set
  * at 3 runs is ~4 minutes per candidate before the model does any work.
  */
-async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], runs: number): Promise<Row> {
+export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], runs: number): Promise<Row> {
   const host = c.host ?? "127.0.0.1";
   if (!(await portOpen(host, c.port))) {
     console.warn(`  ⚠️  ${c.name}: nothing listening on ${host}:${c.port} — skipping`);
@@ -214,6 +217,7 @@ async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], runs: num
     const clipFinal: number[] = [];
     const clipTotal: number[] = [];
     let transcript = "";
+    let failed = false;
     for (let r = 0; r < runs; r++) {
       const t0 = performance.now();
       try {
@@ -227,11 +231,15 @@ async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], runs: num
           deltasDuringAudio += res.deltasDuringAudio;
         }
       } catch (err: unknown) {
+        failed = true;
         console.warn(`  ⚠️  ${c.name} / ${clip.name}: ${err instanceof Error ? err.message : String(err)}`);
         break;
       }
     }
-    if (!transcript) { errors++; continue; }
+    // A clip counts only when every repetition finished. Scoring one that
+    // failed run 2 of 3 mixes a median over one sample into a column read as a
+    // median over three, and reports errors=0 for a clip that errored.
+    if (failed || !transcript) { errors++; continue; }
 
     const { wer } = wordErrorRate(clip.reference, transcript);
     wers.push(wer * 100);
@@ -242,7 +250,7 @@ async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], runs: num
 
   return {
     ...emptyRow(c.name, true),
-    meanWerPct: wers.length ? wers.reduce((a, b) => a + b, 0) / wers.length : 0,
+    meanWerPct: wers.length ? wers.reduce((a, b) => a + b, 0) / wers.length : NaN,
     warmMs: median(totals),
     errors,
     clips: wers.length,
@@ -287,7 +295,7 @@ async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promis
         break;
       }
     }
-    if (failed && !transcript) { errors++; continue; }
+    if (failed || !transcript) { errors++; continue; }
 
     const { wer } = wordErrorRate(clip.reference, transcript);
     wers.push(wer * 100);
@@ -302,7 +310,7 @@ async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promis
   return {
     name: c.name,
     available: true,
-    meanWerPct: wers.length ? wers.reduce((a, b) => a + b, 0) / wers.length : 0,
+    meanWerPct: wers.length ? wers.reduce((a, b) => a + b, 0) / wers.length : NaN,
     warmMs: median(warmTimes),
     coldMs: median(coldTimes),
     rtf: median(rtfs),
@@ -313,15 +321,37 @@ async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promis
 
 const fmt = (n: number, d = 1) => (Number.isFinite(n) ? n.toFixed(d) : "n/a");
 
-function renderTable(rows: Row[]): string {
-  const avail = rows.filter((r) => r.available && !r.streaming).sort((a, b) => a.meanWerPct - b.meanWerPct);
+/**
+ * Rows that scored at least one clip, best WER first. A candidate whose every
+ * run failed is deliberately NOT here: it has no WER to rank by, and leaving it
+ * in put it at the top of a table sorted ascending — a candidate that produced
+ * nothing rendered as the most accurate one.
+ */
+const ranked = (rows: Row[], streaming: boolean): Row[] =>
+  rows.filter((r) => r.available && !!r.streaming === streaming && r.clips > 0)
+    .sort((a, b) => a.meanWerPct - b.meanWerPct);
+
+/** Reachable, but every run failed — reported, never ranked. */
+const allFailed = (rows: Row[], streaming: boolean): Row[] =>
+  rows.filter((r) => r.available && !!r.streaming === streaming && r.clips === 0);
+
+const failedLine = (r: Row): string =>
+  `- ${r.name} (reachable, but every clip failed — ${r.errors} ${r.errors === 1 ? "error" : "errors"}; no metrics)`;
+
+export function renderTable(rows: Row[]): string {
+  const avail = ranked(rows, false);
   const header = "| Candidate | WER % | warm ms | cold ms | RTF | errors | clips |";
   const sep = "|---|---:|---:|---:|---:|---:|---:|";
   const lines = avail.map((r) =>
     `| ${r.name} | ${fmt(r.meanWerPct)} | ${fmt(r.warmMs, 0)} | ${fmt(r.coldMs, 0)} | ${r.rtf ? fmt(r.rtf, 3) : "n/a"} | ${r.errors} | ${r.clips} |`,
   );
+  const failed = allFailed(rows, false).map(failedLine);
   const skipped = rows.filter((r) => !r.available).map((r) => `- ${r.name} (unavailable — server down or command missing)`);
-  return [header, sep, ...lines, ...(skipped.length ? ["", "**Skipped:**", ...skipped] : [])].join("\n");
+  return [
+    header, sep, ...lines,
+    ...(failed.length ? ["", "**Failed:**", ...failed] : []),
+    ...(skipped.length ? ["", "**Skipped:**", ...skipped] : []),
+  ].join("\n");
 }
 
 /**
@@ -330,9 +360,10 @@ function renderTable(rows: Row[]): string {
  * comparison that means nothing. Time-to-final is measured from the end of the
  * audio, which is the number a live loop actually waits out.
  */
-function renderStreamingTable(rows: Row[]): string {
-  const avail = rows.filter((r) => r.available && r.streaming).sort((a, b) => a.meanWerPct - b.meanWerPct);
-  if (!avail.length) return "";
+export function renderStreamingTable(rows: Row[]): string {
+  const avail = ranked(rows, true);
+  const failed = allFailed(rows, true);
+  if (!avail.length && !failed.length) return "";
   const header = "| Candidate | WER % | first delta ms | deltas during audio | final after audio ms | errors | clips |";
   const sep = "|---|---:|---:|---:|---:|---:|---:|";
   const lines = avail.map((r) => {
@@ -344,6 +375,7 @@ function renderStreamingTable(rows: Row[]): string {
     "### Streaming (real-time feed, `/v1/audio/transcriptions/live`)",
     "",
     header, sep, ...lines,
+    ...(failed.length ? ["", "**Failed:**", ...failed.map(failedLine)] : []),
     "",
     "_`first delta` is from the first PCM byte; `final after audio` is `transcript.text.done`"
     + " relative to the last sample (negative = done before the audio ended). `n/a` first delta"

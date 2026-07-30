@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { createServer, type Socket as NodeSocket } from "node:net";
-import { transcribeLive } from "../../bench/stt/live-stream";
+import { liveStreamTimeoutMs, transcribeLive } from "../../bench/stt/live-stream";
+import { MAX_DECODED_WAV_DURATION_MS } from "../../src/platform/wav";
 import { portOpen } from "../../bench/stt-bench";
 import type { StreamCandidate } from "../../bench/stt/types";
 import { writeWavFixture } from "../helpers/wav";
@@ -307,6 +308,120 @@ test("live stream without a terminal event uses the last delta for time-to-final
     expect(result.firstDeltaMs).toBeCloseTo(1_000, 5);
     expect(result.finalAfterAudioMs).toBeCloseTo(500, 5);
     expect(result.finalAfterAudioMs).not.toBeCloseTo(-9_000, 5);
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
+test("an empty terminal transcript is not backfilled from the partials", async () => {
+  // audio.cpp emits partials and the terminal `text_output` independently, so a
+  // clip the model ultimately heard nothing in arrives as deltas followed by an
+  // empty `transcript.text.done`. Scoring the retracted partial as the answer
+  // would silently credit a model for words it withdrew.
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"stale partial"}\n\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":""}\n\n');
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.08, 8_000);
+  try {
+    await expect(withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    )).rejects.toThrow("empty final transcript");
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
+test("a non-empty terminal transcript still wins over the partials", async () => {
+  // The other side of that boundary: the terminal event replaces the deltas, it
+  // does not merely get preferred when non-empty by accident of `||`.
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"stale partial"}\n\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"corrected final"}\n\n');
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.08, 8_000);
+  try {
+    const result = await withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    );
+    expect(result.text).toBe("corrected final");
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
+test("the default deadline outlasts the longest clip decodeWav will accept", () => {
+  // The feed is paced in real time, so a run cannot finish sooner than the clip
+  // itself. A fixed 180s deadline failed every legal clip over three minutes
+  // however healthy the server was — decodeWav accepts up to five.
+  expect(liveStreamTimeoutMs(MAX_DECODED_WAV_DURATION_MS)).toBeGreaterThan(MAX_DECODED_WAV_DURATION_MS);
+  expect(liveStreamTimeoutMs(10_000)).toBeGreaterThan(10_000);
+  // Still bounded: the grace is a constant, not a multiple.
+  expect(liveStreamTimeoutMs(10_000)).toBeLessThan(10_000 + 5 * 60_000);
+});
+
+test("a final SSE event missing its blank line is still consumed", async () => {
+  // The HTTP body can frame correctly while the last event lacks its "\n\n".
+  // Dropping that residual silently rewrote the answer to the previous delta.
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"hello"}\n\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"hello world"}\n');
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.08, 8_000);
+  try {
+    const result = await withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    );
+    expect(result.text).toBe("hello world");
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
+test("a response cut off inside its final SSE event fails the run", async () => {
+  // The other side of that boundary: a residual that is not a whole event means
+  // the stream was truncated, and the earlier delta is not the model's answer.
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"hello"}\n\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"hello wor');
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.08, 8_000);
+  try {
+    await expect(withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    )).rejects.toThrow("response ended mid-event");
   } finally {
     server.stop(true);
     rmSync(wav.dir, { recursive: true, force: true });
