@@ -29,7 +29,11 @@ import {
 } from "./platform/secure-storage";
 import { voiceProviderContractForBackend } from "./voice/provider-contract";
 import { webVoiceTokenProblem } from "./web-voice/startup-policy";
-import { processIdentitySync, type ProcessIdentity } from "./daemon-pid";
+import {
+  MAX_PROCESS_IDENTITY_LENGTH,
+  processIdentitySync,
+  type ProcessIdentity,
+} from "./daemon-pid";
 
 const CONFIG_FILE = "config.yaml";
 const ACTIONS_FILE = "actions.yaml";
@@ -226,7 +230,7 @@ function validConfigLockOwner(
       || (
         typeof owner.identity === "string"
         && owner.identity.length > 0
-        && owner.identity.length <= 1_024
+        && owner.identity.length <= MAX_PROCESS_IDENTITY_LENGTH
       )
     );
 }
@@ -241,7 +245,7 @@ function configLockRecordIdentity(
     && record.token === participant.token
     && typeof record.identity === "string"
     && record.identity.length > 0
-    && record.identity.length <= 1_024
+    && record.identity.length <= MAX_PROCESS_IDENTITY_LENGTH
     ? record.identity
     : undefined;
 }
@@ -277,10 +281,11 @@ function reclaimableConfigLock(
 function removeStaleConfigLock(
   participant: ConfigLockParticipant,
   recordedIdentity: string | undefined,
-  readProcessIdentity: (pid: number) => ProcessIdentity,
-): void {
-  // Re-check immediately before removal so a live ticket cannot be displaced.
-  if (!reclaimableConfigLock(participant, recordedIdentity, readProcessIdentity)) return;
+  readFreshProcessIdentity: (pid: number) => ProcessIdentity,
+): boolean {
+  // Re-check with an uncached identity immediately before removal so a live
+  // replacement process cannot be displaced by a stale per-acquisition cache.
+  if (!reclaimableConfigLock(participant, recordedIdentity, readFreshProcessIdentity)) return false;
   for (const path of [participant.choosingPath, participant.ownerPath]) {
     if (!path) continue;
     try {
@@ -294,6 +299,7 @@ function removeStaleConfigLock(
     }
   }
   updateConfigLockExitCleanup();
+  return true;
 }
 
 function inspectLegacyConfigLock(configPath: string): "absent" | "blocked" | "removed" {
@@ -325,6 +331,7 @@ function inspectLegacyConfigLock(configPath: string): "absent" | "blocked" | "re
 function scanConfigLocks(
   configPath: string,
   readProcessIdentity: (pid: number) => ProcessIdentity,
+  readFreshProcessIdentity: (pid: number) => ProcessIdentity,
 ): ConfigLockScan {
   const directory = dirname(configPath);
   const participants = new Map<string, ConfigLockParticipant>();
@@ -376,8 +383,10 @@ function scanConfigLocks(
     const recordedIdentity = choosingIdentity && ownerIdentity && choosingIdentity !== ownerIdentity
       ? undefined
       : choosingIdentity ?? ownerIdentity;
-    if (reclaimableConfigLock(participant, recordedIdentity, readProcessIdentity)) {
-      removeStaleConfigLock(participant, recordedIdentity, readProcessIdentity);
+    if (
+      reclaimableConfigLock(participant, recordedIdentity, readProcessIdentity)
+      && removeStaleConfigLock(participant, recordedIdentity, readFreshProcessIdentity)
+    ) {
       continue;
     }
     if (participant.choosingPath) choosing.push(participant);
@@ -407,8 +416,9 @@ function configLockIsOwned(
   configPath: string,
   expected: ConfigUpdateLockOwner,
   readProcessIdentity: (pid: number) => ProcessIdentity,
+  readFreshProcessIdentity: (pid: number) => ProcessIdentity,
 ): boolean {
-  const scan = scanConfigLocks(configPath, readProcessIdentity);
+  const scan = scanConfigLocks(configPath, readProcessIdentity, readFreshProcessIdentity);
   const own = scan.owners.find(({ owner }) =>
     owner.pid === expected.pid
     && owner.token === expected.token
@@ -453,12 +463,15 @@ export function acquireConfigUpdateLock(
   const writePath = options.writeFileSync ?? writeFileSync;
   const identityReader = options.processIdentitySync ?? processIdentitySync;
   const identityCache = new Map<number, ProcessIdentity>();
-  const readProcessIdentity = (pid: number): ProcessIdentity => {
-    const cached = identityCache.get(pid);
-    if (cached) return cached;
+  const readFreshProcessIdentity = (pid: number): ProcessIdentity => {
     const identity = identityReader(pid);
     identityCache.set(pid, identity);
     return identity;
+  };
+  const readProcessIdentity = (pid: number): ProcessIdentity => {
+    const cached = identityCache.get(pid);
+    if (cached) return cached;
+    return readFreshProcessIdentity(pid);
   };
 
   liveConfigUpdateLeases.set(token, lease);
@@ -470,7 +483,7 @@ export function acquireConfigUpdateLock(
       token,
       identity,
     }), { flag: "wx", mode: PRIVATE_FILE_MODE });
-    const initial = scanConfigLocks(configPath, readProcessIdentity);
+    const initial = scanConfigLocks(configPath, readProcessIdentity, readFreshProcessIdentity);
     const highestTicket = initial.owners.reduce(
       (highest, entry) => Math.max(highest, entry.owner.ticket),
       0,
@@ -492,7 +505,7 @@ export function acquireConfigUpdateLock(
     unlinkPath(choosingPath);
 
     while (true) {
-      const scan = scanConfigLocks(configPath, readProcessIdentity);
+      const scan = scanConfigLocks(configPath, readProcessIdentity, readFreshProcessIdentity);
       const own = scan.owners.find(({ owner: candidate }) =>
         candidate.pid === owner!.pid
         && candidate.token === owner!.token
@@ -511,7 +524,15 @@ export function acquireConfigUpdateLock(
       ) {
         return {
           assertOwned(): void {
-            if (!lease.usable || !configLockIsOwned(configPath, owner!, readProcessIdentity)) {
+            if (
+              !lease.usable
+              || !configLockIsOwned(
+                configPath,
+                owner!,
+                readProcessIdentity,
+                readFreshProcessIdentity,
+              )
+            ) {
               throw configLockOwnershipError(configPath);
             }
           },

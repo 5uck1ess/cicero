@@ -230,7 +230,7 @@ describe("updateConfigFields", () => {
       },
     });
 
-    expect(foreignIdentityReads).toBe(1);
+    expect(foreignIdentityReads).toBe(2);
     expect(existsSync(ownerPath)).toBe(false);
     lock.release();
     updateConfigFields({ voice: "recovered-after-pid-reuse" }, path);
@@ -250,6 +250,47 @@ describe("updateConfigFields", () => {
     })).toThrow("Config update lease tickets are exhausted");
 
     expect(existsSync(ownerPath)).toBe(true);
+  });
+
+  test("a fresh identity check preserves a live participant after PID reuse", () => {
+    expect(() => process.kill(process.ppid, 0)).not.toThrow();
+    const ownerPath = writeParticipantOwner(process.ppid, "test:replacement-parent");
+    // A second same-PID participant pins cache write-back: it must reuse the
+    // fresh "keep" result instead of spawning another identity lookup.
+    const secondOwnerPath = writeParticipantOwner(process.ppid, "test:replacement-parent");
+    let foreignIdentityReads = 0;
+    let lock: ReturnType<typeof acquireConfigUpdateLock> | undefined;
+    let acquisitionError: unknown;
+
+    try {
+      lock = acquireConfigUpdateLock(path, {
+        processIdentitySync: (pid) => {
+          if (pid === process.pid) return { kind: "identified", value: "test:config-writer" };
+          if (pid === process.ppid) {
+            foreignIdentityReads += 1;
+            return {
+              kind: "identified",
+              value: foreignIdentityReads === 1
+                ? "test:departed-parent"
+                : "test:replacement-parent",
+            };
+          }
+          return { kind: "not-running" };
+        },
+      });
+    } catch (error) {
+      acquisitionError = error;
+    } finally {
+      lock?.release();
+    }
+
+    expect(acquisitionError).toBeInstanceOf(Error);
+    expect((acquisitionError as Error).message).toContain(
+      "Config update lease tickets are exhausted",
+    );
+    expect(foreignIdentityReads).toBe(2);
+    expect(existsSync(ownerPath)).toBe(true);
+    expect(existsSync(secondOwnerPath)).toBe(true);
   });
 
   test("an identity-free owner falls back to liveness and remains valid", () => {

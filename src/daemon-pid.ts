@@ -1,6 +1,6 @@
 import { constants, lstatSync, readFileSync } from "node:fs";
 import { link, lstat, open, readFile, unlink } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { ensurePrivateDirectorySync, PRIVATE_FILE_MODE } from "./platform/secure-storage";
 
@@ -9,6 +9,7 @@ const MAX_PID_RECORD_BYTES = 4_096;
 const PID_REUSE_RECHECK_DELAY_MS = 5;
 const PROCESS_IDENTITY_COMMAND_TIMEOUT_MS = 5_000;
 const MAX_PROCESS_IDENTITY_OUTPUT_BYTES = 64 * 1_024;
+export const MAX_PROCESS_IDENTITY_LENGTH = 1_024;
 
 export interface DaemonPidRecord {
   version: typeof PID_RECORD_VERSION;
@@ -80,14 +81,21 @@ function isPidRecord(value: unknown): value is DaemonPidRecord {
     && isPositivePid(record.pid)
     && typeof record.identity === "string"
     && record.identity.length > 0
-    && record.identity.length <= 1_024
+    && record.identity.length <= MAX_PROCESS_IDENTITY_LENGTH
     && typeof record.token === "string"
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(record.token)
     && typeof record.createdAt === "string"
     && Number.isFinite(Date.parse(record.createdAt));
 }
 
-function parseLinuxIdentity(stat: string, bootId: string): ProcessIdentity {
+function boundedProcessIdentity(platform: NodeJS.Platform | "linux", value: string): string {
+  const identity = `${platform}:${value}`;
+  if (identity.length <= MAX_PROCESS_IDENTITY_LENGTH) return identity;
+  const digest = createHash("sha256").update(identity).digest("hex");
+  return `${platform}:sha256:${digest}`;
+}
+
+export function parseLinuxIdentity(stat: string, bootId: string): ProcessIdentity {
   // The command name is parenthesized and may itself contain spaces or `)`.
   // Field 3 starts after the final `) `; process start ticks are field 22.
   const commandEnd = stat.lastIndexOf(") ");
@@ -101,7 +109,7 @@ function parseLinuxIdentity(stat: string, bootId: string): ProcessIdentity {
   }
   const boot = bootId.trim();
   if (!boot) return { kind: "unsupported", reason: "missing Linux boot identity" };
-  return { kind: "identified", value: `linux:${boot}:${startTicks}` };
+  return { kind: "identified", value: boundedProcessIdentity("linux", `${boot}:${startTicks}`) };
 }
 
 function psIdentityCommand(pid: number): string[] {
@@ -119,7 +127,7 @@ function psIdentityCommand(pid: number): string[] {
   ];
 }
 
-function parsePsIdentity(
+export function parsePsIdentity(
   platform: NodeJS.Platform,
   stdout: string,
   stderr: string,
@@ -131,7 +139,7 @@ function parsePsIdentity(
   }
   const value = stdout.trim().replace(/\s+/g, " ");
   if (!value) return { kind: "not-running" };
-  return { kind: "identified", value: `${platform}:${value}` };
+  return { kind: "identified", value: boundedProcessIdentity(platform, value) };
 }
 
 function windowsIdentityCommand(pid: number): string[] {
@@ -151,14 +159,18 @@ function windowsIdentityCommand(pid: number): string[] {
   ];
 }
 
-function parseWindowsIdentity(stdout: string, stderr: string, exitCode: number): ProcessIdentity {
+export function parseWindowsIdentity(
+  stdout: string,
+  stderr: string,
+  exitCode: number,
+): ProcessIdentity {
   if (exitCode === 3) return { kind: "not-running" };
   if (exitCode !== 0) {
     return { kind: "unsupported", reason: stderr.trim() || `PowerShell exited with status ${exitCode}` };
   }
   const value = stdout.trim();
   if (!value) return { kind: "unsupported", reason: "PowerShell returned no process identity" };
-  return { kind: "identified", value: `win32:${value}` };
+  return { kind: "identified", value: boundedProcessIdentity("win32", value) };
 }
 
 async function readLinuxIdentity(pid: number): Promise<ProcessIdentity> {
