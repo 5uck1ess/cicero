@@ -328,6 +328,9 @@ export class SwitchboardBrain implements Brain {
   private rollcall: RollcallVoiceQueue | null = null;
   /** True when the last turn was answered lexically (ack/roll call/standup). */
   private control = false;
+  /** A rejected classifier label must not return through a front-desk reply
+   * that parrots the same group-action trigger later in the turn. */
+  private refusedGroupAction = false;
   /** The group action "again" repeats; cleared when a normal brain turn intervenes. */
   private lastGroupAction: "rollcall" | "standup" | null = null;
   /** The most recent real exchange, for handoff briefings on transfer. */
@@ -1131,12 +1134,14 @@ export class SwitchboardBrain implements Brain {
     const confirmation = /^\s*(?:yes|yeah|yep|correct|right)\b|\bthat['’]s\s+what\s+i\s+(?:just\s+)?said\b/i;
     if (label === "standup" || label === "rollcall") {
       if (matchCallMe(utterance)) {
+        this.refusedGroupAction = true;
         log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" is a dial-back request — ignoring`);
         return null;
       }
       if (!group.test(utterance) && !request.test(utterance)
         && !(confirmation.test(utterance) && literal.test(utterance))
       ) {
+        this.refusedGroupAction = true;
         log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" has no group request or confirmation — ignoring`);
         return null;
       }
@@ -1521,14 +1526,20 @@ export class SwitchboardBrain implements Brain {
   private replyTrigger(reply: string): "standup" | "rollcall" | null {
     if (this.active !== null) return null; // only the front desk drives the board
     const r = normalizeUtterance(reply);
-    if (/^(?:status from every(?:one|body)|standup)$/.test(r)) return "standup";
-    if (/^roll\s?-?call$/.test(r)) return "rollcall";
-    return null;
+    const trigger = /^(?:status from every(?:one|body)|standup)$/.test(r)
+      ? "standup"
+      : /^roll\s?-?call$/.test(r) ? "rollcall" : null;
+    if (trigger !== null && this.refusedGroupAction) {
+      log("info", `switchboard: front desk replied ${trigger} after the classifier label was refused — ignoring`);
+      return null;
+    }
+    return trigger;
   }
 
   send(message: string, options?: BrainTurnOptions): Promise<string> {
     return this.runAcceptedTurn(options, async (turn, turnOptions) => {
       this.control = false;
+      this.refusedGroupAction = false;
       const routed = await this.controlPlane(message, turn, turnOptions);
       this.assertAcceptedTurn(turn);
       if (routed === "standup") {
@@ -1579,6 +1590,7 @@ export class SwitchboardBrain implements Brain {
     turn: AcceptedTurn,
   ): AsyncIterable<string> {
     this.control = false;
+    this.refusedGroupAction = false;
     const routed = await this.controlPlane(message, turn, turnOptions);
     this.assertAcceptedTurn(turn);
     if (routed === "standup") {
