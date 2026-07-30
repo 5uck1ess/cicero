@@ -2102,7 +2102,11 @@ export class CiceroDaemon {
    */
   private anyInputSurfaceActive(): boolean {
     if (this.voiceDesiredActive) return true;
-    return (this.webVoice?.clientCount() ?? 0) > 0;
+    // Not `clientCount() > 0`: a browser that dropped its socket is still in the
+    // conversation for the length of its reconnect grace, and counting it as
+    // gone let a microphone deactivation during that window call off work the
+    // page would have come straight back to.
+    return this.webVoice?.conversationLive() === true;
   }
 
   /**

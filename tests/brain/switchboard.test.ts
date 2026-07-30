@@ -380,6 +380,56 @@ test("an explicit local stop drops the transfer even though the reason says barg
   }
 });
 
+test("a cold transfer called off mid-start does not pin the lane it was starting", async () => {
+  // Deactivating the microphone ends the conversation WITHOUT aborting the turn
+  // that asked for the transfer, so the cold start runs to completion on a live
+  // signal. Clearing the pending record alone did not stop it: it finished the
+  // wait and pinned the lane seconds after everyone had left.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    sb.dropDeferredWork();
+    cold.release();
+
+    expect(await transfer).toBe("Never mind worker then.");
+    expect(sb.activeLane()).toBeNull();
+    // ...and the conversation that follows starts at the front desk.
+    expect(await sb.send("new conversation")).toBe("front reply");
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a cold transfer nobody called off still pins the lane", async () => {
+  // The other direction: refusing a late pin must be tied to the drop, not
+  // applied to every start that takes a while.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    cold.release();
+
+    expect(await transfer).toBe("Worker here.");
+    expect(sb.activeLane()).toBe("worker");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
 test("a transport-cancelled cold transfer does not steer a later conversation", async () => {
   const calls: string[] = [];
   const cold = coldLane(calls);

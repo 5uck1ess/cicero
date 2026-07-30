@@ -2145,6 +2145,39 @@ test("saying goodbye ends the conversation without waiting out the grace", async
   expect(ended).toBe(1);
 });
 
+test("a conversation with no socket attached is still live during its grace", async () => {
+  // What the daemon reads to decide whether anybody is still on the line. The
+  // attached-socket count alone says "empty room" for the whole grace window,
+  // so another surface going away meanwhile concluded the conversation was over
+  // and called off work the reconnecting page would have come back to.
+  const base = start({ conversationEndGraceMs: 300 });
+  const ws = await connect(base);
+  expect(handle!.conversationLive()).toBe(true);
+  ws.close();
+  await Bun.sleep(60);
+  expect(handle!.clientCount()).toBe(0);
+  expect(handle!.conversationLive()).toBe(true);   // ...but not over
+  await Bun.sleep(400);
+  expect(handle!.conversationLive()).toBe(false);  // the grace ran out
+  expect(base).toContain("127.0.0.1");
+});
+
+test("shutting down with a socket attached does not re-arm the conversation end", async () => {
+  // stop() ends the conversation and then closes its sockets, and every one of
+  // those closes lands in the same handler that arms the grace timer. Arming it
+  // there scheduled a second ending for a server that had already torn down.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 200 });
+  const ws = await connect(base);
+  await handle!.stop();
+  handle = null;
+  expect(ended).toBe(1);
+  await Bun.sleep(400);
+  expect(ended).toBe(1);
+  ws.close();
+  expect(base).toContain("127.0.0.1");
+});
+
 test("a pending conversation end does not outlive the server", async () => {
   // The timer is owned: a shutdown mid-grace must not leave it armed.
   let ended = 0;

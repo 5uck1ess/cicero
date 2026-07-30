@@ -203,6 +203,11 @@ export interface WebVoiceHandle {
   /** Connected voice clients right now (for status/logging). */
   clientCount: () => number;
   /**
+   * A voice conversation is still in progress — either a socket is attached, or
+   * the last one dropped recently enough that the page is expected back.
+   */
+  conversationLive: () => boolean;
+  /**
    * Speak a notification through the same path as POST /api/notify (render,
    * broadcast, park when nobody's connected) — for in-process callers like the
    * kanban watcher. Resolves null when unavailable, saturated, or quiescing.
@@ -395,6 +400,11 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
 
   const scheduleConversationEnd = (): void => {
     cancelConversationEnd();
+    // Shutdown already ended the conversation before closing its sockets, and
+    // each of those closes lands here. Re-arming would leave a timer running
+    // past the server's own teardown and report a second ending nobody is
+    // there for.
+    if (!accepting) return;
     if (conversationEndGraceMs === 0) { endConversationNow(); return; }
     conversationEndTimer = setTimeout(() => {
       conversationEndTimer = null;
@@ -1762,6 +1772,10 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       scheme,
       port: server.port ?? port,
       clientCount: () => clients.size,
+      // A conversation whose grace has not expired is still live even with no
+      // socket attached: the page reconnects by itself, and another surface
+      // going away meanwhile must not conclude that nobody is left.
+      conversationLive: () => clients.size > 0 || conversationEndTimer !== null,
       notify,
       confirmPending,
       stop,

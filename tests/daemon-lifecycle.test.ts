@@ -1027,6 +1027,7 @@ describe("CiceroDaemon lifecycle", () => {
         scheme: "http",
         port: 18_443,
         clientCount: () => 0,
+        conversationLive: () => false,
         notify: () => Promise.resolve(null),
         stop: () => Promise.resolve(),
       }),
@@ -1119,6 +1120,7 @@ describe("CiceroDaemon lifecycle", () => {
         scheme: "http",
         port: 18_444,
         clientCount: () => 0,
+        conversationLive: () => false,
         notify: () => Promise.resolve(null),
         stop: () => Promise.resolve(),
       }),
@@ -1168,10 +1170,15 @@ describe("deferred brain work", () => {
     Object.defineProperty(brain, "dropDeferredWork", { value: spy, configurable: true });
   }
 
+  /**
+   * `clients` and `live` are deliberately separable: during the reconnect grace
+   * a real server reports no attached socket and a live conversation at the
+   * same time, which is the state the daemon has to read correctly.
+   */
   function startableDaemon(
     home: string,
     capture?: (opts: Record<string, unknown>) => void,
-    clientCount: () => number = () => 0,
+    webVoiceState: { clients?: number; live?: boolean } = {},
   ): CiceroDaemon {
     const config = loadConfig({}, { home });
     config.raw.headless = true;
@@ -1198,7 +1205,8 @@ describe("deferred brain work", () => {
         return {
           scheme: "http",
           port: 18_446,
-          clientCount,
+          clientCount: () => webVoiceState.clients ?? 0,
+          conversationLive: () => webVoiceState.live ?? (webVoiceState.clients ?? 0) > 0,
           notify: () => Promise.resolve(null),
           stop: () => Promise.resolve(),
         };
@@ -1290,7 +1298,26 @@ describe("deferred brain work", () => {
     // away from the microphone is still on the line in the browser, and the
     // transfer they asked for is still theirs.
     const home = mkdtempSync(join(tmpdir(), "cicero-deferred-deact-web-"));
-    const daemon = startableDaemon(home, undefined, () => 1);
+    const daemon = startableDaemon(home, undefined, { clients: 1 });
+    let dropped = 0;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      (daemon as unknown as { handleVoiceDeactivated: () => void }).handleVoiceDeactivated();
+      expect(dropped).toBe(0);
+    } finally {
+      await daemon.stop().catch(() => { /* best effort */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("putting the microphone down during the browser's reconnect grace keeps deferred work", async () => {
+    // The browser's socket is gone but its conversation is not: the page comes
+    // back by itself inside the grace window. Reading the attached-socket count
+    // here saw an empty room and called off the transfer, and the reconnect
+    // that followed had nothing left to adopt.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-deact-grace-"));
+    const daemon = startableDaemon(home, undefined, { clients: 0, live: true });
     let dropped = 0;
     try {
       await daemon.start();

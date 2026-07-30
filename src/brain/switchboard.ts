@@ -353,6 +353,8 @@ export class SwitchboardBrain implements Brain {
    * turn reports the wait, or completes the pin itself once the lane is up.
    */
   private pendingTransfer: PendingTransfer | null = null;
+  /** Incremented by dropDeferredWork; see its comment and pinLane. */
+  private deferredGeneration = 0;
   /** Cold starts outlive initiating turns and are shared by concurrent callers. */
   private laneStarts = new Map<string, LaneStartLifecycle>();
   /** Cleanup calls coalesce when a failing start races global shutdown. */
@@ -625,7 +627,24 @@ export class SwitchboardBrain implements Brain {
    * that is still starting must not steer whatever is said next.
    */
   dropDeferredWork(): void {
+    // Bumped before the clear, and never by an ordinary release: a cold start
+    // already in flight has its own live turn signal, so clearing the record
+    // alone would still let it pin the lane seconds later — steering a
+    // conversation that had already ended. See pinLane.
+    this.deferredGeneration++;
     this.clearPendingTransfer();
+  }
+
+  /**
+   * What a pin says when the conversation it belonged to ended underneath it.
+   * Deliberately not the "I couldn't reach" line — the lane was reachable; the
+   * transfer was called off, and reporting a failure that did not happen would
+   * be the wrong thing for a programmatic caller to read.
+   */
+  private calledOffReply(lane: string): string {
+    this.clearPendingTransfer();
+    log("info", `switchboard: transfer to ${lane} was called off mid-start`);
+    return `Never mind ${lane} then.`;
   }
 
   private clearPendingTransfer(expected?: PendingTransfer): void {
@@ -1019,8 +1038,15 @@ export class SwitchboardBrain implements Brain {
   ): Promise<string> {
     this.assertAcceptedTurn(turn);
     const def = this.lanes[lane];
+    // A cold start outlives the moment that asked for it, and the turn signal
+    // does not always die with the conversation: deactivating the microphone
+    // leaves its turn running. So the drop is tracked separately, and a pin
+    // that was called off mid-start abandons the lane instead of pinning it.
+    const generation = this.deferredGeneration;
+    const calledOff = (): boolean => this.deferredGeneration !== generation;
     try {
       while (!this.started.has(lane)) {
+        if (calledOff()) return this.calledOffReply(lane);
         const prior = this.laneStarts.get(lane);
         if (prior?.retired) {
           // A new board session must not overlap the old session's unresolved
@@ -1046,6 +1072,7 @@ export class SwitchboardBrain implements Brain {
         this.setPendingTransfer(lane, turn, origin);
         await raceWithSignal(this.startLane(lane), turn.signal);
         this.assertAcceptedTurn(turn);
+        if (calledOff()) return this.calledOffReply(lane);
       }
     } catch (err: unknown) {
       // Supersession/caller cancellation is control flow, not a failed lane
