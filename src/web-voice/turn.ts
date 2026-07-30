@@ -1151,7 +1151,17 @@ async function streamReply(
         timer.mark(reassurance ? "reassurance_audio" : "filler_audio");
         if (reassurancesSpoken >= maxReassurances) return;
         const next = nextDistinctFiller();
-        if (next) armFiller(next, reassuranceIntervalMs, true);
+        if (next) {
+          const durationMs = wavDurationMs(clip.audio);
+          // A malformed header cannot safely extend the pacing delay, but an
+          // optional reassurance must not break the chain after audio emission.
+          // Falling back preserves the configured interval used before duration
+          // awareness instead of throwing or silently ending slow-turn coverage.
+          const nextDelayMs = durationMs === null
+            ? reassuranceIntervalMs
+            : Math.max(reassuranceIntervalMs, Math.ceil(durationMs));
+          armFiller(next, nextDelayMs, true);
+        }
       }, delayMs);
     };
     if (firstFiller) {

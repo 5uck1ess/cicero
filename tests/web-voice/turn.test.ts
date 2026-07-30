@@ -316,6 +316,89 @@ test("streamWebTurn repeats cached reassurances while the turn is pending", asyn
   expect(syntheses).toBe(1); // content only; every reassurance used cached audio
 });
 
+test("streamWebTurn waits for a long reassurance clip to finish before emitting another", async () => {
+  jest.useFakeTimers();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const lines = ["Long clip.", "Next clip."];
+  let picks = 0;
+  const deps: WebStreamDeps = {
+    ...streamDeps(),
+    brain: {
+      send: async () => "",
+      sendStream: () => (async function* () {
+        started();
+        await gate;
+        yield "Done.";
+      })(),
+    },
+    filler: () => ({
+      text: lines[picks]!,
+      audio: pcm8Wav(picks++ === 0 ? 320 : 1),
+    }),
+    fillerDelayMs: 5,
+    fillerReassuranceIntervalMs: 10,
+    fillerMaxReassurances: 1,
+  };
+  const { sink, calls } = capturingSink();
+  const running = streamWebTextTurn("keep working", deps, sink);
+  await waiting;
+
+  jest.advanceTimersByTime(44);
+  expect(calls.sentence).toEqual(["Long clip."]);
+  jest.advanceTimersByTime(1);
+  expect(calls.sentence).toEqual(["Long clip.", "Next clip."]);
+
+  release();
+  await running;
+  expect(calls.sentence.at(-1)).toBe("Done.");
+});
+
+test("streamWebTurn returns to the configured interval after a shorter reassurance clip", async () => {
+  jest.useFakeTimers();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const lines = ["Long clip.", "Short clip.", "Following clip."];
+  const frames = [160, 8, 8];
+  let picks = 0;
+  const deps: WebStreamDeps = {
+    ...streamDeps(),
+    brain: {
+      send: async () => "",
+      sendStream: () => (async function* () {
+        started();
+        await gate;
+        yield "Done.";
+      })(),
+    },
+    filler: () => {
+      const index = picks++;
+      return { text: lines[index]!, audio: pcm8Wav(frames[index]!) };
+    },
+    fillerDelayMs: 5,
+    fillerReassuranceIntervalMs: 10,
+    fillerMaxReassurances: 2,
+  };
+  const { sink, calls } = capturingSink();
+  const running = streamWebTextTurn("keep working", deps, sink);
+  await waiting;
+
+  jest.advanceTimersByTime(25);
+  expect(calls.sentence).toEqual(["Long clip.", "Short clip."]);
+  jest.advanceTimersByTime(9);
+  expect(calls.sentence).toEqual(["Long clip.", "Short clip."]);
+  jest.advanceTimersByTime(1);
+  expect(calls.sentence).toEqual(["Long clip.", "Short clip.", "Following clip."]);
+
+  release();
+  await running;
+  expect(calls.sentence.at(-1)).toBe("Done.");
+});
+
 test("streamWebTurn enforces the reassurance cap", async () => {
   jest.useFakeTimers();
   let release!: () => void;
