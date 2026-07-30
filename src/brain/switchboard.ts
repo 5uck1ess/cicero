@@ -1116,17 +1116,30 @@ export class SwitchboardBrain implements Brain {
     if (!label) return null;
     // The classifier sometimes labels a bare "what's the status?" as a team
     // standup (seen live 2026-07-11 — the front desk hijacked a question meant
-    // for the pinned lane). Group actions demand a group word, an explicit
-    // request bound to the action name, or confirmation of a prior request.
-    const group = /\b(?:every(?:one|body)|team|office|all|each|agents?|staff|group|hands)\b/i;
+    // for the pinned lane). Group actions demand a group word, a request frame
+    // bound to the action name, or confirmation that repeats the name. Ambiguous
+    // verbs need an article because "have roll call me back" was an STT rendering
+    // of a named dial-back, and any utterance the dial-back matcher recognizes
+    // must win even when it also contains group evidence.
+    // "hands" only counts as a group in "hands on deck". Bare, it admitted any
+    // sentence the word wandered into — "take roll call off my hands" named no
+    // group at all and still fanned out to every lane. "all hands" keeps
+    // working through the "all" branch.
+    const group = /\b(?:every(?:one|body)|team|office|all|each|agents?|staff|group|hands\s+on\s+deck)\b/i;
     const literal = label === "rollcall" ? /\broll\s?-?calls?\b/i : /\bstand\s?-?ups?\b/i;
-    const request = new RegExp(String.raw`\b(?:(?:run|do|start|begin|initiate|hold|have|take)(?:\s+(?:a|an|the|another))?|give\s+me(?:\s+(?:a|an|the|another))?|let['’]s\s+(?:do|have)(?:\s+(?:a|an|the|another))?)\s+${literal.source}`, "i");
+    const request = new RegExp(String.raw`\b(?:(?:run|do|start|begin|initiate|hold)(?:\s+(?:a|an|the|another))?|(?:have|take|get)\s+(?:a|an|the|another)|(?:i\s+want|i(?:['’]d|\s+would)\s+like|i\s+need|can\s+you|could\s+you|would\s+you)(?:\s+(?:a|an|the|another))?|give\s+me(?:\s+(?:a|an|the|another))?|let['’]s\s+(?:do|have)(?:\s+(?:a|an|the|another))?)\s+${literal.source}`, "i");
     const confirmation = /^\s*(?:yes|yeah|yep|correct|right)\b|\bthat['’]s\s+what\s+i\s+(?:just\s+)?said\b/i;
-    if ((label === "standup" || label === "rollcall") && !group.test(utterance)
-      && !request.test(utterance) && !(confirmation.test(utterance) && literal.test(utterance))
-    ) {
-      log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" has no group request or confirmation — ignoring`);
-      return null;
+    if (label === "standup" || label === "rollcall") {
+      if (matchCallMe(utterance)) {
+        log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" is a dial-back request — ignoring`);
+        return null;
+      }
+      if (!group.test(utterance) && !request.test(utterance)
+        && !(confirmation.test(utterance) && literal.test(utterance))
+      ) {
+        log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" has no group request or confirmation — ignoring`);
+        return null;
+      }
     }
     if (label === "standup") return "standup";
     if (label === "rollcall") return this.doRollcall(turn);

@@ -1636,7 +1636,7 @@ test("classifier-labeled bare group-action names are ignored (2026-07-30 live re
   }
 });
 
-test("classifier group-action labels require a request or confirmation", async () => {
+test("classifier group-action request framing distinguishes commands from ambiguous bare verbs", async () => {
   const requests = [
     ["run the roll call", "rollcall"],
     ["do the roll call", "rollcall"],
@@ -1645,7 +1645,10 @@ test("classifier group-action labels require a request or confirmation", async (
     ["initiate the roll call", "rollcall"],
     ["hold a roll call", "rollcall"],
     ["have the roll call", "rollcall"],
+    ["have a roll call", "rollcall"],
     ["take a roll call", "rollcall"],
+    ["I'd like a roll call", "rollcall"],
+    ["I need a roll call", "rollcall"],
     ["give me a roll call", "rollcall"],
     ["let's have the standup", "standup"],
     ["Right, standup", "standup"],
@@ -1659,9 +1662,19 @@ test("classifier group-action labels require a request or confirmation", async (
     expect(label === "rollcall" ? reply.includes("checking in.") : reply.startsWith("Getting status from the team.")).toBe(true);
     expect(sb.wasControlTurn()).toBe(true);
   }
+  for (const utterance of [
+    "have roll call me back",
+    "take roll call off my hands",
+  ]) {
+    const calls: string[] = [];
+    const { sb } = classifierBoard(calls, "rollcall");
+    await sb.start();
+    expect(await sb.send(utterance)).toBe("front reply");
+    expect(sb.wasControlTurn()).toBe(false);
+  }
 });
 
-test("classifier confirmation without the named group action remains a normal brain turn", async () => {
+test("classifier group-action evidence yields to dial-back readings and requires a named confirmation", async () => {
   for (const utterance of [
     "yes, check on that",
     "right, transfer the status",
@@ -1673,6 +1686,11 @@ test("classifier confirmation without the named group action remains a normal br
     expect(await sb.send(utterance)).toBe("front reply");
     expect(sb.wasControlTurn()).toBe(false);
   }
+  const calls: string[] = [];
+  const { sb } = classifierBoard(calls, "rollcall");
+  await sb.start();
+  expect(await sb.send("have everyone call me back")).toBe("front reply");
+  expect(sb.wasControlTurn()).toBe(false);
 });
 
 test("'do another roll call' matches lexically — no classifier round-trip", async () => {
