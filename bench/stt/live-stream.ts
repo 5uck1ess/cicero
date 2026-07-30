@@ -441,12 +441,22 @@ export async function transcribeLive(
     sseBytes += bytes;
   };
 
+  /**
+   * A whole, properly delimited event whose payload will not parse is a
+   * malformed response, not a no-op. Dropping it silently left the run scored
+   * on whatever the previous delta said — the same lie as a truncated stream,
+   * arriving through the ordinary path rather than the residual one.
+   */
+  const takeEvent = (block: string): void => {
+    if (!consumeEvent(block)) failure ??= new Error("malformed SSE event");
+    sse = "";
+    sseBytes = 0;
+  };
+
   const consumeEvents = (text: string): void => {
     let offset = 0;
     if (sse.endsWith("\n") && text.startsWith("\n")) {
-      consumeEvent(sse.slice(0, -1));
-      sse = "";
-      sseBytes = 0;
+      takeEvent(sse.slice(0, -1));
       offset = 1;
     }
     for (;;) {
@@ -456,9 +466,7 @@ export async function transcribeLive(
         return;
       }
       appendEventFragment(text.slice(offset, end));
-      consumeEvent(sse);
-      sse = "";
-      sseBytes = 0;
+      takeEvent(sse);
       offset = end + 2;
     }
   };

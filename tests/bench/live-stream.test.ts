@@ -403,6 +403,62 @@ test("a final SSE event missing its blank line is still consumed", async () => {
   }
 }, 1_000);
 
+test("a malformed but properly delimited SSE event fails the run", async () => {
+  // The residual path is not the only way an unparseable event arrives. A
+  // server can emit a whole "\n\n"-terminated event whose payload is not JSON;
+  // discarding it left the run scored on the previous delta with that delta's
+  // timing recorded as the final.
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, 'data: {"type":"transcript.text.delta","delta":"hello"}\n\n');
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"hello wor\n\n');
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.08, 8_000);
+  try {
+    await expect(withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    )).rejects.toThrow("malformed SSE event");
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
+test("non-JSON bookkeeping lines are not mistaken for malformed events", async () => {
+  // The other side of that boundary: SSE comments, an unrelated event type and
+  // the conventional [DONE] sentinel carry no JSON payload and must not fail a
+  // run that otherwise completed.
+  const server = listenAfterCompleteRequest((socket) => {
+    socket.write(
+      "HTTP/1.1 200 OK\r\n" +
+      "Content-Type: text/event-stream\r\n" +
+      "Transfer-Encoding: chunked\r\n\r\n",
+    );
+    writeChunk(socket, ": keep-alive\n\n");
+    writeChunk(socket, "event: ping\n\n");
+    writeChunk(socket, 'data: {"type":"transcript.text.done","text":"hello world"}\n\n');
+    writeChunk(socket, "data: [DONE]\n\n");
+    socket.write("0\r\n\r\n");
+    socket.end();
+  });
+  const wav = writeWavFixture(0.08, 8_000);
+  try {
+    const result = await withGuard(
+      transcribeLive(wav.path, candidate(server.port), { timeoutMs: 250 }),
+    );
+    expect(result.text).toBe("hello world");
+  } finally {
+    server.stop(true);
+    rmSync(wav.dir, { recursive: true, force: true });
+  }
+}, 1_000);
+
 test("a response cut off inside its final SSE event fails the run", async () => {
   // The other side of that boundary: a residual that is not a whole event means
   // the stream was truncated, and the earlier delta is not the model's answer.
