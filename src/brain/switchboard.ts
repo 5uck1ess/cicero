@@ -346,8 +346,9 @@ export class SwitchboardBrain implements Brain {
   private active: string | null = null;
   /**
    * A cold transfer can pin after its microphone has gone inactive but before
-   * the last live turn settles. The later conversation-end drop must release
-   * that pin without changing the persistence of an ordinary warm transfer.
+   * the last live turn settles. Until the lane answers an ordinary turn, the
+   * later conversation-end drop must release that unused pin without changing
+   * the persistence of an established or ordinary warm transfer.
    */
   private activeFromDeferredTransfer = false;
   private started = new Set<string>();
@@ -1666,6 +1667,11 @@ export class SwitchboardBrain implements Brain {
     if (!reply.trim()) return;
     this.lastExchange = { speaker: this.active ?? "Cicero", user, reply };
     if (this.active !== null) {
+      // The greeting belongs to the transfer control path and never reaches
+      // this successful ordinary-answer boundary. Once the lane answers here,
+      // dropping the pin at conversation end would lose a line the operator
+      // actually used and make a cold transfer less sticky than a warm one.
+      this.activeFromDeferredTransfer = false;
       // Bounded before retained: the release recap needs a tail, not a log.
       this.laneLog.push({ user: clipText(user, 200), reply: clipText(reply, 240) });
       if (this.laneLog.length > SwitchboardBrain.LANE_LOG_TURNS) this.laneLog.shift();

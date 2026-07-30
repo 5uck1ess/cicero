@@ -437,6 +437,32 @@ test("ending a conversation releases a deferred transfer that already pinned", a
   }
 });
 
+test("a cold transfer becomes sticky after its lane answers an ordinary turn", async () => {
+  // The cold-start greeting only completes the transfer. Once the operator
+  // actually talks to that lane and gets an answer, ending the conversation
+  // must not discard a pin that is now indistinguishable from a warm transfer.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    cold.release();
+    expect(await transfer).toBe("Worker here.");
+
+    expect(await sb.send("help me with this")).toBe("worker reply");
+    sb.dropDeferredWork();
+
+    expect(sb.activeLane()).toBe("worker");
+    expect(await sb.send("new conversation")).toBe("worker reply");
+    expect(calls).toContain("worker:send:new conversation");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
 test("ending a conversation leaves the front desk no memo about it", async () => {
   // Releasing a lane normally tells whoever answers next that the user came
   // back from a side conversation, and carries its last exchanges along. After
@@ -480,11 +506,11 @@ test("ending a conversation clears its exchange before the next transfer", async
   });
   try {
     await sb.start();
+    expect(await sb.send("the old conversation's private detail")).toBe("front reply");
     const transfer = sb.send("talk to the worker");
     await Bun.sleep(0);
     cold.release();
     expect(await transfer).toBe("Worker here.");
-    expect(await sb.send("the old conversation's private detail")).toBe("worker reply");
 
     sb.dropDeferredWork();
     expect(await sb.send("talk to think")).toBe("Think here.");

@@ -28,7 +28,7 @@ brain:
       voice: af_sky
 ```
 
-- **Transfers are sticky** — a phone transfer, not a per-question relay. "Talk to / switch me to / pass me to / patch me through to X" pins; "back to you / that's all / hang up" releases.
+- **Transfers are sticky** — a phone transfer, not a per-question relay. "Talk to / switch me to / pass me to / patch me through to X" pins; "back to you / that's all / hang up" releases. If a cold transfer connects but the conversation ends before that colleague answers an ordinary turn, Cicero discards the unused pin; after the colleague answers, it is as sticky as a warm transfer.
 - **Nobody plays dumb about what just happened** — a transferred-to colleague is briefed on what you were discussing, and on release the front desk gets a recap of the last few exchanges it missed. Control-plane actions leave the same trail: after "call me" rings your phone, asking "did you call me?" gets a straight yes instead of a denial from a persona that never saw the dial happen.
 - **The first alias is the working name** — the one Cicero says when reciting the roster or running a roll call.
 - **Lanes start lazily** on their first pin, so a big roster costs nothing at boot.
