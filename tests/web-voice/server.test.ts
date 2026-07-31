@@ -92,6 +92,8 @@ function start(opts: {
   confirmations?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["confirmations"]>;
   shutdownDrainTimeoutMs?: number;
   vadDir?: string;
+  onConversationEnded?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onConversationEnded"]>;
+  conversationEndGraceMs?: number;
 } = {}): string {
   handle = startWebVoiceServer({
     host: "127.0.0.1",
@@ -114,6 +116,8 @@ function start(opts: {
     confirmations: opts.confirmations,
     shutdownDrainTimeoutMs: opts.shutdownDrainTimeoutMs,
     vadDir: opts.vadDir,
+    onConversationEnded: opts.onConversationEnded,
+    conversationEndGraceMs: opts.conversationEndGraceMs ?? 0,
   });
   if (!handle) throw new Error("server failed to start");
   return `http://127.0.0.1:${handle.port}`;
@@ -135,9 +139,9 @@ function connectV2(base: string): Promise<{ ws: WebSocket; sessionId: string }> 
   });
 }
 
-function connect(base: string): Promise<WebSocket> {
+function connect(base: string, resume = false): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN);
+    const ws = new WebSocket(base.replace("http", "ws") + "/ws?token=" + TOKEN + (resume ? "&resume=1" : ""));
     const timer = setTimeout(() => reject(new Error("socket open timeout")), 3_000);
     ws.onopen = () => { clearTimeout(timer); resolve(ws); };
     ws.onerror = () => { clearTimeout(timer); reject(new Error("socket open failed")); };
@@ -556,6 +560,295 @@ test("global admission returns 429 instead of spawning unbounded chat work", asy
   expect(overflow.status).toBe(429);
   releaseJobs();
   expect((await Promise.all(active)).every((response) => response.status === 200)).toBe(true);
+});
+
+test("a say job re-reports a departure that arrived while its lease was active", async () => {
+  // Say holds the same foreground lease as chat but has no route-specific
+  // completion path. Re-reporting at the route left a stopped conversation's
+  // cold transfer available for the next turn when speech synthesis finished.
+  const entered = deferred();
+  const release = deferred();
+  let ended = 0;
+  const base = start({
+    onConversationEnded: () => {
+      ended++;
+      throw new Error("ending hook stays fire-and-forget");
+    },
+    onSay: async () => {
+      entered.resolve();
+      await release.promise;
+      return wav();
+    },
+  });
+  const ws = await connect(base);
+  const request = fetch(base + "/api/say", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "hold this synthesis" }),
+  });
+  await entered.promise;
+  ws.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(ended).toBe(1);
+
+  release.resolve();
+  expect((await request).status).toBe(200);
+  expect(handle!.activeJobCount()).toBe(0);
+  expect(ended).toBe(2);
+  ws.close();
+  await Bun.sleep(30);
+  expect(ended).toBe(2);
+});
+
+test("a chat turn that saw no departure does not report a conversation ending", async () => {
+  // The other side of the re-report above, and it earns its place: firing on
+  // every release would end conversations that never ended. On a box driven
+  // entirely through /api/chat that means the turn which just parked a cold
+  // transfer immediately calls it off, because at release there is no socket
+  // attached and never was.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, onChat: async () => "ok" });
+  const response = await fetch(base + "/api/chat", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "no browser has ever been here" }),
+  });
+  expect(response.status).toBe(200);
+  expect(handle!.activeJobCount()).toBe(0);
+  expect(ended).toBe(0);
+});
+
+test("activeJobCount exposes an operator chat lease and re-reports departure when it releases", async () => {
+  // This is the real lease used by /api/chat. Returning a disconnected counter
+  // here would let the daemon declare the conversation over while brain.send()
+  // was still waiting on a cold transfer; omitting the release-time re-report
+  // would then retain that work forever.
+  const entered = deferred();
+  const release = deferred();
+  let ended = 0;
+  const base = start({
+    onConversationEnded: () => { ended++; },
+    onChat: async () => {
+      entered.resolve();
+      await release.promise;
+      return "ok";
+    },
+  });
+  const ws = await connect(base);
+  const request = fetch(base + "/api/chat", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "keep this conversation alive" }),
+  });
+  await entered.promise;
+  expect(handle!.activeJobCount()).toBe(1);
+  ws.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(ended).toBe(1);
+
+  release.resolve();
+  expect((await request).status).toBe(200);
+  expect(handle!.activeJobCount()).toBe(0);
+  expect(ended).toBe(2);
+  ws.close();
+  await Bun.sleep(30);
+  expect(ended).toBe(2);
+});
+
+test("a replacement socket does not leave its predecessor's ending owed to a later chat", async () => {
+  // The first departure was remembered while synthesis ran, but its replacement
+  // arrived before that job drained and later delivered its own ending directly.
+  // Keeping the first debt after both events makes an unrelated socketless chat
+  // report a second ending and discard work belonging to the new conversation.
+  const sayEntered = deferred();
+  const releaseSay = deferred();
+  let ended = 0;
+  const base = start({
+    onConversationEnded: () => { ended++; },
+    onSay: async () => {
+      sayEntered.resolve();
+      await releaseSay.promise;
+      return wav();
+    },
+    onChat: async () => "later work stays parked",
+  });
+  const first = await connect(base);
+  const say = fetch(base + "/api/say", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "hold the old job" }),
+  });
+  await sayEntered.promise;
+  first.send(JSON.stringify({ type: "bye" }));
+  const firstDetachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < firstDetachedBy) await Bun.sleep(5);
+  expect(ended).toBe(1);
+
+  const replacement = await connect(base);
+  // The client sees its socket open when the handshake response arrives, which
+  // is before the server has run its own open handler and counted it. Draining
+  // the held job on that window is the ordinary departure-then-drain case, not
+  // the replacement case this test is about.
+  const replacementAttachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() === 0 && Date.now() < replacementAttachedBy) await Bun.sleep(5);
+  expect(handle!.clientCount()).toBe(1);
+  expect(ended).toBe(2);
+  releaseSay.resolve();
+  expect((await say).status).toBe(200);
+  expect(ended).toBe(2);
+
+  replacement.send(JSON.stringify({ type: "bye" }));
+  const replacementDetachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < replacementDetachedBy) await Bun.sleep(5);
+  expect(ended).toBe(3);
+
+  const chat = await fetch(base + "/api/chat", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "park work for the later conversation" }),
+  });
+  expect(chat.status).toBe(200);
+  expect(handle!.activeJobCount()).toBe(0);
+  expect(ended).toBe(3);
+  first.close();
+  replacement.close();
+});
+
+test("a new conversation definitively ends the previous conversation whose ending is owed", async () => {
+  // The old say lease began before the replacement conversation existed. Its
+  // presence must not let the new conversation inherit work that the daemon
+  // declined to drop when the old conversation first said goodbye.
+  const sayEntered = deferred();
+  const releaseSay = deferred();
+  const endings: boolean[] = [];
+  const base = start({
+    onConversationEnded: (ending?: { definitive?: boolean }) => {
+      endings.push(ending?.definitive === true);
+    },
+    onSay: async () => {
+      sayEntered.resolve();
+      await releaseSay.promise;
+      return wav();
+    },
+  });
+  const first = await connect(base);
+  const say = fetch(base + "/api/say", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "work from the old conversation" }),
+  });
+  await sayEntered.promise;
+  first.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(endings).toEqual([false]);
+
+  const fresh = await connect(base);
+  const attachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() === 0 && Date.now() < attachedBy) await Bun.sleep(5);
+  expect(endings).toEqual([false, true]);
+
+  releaseSay.resolve();
+  expect((await say).status).toBe(200);
+  expect(endings).toEqual([false, true]);
+  first.close();
+  fresh.close();
+});
+
+test("a resume does not definitively end the conversation whose ending is owed", async () => {
+  // An automatic reconnect continues the same conversation, so it must keep
+  // the deferred transfer that the still-running old lease may complete.
+  const sayEntered = deferred();
+  const releaseSay = deferred();
+  const endings: boolean[] = [];
+  const base = start({
+    onConversationEnded: (ending?: { definitive?: boolean }) => {
+      endings.push(ending?.definitive === true);
+    },
+    onSay: async () => {
+      sayEntered.resolve();
+      await releaseSay.promise;
+      return wav();
+    },
+  });
+  const first = await connect(base);
+  const say = fetch(base + "/api/say", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "work from the continuing conversation" }),
+  });
+  await sayEntered.promise;
+  first.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(endings).toEqual([false]);
+
+  const resumed = await connect(base, true);
+  const attachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() === 0 && Date.now() < attachedBy) await Bun.sleep(5);
+  expect(endings).toEqual([false]);
+
+  releaseSay.resolve();
+  expect((await say).status).toBe(200);
+  expect(endings).toEqual([false]);
+  first.close();
+  resumed.close();
+});
+
+test("overlapping jobs re-report a departure once when the last lease releases", async () => {
+  // The first release still leaves an HTTP input surface alive. Consuming the
+  // remembered ending there either ends too early or leaves the last route
+  // unable to report it when that route has no completion callback of its own.
+  const chatEntered = deferred();
+  const sayEntered = deferred();
+  const releaseChat = deferred();
+  const releaseSay = deferred();
+  let ended = 0;
+  const base = start({
+    onConversationEnded: () => { ended++; },
+    onChat: async () => {
+      chatEntered.resolve();
+      await releaseChat.promise;
+      return "ok";
+    },
+    onSay: async () => {
+      sayEntered.resolve();
+      await releaseSay.promise;
+      return wav();
+    },
+  });
+  const ws = await connect(base);
+  const chatRequest = fetch(base + "/api/chat", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "first lease" }),
+  });
+  const sayRequest = fetch(base + "/api/say", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "last lease" }),
+  });
+  await Promise.all([chatEntered.promise, sayEntered.promise]);
+  expect(handle!.activeJobCount()).toBe(2);
+  ws.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(ended).toBe(1);
+
+  releaseChat.resolve();
+  expect((await chatRequest).status).toBe(200);
+  expect(handle!.activeJobCount()).toBe(1);
+  expect(ended).toBe(1);
+
+  releaseSay.resolve();
+  expect((await sayRequest).status).toBe(200);
+  expect(handle!.activeJobCount()).toBe(0);
+  expect(ended).toBe(2);
+  ws.close();
+  await Bun.sleep(30);
+  expect(ended).toBe(2);
 });
 
 test("body readers acquire global admission before parsing completes", async () => {
@@ -1505,6 +1798,29 @@ test("ws: a typed {type:'text'} frame runs the text turn and streams the reply",
   expect(JSON.parse(msgs[3] as string)).toEqual({ type: "done" });
 });
 
+test("ws: a text frame after goodbye does not produce a turn", async () => {
+  // Stop is terminal for this socket. A frame already following it through the
+  // transport cannot become input for a conversation the operator just ended.
+  let turns = 0;
+  const base = start({
+    onTextTurn: async (_text, sink) => {
+      turns += 1;
+      sink.done();
+    },
+  });
+  const ws = await connect(base);
+  const closed = new Promise<void>((resolve) => {
+    ws.addEventListener("close", () => resolve(), { once: true });
+  });
+  ws.send(JSON.stringify({ type: "bye" }));
+  ws.send(JSON.stringify({ type: "text", text: "too late" }));
+  await Promise.race([
+    closed,
+    Bun.sleep(2_000).then(() => { throw new Error("goodbye socket did not close"); }),
+  ]);
+  expect(turns).toBe(0);
+});
+
 test("ws: typed frame without onTextTurn reports 'typed input not available'", async () => {
   const base = start({ onStreamTurn: async () => { /* unused */ } });
   const reply = await new Promise<string>((resolve, reject) => {
@@ -2055,4 +2371,271 @@ test("/vad serves only whitelisted, present assets — unauthenticated, immutabl
 test("/vad without a configured directory stays 404", async () => {
   const base = start({});
   expect((await fetch(`${base}/vad/ort.wasm.min.js`)).status).toBe(404);
+});
+
+test("a closed voice socket reports the conversation as ended", async () => {
+  // The page's Stop button aborts the active turn and THEN closes the socket.
+  // The abort reason is fixed by the first call, so the close is invisible to
+  // anything reading it — a brain holding deferred work for this conversation
+  // has to be told out of band, or it carries that work into the next one.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; } });
+  const ws = await connect(base);
+  expect(ended).toBe(0);
+  ws.close();
+  await Bun.sleep(50);
+  expect(ended).toBe(1);
+});
+
+test("shutting the voice server down reports the conversation as ended", async () => {
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; } });
+  const ws = await connect(base);
+  await handle!.stop();
+  handle = null;
+  try { ws.close(); } catch { /* already gone */ }
+  expect(ended).toBeGreaterThanOrEqual(1);
+  expect(base).toContain("127.0.0.1");
+});
+
+test("a throwing conversation-ended hook does not break socket teardown", async () => {
+  // Fire-and-forget: a brain that throws here must not take the socket handler
+  // down with it, or one bad brain wedges every disconnect.
+  const base = start({ onConversationEnded: () => { throw new Error("brain exploded"); } });
+  const ws = await connect(base);
+  ws.close();
+  await Bun.sleep(50);
+  const res = await fetch(`${base}/api/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  expect(res.status).toBeLessThan(500);
+});
+
+test("one browser leaving does not end a conversation another is still in", async () => {
+  // Every connected browser reaches the same brain, switchboard and active lane
+  // (docs/web-voice.md, "Deliberate multi-client boundary"): one conversation on
+  // several screens. Reporting its end per socket let one browser closing call
+  // off a cold transfer another was still waiting on.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; } });
+  const first = await connect(base);
+  const second = await connect(base);
+  first.close();
+  await Bun.sleep(50);
+  expect(ended).toBe(0);
+  second.close();
+  await Bun.sleep(50);
+  expect(ended).toBe(1);
+});
+
+test("a dropped socket does not end the conversation while the page reconnects", async () => {
+  // The PWA reconnects by itself (1s → 2s → 5s) whenever the operator has not
+  // stopped it, so a tunnel or a sleeping laptop must not be read as "we're
+  // done" — that threw away a cold transfer the operator was still waiting on.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 300 });
+  const first = await connect(base);
+  first.close();
+  await Bun.sleep(60);
+  expect(ended).toBe(0);          // still within the grace
+  const second = await connect(base, true); // ...and the page comes back
+  await Bun.sleep(400);
+  expect(ended).toBe(0);          // the reconnect cancelled the ending outright
+  second.close();
+  await Bun.sleep(400);
+  expect(ended).toBe(1);          // nobody came back this time
+});
+
+test("a fresh connection during the grace ends the conversation that was waiting", async () => {
+  // Pressing Start after an explicit Stop attempted during reconnect backoff is
+  // a new conversation. The old grace must end promptly or its deferred cold
+  // transfer survives into the new conversation and can pin the shared lane.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const first = await connect(base);
+  first.close();
+  await Bun.sleep(30);
+  expect(ended).toBe(0);
+  const fresh = await connect(base);
+  await Bun.sleep(30);
+  expect(ended).toBe(1);
+  fresh.close();
+});
+
+test("a resume connection during the grace does not end the conversation", async () => {
+  // An automatic reconnect continues the same conversation after an ordinary
+  // network drop. Ending it on arrival would discard deferred work the operator
+  // is still waiting for even though the page never stopped.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const first = await connect(base);
+  first.close();
+  await Bun.sleep(30);
+  expect(ended).toBe(0);
+  const resumed = await connect(base, true);
+  await Bun.sleep(30);
+  expect(ended).toBe(0);
+  resumed.close();
+});
+
+test("a second device starting does not end the conversation another is still in", async () => {
+  // A resume deliberately leaves the grace timer armed — it re-checks the room
+  // when it fires — so a client can be attached with a timer still pending. A
+  // fresh connection arriving in that state is a second screen joining, not a
+  // restart of an abandoned conversation, and ending the conversation there
+  // would call off a cold transfer the reconnected page is still waiting on.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const first = await connect(base);
+  first.close();
+  await Bun.sleep(30);
+  const resumed = await connect(base, true);   // the page comes back; timer still armed
+  await Bun.sleep(30);
+  expect(ended).toBe(0);
+  const second = await connect(base);          // another device presses Start
+  await Bun.sleep(30);
+  expect(ended).toBe(0);
+  resumed.close();
+  second.close();
+});
+
+test("saying goodbye ends the conversation without waiting out the grace", async () => {
+  // Stop is not a disconnect: it must take effect at once, or pressing Stop and
+  // Start again inside the grace would resurrect the work it called off.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const ws = await connect(base);
+  ws.send(JSON.stringify({ type: "bye" }));
+  await Bun.sleep(30);
+  ws.close();
+  await Bun.sleep(60);
+  expect(ended).toBe(1);
+});
+
+test("goodbye ends before a replacement socket opens and the old close is a lifecycle no-op", async () => {
+  // Stop and Start can overlap at the transport layer. If goodbye is merely
+  // remembered until close, the replacement joins first and both handlers see
+  // another client, so the stopped conversation is never ended.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const stopped = await connect(base);
+  stopped.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(handle!.clientCount()).toBe(0);
+  expect(ended).toBe(1);
+
+  const replacement = await connect(base);
+  stopped.close();
+  await Bun.sleep(60);
+  expect(ended).toBe(1);
+  expect(handle!.clientCount()).toBe(1);
+  replacement.close();
+});
+
+test("goodbye releases owned connection slots and its close does not end the conversation twice", async () => {
+  // Detached sockets are still server-owned transports until they close. If
+  // goodbye leaves them open outside admission accounting, repeated Stops can
+  // accumulate more live transports than the connection limit is meant to own.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 10_000 });
+  const sockets = await Promise.all(
+    Array.from({ length: MAX_WEB_VOICE_CLIENTS }, () => connect(base)),
+  );
+  const closed = sockets.map((ws) => new Promise<void>((resolve) => {
+    ws.addEventListener("close", () => resolve(), { once: true });
+  }));
+  for (const ws of sockets) ws.send(JSON.stringify({ type: "bye" }));
+
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 0 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(handle!.clientCount()).toBe(0);
+  await Promise.race([
+    Promise.all(closed),
+    Bun.sleep(2_000).then(() => { throw new Error("goodbye sockets did not close"); }),
+  ]);
+  expect(ended).toBe(1);
+
+  const replacement = await connect(base);
+  expect(handle!.clientCount()).toBe(1);
+  await Bun.sleep(60);
+  expect(ended).toBe(1);
+  replacement.close();
+});
+
+test("goodbye detaches one client without ending another client's conversation or arming grace", async () => {
+  // One browser's goodbye removes it at once, but the other browser remains the
+  // same single-operator conversation. The departed socket's later close must
+  // not leave a timer behind that can report a second ending.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 100 });
+  const departed = await connect(base);
+  const remaining = await connect(base);
+  departed.send(JSON.stringify({ type: "bye" }));
+  const detachedBy = Date.now() + 1_000;
+  while (handle!.clientCount() !== 1 && Date.now() < detachedBy) await Bun.sleep(5);
+  expect(handle!.clientCount()).toBe(1);
+  expect(ended).toBe(0);
+
+  departed.close();
+  await Bun.sleep(180);
+  expect(ended).toBe(0);
+  expect(handle!.conversationLive()).toBe(true);
+
+  remaining.send(JSON.stringify({ type: "bye" }));
+  const endedBy = Date.now() + 1_000;
+  while (ended !== 1 && Date.now() < endedBy) await Bun.sleep(5);
+  expect(ended).toBe(1);
+  expect(handle!.clientCount()).toBe(0);
+  expect(handle!.conversationLive()).toBe(false);
+  remaining.close();
+  await Bun.sleep(180);
+  expect(ended).toBe(1);
+});
+
+test("a conversation with no socket attached is still live during its grace", async () => {
+  // What the daemon reads to decide whether anybody is still on the line. The
+  // attached-socket count alone says "empty room" for the whole grace window,
+  // so another surface going away meanwhile concluded the conversation was over
+  // and called off work the reconnecting page would have come back to.
+  const base = start({ conversationEndGraceMs: 300 });
+  const ws = await connect(base);
+  expect(handle!.conversationLive()).toBe(true);
+  ws.close();
+  await Bun.sleep(60);
+  expect(handle!.clientCount()).toBe(0);
+  expect(handle!.conversationLive()).toBe(true);   // ...but not over
+  await Bun.sleep(400);
+  expect(handle!.conversationLive()).toBe(false);  // the grace ran out
+  expect(base).toContain("127.0.0.1");
+});
+
+test("shutting down with a socket attached does not re-arm the conversation end", async () => {
+  // stop() ends the conversation and then closes its sockets, and every one of
+  // those closes lands in the same handler that arms the grace timer. Arming it
+  // there scheduled a second ending for a server that had already torn down.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 200 });
+  const ws = await connect(base);
+  await handle!.stop();
+  handle = null;
+  expect(ended).toBe(1);
+  await Bun.sleep(400);
+  expect(ended).toBe(1);
+  ws.close();
+  expect(base).toContain("127.0.0.1");
+});
+
+test("a pending conversation end does not outlive the server", async () => {
+  // The timer is owned: a shutdown mid-grace must not leave it armed.
+  let ended = 0;
+  const base = start({ onConversationEnded: () => { ended++; }, conversationEndGraceMs: 200 });
+  const ws = await connect(base);
+  ws.close();
+  await Bun.sleep(20);
+  await handle!.stop();
+  handle = null;
+  const afterStop = ended;
+  expect(afterStop).toBeGreaterThanOrEqual(1); // shutdown ends it immediately
+  await Bun.sleep(400);
+  expect(ended).toBe(afterStop);              // ...and the armed timer never fires again
+  expect(base).toContain("127.0.0.1");
 });

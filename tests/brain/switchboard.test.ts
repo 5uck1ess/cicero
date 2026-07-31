@@ -226,6 +226,539 @@ test("a lane that fails to start reports it and stays unpinned", async () => {
   expect(await sb.send("hello")).toBe("front reply");
 });
 
+/** A lane whose start hangs until the returned release() is called. */
+function coldLane(calls: string[], name = "worker") {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let starts = 0;
+  const brain: Brain = {
+    ...fakeBrain(name, calls),
+    start: async () => { starts++; await gate; calls.push(`${name}:start`); },
+  };
+  return { brain, release: () => release(), startCount: () => starts };
+}
+
+test("a transfer talked over during a cold start is not silently dropped", async () => {
+  // Forward guard for these review fixes: the PR already preserves a genuine
+  // barge-in; cancellation ownership must not clear that intentional handoff.
+  // Live incident 2026-07-30: "get Rick" started a 14-second ACP lane cold
+  // start with no further speech to cover it. The user spoke into the silence,
+  // that barge-in superseded the pending transfer, and the request evaporated —
+  // the lane came up and sat there while every later turn went to the front
+  // desk. The superseded turn must still reject (late work must never publish
+  // into a newer turn), but the front desk must stop pretending it was never
+  // asked.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  const transport = new AbortController();
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker", { signal: transport.signal });
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    // The web transport aborts the old same-socket turn before its drain loop
+    // admits the queued successor. The dead turn still rejects and publishes
+    // nothing; the successor owns the pending ask.
+    transport.abort(new Error("superseded by a newer turn"));
+    await expect(transfer).rejects.toThrow("superseded by a newer turn");
+    expect(await settlesWithin(sb.send("hello?"), "barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+    expect(sb.activeLane()).toBeNull(); // nothing pinned late by the dead turn
+
+    cold.release();
+    await Bun.sleep(0);
+    // With the lane up, the NEXT turn completes the pin itself.
+    expect(await settlesWithin(sb.send("you there?"), "pin")).toBe("Worker here.");
+    expect(sb.activeLane()).toBe("worker");
+    // Resolved once — a later turn is an ordinary lane turn, not another ack.
+    expect(await sb.send("what's up")).toBe("worker reply");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a push-to-talk barge-in keeps the pending cold transfer alive", async () => {
+  // The browser's PTT interruption aborts the active turn BEFORE it has the
+  // replacement audio to send (page.ts abortActiveTurn, then endPtt sends the
+  // WAV), and the server records that as "turn aborted by client". abortTurn
+  // fixes the reason on the FIRST abort, so the later same-socket supersession
+  // can never overwrite it. This is an ordinary barge-in with the speaker still
+  // on the line, so the transfer must survive it exactly as a queued-turn
+  // supersession does — treating it as the conversation going away reinstates
+  // the very incident this feature exists to fix.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  const transport = new AbortController();
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker", { signal: transport.signal });
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    transport.abort(new Error("turn aborted by client"));
+    await expect(transfer).rejects.toThrow("turn aborted by client");
+    expect(await settlesWithin(sb.send("hello?"), "barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("you there?"), "pin")).toBe("Worker here.");
+    expect(sb.activeLane()).toBe("worker");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a local-microphone barge-in keeps the pending cold transfer alive", async () => {
+  // src/daemon.ts aborts the active local turn with a bare string rather than an
+  // Error. Same contract as the browser barge-in, different reason shape — a
+  // classifier that only understood Errors dropped every local transfer.
+  // Literal, not a shared constant: the point is what the daemon really sends.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  const transport = new AbortController();
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker", { signal: transport.signal });
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    transport.abort("barge-in");
+    await expect(transfer).rejects.toThrow();
+    expect(await settlesWithin(sb.send("hello?"), "local barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("you there?"), "pin")).toBe("Worker here.");
+    expect(sb.activeLane()).toBe("worker");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("an explicit local stop drops the transfer even though the reason says barge-in", async () => {
+  // "stop" cancels the work in flight. The operator is still on the line, but
+  // they asked for this to go away — the next thing they say must not be
+  // steered into a lane they just cancelled. The abort reason cannot carry
+  // that: the interrupt callback runs first and fixes it as "barge-in".
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  const transport = new AbortController();
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker", { signal: transport.signal });
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    transport.abort("barge-in");
+    await expect(transfer).rejects.toThrow();
+    // A spoken "stop" reaches the daemon as a barge-in AND a stop command, in
+    // that order, so the reason on the wire says "barge-in". The stop is
+    // delivered out of band.
+    sb.dropDeferredWork();
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await sb.send("new conversation")).toBe("front reply");
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a cold transfer called off mid-start does not pin the lane it was starting", async () => {
+  // Deactivating the microphone ends the conversation WITHOUT aborting the turn
+  // that asked for the transfer, so the cold start runs to completion on a live
+  // signal. Clearing the pending record alone did not stop it: it finished the
+  // wait and pinned the lane seconds after everyone had left.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    sb.dropDeferredWork();
+    cold.release();
+
+    expect(await transfer).toBe("Never mind worker then.");
+    expect(sb.activeLane()).toBeNull();
+    // ...and the conversation that follows starts at the front desk.
+    expect(await sb.send("new conversation")).toBe("front reply");
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("ending a conversation releases a deferred transfer that already pinned", async () => {
+  // The microphone can go inactive while its last local turn still keeps the
+  // conversation live. If the cold start pins during that turn, the eventual
+  // conversation-end drop must release the pin too or the next conversation
+  // bypasses the front desk and reaches the old worker.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    cold.release();
+    expect(await transfer).toBe("Worker here.");
+    expect(sb.activeLane()).toBe("worker");
+
+    sb.dropDeferredWork();
+
+    expect(sb.activeLane()).toBeNull();
+    expect(await sb.send("new conversation")).toBe("front reply");
+    expect(calls).not.toContain("worker:send:new conversation");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a cold transfer becomes sticky after its lane answers an ordinary turn", async () => {
+  // The cold-start greeting only completes the transfer. Once the operator
+  // actually talks to that lane and gets an answer, ending the conversation
+  // must not discard a pin that is now indistinguishable from a warm transfer.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    cold.release();
+    expect(await transfer).toBe("Worker here.");
+
+    expect(await sb.send("help me with this")).toBe("worker reply");
+    sb.dropDeferredWork();
+
+    expect(sb.activeLane()).toBe("worker");
+    expect(await sb.send("new conversation")).toBe("worker reply");
+    expect(calls).toContain("worker:send:new conversation");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("ending a conversation leaves the front desk no memo about it", async () => {
+  // Releasing a lane normally tells whoever answers next that the user came
+  // back from a side conversation, and carries its last exchanges along. After
+  // a conversation ends nobody came back, and that recap would be the finished
+  // conversation's tail arriving inside an unrelated later one.
+  const calls: string[] = [];
+  const injected: string[] = [];
+  const front = { ...fakeBrain("front", calls), injectContext: (context: string) => injected.push(context) };
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(front, { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    cold.release();
+    expect(await transfer).toBe("Worker here.");
+
+    sb.dropDeferredWork();
+    expect(await sb.send("new conversation")).toBe("front reply");
+    expect(injected.join("\n")).not.toContain("returned to the main line");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("ending a conversation clears its exchange before the next transfer", async () => {
+  // A deferred pin can settle before the conversation-end notification arrives.
+  // Releasing that pin clears its recap, but the handoff record must go too or
+  // the next conversation's first transfer briefs a new lane on the old caller.
+  const calls: string[] = [];
+  const thinkContexts: string[] = [];
+  const cold = coldLane(calls);
+  const think = {
+    ...fakeBrain("think", calls),
+    injectContext: (context: string) => { thinkContexts.push(context); },
+  };
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    worker: { brain: cold.brain },
+    think: { brain: think },
+  });
+  try {
+    await sb.start();
+    expect(await sb.send("the old conversation's private detail")).toBe("front reply");
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    cold.release();
+    expect(await transfer).toBe("Worker here.");
+
+    sb.dropDeferredWork();
+    expect(await sb.send("talk to think")).toBe("Think here.");
+    expect(thinkContexts.join("\n")).not.toContain("the old conversation's private detail");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("returning to the front desk preserves the exchange for a later transfer", async () => {
+  // Returning to Cicero is still inside one conversation. The next lane should
+  // receive the prior lane's exchange so the user does not have to repeat it.
+  const calls: string[] = [];
+  const thinkContexts: string[] = [];
+  const coder = fakeBrain("coder", calls);
+  const think = {
+    ...fakeBrain("think", calls),
+    injectContext: (context: string) => { thinkContexts.push(context); },
+  };
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    coder: { brain: coder },
+    think: { brain: think },
+  });
+  try {
+    await sb.start();
+    expect(await sb.send("talk to coder")).toBe("Coder here.");
+    expect(await sb.send("keep this same-conversation detail")).toBe("coder reply");
+    expect(await sb.send("back to Cicero")).toBe("Back with you.");
+
+    expect(await sb.send("talk to think")).toBe("Think here.");
+    expect(thinkContexts.join("\n")).toContain("keep this same-conversation detail");
+  } finally {
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("ending a conversation does not release an ordinary explicit transfer", async () => {
+  // A deliberate transfer to an already-started lane is the existing sticky
+  // product behavior. Conversation cleanup must not mistake that live pin for
+  // deferred work merely because both routes select the same employee.
+  const calls: string[] = [];
+  const sb = board(calls);
+  try {
+    await sb.start();
+    await sb.send("talk to the coder");
+    await sb.send("back to cicero");
+
+    expect(await sb.send("talk to the coder")).toBe("Coder here.");
+    expect(sb.activeLane()).toBe("coder");
+
+    sb.dropDeferredWork();
+
+    expect(sb.activeLane()).toBe("coder");
+    expect(await sb.send("new conversation")).toBe("coder reply");
+    expect(calls).toContain("coder:send:new conversation");
+  } finally {
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a cold transfer nobody called off still pins the lane", async () => {
+  // The other direction: refusing a late pin must be tied to the drop, not
+  // applied to every start that takes a while.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    cold.release();
+
+    expect(await transfer).toBe("Worker here.");
+    expect(sb.activeLane()).toBe("worker");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a transport-cancelled cold transfer does not steer a later conversation", async () => {
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  const transport = new AbortController();
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker", { signal: transport.signal });
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+
+    transport.abort(new Error("voice socket closed"));
+    await expect(transfer).rejects.toThrow("voice socket closed");
+    sb.dropDeferredWork();
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await sb.send("new conversation")).toBe("front reply");
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a pending cold transfer that fails to start reports it instead of stalling", async () => {
+  // The "still coming" ack must never outlive the start it describes, or the
+  // user is told to hold for a lane that is never going to arrive.
+  const calls: string[] = [];
+  let failStart!: (e: Error) => void;
+  const gate = new Promise<void>((_, reject) => { failStart = reject; });
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    worker: { brain: { ...fakeBrain("worker", calls), start: () => gate } },
+  });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("hello?"), "barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+    await expect(transfer).rejects.toThrow("superseded by a newer accepted turn");
+
+    failStart(new Error("worker down"));
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("you there?"), "failure ack"))
+      .toBe("I couldn't reach worker right now.");
+    expect(sb.activeLane()).toBeNull();
+    expect(await sb.send("hello")).toBe("front reply"); // cleared, not sticky
+  } finally {
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("'never mind' calls off a transfer that is still coming", async () => {
+  // The hold must be cancellable, or it is the one state the user cannot exit.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* superseded below */ });
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("hello?"), "barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+    await expect(transfer).rejects.toThrow("superseded by a newer accepted turn");
+
+    expect(await settlesWithin(sb.send("never mind"), "cancel"))
+      .toBe("Alright — I'll leave Worker out of it.");
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await sb.send("you there?")).toBe("front reply"); // stays at the front desk
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("'never mind' spoken to somebody on the line goes to them, not the switchboard", async () => {
+  // "never mind" cancels a transfer that has not connected yet. Once the coder
+  // has picked up it is something the user is saying TO the coder ("never mind,
+  // I'll do it myself"), and hanging up on them instead loses the utterance.
+  // Explicit release phrases still release.
+  const calls: string[] = [];
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    coder: { brain: fakeBrain("coder", calls) },
+  });
+  try {
+    await sb.start();
+    expect(await sb.send("talk to the coder")).toBe("Coder here.");
+    expect(sb.activeLane()).toBe("coder");
+
+    expect(await sb.send("never mind")).toBe("coder reply");
+    expect(sb.activeLane()).toBe("coder");
+
+    expect(await sb.send("that's all")).toBe("Back with you.");
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("'that's all' releases an active lane and cancels a pending cold transfer", async () => {
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    coder: { brain: fakeBrain("coder", calls) },
+    worker: { brain: cold.brain },
+  });
+  try {
+    await sb.start();
+    expect(await sb.send("talk to the coder")).toBe("Coder here.");
+
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* asserted below */ });
+    await Bun.sleep(0);
+    expect(cold.startCount()).toBe(1);
+    expect(sb.activeLane()).toBe("coder");
+
+    expect(await settlesWithin(sb.send("that's all"), "release and cancel"))
+      .toBe("Back with you — and I'll leave Worker out of it.");
+    await expect(transfer).rejects.toThrow("superseded by a newer accepted turn");
+    expect(sb.activeLane()).toBeNull();
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await sb.send("new topic")).toBe("front reply");
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
+test("a newer transfer replaces a pending cold one — no stale lane arrives", async () => {
+  // "get the worker… no, the coder" must not leave the worker queued to seize
+  // the line the moment its slow start lands.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), {
+    worker: { brain: cold.brain },
+    coder: { brain: fakeBrain("coder", calls) },
+  });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* superseded below */ });
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("talk to the coder"), "second transfer")).toBe("Coder here.");
+    expect(sb.activeLane()).toBe("coder");
+
+    cold.release();
+    await Bun.sleep(0);
+    expect(await sb.send("still there?")).toBe("coder reply"); // coder keeps the line
+    expect(sb.activeLane()).toBe("coder");
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
+});
+
 test("'that's all' at the front desk is a normal turn, not a release ack", async () => {
   const calls: string[] = [];
   const sb = board(calls);
@@ -744,6 +1277,35 @@ test("stop does not wait for a lane start that never settles", async () => {
   expect(stops).toBe(1);
   expect(sb.activeLane()).toBeNull();
   await expect(settlesWithin(transfer, "retired transfer")).rejects.toThrow("switchboard stopping");
+});
+
+test("stop clears a pending cold transfer before the next board session", async () => {
+  // Forward guard: stop already cleared the scalar pending state before the
+  // pending-transfer ownership fix made cancellation disposition explicit.
+  const calls: string[] = [];
+  const cold = coldLane(calls);
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { worker: { brain: cold.brain } });
+  try {
+    await sb.start();
+    const transfer = sb.send("talk to the worker");
+    void transfer.catch(() => { /* superseded below */ });
+    await Bun.sleep(0);
+    expect(await settlesWithin(sb.send("hello?"), "barge-in"))
+      .toBe("Still getting Worker on the line — one moment.");
+    await expect(transfer).rejects.toThrow("superseded by a newer accepted turn");
+
+    await settlesWithin(sb.stop(), "switchboard stop");
+    cold.release();
+    await Bun.sleep(0);
+    await Bun.sleep(0);
+
+    await sb.start();
+    expect(await sb.send("fresh conversation")).toBe("front reply");
+    expect(sb.activeLane()).toBeNull();
+  } finally {
+    cold.release();
+    await sb.stop().catch(() => { /* test cleanup */ });
+  }
 });
 
 test("stop preempts a primary start that never settles", async () => {
@@ -1575,6 +2137,12 @@ test("transferTo caller cancellation cannot pin a lane after a late start", asyn
   await expect(transfer).rejects.toThrow("superseded dial-back");
   releaseStart();
   await Bun.sleep(0);
+  expect(sb.activeLane()).toBeNull();
+  // The revealing turn: checking only the instant after startup missed that a
+  // cancelled programmatic transfer could still be adopted by whatever the
+  // operator said next. transferTo's signal is documented to prevent a LATE
+  // pin, not merely to abandon its own turn.
+  expect(await sb.send("hello?")).toBe("front reply");
   expect(sb.activeLane()).toBeNull();
   await sb.stop();
 });

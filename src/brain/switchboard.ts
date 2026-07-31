@@ -84,6 +84,28 @@ interface AcceptedTurn {
   detachCaller: () => void;
 }
 
+/**
+ * Who asked for the transfer, which decides what a cancellation means.
+ *
+ * A conversational ask survives cancellation: the operator is mid-conversation
+ * and the next thing they say should still reach the lane they asked for. A
+ * programmatic ask does not: `transferTo`'s signal is documented to cancel
+ * startup AND prevent a late pin, so its caller must be able to call the whole
+ * thing off, not merely abandon this turn.
+ */
+type TransferOrigin = "conversation" | "programmatic";
+
+interface PendingTransfer {
+  readonly lane: string;
+  readonly origin: TransferOrigin;
+  /** The accepted turn whose cancellation disposition controls this ask. */
+  owner: AcceptedTurn;
+  /** Retained only while waiting for the continuing conversation's next turn. */
+  disposition: "owned" | "awaiting-successor";
+  /** Cancellation listeners belong to this record and leave with it. */
+  detachAbort: () => void;
+}
+
 interface LaneStartLifecycle {
   /** A global stop retires the attempt without waiting for an uncooperative start. */
   retired: boolean;
@@ -177,6 +199,7 @@ class LaneStartRetiredError extends Error {
   }
 }
 
+
 // Matched against a normalized utterance (commas stripped, whitespace collapsed,
 // trailing punctuation removed) so STT decoration ("I said, let me talk to the
 // coder.") can't defeat a transfer. Lead-ins, question forms ("can you…"), and a
@@ -194,6 +217,11 @@ const STRICT_VERB = "let me (?:talk|speak) (?:to|with)|switch(?: me)?(?: over)? 
 const LOOSE_VERB = "(?:talk|speak) (?:to|with)|put|get me|give me|pass me (?:over |through )?to|hand me (?:over )?to|patch me (?:through |over )?to";
 const PIN_RE = new RegExp(`^${LEAD_IN}${ASK_WRAP}(?:(${STRICT_VERB})|(?:${LOOSE_VERB}))\\s+(?:the\\s+)?(?!me\\b|you\\b|us\\b)(.{1,60}?)(?:\\s+on(?: the line)?)?(?:\\s+please)?$`, "i");
 const RELEASE_RE = new RegExp(`^${LEAD_IN}(?:thanks\\s+|thank you\\s+)?(?:(?:go |switch )?back to (?:you|cicero|jarvis)|(?:cicero|jarvis) come back|switch back|that(?:'s| is) all(?: for now)?|hang up|end (?:the )?(?:call|transfer))(?:\\s+please)?$`, "i");
+// Calling off a transfer that has not connected yet. Deliberately NOT part of
+// RELEASE_RE: with somebody already on the line, "never mind" is something the
+// user is saying TO them ("never mind, I'll do it myself"), not an instruction
+// to hang up. It only means "cancel" while the line is still ringing.
+const CANCEL_PENDING_RE = new RegExp(`^${LEAD_IN}(?:never\\s?mind(?: (?:about )?(?:that|it))?|forget (?:it|that))(?:\\s+please)?$`, "i");
 // Roll call: every employee checks in, each sentence rendered in that lane's
 // own voice (the voice queue below feeds activeLaneVoice per sentence).
 // "Group call" style requests land here too — there's no conference mode, so
@@ -317,7 +345,24 @@ function normalizeRef(raw: string): string {
 export class SwitchboardBrain implements Brain {
   /** Pinned lane name, or null = the front desk (primary). */
   private active: string | null = null;
+  /**
+   * A cold transfer can pin after its microphone has gone inactive but before
+   * the last live turn settles. Until the lane answers an ordinary turn, the
+   * later conversation-end drop must release that unused pin without changing
+   * the persistence of an established or ordinary warm transfer.
+   */
+  private activeFromDeferredTransfer = false;
   private started = new Set<string>();
+  /**
+   * A transfer whose lane was still cold when its turn ended. The request is
+   * NOT resurrected — a superseded turn must never publish into a newer one,
+   * so the dead turn neither pins nor briefs. This only records that the user
+   * asked, so the front desk stops answering as though they never did: a later
+   * turn reports the wait, or completes the pin itself once the lane is up.
+   */
+  private pendingTransfer: PendingTransfer | null = null;
+  /** Incremented by dropDeferredWork; see its comment and pinLane. */
+  private deferredGeneration = 0;
   /** Cold starts outlive initiating turns and are shared by concurrent callers. */
   private laneStarts = new Map<string, LaneStartLifecycle>();
   /** Cleanup calls coalesce when a failing start races global shutdown. */
@@ -427,7 +472,7 @@ export class SwitchboardBrain implements Brain {
         }
       }
 
-      await this.pinLane(lane, turn, context);
+      await this.pinLane(lane, turn, context, "programmatic");
       this.assertAcceptedTurn(turn);
       if (this.active !== lane) return null; // lane failed to start — pin never took
       return workingName(lane, this.lanes[lane]);
@@ -621,6 +666,88 @@ export class SwitchboardBrain implements Brain {
       );
     }
     if (this.acceptedTurn === turn) this.acceptedTurn = null;
+  }
+
+  /**
+   * The conversation ended, or the operator called the work off. A transfer
+   * that is still starting must not steer whatever is said next.
+   */
+  dropDeferredWork(): void {
+    // Bumped before the clear, and never by an ordinary release: a cold start
+    // already in flight has its own live turn signal, so clearing the record
+    // alone would still let it pin the lane seconds later — steering a
+    // conversation that had already ended. See pinLane.
+    this.deferredGeneration++;
+    if (this.activeFromDeferredTransfer) {
+      this.releaseActiveLane(false);
+    } else {
+      this.clearPendingTransfer();
+    }
+  }
+
+  /**
+   * What a pin says when the conversation it belonged to ended underneath it.
+   * Deliberately not the "I couldn't reach" line — the lane was reachable; the
+   * transfer was called off, and reporting a failure that did not happen would
+   * be the wrong thing for a programmatic caller to read.
+   */
+  private calledOffReply(lane: string): string {
+    this.clearPendingTransfer();
+    log("info", `switchboard: transfer to ${lane} was called off mid-start`);
+    return `Never mind ${lane} then.`;
+  }
+
+  private clearPendingTransfer(expected?: PendingTransfer): void {
+    const pending = this.pendingTransfer;
+    if (pending === null || (expected !== undefined && pending !== expected)) return;
+    pending.detachAbort();
+    this.pendingTransfer = null;
+  }
+
+  private ownPendingTransfer(pending: PendingTransfer, turn: AcceptedTurn): void {
+    pending.detachAbort();
+    pending.owner = turn;
+    pending.disposition = "owned";
+    // Cancelling the owning turn parks a conversational transfer for the next
+    // turn to adopt. Whether the conversation is actually over is not knowable
+    // from the abort reason — see Brain.dropDeferredWork, which is how a
+    // transport says so. A programmatic transfer is the opposite: its caller's
+    // signal is documented to prevent a late pin, so cancellation is final.
+    const onAbort = (): void => {
+      if (this.pendingTransfer !== pending || pending.owner !== turn) return;
+      if (pending.origin === "programmatic") {
+        this.clearPendingTransfer(pending);
+        return;
+      }
+      pending.disposition = "awaiting-successor";
+      pending.detachAbort();
+    };
+    turn.signal.addEventListener("abort", onAbort, { once: true });
+    turn.callerSignal?.addEventListener("abort", onAbort, { once: true });
+    pending.detachAbort = () => {
+      turn.signal.removeEventListener("abort", onAbort);
+      turn.callerSignal?.removeEventListener("abort", onAbort);
+    };
+    if (turn.signal.aborted || turn.callerSignal?.aborted) onAbort();
+  }
+
+  private setPendingTransfer(lane: string, turn: AcceptedTurn, origin: TransferOrigin): void {
+    this.clearPendingTransfer();
+    const pending: PendingTransfer = {
+      lane,
+      origin,
+      owner: turn,
+      disposition: "owned",
+      detachAbort: () => {},
+    };
+    this.pendingTransfer = pending;
+    this.ownPendingTransfer(pending, turn);
+  }
+
+  private adoptPendingTransfer(turn: AcceptedTurn): void {
+    const pending = this.pendingTransfer;
+    if (pending === null || pending.owner === turn) return;
+    this.ownPendingTransfer(pending, turn);
   }
 
   private abortAcceptedTurn(turn: AcceptedTurn, reason: unknown): void {
@@ -836,10 +963,43 @@ export class SwitchboardBrain implements Brain {
 
   private doRelease(turn: AcceptedTurn): string | null {
     this.assertAcceptedTurn(turn);
-    if (this.active === null) return null; // "that's all" mid-chat with Cicero is just a turn
+    if (this.active === null) {
+      // Nobody is on the line, but a cold transfer may still be coming. "Never
+      // mind" has to be able to call it off — otherwise the hold introduced by
+      // resolvePendingTransfer() would be the one thing the user cannot cancel.
+      if (this.pendingTransfer !== null) {
+        const dropped = this.pendingTransfer.lane;
+        this.clearPendingTransfer();
+        log("info", `switchboard: dropped the pending transfer to ${dropped}`);
+        return `Alright — I'll leave ${workingName(dropped, this.lanes[dropped])} out of it.`;
+      }
+      return null; // "that's all" mid-chat with Cicero is just a turn
+    }
+    const dropped = this.pendingTransfer?.lane ?? null;
+    this.releaseActiveLane(true);
+    return dropped === null
+      ? "Back with you."
+      : `Back with you — and I'll leave ${workingName(dropped, this.lanes[dropped])} out of it.`;
+  }
+
+  /**
+   * `memo` is false when the conversation itself ended rather than returning to
+   * the front desk. The note below says the user came back to the main line,
+   * which did not happen, and it would carry the finished conversation's tail
+   * into whichever unrelated conversation answered next — the same leak across
+   * a conversation boundary that dropping the transfer exists to prevent.
+   */
+  private releaseActiveLane(memo: boolean): void {
     const released = this.active;
+    if (released === null) return;
+    const dropped = this.pendingTransfer?.lane ?? null;
+    this.clearPendingTransfer();
     log("info", `switchboard: released ${released} — back to the front desk`);
+    if (dropped !== null) {
+      log("info", `switchboard: dropped the pending transfer to ${dropped}`);
+    }
     this.active = null;
+    this.activeFromDeferredTransfer = false;
     // The front desk never heard the lane conversation, so the memo carries
     // the tail of what it missed (the mirror of the handoff briefing a lane
     // gets on transfer). Recipient-neutral facts only: the one-shot channel
@@ -852,8 +1012,13 @@ export class SwitchboardBrain implements Brain {
           .join("\n")}`
       : "";
     this.laneLog = [];
-    this.leaveMemo(`System note: the user just ended a side conversation with ${name} and returned to the main line.${recap}`);
-    return "Back with you.";
+    // A conversation-end release is a boundary, so its last exchange cannot
+    // brief a lane in the next conversation. An ordinary return deliberately
+    // keeps it because the user is still in the same conversation.
+    if (!memo) this.lastExchange = null;
+    if (memo) {
+      this.leaveMemo(`System note: the user just ended a side conversation with ${name} and returned to the main line.${recap}`);
+    }
   }
 
   /**
@@ -919,15 +1084,48 @@ export class SwitchboardBrain implements Brain {
     return lifecycle.promise;
   }
 
+  /**
+   * Answer for a transfer whose cold start outlived the turn that asked for it.
+   * Returns null when there is nothing outstanding, so an ordinary turn is
+   * untouched. This runs on the CURRENT turn — it reads switchboard state and
+   * pins on the live lease, so no output is published by the dead turn.
+   */
+  private async resolvePendingTransfer(turn: AcceptedTurn): Promise<string | null> {
+    const pending = this.pendingTransfer;
+    if (pending === null || !this.lanes[pending.lane]) return null;
+    const lane = pending.lane;
+    if (this.active === lane) { this.clearPendingTransfer(); return null; }
+    const name = workingName(lane, this.lanes[lane]);
+    // Up at last — this turn completes the handoff the earlier one couldn't.
+    if (this.started.has(lane)) return this.pinLane(lane, turn);
+    const starting = this.laneStarts.get(lane);
+    // The start is gone without the lane having started: it failed. Say so —
+    // a "still coming" ack must never outlive the start it describes, or the
+    // user holds for a lane that is never going to arrive.
+    if (!starting || starting.retired) {
+      this.clearPendingTransfer();
+      return `I couldn't reach ${lane} right now.`;
+    }
+    return `Still getting ${name} on the line — one moment.`;
+  }
+
   private async pinLane(
     lane: string,
     turn: AcceptedTurn,
     explicitContext: string | null = null,
+    origin: TransferOrigin = "conversation",
   ): Promise<string> {
     this.assertAcceptedTurn(turn);
     const def = this.lanes[lane];
+    // A cold start outlives the moment that asked for it, and the turn signal
+    // does not always die with the conversation: deactivating the microphone
+    // leaves its turn running. So the drop is tracked separately, and a pin
+    // that was called off mid-start abandons the lane instead of pinning it.
+    const generation = this.deferredGeneration;
+    const calledOff = (): boolean => this.deferredGeneration !== generation;
     try {
       while (!this.started.has(lane)) {
+        if (calledOff()) return this.calledOffReply(lane);
         const prior = this.laneStarts.get(lane);
         if (prior?.retired) {
           // A new board session must not overlap the old session's unresolved
@@ -946,15 +1144,28 @@ export class SwitchboardBrain implements Brain {
           def.brain.injectContext(def.persona);
           this.personaInstalled.add(lane);
         }
+        // The wait below can outlast this turn: a lane cold start runs for
+        // seconds and the user, hearing silence, speaks again. Record the ask
+        // BEFORE waiting so a barge-in that kills this turn cannot erase the
+        // fact that a transfer was requested.
+        this.setPendingTransfer(lane, turn, origin);
         await raceWithSignal(this.startLane(lane), turn.signal);
         this.assertAcceptedTurn(turn);
+        if (calledOff()) return this.calledOffReply(lane);
       }
     } catch (err: unknown) {
       // Supersession/caller cancellation is control flow, not a failed lane
       // start to translate into a stale spoken acknowledgment.
       this.assertAcceptedTurn(turn);
+      this.clearPendingTransfer();
       return `I couldn't reach ${lane} right now.`;
     }
+    // Any pin that RAN to a conclusion resolves the pending state — including a
+    // pin of some other lane, which is the user changing their mind ("get the
+    // worker… no, the coder"). Only supersession leaves it standing, and that
+    // path rethrows above without reaching here.
+    const deferred = this.pendingTransfer?.lane === lane;
+    this.clearPendingTransfer();
     this.assertAcceptedTurn(turn);
     if (!this.started.has(lane)) return `I couldn't reach ${lane} right now.`;
     // Programmatic call context is held locally across a cold start. Only the
@@ -973,6 +1184,7 @@ export class SwitchboardBrain implements Brain {
     // only an actual change of counterpart starts a fresh recap tail.
     if (this.active !== lane) this.laneLog = [];
     this.active = lane;
+    this.activeFromDeferredTransfer = deferred;
     log("info", `switchboard: pinned to ${lane}`);
     return def.greeting ?? `${lane[0].toUpperCase()}${lane.slice(1)} here.`;
   }
@@ -1016,6 +1228,10 @@ export class SwitchboardBrain implements Brain {
     const m = normalizeUtterance(message);
     if (ROLLCALL_RE.test(m)) return this.doRollcall(turn);
     if (RELEASE_RE.test(m)) return this.doRelease(turn);
+    // Only while nobody has picked up: see CANCEL_PENDING_RE.
+    if (this.active === null && this.pendingTransfer !== null && CANCEL_PENDING_RE.test(m)) {
+      return this.doRelease(turn);
+    }
     // Spoken dial-back ("call me", "have ada call me") — must beat PIN_RE:
     // "have ada call me" would otherwise read as a transfer to "ada call".
     const dial = this.callMe;
@@ -1445,6 +1661,7 @@ export class SwitchboardBrain implements Brain {
     options: BrainTurnOptions,
   ): Promise<string | "standup" | null> {
     this.assertAcceptedTurn(turn);
+    this.adoptPendingTransfer(turn);
     const m = normalizeUtterance(message);
     const pendingAck = this.relayPendingConfirmation(m);
     if (pendingAck !== null) return pendingAck;
@@ -1481,6 +1698,13 @@ export class SwitchboardBrain implements Brain {
     this.assertAcceptedTurn(turn);
     const routed = await this.actOnIntent(label, m, turn, options);
     this.assertAcceptedTurn(turn);
+    if (routed === null) {
+      // Last stop before the front desk answers: if a transfer is still in
+      // flight, say so rather than replying as though nobody asked.
+      const held = await this.resolvePendingTransfer(turn);
+      this.assertAcceptedTurn(turn);
+      if (held !== null) return held;
+    }
     // A normal brain turn ends the "again" context — a later bare "again"
     // refers to the conversation, not to a roll call from minutes ago.
     if (routed === null) this.lastGroupAction = null;
@@ -1514,6 +1738,11 @@ export class SwitchboardBrain implements Brain {
     if (!reply.trim()) return;
     this.lastExchange = { speaker: this.active ?? "Cicero", user, reply };
     if (this.active !== null) {
+      // The greeting belongs to the transfer control path and never reaches
+      // this successful ordinary-answer boundary. Once the lane answers here,
+      // dropping the pin at conversation end would lose a line the operator
+      // actually used and make a cold transfer less sticky than a warm one.
+      this.activeFromDeferredTransfer = false;
       // Bounded before retained: the release recap needs a tail, not a log.
       this.laneLog.push({ user: clipText(user, 200), reply: clipText(reply, 240) });
       if (this.laneLog.length > SwitchboardBrain.LANE_LOG_TURNS) this.laneLog.shift();
@@ -1703,8 +1932,12 @@ export class SwitchboardBrain implements Brain {
     // Reset routing before awaiting cleanup so no caller can observe or reuse a
     // stopped lane if start() is called again on this Switchboard instance.
     this.active = null;
+    this.activeFromDeferredTransfer = false;
     this.started.clear();
     this.personaInstalled.clear();
+    // A transfer asked for before this boundary is void: the lane it named no
+    // longer exists in the form that was requested.
+    this.clearPendingTransfer();
     this.control = false;
     this.lastExchange = null;
     this.laneLog = [];
@@ -1737,6 +1970,9 @@ export class SwitchboardBrain implements Brain {
     this.control = false;
     this.lastExchange = null;
     this.laneLog = [];
+    // Same boundary rule as stop(): a transfer asked for before the restart is
+    // void — its cold start is about to be retired out from under it.
+    this.clearPendingTransfer();
 
     const started = [...this.started];
     const pending = [...this.laneStarts.entries()];
@@ -1777,7 +2013,10 @@ export class SwitchboardBrain implements Brain {
           } catch (err: unknown) {
             this.started.delete(name);
             this.personaInstalled.delete(name);
-            if (this.active === name) this.active = null;
+            if (this.active === name) {
+              this.active = null;
+              this.activeFromDeferredTransfer = false;
+            }
             await this.stopLane(name).catch((error: unknown) => {
               this.logLaneCleanupFailure(name, error);
             });

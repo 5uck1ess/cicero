@@ -736,21 +736,25 @@ function scheduleReconnect() {
   const delay = [1000, 2000, 5000][Math.min(reconnectAttempt, 2)];
   reconnectAttempt++;
   setStatus("reconnecting… (attempt " + reconnectAttempt + ")");
-  reconnectTimer = setTimeout(() => { reconnectTimer = null; if (convOn) connectWs(); }, delay);
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; if (convOn) connectWs(true); }, delay);
 }
 // Coming back online / to the foreground: retry immediately, not on the timer.
 function retryNow() {
   if (!convOn || (ws && ws.readyState <= 1)) return;
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  connectWs();
+  connectWs(true);
 }
 window.addEventListener("online", retryNow);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { retryNow(); requestWakeLock(); } });
 
-function connectWs() {
+// The resume flag separates an automatic reconnect from the operator pressing Start.
+// The server cannot tell them apart from the socket alone, and Stop pressed
+// during the backoff has no open socket to send its goodbye on — so a restart
+// would otherwise inherit the stopped conversation's deferred work.
+function connectWs(resume = false) {
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   wsSessionId = "";
-  const sock = new WebSocket(scheme + "//" + location.host + "/ws?protocol=2&token=" + encodeURIComponent(TOKEN));
+  const sock = new WebSocket(scheme + "//" + location.host + "/ws?protocol=2&token=" + encodeURIComponent(TOKEN) + (resume ? "&resume=1" : ""));
   ws = sock;
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { setDot(true); setStatus("connected — securing session…"); };
@@ -809,7 +813,7 @@ async function ensureAudio() {
   }
 }
 
-async function startConversation() {
+async function startConversation(resume = false) {
   if (!TOKEN) {
     setStatus("authorization required — reopen the tokened Cicero URL once");
     return;
@@ -817,7 +821,7 @@ async function startConversation() {
   if (!(await ensureAudio())) return;
   if (audioCtx.state === "suspended") { try { await audioCtx.resume(); } catch (e) { /* ignore */ } }
   convOn = true; toggleLabel.textContent = "Stop conversation"; toggle.classList.add("on");
-  connectWs();
+  connectWs(resume);
   requestWakeLock();
 }
 
@@ -831,6 +835,10 @@ function stopConversation() {
   reconnectAttempt = 0;
   if (pttBargeTimer) { clearTimeout(pttBargeTimer); pttBargeTimer = null; }
   abortActiveTurn();
+  // Tell the server this is the operator stopping, not the network dropping:
+  // the two are indistinguishable from a closed socket, and only this one means
+  // "call off anything you were still working on for me".
+  if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify({ type: "bye" })); } catch (e) { /* ignore */ } }
   if (ws) { try { ws.close(); } catch (e) { /* ignore */ } ws = null; }
   wsSessionId = ""; captureTurnId = null;
   stopPlayback();
@@ -1057,7 +1065,7 @@ renderAuto();
         return;
       }
     }
-    await startConversation();
+    await startConversation(true);
     if (!convOn) {
       revealAutoStartFallback(); // preserve ensureAudio's useful mic error
       return;

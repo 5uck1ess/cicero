@@ -84,6 +84,23 @@ test("a bare 'stop' halts playback without dispatching a turn", async () => {
   expect(received).toBeNull();
 });
 
+test("a bare 'stop' interrupts before it reports the stop", async () => {
+  // Ordering, pinned deliberately: the interrupt must land first so playback
+  // cuts immediately. The consequence is that the turn's abort reason is fixed
+  // as the barge-in and the stop can never replace it, which is why the daemon
+  // tells the brain about a stop out of band (Brain.dropDeferredWork) instead
+  // of encoding it in the reason. Reorder this and revisit that decision.
+  const l = makeListener("stop", SPOKEN);
+  const order: string[] = [];
+  l.onBargeIn(() => { order.push("barge-in"); });
+  l.onStopCommand(() => { order.push("stop"); });
+  l.detectBargeIn = async () => "/tmp/cicero-test-stop-order.wav";
+
+  await l.runFullDuplexTurn(new Promise<void>(() => {}));
+
+  expect(order).toEqual(["barge-in", "stop"]);
+});
+
 test("when the reply finishes before any speech, nothing is interrupted", async () => {
   const l = makeListener("", SPOKEN);
   let interrupted = false;

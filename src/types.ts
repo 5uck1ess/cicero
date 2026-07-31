@@ -508,6 +508,21 @@ export interface Brain {
   restart(): Promise<void>;
   health(): Promise<boolean>;
   /** Lane switchboard: name of the pinned lane, or null at the front desk. */
+  /**
+   * Deferred work this brain is holding on the current conversation's behalf —
+   * a cold transfer that is still starting, say — must not be carried into a
+   * later turn. The transport calls this when the conversation ends or the
+   * operator calls the work off.
+   *
+   * It exists because a turn's abort reason cannot answer that question. The
+   * reason is fixed by the FIRST abort, while the disposition is often decided
+   * by a later event on the same turn: the browser sends `abort` and then
+   * closes its socket, and a spoken "stop" reaches the daemon as a barge-in
+   * followed by a stop command. Classifying by reason silently kept a transfer
+   * alive across both. Optional; brains holding nothing deferred omit it.
+   */
+  dropDeferredWork?(): void;
+
   activeLane?(): string | null;
   /** Lane switchboard: pin a lane by name/alias (typed dial-back routing).
    * Resolves the employee's working name, or null when nobody matched.

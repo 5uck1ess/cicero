@@ -61,6 +61,10 @@ interface WsData {
   pendingClientSlot: boolean;
   sessionId: string;
   protocol: 1 | 2;
+  /** The page says this connection continues a conversation rather than starting one. */
+  resume: boolean;
+  departed: boolean;
+  departureCloseTimer: ReturnType<typeof setTimeout> | null;
   busy: boolean;               // a turn is being processed right now
   // Latest input waiting to be processed (barge-in wins): a captured
   // utterance WAV, or a typed message ({type:"text"} control frame).
@@ -96,6 +100,26 @@ export interface WebVoiceServerOptions {
    * audioBase64} to every connected voice client — Cicero speaks up unprompted
    * ("PR #142 is up") instead of only answering. Optional.
    */
+  /**
+   * This voice conversation is over — the LAST voice socket closed, or the
+   * server is shutting down. Every browser shares one brain and active lane, so
+   * this fires once for the shared conversation, not once per socket. The
+   * daemon uses it to tell the brain to drop work it was holding for the
+   * conversation, which the turn's abort reason cannot convey: the page sends
+   * `abort` and then closes, and the first abort fixes the reason, so the close
+   * is invisible to anything reading it. A definitive ending means a new
+   * conversation has arrived and the old work must be dropped even while its
+   * earlier job is still draining. Fire-and-forget.
+   */
+  onConversationEnded?: (ending?: { definitive?: boolean }) => void;
+  /**
+   * How long to wait, after the last voice socket goes away, before deciding
+   * the conversation is over. The PWA reconnects automatically (1s → 2s → 5s
+   * backoff) whenever the operator has not stopped it, so treating every drop
+   * as an ending discarded work across an ordinary network blip. An explicit
+   * goodbye skips this wait entirely. Default 30s; tests inject something small.
+   */
+  conversationEndGraceMs?: number;
   /**
    * Toggle native dictation on the daemon. Separate from onNotify because it
    * neither renders nor fans out — it starts or ends a local capture.
@@ -179,6 +203,16 @@ export interface WebVoiceHandle {
   /** Connected voice clients right now (for status/logging). */
   clientCount: () => number;
   /**
+   * Foreground web request or turn jobs currently holding an admission lease.
+   * This excludes speculative and detached background work.
+   */
+  activeJobCount: () => number;
+  /**
+   * A voice conversation is still in progress — either a socket is attached, or
+   * the last one dropped recently enough that the page is expected back.
+   */
+  conversationLive: () => boolean;
+  /**
    * Speak a notification through the same path as POST /api/notify (render,
    * broadcast, park when nobody's connected) — for in-process callers like the
    * kanban watcher. Resolves null when unavailable, saturated, or quiescing.
@@ -253,7 +287,10 @@ function abortTurn(turn: TurnState | null, reason: string): void {
 }
 
 const BODY_READ_TIMEOUT_MS = 5_000;
+/** Long enough to cover the page's 1s → 2s → 5s reconnect backoff several times over. */
+const DEFAULT_CONVERSATION_END_GRACE_MS = 30_000;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 95_000;
+const GOODBYE_CLOSE_TIMEOUT_MS = 1_000;
 const MAX_BACKGROUND_WEB_JOBS = MAX_CONCURRENT_WEB_JOBS;
 const MAX_VOICE_NAME_CHARS = 128;
 const MAX_HEALTH_METRIC_CHARS = 128;
@@ -333,8 +370,72 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   const shutdownController = new AbortController();
   let accepting = true;
   let stopPromise: Promise<void> | null = null;
-  // Live voice clients — notify broadcasts go to every open socket.
+  // Attached voice clients — notify broadcasts go to every one still in the conversation.
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
+  // Transport ownership outlives conversation attachment for the brief span
+  // between a goodbye frame and that socket's eventual close callback.
+  const sockets = new Set<import("bun").ServerWebSocket<WsData>>();
+
+  /*
+   * Deciding the conversation is over.
+   *
+   * A dropped socket and a deliberate Stop look identical at this end, and they
+   * mean opposite things to a brain holding deferred work: the PWA reconnects
+   * by itself after an unplanned close, so ending the conversation on every
+   * disconnect threw that work away across an ordinary network blip. The page
+   * says goodbye when the operator stops; anything else gets a grace period
+   * that a reconnecting client cancels just by arriving.
+   *
+   * The timer is owned here: replaced when another wait starts, cleared when
+   * the ending fires, and cleared on shutdown, so it can never outlive the
+   * server.
+   */
+  const conversationEndGraceMs = Number.isFinite(opts.conversationEndGraceMs)
+    && (opts.conversationEndGraceMs ?? -1) >= 0
+    ? Math.floor(opts.conversationEndGraceMs!)
+    : DEFAULT_CONVERSATION_END_GRACE_MS;
+  let conversationEndTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const cancelConversationEnd = (): void => {
+    if (conversationEndTimer === null) return;
+    clearTimeout(conversationEndTimer);
+    conversationEndTimer = null;
+  };
+
+  // An ending reported while a foreground job is running is one the daemon
+  // will decline to act on, because that job is itself a live surface. Nothing
+  // would deliver it again once the job finished, so it is remembered and
+  // re-reported at the release instead.
+  let endReportedDuringJob = false;
+  const endConversationNow = (definitive = false): void => {
+    cancelConversationEnd();
+    if (definitive) {
+      endReportedDuringJob = false;
+    } else if (activeJobs > 0) {
+      endReportedDuringJob = true;
+    }
+    try {
+      opts.onConversationEnded?.(definitive ? { definitive: true } : undefined);
+    } catch { /* fire-and-forget */ }
+  };
+
+  const scheduleConversationEnd = (): void => {
+    cancelConversationEnd();
+    // Shutdown already ended the conversation before closing its sockets, and
+    // each of those closes lands here. Re-arming would leave a timer running
+    // past the server's own teardown and report a second ending nobody is
+    // there for.
+    if (!accepting) return;
+    if (conversationEndGraceMs === 0) { endConversationNow(); return; }
+    conversationEndTimer = setTimeout(() => {
+      conversationEndTimer = null;
+      // Re-checked rather than cancelled on connect: this is the single place
+      // that decides, so a client that arrived during the wait (a reconnect) or
+      // arrived and left again is handled by the same question either way.
+      if (clients.size === 0) endConversationNow();
+    }, conversationEndGraceMs);
+    conversationEndTimer.unref?.();
+  };
   const debugConfirmation = (reason: string, nonce?: string, approved?: boolean): void => {
     // The project logger intentionally has no debug level. Keep rejected
     // controls out of the operator event stream while retaining a debug trace.
@@ -509,6 +610,21 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   };
   const releaseJob = (): void => {
     activeJobs = Math.max(0, activeJobs - 1);
+    // Re-report only an ending that actually arrived while a job held the
+    // daemon back. Firing on every release would end conversations that never
+    // ended, and on a box driven entirely through the HTTP API that would drop
+    // a transfer parked by the turn that just finished. The latch is consumed
+    // before the fire-and-forget hook so this release path cannot report it
+    // twice even if the hook fails.
+    if (
+      activeJobs === 0 &&
+      endReportedDuringJob &&
+      clients.size === 0 &&
+      conversationEndTimer === null
+    ) {
+      endReportedDuringJob = false;
+      endConversationNow();
+    }
     resolveIfDrained();
   };
   const releaseSocketCallback = (): void => {
@@ -963,6 +1079,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // pipeline but stay out of the persisted chat history.
           const record = url.searchParams.get("record") !== "0";
           const protocol = url.searchParams.get("protocol") === "2" ? 2 : 1;
+          // Set by the page's automatic reconnect paths only; see the `open`
+          // handler for what the difference decides.
+          const resume = url.searchParams.get("resume") === "1";
           pendingClients += 1;
           let upgraded = false;
           try {
@@ -971,6 +1090,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 pendingClientSlot: true,
                 sessionId: crypto.randomUUID(),
                 protocol,
+                resume,
+                departed: false,
+                departureCloseTimer: null,
                 busy: false,
                 pending: null,
                 current: null,
@@ -1143,7 +1265,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               log("error", `web-voice chat failed: ${message}`);
               return Response.json({ error: message }, { status: 500 });
             }
-          });
+          }, unavailableResponse);
         }
 
         // Health-record ingest: one row or an array of rows, appended to
@@ -1319,7 +1441,34 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             ws.close(1012, "Server shutting down");
             return;
           }
+          // A closed socket cannot say why it closed, and the page cannot tell
+          // us either while it is between reconnect attempts: pressing Stop
+          // during the backoff has no open socket to send the goodbye on. So the
+          // page states which kind of connection this is instead. An operator
+          // pressing Start is a new conversation, and any conversation still
+          // sitting out its grace is over — otherwise its deferred cold transfer
+          // survived the Stop and steered the conversation that replaced it.
+          // Only when nobody else is attached: the timer is deliberately left
+          // armed while clients are connected (it re-checks on fire), so without
+          // that condition a second device pressing Start would end a
+          // conversation the first one is still in.
+          const startsNewConversation = !ws.data.resume && clients.size === 0;
+          if (startsNewConversation && conversationEndTimer !== null) {
+            endConversationNow();
+          } else if (startsNewConversation && endReportedDuringJob) {
+            // This job predates the newly attached conversation, so it cannot
+            // keep the previous one's deferred transfer alive. Without a
+            // definitive ending, the replacement adopts that stale transfer.
+            endConversationNow(true);
+          }
+          sockets.add(ws);
           clients.add(ws);
+          // An ending remembered while a job was still running is owed only
+          // until somebody is listening again. A resume continues that same
+          // conversation and cancels the debt; a fresh connection consumed it
+          // definitively above. Keeping either debt would let a later,
+          // unrelated socketless turn pay it and lose its own deferred work.
+          endReportedDuringJob = false;
           if (ws.data.protocol === 2) {
             sendJson(ws, {
               type: "hello",
@@ -1365,6 +1514,12 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           if (!accepting) {
             protocolError(ws, "server shutting down");
             ws.close(1012, "Server shutting down");
+            return;
+          }
+          if (ws.data.departed) {
+            // The operator stopped this conversation. A frame arriving after
+            // goodbye belongs to no live conversation and must not start or
+            // continue a turn on the detached socket.
             return;
           }
           // Text frames are control messages: abort (barge-in) or a typed turn.
@@ -1425,6 +1580,36 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               }));
               log("info", `web-voice confirmation resolved nonce=${replyNonce} approved=${approved}`);
               broadcastConfirmationResolved(replyNonce);
+              return;
+            }
+            if (msg.type === "bye") {
+              // Deliberately ahead of the session-id gate: this frame carries no
+              // authority, only the operator's intent to stop, and refusing it
+              // over a stale session id would silently downgrade a Stop into a
+              // dropped connection.
+              // Goodbye is the departure, not a hint to interpret a later
+              // socket close. Waiting for close let a replacement socket join
+              // first, after which neither event saw an empty room and the
+              // stopped conversation survived into its replacement.
+              ws.data.departed = true;
+              if (clients.delete(ws) && clients.size === 0) endConversationNow();
+              // Let the current ingress dispatch unwind before starting the
+              // close handshake; the terminal flag rejects frames already
+              // queued behind goodbye. The forced deadline keeps a peer that
+              // never completes that handshake from remaining server-owned.
+              ws.data.departureCloseTimer = setTimeout(() => {
+                ws.data.departureCloseTimer = null;
+                if (!sockets.has(ws)) return;
+                ws.data.departureCloseTimer = setTimeout(() => {
+                  ws.data.departureCloseTimer = null;
+                  if (!sockets.has(ws)) return;
+                  try {
+                    ws.terminate();
+                    sockets.delete(ws);
+                  } catch { /* shutdown or the close callback still owns cleanup */ }
+                }, GOODBYE_CLOSE_TIMEOUT_MS);
+                try { ws.close(1000, "Conversation ended"); } catch { /* the deadline will terminate it */ }
+              }, 0);
               return;
             }
             if (ws.data.protocol === 2 && msg.sessionId !== ws.data.sessionId) {
@@ -1555,8 +1740,22 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         },
         close(ws) {
           if (ws.data.pendingClientSlot) pendingClients = Math.max(0, pendingClients - 1);
-          clients.delete(ws);
+          if (ws.data.departureCloseTimer !== null) {
+            clearTimeout(ws.data.departureCloseTimer);
+            ws.data.departureCloseTimer = null;
+          }
+          sockets.delete(ws);
+          const wasAttached = clients.delete(ws);
           abortTurn(ws.data.current, "voice socket closed");
+          // Every connected browser reaches the same brain, switchboard and
+          // active lane (docs/web-voice.md, "Deliberate multi-client
+          // boundary") — they are one conversation on several screens. It ends
+          // when the last of them leaves, so reporting it per socket would let
+          // one browser closing call off work another is still waiting on.
+          // A goodbye already detached this socket and made the lifecycle
+          // decision. Its eventual transport close must not report another
+          // ending or start a reconnect grace for a client that already left.
+          if (wasAttached && clients.size === 0) scheduleConversationEnd();
           ws.data.pending = null;
           ws.data.latestProbeTurnId = null;
           const spec = ws.data.spec;
@@ -1600,7 +1799,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       }).then(() => {
         if (
           server.pendingRequests === 0 &&
-          clients.size === 0 &&
+          sockets.size === 0 &&
           isDrained()
         ) return;
         return runtimeStop;
@@ -1624,10 +1823,15 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       if (!shutdownController.signal.aborted) {
         shutdownController.abort(new Error("web voice server shutting down"));
       }
+      endConversationNow();
       pendingClients = 0;
       parked.length = 0;
 
-      for (const ws of clients) {
+      for (const ws of sockets) {
+        if (ws.data.departureCloseTimer !== null) {
+          clearTimeout(ws.data.departureCloseTimer);
+          ws.data.departureCloseTimer = null;
+        }
         abortTurn(ws.data.current, "web voice server shutting down");
         ws.data.pending = null;
         ws.data.latestProbeTurnId = null;
@@ -1640,6 +1844,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // A forced terminate transfers socket ownership back to the runtime
           // synchronously. Bun need not emit close for an already-closing peer;
           // retaining it here would make every bounded stop retry wait forever.
+          sockets.delete(ws);
           clients.delete(ws);
         } catch { /* runtime still owns it; close callback/retry will confirm */ }
       }
@@ -1673,6 +1878,11 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       scheme,
       port: server.port ?? port,
       clientCount: () => clients.size,
+      activeJobCount: () => activeJobs,
+      // A conversation whose grace has not expired is still live even with no
+      // socket attached: the page reconnects by itself, and another surface
+      // going away meanwhile must not conclude that nobody is left.
+      conversationLive: () => clients.size > 0 || conversationEndTimer !== null,
       notify,
       confirmPending,
       stop,

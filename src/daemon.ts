@@ -1562,6 +1562,13 @@ export class CiceroDaemon {
         // deferred) becomes one-shot brain context, so "call me" or "what do
         // we do about that?" right after an announcement lands on-topic.
         onNotified: (text) => this.brain.injectContext(notificationTurnContext(text, new Date())),
+        onConversationEnded: (ending) => {
+          // A fresh web conversation proves that the older web job cannot own
+          // the work it replaces, but says nothing about a local turn or the
+          // operator still speaking at the microphone. Skipping those local
+          // signals too would let an unrelated browser discard their transfer.
+          this.noteInputSurfaceDeparted(ending?.definitive ? "web-job" : undefined);
+        },
         onDictate: async () => {
           if (!this.dictation) throw new Error("dictation is not enabled on this daemon");
           await this.dictation.toggle();
@@ -1893,6 +1900,11 @@ export class CiceroDaemon {
       this.conversational.onStopCommand(() => {
         this.pendingRecovery = null;
         this.activeLocalTurn?.abort("stop command");
+        // A stop-class barge-in fires the interrupt callback first, so this
+        // controller is usually already aborted with "barge-in" and the reason
+        // above never lands. Telling the brain directly is what actually calls
+        // off work it was holding for this conversation.
+        this.dropDeferredBrainWork();
       });
     }
     // Headless: skip starting any local-mic capture (clap, conversational, hotkey).
@@ -1983,7 +1995,13 @@ export class CiceroDaemon {
         }
       })
       .finally(() => {
-        if (this.activeLocalTurn === controller) this.activeLocalTurn = null;
+        if (this.activeLocalTurn === controller) {
+          this.activeLocalTurn = null;
+          // A browser departure may have been suppressed while this turn was
+          // still the conversation. Re-evaluate at the owned completion point
+          // so its deferred work does not survive after the turn itself ends.
+          this.noteInputSurfaceDeparted();
+        }
         this.localTurnTasks.delete(task);
       });
     this.localTurnTasks.add(task);
@@ -2076,6 +2094,49 @@ export class CiceroDaemon {
     this.conversational?.noteInterrupted(spoken.join(" "));
     this.activeLocalTurn?.abort("barge-in");
     this.streamingSpeaker.interrupt();
+  }
+
+  /**
+   * Tell the brain that work it deferred for this conversation must not be
+   * carried into a later turn. Fire-and-forget: a brain without the capability
+   * has nothing deferred, and a throw here must not take down a stop or a
+   * shutdown.
+   */
+  private dropDeferredBrainWork(): void {
+    try { this.brain.dropDeferredWork?.(); } catch { /* best-effort */ }
+  }
+
+  /**
+   * True while an operator surface or its accepted turn is still active. Cicero
+   * is one assistant behind every surface — the same brain, switchboard and
+   * active lane — so a conversation is not over because one way in went away,
+   * only when the last surface and its owned work are done.
+   */
+  private anyInputSurfaceActive(ignoredSignal?: "web-job"): boolean {
+    if (this.voiceDesiredActive) return true;
+    // A running turn is the conversation even if the surface that delivered
+    // it has just gone away. Ignoring that interval let the last browser close
+    // call off a cold transfer while the local or operator-chat turn was still
+    // waiting to adopt it.
+    if (this.activeLocalTurn !== null) return true;
+    if (ignoredSignal !== "web-job" && (this.webVoice?.activeJobCount() ?? 0) > 0) return true;
+    // Not `clientCount() > 0`: a browser that dropped its socket is still in the
+    // conversation for the length of its reconnect grace, and counting it as
+    // gone let a microphone deactivation during that window call off work the
+    // page would have come straight back to.
+    return this.webVoice?.conversationLive() === true;
+  }
+
+  /**
+   * One way in went away (a browser closed, the microphone was deactivated).
+   * Deferred work belongs to the conversation, not to the surface that happened
+   * to carry it, so it survives while any other surface can still adopt it —
+   * otherwise closing an idle tab called off a transfer the operator was
+   * waiting on at the microphone, and vice versa.
+   */
+  private noteInputSurfaceDeparted(ignoredSignal?: "web-job"): void {
+    if (this.anyInputSurfaceActive(ignoredSignal)) return;
+    this.dropDeferredBrainWork();
   }
 
   private finalizeStreamingTurn(text: string, result: RouterResult, signal: AbortSignal): boolean {
@@ -2555,6 +2616,11 @@ export class CiceroDaemon {
     this.voiceDesiredActive = false;
     dashBus.setVoiceActive(false);
     this.beginVoiceInputHandoff();
+    // Every way of putting the microphone down lands here — "stop listening",
+    // the hotkey, the dashboard, a clap, a capture failure — so this is the one
+    // place that has to notice, rather than a list of them that will be
+    // incomplete again next time.
+    this.noteInputSurfaceDeparted();
   }
 
   /**
@@ -2854,6 +2920,7 @@ export class CiceroDaemon {
     this.lifecycleAbort.abort();
     this.activeLocalTurn?.abort("daemon stopping");
     this.activeLocalTurn = null;
+    this.dropDeferredBrainWork();
     this.lifecycle = "stopping";
     const stopping = this.stopAfterStartup(this.startPromise, ingressStop);
     this.stopPromise = stopping;
