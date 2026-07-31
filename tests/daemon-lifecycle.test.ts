@@ -1429,6 +1429,75 @@ describe("deferred brain work", () => {
     }
   });
 
+  test("a definitive browser ending keeps deferred work while the microphone is live", async () => {
+    // The replacement browser proves only that the older web job cannot own
+    // the pending transfer. It knows nothing about the operator still waiting
+    // for that transfer at the local microphone.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-definitive-mic-"));
+    let serverOptions: Record<string, unknown> | null = null;
+    const daemon = startableDaemon(home, (opts) => { serverOptions = opts; }, {
+      activeJobs: 1,
+    });
+    let dropped = 0;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      (daemon as unknown as { voiceDesiredActive: boolean }).voiceDesiredActive = true;
+      const ended = (serverOptions as unknown as {
+        onConversationEnded?: (ending?: { definitive?: boolean }) => void;
+      } | null)?.onConversationEnded;
+      expect(typeof ended).toBe("function");
+      ended?.({ definitive: true });
+      expect(dropped).toBe(0);
+    } finally {
+      await daemon.stop().catch(() => { /* best effort */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a definitive browser ending keeps deferred work while a local turn is in flight", async () => {
+    // A local turn still owns the shared conversation even when the arriving
+    // browser makes an older web lease irrelevant. Dropping both signals would
+    // call off work while that local turn was still waiting to adopt it.
+    const home = mkdtempSync(join(tmpdir(), "cicero-deferred-definitive-local-turn-"));
+    let serverOptions: Record<string, unknown> | null = null;
+    const daemon = startableDaemon(home, (opts) => { serverOptions = opts; }, {
+      activeJobs: 1,
+    });
+    let dropped = 0;
+    let releaseTurn!: () => void;
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let dispatched: Promise<void> | null = null;
+    try {
+      await daemon.start();
+      spyOnDropDeferredWork(daemon, () => { dropped++; });
+      const state = daemon as unknown as {
+        handleCommand: (text: string, signal: AbortSignal) => Promise<void>;
+        dispatchCommand: (text: string) => Promise<void>;
+      };
+      state.handleCommand = async () => {
+        markStarted();
+        await turnGate;
+      };
+      dispatched = state.dispatchCommand("wait for the worker");
+      await started;
+
+      const ended = (serverOptions as unknown as {
+        onConversationEnded?: (ending?: { definitive?: boolean }) => void;
+      } | null)?.onConversationEnded;
+      expect(typeof ended).toBe("function");
+      ended?.({ definitive: true });
+      expect(dropped).toBe(0);
+    } finally {
+      releaseTurn();
+      await dispatched?.catch(() => {});
+      await daemon.stop().catch(() => { /* best effort */ });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("a definitive browser ending drops deferred work despite an older active job", async () => {
     // A fresh browser conversation cannot own a job that started before it
     // attached. Consulting that old lease here lets the fresh conversation
@@ -1436,8 +1505,6 @@ describe("deferred brain work", () => {
     const home = mkdtempSync(join(tmpdir(), "cicero-deferred-definitive-"));
     let serverOptions: Record<string, unknown> | null = null;
     const daemon = startableDaemon(home, (opts) => { serverOptions = opts; }, {
-      clients: 1,
-      live: true,
       activeJobs: 1,
     });
     let dropped = 0;

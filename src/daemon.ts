@@ -1563,11 +1563,11 @@ export class CiceroDaemon {
         // we do about that?" right after an announcement lands on-topic.
         onNotified: (text) => this.brain.injectContext(notificationTurnContext(text, new Date())),
         onConversationEnded: (ending) => {
-          if (ending?.definitive) {
-            this.dropDeferredBrainWork();
-          } else {
-            this.noteInputSurfaceDeparted();
-          }
+          // A fresh web conversation proves that the older web job cannot own
+          // the work it replaces, but says nothing about a local turn or the
+          // operator still speaking at the microphone. Skipping those local
+          // signals too would let an unrelated browser discard their transfer.
+          this.noteInputSurfaceDeparted(ending?.definitive ? "web-job" : undefined);
         },
         onDictate: async () => {
           if (!this.dictation) throw new Error("dictation is not enabled on this daemon");
@@ -2112,14 +2112,14 @@ export class CiceroDaemon {
    * active lane — so a conversation is not over because one way in went away,
    * only when the last surface and its owned work are done.
    */
-  private anyInputSurfaceActive(): boolean {
+  private anyInputSurfaceActive(ignoredSignal?: "web-job"): boolean {
     if (this.voiceDesiredActive) return true;
     // A running turn is the conversation even if the surface that delivered
     // it has just gone away. Ignoring that interval let the last browser close
     // call off a cold transfer while the local or operator-chat turn was still
     // waiting to adopt it.
     if (this.activeLocalTurn !== null) return true;
-    if ((this.webVoice?.activeJobCount() ?? 0) > 0) return true;
+    if (ignoredSignal !== "web-job" && (this.webVoice?.activeJobCount() ?? 0) > 0) return true;
     // Not `clientCount() > 0`: a browser that dropped its socket is still in the
     // conversation for the length of its reconnect grace, and counting it as
     // gone let a microphone deactivation during that window call off work the
@@ -2134,8 +2134,8 @@ export class CiceroDaemon {
    * otherwise closing an idle tab called off a transfer the operator was
    * waiting on at the microphone, and vice versa.
    */
-  private noteInputSurfaceDeparted(): void {
-    if (this.anyInputSurfaceActive()) return;
+  private noteInputSurfaceDeparted(ignoredSignal?: "web-job"): void {
+    if (this.anyInputSurfaceActive(ignoredSignal)) return;
     this.dropDeferredBrainWork();
   }
 
