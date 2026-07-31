@@ -22,6 +22,14 @@ export type STTTranscriptionResult =
   | { kind: "failure"; reason: string };
 
 export interface STTProvider {
+  /**
+   * Optional: abandon a startup that has not resolved yet, synchronously. A
+   * managed backend spawns its child before readiness completes, so an owner
+   * that cannot cancel can only wait the whole launch out — see
+   * startManagedServer. Every wrapper must forward this or the wrapped
+   * provider's startup becomes uncancellable.
+   */
+  cancelStartup?(): void;
   readonly name: string;
   transcribe(audioFile: string): Promise<string | null>;
   /**

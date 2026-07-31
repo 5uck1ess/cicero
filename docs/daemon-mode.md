@@ -15,6 +15,82 @@ marker is replaced on the next start. Unsafe legacy, symlinked, non-regular, or
 non-private markers are rejected with an actionable error instead of followed
 or overwritten.
 
+## Live STT/TTS swaps
+
+A running daemon can replace either speech provider without restarting:
+
+```bash
+cicero swap stt faster-whisper
+cicero swap stt faster-whisper Systran/faster-whisper-large-v3-turbo
+cicero swap tts kokoro
+cicero swap tts audiocpp some-org/some-voice-model
+```
+
+The optional final argument overrides the model. Backends that serve one fixed
+model — `kokoro`, `pocket-tts`, and `wyoming` for TTS, `wyoming` for STT —
+reject it rather than accept a model they would never load: a swap that
+persisted and reported an ignored model would be a lie about what is running.
+Swap those without a model. A remote `mlx-whisper` endpoint likewise rejects a
+model override because that server selects its model only when it starts and
+its inference request cannot switch models; reconfigure the remote server, then
+swap without a model. Cicero constructs and starts
+the complete configured provider, including its fallback, then requires warmup
+and a healthy primary before cutover. Local managed replacements that would
+collide with the live provider are staged on a free loopback port. A staged
+startup never adopts a listener that appeared on that port after selection; it
+discards that candidate and retries on another dynamically selected port. The
+same exact-child ownership check runs again at the config commit boundary, so a
+supervised staged child that dies during warmup cannot be replaced by an
+unrelated compatible listener and then persisted.
+New work uses the replacement after cutover; work already holding the old
+generation is allowed to finish before that generation is stopped.
+When the requested backend is the configured fallback, Cicero promotes that
+full block and rotates the old primary into the fallback seat; it does not run
+or persist two copies of the promoted backend.
+
+Only a successful readiness gate is written to `~/.cicero/config.yaml`, using
+the same atomic private-file update as other configuration commands. Those
+whole-file rewrites share a bounded, crash-recoverable cross-process lease, so a
+concurrent command such as `cicero voice use` merges after the swap instead of
+renaming an older snapshot over it. Each writer has a unique lease record; only
+records belonging to dead PIDs are retired, and the elected writer re-verifies
+its exact record immediately before the atomic rename. A startup, warmup,
+health, or persistence failure cleans up the candidate and leaves both the
+active provider and config unchanged. One swap may run at a time across both
+roles. A concurrent
+request exits non-zero with `another provider swap is already in progress`.
+The command's success line names the active backend/model and says
+`Config persisted`; preparation and persistence failures explicitly say the
+current provider and config were retained. A rare post-cutover cleanup failure
+instead reports that cutover committed but old-provider cleanup is unconfirmed;
+the daemon does not lie about rolling back after ownership became uncertain.
+
+**One managed server shared by both roles cannot be swapped.** If STT and TTS
+name the same local backend on the same port — a single audio.cpp process
+serving both is a common single-seat setup — one role owns that process and the
+other borrows it. Retiring the owner would stop the process the other role is
+still using, and nothing transfers that ownership at runtime, so the swap is
+refused with a message naming the other role. Give one role its own port to
+swap them independently, or change both in config and restart. A shared
+*remote* endpoint is unaffected: no local process is owned, so there is nothing
+to stop.
+
+This covers **fallbacks too**. A role owns both of its engines — retiring it
+stops the primary and the fallback together — so a fallback naming the same
+local backend and port as anything the other role uses is the same collision,
+and is refused the same way.
+
+A voice provider whose release could not be confirmed is kept, retried on every
+later `stop()` — and **blocks the next start** until it is confirmed gone. The
+daemon will not build a second provider on the port a child it cannot account
+for may still own, because a healthy server there is adopted rather than
+replaced. The error names the role; stop that process and start again.
+
+The CLI reaches the daemon through a loopback-only authenticated control socket.
+Its short-lived descriptor is private under `~/.cicero/` and is removed during
+clean shutdown. If the descriptor is absent, the CLI reports that runtime
+control is unavailable instead of editing config behind a stopped daemon.
+
 ## Conversational mode
 
 Type `voice` in the cicero prompt or, on macOS with the helper built, press **Ctrl+Shift+Space** to toggle. The native helper currently listens to that fixed chord; configuring another display value does not rebind it. Cicero continuously listens, transcribes, responds via streaming TTS. Say "stop listening" or "goodbye" to deactivate.

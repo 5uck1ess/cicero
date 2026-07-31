@@ -1,12 +1,15 @@
-import { constants, lstatSync } from "node:fs";
+import { constants, lstatSync, readFileSync } from "node:fs";
 import { link, lstat, open, readFile, unlink } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { ensurePrivateDirectorySync, PRIVATE_FILE_MODE } from "./platform/secure-storage";
 
 const PID_RECORD_VERSION = 1 as const;
 const MAX_PID_RECORD_BYTES = 4_096;
 const PID_REUSE_RECHECK_DELAY_MS = 5;
+const PROCESS_IDENTITY_COMMAND_TIMEOUT_MS = 5_000;
+const MAX_PROCESS_IDENTITY_OUTPUT_BYTES = 64 * 1_024;
+export const MAX_PROCESS_IDENTITY_LENGTH = 1_024;
 
 export interface DaemonPidRecord {
   version: typeof PID_RECORD_VERSION;
@@ -27,7 +30,7 @@ export type DaemonStopResult =
   | { kind: "not-running"; reason?: string }
   | { kind: "unsafe"; reason: string };
 
-type ProcessIdentity =
+export type ProcessIdentity =
   | { kind: "identified"; value: string }
   | { kind: "not-running" }
   | { kind: "unsupported"; reason: string };
@@ -78,11 +81,96 @@ function isPidRecord(value: unknown): value is DaemonPidRecord {
     && isPositivePid(record.pid)
     && typeof record.identity === "string"
     && record.identity.length > 0
-    && record.identity.length <= 1_024
+    && record.identity.length <= MAX_PROCESS_IDENTITY_LENGTH
     && typeof record.token === "string"
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(record.token)
     && typeof record.createdAt === "string"
     && Number.isFinite(Date.parse(record.createdAt));
+}
+
+function boundedProcessIdentity(platform: NodeJS.Platform | "linux", value: string): string {
+  const identity = `${platform}:${value}`;
+  if (identity.length <= MAX_PROCESS_IDENTITY_LENGTH) return identity;
+  const digest = createHash("sha256").update(identity).digest("hex");
+  return `${platform}:sha256:${digest}`;
+}
+
+export function parseLinuxIdentity(stat: string, bootId: string): ProcessIdentity {
+  // The command name is parenthesized and may itself contain spaces or `)`.
+  // Field 3 starts after the final `) `; process start ticks are field 22.
+  const commandEnd = stat.lastIndexOf(") ");
+  if (commandEnd < 0) return { kind: "unsupported", reason: "malformed /proc process metadata" };
+  const fields = stat.slice(commandEnd + 2).trim().split(/\s+/);
+  const state = fields[0];
+  const startTicks = fields[19];
+  if (state === "Z" || state === "X") return { kind: "not-running" };
+  if (!startTicks || !/^\d+$/.test(startTicks)) {
+    return { kind: "unsupported", reason: "missing /proc process start time" };
+  }
+  const boot = bootId.trim();
+  if (!boot) return { kind: "unsupported", reason: "missing Linux boot identity" };
+  return { kind: "identified", value: boundedProcessIdentity("linux", `${boot}:${startTicks}`) };
+}
+
+function psIdentityCommand(pid: number): string[] {
+  return [
+    "ps",
+    "-ww",
+    "-p",
+    String(pid),
+    "-o",
+    "lstart=",
+    "-o",
+    "uid=",
+    "-o",
+    "command=",
+  ];
+}
+
+export function parsePsIdentity(
+  platform: NodeJS.Platform,
+  stdout: string,
+  stderr: string,
+  exitCode: number,
+): ProcessIdentity {
+  if (exitCode !== 0) {
+    if (exitCode === 1) return { kind: "not-running" };
+    return { kind: "unsupported", reason: stderr.trim() || `ps exited with status ${exitCode}` };
+  }
+  const value = stdout.trim().replace(/\s+/g, " ");
+  if (!value) return { kind: "not-running" };
+  return { kind: "identified", value: boundedProcessIdentity(platform, value) };
+}
+
+function windowsIdentityCommand(pid: number): string[] {
+  const command = [
+    `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
+    "if ($null -eq $p) { exit 3 }",
+    "$path = if ($null -eq $p.Path) { '' } else { $p.Path }",
+    "Write-Output ($p.StartTime.ToUniversalTime().Ticks.ToString() + '|' + $path)",
+  ].join("; ");
+  return [
+    "powershell.exe",
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    command,
+  ];
+}
+
+export function parseWindowsIdentity(
+  stdout: string,
+  stderr: string,
+  exitCode: number,
+): ProcessIdentity {
+  if (exitCode === 3) return { kind: "not-running" };
+  if (exitCode !== 0) {
+    return { kind: "unsupported", reason: stderr.trim() || `PowerShell exited with status ${exitCode}` };
+  }
+  const value = stdout.trim();
+  if (!value) return { kind: "unsupported", reason: "PowerShell returned no process identity" };
+  return { kind: "identified", value: boundedProcessIdentity("win32", value) };
 }
 
 async function readLinuxIdentity(pid: number): Promise<ProcessIdentity> {
@@ -91,20 +179,7 @@ async function readLinuxIdentity(pid: number): Promise<ProcessIdentity> {
       readFile(`/proc/${pid}/stat`, "utf8"),
       readFile("/proc/sys/kernel/random/boot_id", "utf8"),
     ]);
-    // The command name is parenthesized and may itself contain spaces or `)`.
-    // Field 3 starts after the final `) `; process start ticks are field 22.
-    const commandEnd = stat.lastIndexOf(") ");
-    if (commandEnd < 0) return { kind: "unsupported", reason: "malformed /proc process metadata" };
-    const fields = stat.slice(commandEnd + 2).trim().split(/\s+/);
-    const state = fields[0];
-    const startTicks = fields[19];
-    if (state === "Z" || state === "X") return { kind: "not-running" };
-    if (!startTicks || !/^\d+$/.test(startTicks)) {
-      return { kind: "unsupported", reason: "missing /proc process start time" };
-    }
-    const boot = bootId.trim();
-    if (!boot) return { kind: "unsupported", reason: "missing Linux boot identity" };
-    return { kind: "identified", value: `linux:${boot}:${startTicks}` };
+    return parseLinuxIdentity(stat, bootId);
   } catch (error) {
     if (errno(error).code === "ENOENT" || errno(error).code === "ESRCH") return { kind: "not-running" };
     return {
@@ -119,18 +194,7 @@ async function readPsIdentity(pid: number): Promise<ProcessIdentity> {
     // BSD/macOS expose start time at one-second resolution. Bind the identity
     // to the uid and full command as well so a rapid PID reuse by another Bun
     // process cannot match merely because its executable name is also `bun`.
-    const proc = Bun.spawn([
-      "ps",
-      "-ww",
-      "-p",
-      String(pid),
-      "-o",
-      "lstart=",
-      "-o",
-      "uid=",
-      "-o",
-      "command=",
-    ], {
+    const proc = Bun.spawn(psIdentityCommand(pid), {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -140,13 +204,7 @@ async function readPsIdentity(pid: number): Promise<ProcessIdentity> {
       new Response(proc.stderr).text(),
       proc.exited,
     ]);
-    if (exitCode !== 0) {
-      if (exitCode === 1) return { kind: "not-running" };
-      return { kind: "unsupported", reason: stderr.trim() || `ps exited with status ${exitCode}` };
-    }
-    const value = stdout.trim().replace(/\s+/g, " ");
-    if (!value) return { kind: "not-running" };
-    return { kind: "identified", value: `${process.platform}:${value}` };
+    return parsePsIdentity(process.platform, stdout, stderr, exitCode);
   } catch (error) {
     return {
       kind: "unsupported",
@@ -157,20 +215,7 @@ async function readPsIdentity(pid: number): Promise<ProcessIdentity> {
 
 async function readWindowsIdentity(pid: number): Promise<ProcessIdentity> {
   try {
-    const command = [
-      `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
-      "if ($null -eq $p) { exit 3 }",
-      "$path = if ($null -eq $p.Path) { '' } else { $p.Path }",
-      "Write-Output ($p.StartTime.ToUniversalTime().Ticks.ToString() + '|' + $path)",
-    ].join("; ");
-    const proc = Bun.spawn([
-      "powershell.exe",
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      command,
-    ], {
+    const proc = Bun.spawn(windowsIdentityCommand(pid), {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -180,17 +225,78 @@ async function readWindowsIdentity(pid: number): Promise<ProcessIdentity> {
       new Response(proc.stderr).text(),
       proc.exited,
     ]);
-    if (exitCode === 3) return { kind: "not-running" };
-    if (exitCode !== 0) {
-      return { kind: "unsupported", reason: stderr.trim() || `PowerShell exited with status ${exitCode}` };
-    }
-    const value = stdout.trim();
-    if (!value) return { kind: "unsupported", reason: "PowerShell returned no process identity" };
-    return { kind: "identified", value: `win32:${value}` };
+    return parseWindowsIdentity(stdout, stderr, exitCode);
   } catch (error) {
     return {
       kind: "unsupported",
       reason: `cannot query Windows process start time: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+function syncCommandFailure(
+  command: "ps" | "PowerShell",
+  proc: Bun.SyncSubprocess<"pipe", "pipe">,
+): ProcessIdentity | undefined {
+  if (proc.exitedDueToTimeout) {
+    return { kind: "unsupported", reason: `${command} process identity query timed out` };
+  }
+  if (proc.exitedDueToMaxBuffer) {
+    return { kind: "unsupported", reason: `${command} process identity output exceeded 64 KiB` };
+  }
+  return undefined;
+}
+
+/**
+ * Read the same cross-platform process identity used by daemon PID records
+ * without yielding. Callers that poll should cache this result per PID.
+ */
+export function processIdentitySync(pid: number): ProcessIdentity {
+  try {
+    if (!isPositivePid(pid)) return { kind: "not-running" };
+    if (process.platform === "linux") {
+      try {
+        return parseLinuxIdentity(
+          readFileSync(`/proc/${pid}/stat`, "utf8"),
+          readFileSync("/proc/sys/kernel/random/boot_id", "utf8"),
+        );
+      } catch (error) {
+        if (errno(error).code === "ENOENT" || errno(error).code === "ESRCH") {
+          return { kind: "not-running" };
+        }
+        return {
+          kind: "unsupported",
+          reason: `cannot read Linux process identity: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    if (process.platform === "win32") {
+      const proc = Bun.spawnSync(windowsIdentityCommand(pid), {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: PROCESS_IDENTITY_COMMAND_TIMEOUT_MS,
+        maxBuffer: MAX_PROCESS_IDENTITY_OUTPUT_BYTES,
+      });
+      return syncCommandFailure("PowerShell", proc)
+        ?? parseWindowsIdentity(proc.stdout.toString(), proc.stderr.toString(), proc.exitCode);
+    }
+    if (["darwin", "freebsd", "openbsd", "netbsd", "aix", "sunos"].includes(process.platform)) {
+      const proc = Bun.spawnSync(psIdentityCommand(pid), {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: PROCESS_IDENTITY_COMMAND_TIMEOUT_MS,
+        maxBuffer: MAX_PROCESS_IDENTITY_OUTPUT_BYTES,
+      });
+      return syncCommandFailure("ps", proc)
+        ?? parsePsIdentity(process.platform, proc.stdout.toString(), proc.stderr.toString(), proc.exitCode);
+    }
+    return { kind: "unsupported", reason: `process identity is unsupported on ${process.platform}` };
+  } catch (error) {
+    return {
+      kind: "unsupported",
+      reason: `process identity lookup failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }

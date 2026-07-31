@@ -11,6 +11,7 @@ import type { TurnDetector, TurnPrediction } from "../backends/turn/provider";
 import { decideEndOfTurn } from "../backends/turn/policy";
 import { decodeWavFile } from "../platform/wav";
 import { VadRecorder, type VadRecorderOptions } from "./vad-recorder";
+import { pinGeneration, type GenerationPin } from "../backends/hot-swap";
 import type { AecAudioHub } from "../platform/aec-hub";
 import { terminateDirectChild } from "../process/direct-child";
 import { ensurePrivateDirectorySync } from "../platform/secure-storage";
@@ -134,6 +135,9 @@ export function classifyBargeIn(transcript: string | null | undefined, speaking:
  * 5. Waits for processing + TTS to finish, then resumes listening
  * 6. Deactivated via hotkey, "stop listening", or "goodbye"
  */
+/** Lazily-acquired STT generation lease for one turn (see captureTurn). */
+interface TurnPin { held: GenerationPin<STTProvider> | null }
+
 export class ConversationalListener implements Listener {
   private callback?: (text: string) => void;
   private bargeInCallback?: () => void;
@@ -882,7 +886,35 @@ export class ConversationalListener implements Listener {
   private async captureTurn(epoch: number = this.activationEpoch): Promise<string | null> {
     const segments: string[] = [];
     let attempts = 0;
+    // One turn, one STT generation. A Smart-Turn turn is transcribed segment by
+    // segment with the mic reopening in between, and each unpinned facade call
+    // takes whatever generation is current at that instant — so a swap landing
+    // during a grace window joined one provider's words to another's inside a
+    // single utterance. The web path already pins for exactly this reason; the
+    // pin is released as soon as the turn ends, which is what lets the retired
+    // generation drain.
+    //
+    // Round 7 (Codex): it is taken with the FIRST captured audio, NOT before
+    // recording. An armed-but-idle listener sits in the silence loop for as
+    // long as nobody speaks, so pinning up front held the retired generation
+    // indefinitely — a swap then reported its own committed cutover as a
+    // cleanup failure, and every later swap timed out behind the same lease.
+    // Nothing has been transcribed yet at that point, so there is no
+    // generation worth holding.
+    const pin: TurnPin = { held: null };
+    try {
+      return await this.captureTurnSegments(epoch, segments, attempts, pin);
+    } finally {
+      pin.held?.release();
+    }
+  }
 
+  private async captureTurnSegments(
+    epoch: number,
+    segments: string[],
+    attempts: number,
+    pin: TurnPin,
+  ): Promise<string | null> {
     while (this.isCurrentActivation(epoch)) {
       const isGrace = attempts > 0;
       // Grace rounds bound how long we wait for the user to resume; the initial
@@ -910,8 +942,11 @@ export class ConversationalListener implements Listener {
       }
 
       const wav = result.path;
+      // The first real audio of the turn fixes the generation that every later
+      // segment — and every grace window between them — will use.
+      pin.held ??= pinGeneration(this.sttProvider);
       const tStt = Date.now();
-      const transcript = await this.transcribeSafe(wav);
+      const transcript = await this.transcribeSafe(wav, pin.held.provider);
       if (!this.isCurrentActivation(epoch)) {
         try { unlinkSync(wav); } catch { /* stale capture cleanup */ }
         return null;
@@ -942,9 +977,9 @@ export class ConversationalListener implements Listener {
   }
 
   /** Transcribe a wav, swallowing errors to "" so one STT hiccup can't kill the loop. */
-  private async transcribeSafe(wav: string): Promise<string> {
+  private async transcribeSafe(wav: string, stt: STTProvider = this.sttProvider): Promise<string> {
     try {
-      return (await this.sttProvider.transcribe(wav))?.trim() ?? "";
+      return (await stt.transcribe(wav))?.trim() ?? "";
     } catch (err: unknown) {
       log("info", `Transcribe failed: ${err instanceof Error ? err.message : String(err)}`);
       return "";

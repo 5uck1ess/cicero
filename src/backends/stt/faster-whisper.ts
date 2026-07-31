@@ -9,8 +9,12 @@ import { SerializedLifecycle } from "../serialized-lifecycle";
 import { httpBase, isLocalHost } from "../net";
 import { log } from "../../logger";
 import { join, dirname } from "path";
+import { unlink } from "node:fs/promises";
+import { encodeSilentWav } from "../../platform/wav";
 import { resolveVenvPython } from "../../platform/python";
+import { writeSecureTempAudio } from "../../platform/secure-temp-audio";
 import {
+  MANAGED_STARTUP_TIMEOUT_MS,
   PROVIDER_TIMEOUT_MS,
   discardResponseBody,
   providerSignal,
@@ -37,7 +41,28 @@ export class FasterWhisperProvider implements STTProvider {
   private model: string;
   private computeType?: string;
   private readonly timeoutMs: number;
+  /** Fresh cancellation scope for one startup; replaces any settled predecessor. */
+  private beginStartup(): AbortSignal {
+    const abort = new AbortController();
+    this.startAbort = abort;
+    return abort.signal;
+  }
+
+  /**
+   * Latch synchronously, BEFORE any await, so a launch in flight sees it and
+   * reaps the child it already spawned. Public because an owner holding a
+   * candidate (see ProviderSlot) must be able to cancel a minutes-long startup
+   * without waiting it out first. Safe to call at any time, including twice.
+   */
+  cancelStartup(): void {
+    this.startAbort?.abort(new Error("faster-whisper" + " is stopping"));
+    this.startAbort = null;
+  }
+
   private managed: ManagedProcess | null = null;
+  /** Cancels a startup still in flight, so stop() can reach a child that
+   *  start() has not published yet. Set synchronously by stop(). */
+  private startAbort: AbortController | null = null;
   private active = false;
   private cleanupFailure: Error | null = null;
   private readonly lifecycle = new SerializedLifecycle();
@@ -105,6 +130,18 @@ export class FasterWhisperProvider implements STTProvider {
     }
   }
 
+  /** Exercise the selected model; a generic health endpoint cannot prove it is loadable. */
+  async warmup(): Promise<void> {
+    const tmp = await writeSecureTempAudio(encodeSilentWav(), { prefix: "cicero-stt-warm" });
+    try {
+      const result = await this.transcribeResult(tmp);
+      if (result.kind === "failure") throw new Error(result.reason);
+      log("ok", "STT model warmed");
+    } finally {
+      await unlink(tmp).catch(() => { /* best-effort cleanup */ });
+    }
+  }
+
   start(): Promise<void> {
     return this.lifecycle.run("start", () => {
       if (this.cleanupFailure) {
@@ -130,6 +167,7 @@ export class FasterWhisperProvider implements STTProvider {
       const server = join(projectRoot, "servers", "stt_faster_whisper_server.py");
 
       this.managed = await startManagedServer({
+        signal: this.beginStartup(),
         name: "faster-whisper",
         port: this.port,
         command: [python, server, "--host", "127.0.0.1", "--port", this.port.toString(), "--model", this.model,
@@ -141,7 +179,7 @@ export class FasterWhisperProvider implements STTProvider {
         // green; the first GPU pass is slow, and a cold model download slower, so
         // allow generous headroom.
         healthUrl: `${httpBase(this.host, this.port)}/health`,
-        timeoutMs: 300000,
+        timeoutMs: MANAGED_STARTUP_TIMEOUT_MS,
         supervise: true,
       });
       this.active = this.managed !== null;
@@ -151,6 +189,8 @@ export class FasterWhisperProvider implements STTProvider {
   }
 
   stop(): Promise<void> {
+    // Synchronous, before any await: a startup still in flight must see this.
+    this.cancelStartup();
     return this.lifecycle.run("stop", async () => {
       try {
         await this.doStop();

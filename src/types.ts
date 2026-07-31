@@ -559,7 +559,7 @@ export interface Brain {
 }
 
 export interface Speaker {
-  speak(text: string): Promise<void>;
+  speak(text: string, signal?: AbortSignal): Promise<void>;
   stop(): Promise<void>;
   health(): Promise<boolean>;
 }

@@ -218,3 +218,95 @@ test("config lines override a single bucket, others keep defaults", async () => 
   expect(bank.pick("Deploy it.")!.text).toBe("Right away, sir.");
   expect(["Hmm, good question.", "Let me think about that.", "Let me see.", "Hmm, thinking."]).toContain(bank.pick("Why though?")!.text);
 });
+
+test("discardPrepared drops clips synthesized on a retired provider, in every voice", async () => {
+  // The bank synthesizes through the swappable TTS facade, so clips primed before a
+  // live swap are the OLD provider's voice. Web turns emit those cached bytes
+  // directly, so keeping them plays the retired provider's filler and then the
+  // replacement's reply inside one turn.
+  let voiceOfRecord = "old";
+  const bank = new FillerBank(
+    { generateAudio: async () => encodeWav(new Int16Array([voiceOfRecord === "old" ? 1 : 2])).buffer as ArrayBuffer },
+    onlyDefault(["one", "two"]),
+  );
+  await bank.prime();
+  await bank.primeVoice("lane-voice", 1);
+  expect(bank.ready).toBe(true);
+  expect(bank.pick()).toBeDefined();
+  expect(bank.pick(undefined, "lane-voice")).toBeDefined();
+
+  // The swap happens here.
+  await bank.discardPrepared();
+  voiceOfRecord = "new";
+
+  // Nothing stale is served — front desk or lane voice. A turn simply skips its
+  // filler, exactly as it did before the bank was ever primed.
+  expect(bank.ready).toBe(false);
+  expect(bank.pick()).toBeUndefined();
+  expect(bank.pick(undefined, "lane-voice")).toBeUndefined();
+
+  // And re-priming works, on the replacement provider.
+  const n = await bank.prime();
+  expect(n).toBe(2);
+  expect(bank.pick()).toBeDefined();
+});
+
+// Round 4 (Codex): the daemon invalidates the bank from the cutover hook, which
+// must stay synchronous — so it cannot await the discard. The clear itself
+// queues behind any in-flight prime (a whole bank of synthesis), while pick()
+// reads the installed maps directly and never joins that queue. Every turn in
+// that window was still handed the retired provider's voice.
+test("discardPrepared silences the bank immediately, before the queued clear runs", async () => {
+  let releasePrime!: () => void;
+  const primeGate = new Promise<void>((resolve) => { releasePrime = resolve; });
+  let primed = 0;
+  const bank = new FillerBank(
+    {
+      generateAudio: async () => {
+        // Only the second prime blocks: the first fills the bank so there is
+        // something stale to serve.
+        if (primed > 0) await primeGate;
+        return encodeWav(new Int16Array([1])).buffer as ArrayBuffer;
+      },
+    },
+    onlyDefault(["one", "two"]),
+  );
+  await bank.prime();
+  primed = 1;
+  expect(bank.pick()).toBeDefined();
+
+  // A prime is in flight, so the discard cannot run yet.
+  const repriming = bank.prime();
+  const discarding = bank.discardPrepared();
+
+  expect(bank.ready).toBe(false);
+  expect(bank.pick()).toBeUndefined();
+
+  releasePrime();
+  await repriming;
+  await discarding;
+  expect(bank.pick()).toBeUndefined();
+
+  // And the bank comes back once it is primed on the replacement provider.
+  expect(await bank.prime()).toBe(2);
+  expect(bank.ready).toBe(true);
+  expect(bank.pick()).toBeDefined();
+});
+
+test("discardPrepared releases the per-voice clip budget it was holding", async () => {
+  // Every voice's clips share one retention budget. perVoice is cleared on discard,
+  // so perVoiceUsage must be cleared with it: a bank still charged for lane clips it
+  // no longer holds inflates the base of the next prime() and silently starves it.
+  const bank = new FillerBank(
+    { generateAudio: async () => encodeWav(new Int16Array([1])).buffer as ArrayBuffer },
+    onlyDefault(["one", "two"]),
+    generousLimits({ maxClips: 3 }),
+  );
+  expect(await bank.primeVoice("lane-voice", 2)).toBe(2);
+
+  await bank.discardPrepared();
+
+  // Only 3 clips fit in total. With the stale 2 lane clips still charged, this
+  // front-desk prime can only fit 1 of its 2 phrases.
+  expect(await bank.prime()).toBe(2);
+});

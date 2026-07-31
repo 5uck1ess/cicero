@@ -4,6 +4,7 @@ import { httpBase, isLocalHost } from "../net";
 import { startManagedServer, stopManagedServer, type ManagedProcess } from "../managed-server";
 import { findVenvPython } from "../../platform/python";
 import {
+  MANAGED_STARTUP_TIMEOUT_MS,
   PROVIDER_TIMEOUT_MS,
   discardResponseBody,
   providerSignal,
@@ -27,7 +28,28 @@ export class Emotion2vecProvider implements SerProvider {
   private port: number;
   private model: string;
   private readonly timeoutMs: number;
+  /** Fresh cancellation scope for one startup; replaces any settled predecessor. */
+  private beginStartup(): AbortSignal {
+    const abort = new AbortController();
+    this.startAbort = abort;
+    return abort.signal;
+  }
+
+  /**
+   * Latch synchronously, BEFORE any await, so a launch in flight sees it and
+   * reaps the child it already spawned. Public because an owner holding a
+   * candidate (see ProviderSlot) must be able to cancel a minutes-long startup
+   * without waiting it out first. Safe to call at any time, including twice.
+   */
+  cancelStartup(): void {
+    this.startAbort?.abort(new Error("emotion2vec" + " is stopping"));
+    this.startAbort = null;
+  }
+
   private managed: ManagedProcess | null = null;
+  /** Cancels a startup still in flight, so stop() can reach a child that
+   *  start() has not published yet. Set synchronously by stop(). */
+  private startAbort: AbortController | null = null;
 
   constructor(config: SerProviderConfig = {}) {
     this.host = config.host;
@@ -90,6 +112,7 @@ export class Emotion2vecProvider implements SerProvider {
     const script = join(projectRoot, "servers", "ser_server.py");
 
     this.managed = await startManagedServer({
+      signal: this.beginStartup(),
       name: "ser",
       port: this.port,
       command: [
@@ -102,12 +125,14 @@ export class Emotion2vecProvider implements SerProvider {
       ],
       healthUrl: `${httpBase(this.host, this.port)}/health`,
       // Model load is ~12s warm; the first EVER start also downloads ~360MB.
-      timeoutMs: 300000,
+      timeoutMs: MANAGED_STARTUP_TIMEOUT_MS,
       supervise: true,
     });
   }
 
   async stop(): Promise<void> {
+    // Synchronous, before any await: a startup still in flight must see this.
+    this.cancelStartup();
     if (this.managed) {
       const managed = this.managed;
       try {

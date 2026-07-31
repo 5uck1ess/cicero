@@ -120,10 +120,30 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
 
     let sourceFinished = false;
     let sourceReadAhead: Promise<string | null> | null = null;
+    // The look-ahead chain decides whether to render at all, so a break can leave
+    // it pending before it has registered anything. Settle the chain, then its render.
+    let lookAhead: Promise<PreparedSentence | null> | null = null;
+    // Pin one generation for this whole reply: a live swap mid-stream must not
+    // move a later sentence onto a different provider than the reply started on.
+    const pin = this.pinTurnProvider();
+    // The pin is the only thing keeping this generation from being stopped, so
+    // every render issued through it must settle before the pin is released.
+    // Two renders can outlive the loop: the look-ahead started while the current
+    // sentence plays, and the first sentence when an interrupt lands before the
+    // loop body runs at all. generateAudio takes no caller-owned signal, so
+    // settling is the only way to know the retired provider is idle.
+    const pendingRenders = new Set<Promise<void>>();
+    const prepare = (text: string): PreparedSentence => {
+      const prepared = this.prepareSentence(text, pin.provider);
+      const settled = prepared.audio.then(() => {}, () => {});
+      pendingRenders.add(settled);
+      void settled.then(() => pendingRenders.delete(settled));
+      return prepared;
+    };
 
     try {
       const first = await this.readNextSentence(iterator);
-      let current = first ? this.prepareSentence(first) : null;
+      let current = first ? prepare(first) : null;
       if (!current) sourceFinished = true;
 
       while (current && !stale()) {
@@ -142,9 +162,10 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
         // as its text arrives. This overlaps it with current playback without
         // issuing concurrent renders to providers that require serialization.
         const nextPrepared = nextText.then((text): PreparedSentence | null =>
-          text && !stale() ? this.prepareSentence(text) : null
+          text && !stale() ? prepare(text) : null
         );
         void nextPrepared.catch(() => {});
+        lookAhead = nextPrepared;
 
         this.inFlight = current.text;
         await this.playOrFallback(audio, current.text, epoch);
@@ -153,6 +174,7 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
         this.inFlight = null;
 
         const prepared = await nextPrepared;
+        lookAhead = null;
         sourceReadAhead = null;
         // An interrupt can land after playback's stale check but while the
         // look-ahead is still pending. nextPrepared deliberately returns null
@@ -173,14 +195,24 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
         log("warn", `Streaming TTS error: ${msg}`);
       }
     } finally {
-      // Before the iterator dance below: a parked coalescer cannot observe
-      // return(), and this is the signal that frees it. Harmless once it has
-      // finished on its own.
+      // Wake read-ahead before waiting for pinned renders so both turn-owned
+      // resources can finish their cleanup without blocking each other.
       coalesceAbort?.abort();
       // Release the slot only if it is still ours — a superseding turn has
       // already installed its own controller, and clearing it here would leave
       // that turn's read-ahead unreachable.
       if (this.turnCancel === coalesceAbort) this.turnCancel = null;
+      // Releasing the pin lets a waiting swap reap this generation, which for a
+      // managed provider means killing its server. Do that only once nothing is
+      // still rendering on it: settle the look-ahead chain first (it may not have
+      // issued its render yet), then every render it registered. This delays the
+      // reap, never the interrupt — playback ownership was already revoked by the
+      // epoch change, and the audio these produce is discarded.
+      if (lookAhead) await lookAhead.then(() => {}, () => {});
+      if (pendingRenders.size > 0) await Promise.allSettled([...pendingRenders]);
+      // Each speakStream owns its own pin; release regardless of ownership so a
+      // superseded turn frees its generation for a swap that is waiting to drain.
+      pin.release();
       if (!sourceFinished) {
         const pendingRead = sourceReadAhead;
         const closeIterator = async () => {
@@ -304,9 +336,9 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     if (this.playerReleaseFailure) throw this.playerReleaseFailure;
   }
 
-  private async generateAudioSafe(text: string): Promise<ArrayBuffer | null> {
+  private async generateAudioSafe(text: string, provider: TTSProvider): Promise<ArrayBuffer | null> {
     try {
-      return await this.generateAudio(text);
+      return await this.generateAudio(text, provider);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       log("warn", `TTS generation failed for "${text.substring(0, 30)}...": ${msg}`);
@@ -324,8 +356,8 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     }
   }
 
-  private prepareSentence(text: string): PreparedSentence {
-    return { text, audio: this.generateAudioSafe(text) };
+  private prepareSentence(text: string, provider: TTSProvider): PreparedSentence {
+    return { text, audio: this.generateAudioSafe(text, provider) };
   }
 
   /**

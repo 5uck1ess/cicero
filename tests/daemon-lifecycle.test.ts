@@ -17,6 +17,15 @@ import type { WebReplySink } from "../src/web-voice/turn";
 import type { HistoryTurn } from "../src/web-voice/history";
 import { readPairingState } from "../src/web-voice/pairing-state";
 import { hasDefaultHistoryCompactor } from "../src/brain/turn-context";
+import { ServerManager } from "../src/servers";
+import { claimDaemonPidFile, type DaemonPidLease } from "../src/daemon-pid";
+import {
+  ProviderSlot,
+  SwappableSTTProvider,
+  SwappableTTSProvider,
+} from "../src/backends/hot-swap";
+import type { STTProvider } from "../src/backends/stt/provider";
+import type { TTSProvider } from "../src/backends/tts/provider";
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -439,6 +448,274 @@ describe("CiceroDaemon lifecycle", () => {
     }
   });
 
+  test("stop cancels a cancellable provider startup instead of waiting for its full cold-start budget", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-start-cancel-test-"));
+    const config = loadConfig({}, { home });
+    let releaseProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    let signalProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { signalProviderStarted = resolve; });
+    let cancelled = 0;
+    const providers = {
+      stt: {
+        name: "test-stt",
+        transcribe: () => Promise.resolve(null),
+        health: () => Promise.resolve(true),
+        stop: () => Promise.resolve(),
+      },
+      tts: {
+        name: "test-tts",
+        generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+        health: () => Promise.resolve(true),
+        stop: () => Promise.resolve(),
+      },
+      llm: {
+        name: "test-llm",
+        chatCompletion: () => Promise.resolve("ok"),
+        health: () => Promise.resolve(true),
+        start: async () => {
+          signalProviderStarted();
+          await providerGate;
+        },
+        cancelStartup: () => {
+          if (cancelled === 0) {
+            cancelled += 1;
+            releaseProvider();
+          }
+        },
+        stop: () => Promise.resolve(),
+      },
+    };
+    const daemon = new CiceroDaemon(config);
+    const state = daemon as unknown as {
+      lifecycle: "idle" | "starting" | "running" | "stopping";
+      startPromise: Promise<void> | null;
+      providers: typeof providers;
+      servers: ServerManager;
+    };
+    const starting = providers.llm.start();
+    state.lifecycle = "starting";
+    state.startPromise = starting;
+    state.providers = providers;
+    state.servers = new ServerManager();
+
+    try {
+      await providerStarted;
+      const stopping = daemon.stop();
+      try {
+        await withTimeout(stopping, 250, "cancellable provider shutdown");
+      } finally {
+        releaseProvider();
+        await stopping.catch(() => {});
+      }
+
+      expect(cancelled).toBe(1);
+      await expect(starting).resolves.toBeUndefined();
+      expect(state.lifecycle).toBe("idle");
+    } finally {
+      releaseProvider();
+      await daemon.stop().catch(() => {});
+      await starting;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a provider that refuses its first stop is retried instead of stranded", async () => {
+    // Teardown keeps the slots when release is unconfirmed, precisely so a later
+    // stop() can retry the unreaped generation. Dropping those exact owners
+    // would leave no way to confirm that the child is gone.
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-stop-retry-test-"));
+    const pidFile = join(home, "cicero.pid");
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.dashboard = { enabled: false };
+    // Ephemeral port: a fixed one races the operator's own daemon.
+    config.raw.web_voice = { ...config.raw.web_voice, enabled: true, port: 0 };
+    config.raw.tts_enabled = false;
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+    };
+    let ttsStopAttempts = 0;
+    const daemon = new CiceroDaemon(config, {
+      pidFile,
+      providerFactory: () => ({
+        stt: {
+          name: "test-stt",
+          transcribe: () => Promise.resolve(null),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+        tts: {
+          name: "test-tts",
+          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          // Refuse the first release only: a genuinely retryable failure latch.
+          stop: () => {
+            ttsStopAttempts += 1;
+            return ttsStopAttempts === 1
+              ? Promise.reject(new Error("tts refused to stop"))
+              : Promise.resolve();
+          },
+        },
+        llm: {
+          name: "test-llm",
+          chatCompletion: () => Promise.resolve("ok"),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+      }),
+    });
+
+    try {
+      await daemon.start();
+      await expect(daemon.stop()).rejects.toThrow(/provider teardown is unconfirmed/);
+      expect(ttsStopAttempts).toBe(1);
+
+      // The retry is the whole point: a second stop() must reach the provider
+      // again while the daemon remains in its fail-closed stopping state.
+      await daemon.stop();
+      expect(ttsStopAttempts).toBe(2);
+
+      // And once it confirms, a third stop() has nothing left to chase.
+      await daemon.stop();
+      expect(ttsStopAttempts).toBe(2);
+    } finally {
+      await daemon.stop().catch(() => {});
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a start is refused while a previous provider release is unconfirmed", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-unconfirmed-start-test-"));
+    const pidFile = join(home, "cicero.pid");
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.dashboard = { enabled: false };
+    config.raw.web_voice = { ...config.raw.web_voice, enabled: true, port: 0 };
+    config.raw.tts_enabled = false;
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+    };
+    let ttsWillStop = false;
+    let ttsStopAttempts = 0;
+    const daemon = new CiceroDaemon(config, {
+      pidFile,
+      providerFactory: () => ({
+        stt: {
+          name: "test-stt",
+          transcribe: () => Promise.resolve(null),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+        tts: {
+          name: "test-tts",
+          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => {
+            ttsStopAttempts += 1;
+            return ttsWillStop
+              ? Promise.resolve()
+              : Promise.reject(new Error("tts child is still alive"));
+          },
+        },
+        llm: {
+          name: "test-llm",
+          chatCompletion: () => Promise.resolve("ok"),
+          health: () => Promise.resolve(true),
+          start: () => Promise.resolve(),
+          stop: () => Promise.resolve(),
+        },
+      }),
+    });
+
+    try {
+      await daemon.start();
+      // The first release is deliberately still unconfirmed.
+      await expect(daemon.stop()).rejects.toThrow(/provider teardown is unconfirmed/);
+      expect(ttsStopAttempts).toBe(1);
+      expect(existsSync(pidFile)).toBe(true);
+
+      // Restarting must not install a second provider on the same port. The
+      // retained ownership fence requires the operator to finish the exact
+      // teardown first, rather than health-adopting its child as unmanaged.
+      await expect(daemon.start()).rejects.toThrow(/cannot start while stopping/);
+      expect(ttsStopAttempts).toBe(1);
+
+      // Retryable, not latched: once teardown confirms the child is gone, the
+      // marker is released and a fresh start works.
+      ttsWillStop = true;
+      await daemon.stop();
+      expect(ttsStopAttempts).toBe(2);
+      expect(existsSync(pidFile)).toBe(false);
+      await daemon.start();
+    } finally {
+      ttsWillStop = true;
+      await daemon.stop().catch(() => {});
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // Round 6 (Codex): the swap request awaited the post-cutover refill, whose
+  // discard queues behind any prime still running — a whole bank of sequential
+  // synthesis, longer than the control client's entire deadline. The CLI then
+  // aborted and reported a failure for a swap that had already persisted and cut
+  // over. The refill is background work; the cutover already closed the bank.
+  test("the post-swap filler refill never holds the swap request or shutdown open", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-refill-test-"));
+    const daemon = new CiceroDaemon(loadConfig({}, { home }));
+    let discardStarted = false;
+    let primeStarted!: () => void;
+    const started = new Promise<void>((resolve) => { primeStarted = resolve; });
+    let releasePrime!: () => void;
+    const primeGate = new Promise<number>((resolve) => { releasePrime = () => resolve(0); });
+    const state = daemon as unknown as {
+      webFillerBank: unknown;
+      refillFillerBankAfterSwap: () => unknown;
+      lifecycle: "idle" | "starting" | "running" | "stopping";
+      running: boolean;
+    };
+    state.webFillerBank = {
+      discardPrepared: () => { discardStarted = true; return Promise.resolve(); },
+      // One generateAudio call can remain pending until its configured provider
+      // timeout. A refill has no abort contract once prime() is inside it.
+      prime: () => { primeStarted(); return primeGate; },
+      primeVoice: () => Promise.resolve(0),
+    };
+    // Exercise the real stop path without starting unrelated daemon components.
+    state.lifecycle = "running";
+    state.running = true;
+
+    try {
+      // Returns nothing to await: the swap cannot be made to wait on it.
+      expect(state.refillFillerBankAfterSwap()).toBeUndefined();
+      await started;
+      expect(discardStarted).toBe(true);
+
+      // Shutdown must proceed to provider teardown without joining this
+      // non-cooperative best-effort cache rebuild.
+      await withTimeout(daemon.stop(), 500, "shutdown with filler refill");
+    } finally {
+      releasePrime();
+      await daemon.stop().catch(() => {});
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("stop cancels in-flight automatic TLS generation instead of waiting for its deadline", async () => {
     const home = mkdtempSync(join(tmpdir(), "cicero-daemon-tls-race-test-"));
     const pidFile = join(home, "cicero.pid");
@@ -853,8 +1130,8 @@ describe("CiceroDaemon lifecycle", () => {
     expect(state.lifecycle).toBe("idle");
   });
 
-  test("an ingress drain failure blocks dependency teardown and a later stop retries", async () => {
-    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-ingress-retry-test-"));
+  test("an ingress drain failure is best-effort and never blocks provider teardown", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-ingress-besteffort-test-"));
     const daemon = new CiceroDaemon(loadConfig({}, { home }));
     let webStops = 0;
     let dashboardStops = 0;
@@ -874,26 +1151,21 @@ describe("CiceroDaemon lifecycle", () => {
     state.dashboard = {
       stop: () => { dashboardStops += 1; return Promise.resolve(); },
     };
+    // A web ingress handle that never drains cleanly (its own socket release is
+    // still bounded elsewhere). Admission is revoked synchronously, so this must
+    // not strand the brain/speaker/provider teardown that follows.
     state.webVoice = {
-      stop: () => {
-        webStops += 1;
-        return webStops === 1
-          ? Promise.reject(new Error("web handler still owns the brain"))
-          : Promise.resolve();
-      },
+      stop: () => { webStops += 1; return Promise.reject(new Error("web handler still owns the brain")); },
     };
     state.brain = { stop: () => { brainStops += 1; return Promise.resolve(); } };
     state.streamingSpeaker = { stop: () => Promise.resolve() };
     state.speaker = { stop: () => { speakerStops += 1; return Promise.resolve(); } };
 
-    await expect(daemon.stop()).rejects.toThrow("external ingress did not drain");
-    expect(brainStops).toBe(0);
-    expect(speakerStops).toBe(0);
-    expect(state.lifecycle).toBe("stopping");
-
+    // One pass completes: the ingress failure is logged, not fatal, and shutdown
+    // proceeds all the way to dependency teardown and idle.
     await daemon.stop();
-    expect(webStops).toBe(2);
-    expect(dashboardStops).toBe(2);
+    expect(webStops).toBe(1);
+    expect(dashboardStops).toBe(1);
     expect(brainStops).toBe(1);
     expect(speakerStops).toBe(1);
     expect(state.lifecycle).toBe("idle");
@@ -954,7 +1226,7 @@ describe("CiceroDaemon lifecycle", () => {
     }
   });
 
-  test("--no-servers still verifies a required external primary without taking ownership", async () => {
+  test("--no-servers verifies a required external primary AND owns its teardown", async () => {
     const home = mkdtempSync(join(tmpdir(), "cicero-daemon-external-provider-test-"));
     const pidFile = join(home, "cicero.pid");
     const config = loadConfig({}, { home });
@@ -989,7 +1261,10 @@ describe("CiceroDaemon lifecycle", () => {
       await expect(daemon.start()).rejects.toThrow(
         "stt.backend='remote-company-stt' failed its health check",
       );
-      expect(lifecycleCalls).toEqual(["health"]);
+      // Health-gated before ownership, THEN stopped on rollback: under --no-servers
+      // the daemon still owns provider teardown (regression: it used to skip the
+      // provider stop entirely, leaking the created generation).
+      expect(lifecycleCalls).toEqual(["health", "stop"]);
       expect(existsSync(pidFile)).toBe(false);
     } catch (error) {
       await daemon.stop().catch(() => {});
@@ -1083,6 +1358,149 @@ describe("CiceroDaemon lifecycle", () => {
     } catch (error) {
       await daemon.stop().catch(() => {});
       throw new Error(`optional warmup test failed: ${(error as Error).message}`, { cause: error });
+    }
+  });
+
+  test("an unconfirmed provider release retains daemon ownership until a retry succeeds", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-provider-unconfirmed-test-"));
+    const pidFile = join(home, "cicero.pid");
+    const daemon = new CiceroDaemon(loadConfig({}, { home }), { pidFile });
+    let stopAttempts = 0;
+    let releaseProvider!: () => void;
+    const providerStop = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    const stt: STTProvider = {
+      name: "delayed-stt",
+      transcribe: () => Promise.resolve(null),
+      health: () => Promise.resolve(true),
+      stop: () => {
+        stopAttempts += 1;
+        return providerStop;
+      },
+    };
+    const tts: TTSProvider = {
+      name: "test-tts",
+      generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+      health: () => Promise.resolve(true),
+      stop: () => Promise.resolve(),
+    };
+    const sttSlot = new ProviderSlot(stt, { cleanupTimeoutMs: 25 });
+    const ttsSlot = new ProviderSlot(tts, { cleanupTimeoutMs: 25 });
+    const state = daemon as unknown as {
+      lifecycle: "idle" | "starting" | "running" | "stopping";
+      running: boolean;
+      pidLease: DaemonPidLease | null;
+      sttSlot: ProviderSlot<STTProvider> | null;
+      ttsSlot: ProviderSlot<TTSProvider> | null;
+      servers: ServerManager;
+      providers: unknown;
+    };
+    state.pidLease = await claimDaemonPidFile(pidFile);
+    state.lifecycle = "running";
+    state.running = true;
+    state.sttSlot = sttSlot;
+    state.ttsSlot = ttsSlot;
+    state.providers = {
+      stt: new SwappableSTTProvider(sttSlot),
+      tts: new SwappableTTSProvider(ttsSlot),
+      llm: {
+        name: "test-llm",
+        chatCompletion: () => Promise.resolve("ok"),
+        health: () => Promise.resolve(true),
+        stop: () => Promise.resolve(),
+      },
+    };
+    state.servers = new ServerManager();
+
+    try {
+      await expect(daemon.stop()).rejects.toThrow(/unconfirmed/);
+      expect(stopAttempts).toBe(1);
+      expect(existsSync(pidFile)).toBe(true);
+      expect(state.lifecycle).toBe("stopping");
+      await expect(claimDaemonPidFile(pidFile)).rejects.toThrow(/already running/);
+
+      // The exact owner remains retryable; only its confirmed release permits
+      // the daemon marker and stopping state to be cleared.
+      releaseProvider();
+      await daemon.stop();
+      expect(stopAttempts).toBe(1);
+      expect(existsSync(pidFile)).toBe(false);
+      expect(state.lifecycle).toBe("idle");
+    } finally {
+      releaseProvider();
+      await daemon.stop().catch(() => {});
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("--no-servers still stops the live STT/TTS providers on daemon.stop() (no leak)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cicero-daemon-noservers-teardown-test-"));
+    const pidFile = join(home, "cicero.pid");
+    const config = loadConfig({}, { home });
+    config.raw.headless = true;
+    config.raw.dashboard = { enabled: false };
+    config.raw.stt = { backend: "company-stt-plugin" };
+    config.raw.tts = { backend: "company-tts-plugin" };
+    config.raw.web_voice = {
+      enabled: true,
+      port: 0,
+      token: "test-token-that-is-long-enough",
+      tls: { enabled: false },
+    };
+    config.raw.brain = {
+      ...config.raw.brain,
+      backend: "qwen",
+      mode: "subprocess",
+      binary: process.execPath,
+      binary_args: ["-e", "console.log('ok')"],
+      thinking_filler: false,
+    };
+    const stops: string[] = [];
+    const daemon = new CiceroDaemon(config, {
+      skipServers: true, // the leak path: no managed ServerManager was retained before
+      pidFile,
+      webVoiceServerStarter: () => ({
+        scheme: "http",
+        port: 18_444,
+        clientCount: () => 0,
+        notify: () => Promise.resolve(null),
+        stop: () => Promise.resolve(),
+      }),
+      providerFactory: () => ({
+        stt: {
+          name: "company-stt-plugin",
+          transcribe: () => Promise.resolve(null),
+          start: () => Promise.resolve(),
+          health: () => Promise.resolve(true),
+          stop: async () => { stops.push("stt"); },
+        },
+        tts: {
+          name: "company-tts-plugin",
+          generateAudio: () => Promise.resolve(new ArrayBuffer(0)),
+          start: () => Promise.resolve(),
+          health: () => Promise.resolve(true),
+          stop: async () => { stops.push("tts"); },
+        },
+        llm: {
+          name: "company-llm-plugin",
+          chatCompletion: () => Promise.resolve("ok"),
+          start: () => Promise.resolve(),
+          health: () => Promise.resolve(true),
+          stop: async () => { stops.push("llm"); },
+        },
+      }),
+    });
+
+    try {
+      await daemon.start();
+      expect(existsSync(pidFile)).toBe(true);
+      // The real CiceroDaemon.stop() — not a manual slot.stop() — must reap the
+      // providers even though no managed servers were started under --no-servers.
+      await daemon.stop();
+      expect(new Set(stops)).toEqual(new Set(["stt", "tts", "llm"]));
+      expect(existsSync(pidFile)).toBe(false);
+    } catch (error) {
+      await daemon.stop().catch(() => {});
+      throw new Error(`no-servers teardown test failed: ${(error as Error).message}`, { cause: error });
     }
   });
 

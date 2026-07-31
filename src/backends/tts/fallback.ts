@@ -77,6 +77,12 @@ export class FallbackTTSProvider implements TTSProvider {
     }
   }
 
+  /** This wrapper owns BOTH engines' startups, so it cancels both. */
+  cancelStartup(): void {
+    this.primary.cancelStartup?.();
+    this.fallback.cancelStartup?.();
+  }
+
   async stop(): Promise<void> {
     const results = await Promise.allSettled([
       this.primary.stop?.() ?? Promise.resolve(),

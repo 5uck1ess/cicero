@@ -16,6 +16,10 @@ import { join } from "node:path";
 import {
   claimDaemonPidFile,
   inspectDaemonPidFile,
+  MAX_PROCESS_IDENTITY_LENGTH,
+  parseLinuxIdentity,
+  parsePsIdentity,
+  parseWindowsIdentity,
   stopDaemonFromPidFile,
   type DaemonPidLease,
   type DaemonPidRecord,
@@ -44,7 +48,51 @@ function writePrivateRecord(path: string, value: DaemonPidRecord | string): void
   if (process.platform !== "win32") chmodSync(path, 0o600);
 }
 
+function identifiedValue(identity: ReturnType<typeof parsePsIdentity>): string {
+  expect(identity.kind).toBe("identified");
+  if (identity.kind !== "identified") throw new Error("expected an identified process");
+  return identity.value;
+}
+
+function linuxStat(startTicks: string): string {
+  return `123 (bun) ${["S", ...Array(18).fill("0"), startTicks].join(" ")}`;
+}
+
 describe("daemon PID ownership", () => {
+  test("bounds over-long parser identities with collision-resistant digests", () => {
+    const commonPrefix = "x".repeat(MAX_PROCESS_IDENTITY_LENGTH + 1);
+    const first = identifiedValue(parsePsIdentity("darwin", `${commonPrefix}a`, "", 0));
+    const second = identifiedValue(parsePsIdentity("darwin", `${commonPrefix}b`, "", 0));
+    const linux = identifiedValue(parseLinuxIdentity(linuxStat("123"), commonPrefix));
+    const windows = identifiedValue(parseWindowsIdentity(`123|${commonPrefix}`, "", 0));
+
+    expect(first.length).toBeLessThanOrEqual(MAX_PROCESS_IDENTITY_LENGTH);
+    expect(second.length).toBeLessThanOrEqual(MAX_PROCESS_IDENTITY_LENGTH);
+    expect(linux.length).toBeLessThanOrEqual(MAX_PROCESS_IDENTITY_LENGTH);
+    expect(windows.length).toBeLessThanOrEqual(MAX_PROCESS_IDENTITY_LENGTH);
+    expect(first).not.toBe(second);
+    expect(first).toStartWith("darwin:sha256:");
+    expect(linux).toStartWith("linux:sha256:");
+    expect(windows).toStartWith("win32:sha256:");
+  });
+
+  test("preserves already-conforming parser identities byte-for-byte", () => {
+    expect(identifiedValue(parseLinuxIdentity(linuxStat("123"), "boot-id"))).toBe(
+      "linux:boot-id:123",
+    );
+    expect(identifiedValue(parsePsIdentity(
+      "darwin",
+      "Mon Jul 30 00:00:00 2026 501 /usr/bin/bun app.ts",
+      "",
+      0,
+    ))).toBe("darwin:Mon Jul 30 00:00:00 2026 501 /usr/bin/bun app.ts");
+    expect(identifiedValue(parseWindowsIdentity(
+      "638894304000000000|C:\\Program Files\\Bun\\bun.exe",
+      "",
+      0,
+    ))).toBe("win32:638894304000000000|C:\\Program Files\\Bun\\bun.exe");
+  });
+
   test("claims a private marker and releases only its own lease", async () => {
     const { root, pidFile } = sandbox("pid-lease");
     try {

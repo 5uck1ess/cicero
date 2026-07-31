@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { basename } from "node:path";
 import {
   STT_DEFAULT_PORTS,
@@ -11,6 +12,8 @@ import { SerializedLifecycle } from "../serialized-lifecycle";
 import { audioCppLocalRuntimePaths } from "../tts/audiocpp";
 import { httpBase, isLocalHost } from "../net";
 import { log } from "../../logger";
+import { encodeSilentWav } from "../../platform/wav";
+import { writeSecureTempAudio } from "../../platform/secure-temp-audio";
 import {
   PROVIDER_TIMEOUT_MS,
   discardResponseBody,
@@ -46,7 +49,28 @@ export class AudioCppSTTProvider implements STTProvider {
   private port: number;
   private model: string;
   private readonly timeoutMs: number;
+  /** Fresh cancellation scope for one startup; replaces any settled predecessor. */
+  private beginStartup(): AbortSignal {
+    const abort = new AbortController();
+    this.startAbort = abort;
+    return abort.signal;
+  }
+
+  /**
+   * Latch synchronously, BEFORE any await, so a launch in flight sees it and
+   * reaps the child it already spawned. Public because an owner holding a
+   * candidate (see ProviderSlot) must be able to cancel a minutes-long startup
+   * without waiting it out first. Safe to call at any time, including twice.
+   */
+  cancelStartup(): void {
+    this.startAbort?.abort(new Error("audiocpp STT" + " is stopping"));
+    this.startAbort = null;
+  }
+
   private managed: ManagedProcess | null = null;
+  /** Cancels a startup still in flight, so stop() can reach a child that
+   *  start() has not published yet. Set synchronously by stop(). */
+  private startAbort: AbortController | null = null;
   private active = false;
   private cleanupFailure: Error | null = null;
   private readonly lifecycle = new SerializedLifecycle();
@@ -114,6 +138,18 @@ export class AudioCppSTTProvider implements STTProvider {
     }
   }
 
+  /** Exercise the selected model; the shared server can be healthy without that model. */
+  async warmup(): Promise<void> {
+    const tmp = await writeSecureTempAudio(encodeSilentWav(), { prefix: "cicero-stt-warm" });
+    try {
+      const result = await this.transcribeResult(tmp);
+      if (result.kind === "failure") throw new Error(result.reason);
+      log("ok", "STT model warmed");
+    } finally {
+      await unlink(tmp).catch(() => { /* best-effort cleanup */ });
+    }
+  }
+
   start(): Promise<void> {
     // Idempotent: a live handle means we're already up (a second start() must
     // not overwrite it and orphan the managed process). Concurrent starts
@@ -148,6 +184,7 @@ export class AudioCppSTTProvider implements STTProvider {
       }
 
       this.managed = await startManagedServer({
+        signal: this.beginStartup(),
         name: "audiocpp-stt",
         port: this.port,
         command: [binary, "--config", serverConfig, "--host", "127.0.0.1", "--port", this.port.toString()],
@@ -163,6 +200,8 @@ export class AudioCppSTTProvider implements STTProvider {
   }
 
   stop(): Promise<void> {
+    // Synchronous, before any await: a startup still in flight must see this.
+    this.cancelStartup();
     // A stop() racing an in-flight start() must let the launch settle first,
     // else it returns before `managed` is assigned and orphans the server.
     return this.lifecycle.run("stop", async () => {

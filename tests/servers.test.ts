@@ -52,6 +52,38 @@ describe("ServerManager startup policy", () => {
     }
   });
 
+  test("stop cancels a provider startup before waiting for its teardown", async () => {
+    let releaseStart!: () => void;
+    const startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+    let signalStarted!: () => void;
+    const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+    let cancellations = 0;
+    const llm = {
+      name: "slow-llm",
+      chatCompletion: () => Promise.resolve("ok"),
+      health: () => Promise.resolve(true),
+      start: async () => {
+        signalStarted();
+        await startGate;
+      },
+      cancelStartup: () => {
+        cancellations += 1;
+        releaseStart();
+      },
+      stop: () => Promise.resolve(),
+    };
+    const manager = new ServerManager();
+    const starting = manager.start({ llm });
+
+    await started;
+    await manager.stop({ llm });
+    const observedCancellations = cancellations;
+    releaseStart();
+    await starting;
+
+    expect(observedCancellations).toBe(1);
+  });
+
   test("fails an explicitly configured primary with actionable key and values", async () => {
     try {
       const manager = new ServerManager();

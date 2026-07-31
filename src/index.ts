@@ -21,6 +21,8 @@ import { sendWebVoiceNotification } from "./cli/notify";
 import { requestDictationToggle } from "./cli/dictate";
 import { commandText } from "./cli/text-input";
 import { unlink } from "node:fs/promises";
+import { controlTimeoutMs, requestRuntimeSwap, type SwapRole } from "./runtime-control";
+import { SUPPORTED_STT_BACKENDS, SUPPORTED_TTS_BACKENDS } from "./backends/supported-backends";
 import {
   MAX_NOTIFY_JSON_BYTES,
   MAX_NOTIFY_TEXT_CHARS,
@@ -195,6 +197,44 @@ program
       process.stdout.write(renderStatus(await collectStatus(config)));
     } catch (error: unknown) {
       console.error(`Could not collect Cicero status: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("swap")
+  .description("Hot-swap a running STT or TTS provider; persist only after readiness succeeds")
+  .argument("<role>", "stt or tts")
+  .argument("<backend>", "registered backend name")
+  .argument("[model]", "optional model override")
+  .action(async (roleInput: string, backend: string, model?: string) => {
+    try {
+      if (roleInput !== "stt" && roleInput !== "tts") {
+        throw new Error("role must be stt or tts. Usage: cicero swap stt|tts <backend> [model]");
+      }
+      const role: SwapRole = roleInput;
+      const supported: readonly string[] = role === "stt" ? SUPPORTED_STT_BACKENDS : SUPPORTED_TTS_BACKENDS;
+      if (!supported.includes(backend)) {
+        throw new Error(`unsupported ${role.toUpperCase()} backend '${backend}'. Valid: ${supported.join(", ")}`);
+      }
+      // The daemon warms the candidate under the CONFIGURED provider deadline, so
+      // the client has to wait at least that long — an abort here prints a
+      // failure for a swap that goes on to commit.
+      const raw = loadConfig().raw;
+      const result = await requestRuntimeSwap(
+        { role, backend, ...(model ? { model } : {}) },
+        {
+          timeoutMs: controlTimeoutMs([
+            raw.stt?.timeout_ms,
+            raw.stt_fallback?.timeout_ms,
+            raw.tts?.timeout_ms,
+            raw.tts_fallback?.timeout_ms,
+          ].filter((value): value is number => typeof value === "number")),
+        },
+      );
+      console.log(`${result.role.toUpperCase()} active: ${result.backend}${result.model ? ` (${result.model})` : ""}. Config persisted.`);
+    } catch (error) {
+      console.error(`[cicero] swap failed: ${error instanceof Error ? error.message : String(error)}`);
       process.exitCode = 1;
     }
   });

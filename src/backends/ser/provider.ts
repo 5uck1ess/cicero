@@ -17,6 +17,7 @@ export interface SerProvider {
   /** Tone of one utterance WAV; null on ANY failure — tone must never block a turn. */
   classify(wav: ArrayBuffer | Uint8Array): Promise<ToneResult | null>;
   health(): Promise<boolean>;
+  cancelStartup?(): void;
   start?(): Promise<void>;
   stop?(): Promise<void>;
 }

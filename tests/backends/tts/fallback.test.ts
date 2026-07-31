@@ -110,3 +110,26 @@ test("stop attempts both engines and reports every cleanup failure", async () =>
     throw new Error(`fallback cleanup aggregation test failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 });
+
+// Round 9 (Codex): this wrapper owns BOTH engines' startups, and an owner holding
+// it as a swap candidate sees only the wrapper. A managed backend spawns its
+// child before readiness finishes, so a wrapper that drops cancellation made
+// both engines' launches uncancellable — the owner could only wait them out,
+// miss its deadline, and leave the children unowned.
+test("startup cancellation reaches both engines, synchronously", () => {
+  const cancels: string[] = [];
+  const primary = fake("a", { cancelStartup: () => { cancels.push("a"); } });
+  const fallback = fake("b", { cancelStartup: () => { cancels.push("b"); } });
+  const provider = new FallbackTTSProvider(primary, fallback);
+
+  provider.cancelStartup!(); // no await: the latch must land before any
+  expect(cancels).toEqual(["a", "b"]);
+});
+
+// An engine without the capability must not break cancelling the other one.
+test("a mixed pair still cancels the engine that can be cancelled", () => {
+  const cancels: string[] = [];
+  const provider = new FallbackTTSProvider(fake("a"), fake("b", { cancelStartup: () => { cancels.push("b"); } }));
+  expect(() => provider.cancelStartup!()).not.toThrow();
+  expect(cancels).toEqual(["b"]);
+});

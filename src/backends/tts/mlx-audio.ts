@@ -21,7 +21,28 @@ export class MlxAudioProvider implements TTSProvider {
   private refAudio?: string;
   private refText?: string;
   private readonly timeoutMs: number;
+  /** Fresh cancellation scope for one startup; replaces any settled predecessor. */
+  private beginStartup(): AbortSignal {
+    const abort = new AbortController();
+    this.startAbort = abort;
+    return abort.signal;
+  }
+
+  /**
+   * Latch synchronously, BEFORE any await, so a launch in flight sees it and
+   * reaps the child it already spawned. Public because an owner holding a
+   * candidate (see ProviderSlot) must be able to cancel a minutes-long startup
+   * without waiting it out first. Safe to call at any time, including twice.
+   */
+  cancelStartup(): void {
+    this.startAbort?.abort(new Error("mlx-audio" + " is stopping"));
+    this.startAbort = null;
+  }
+
   private managed: ManagedProcess | null = null;
+  /** Cancels a startup still in flight, so stop() can reach a child that
+   *  start() has not published yet. Set synchronously by stop(). */
+  private startAbort: AbortController | null = null;
 
   constructor(config: TTSProviderConfig) {
     this.host = config.host;
@@ -89,6 +110,7 @@ export class MlxAudioProvider implements TTSProvider {
     const python = resolveVenvPython(join(projectRoot, ".venv"));
 
     this.managed = await startManagedServer({
+      signal: this.beginStartup(),
       name: "mlx-audio",
       port: this.port,
       command: [python, "-m", "mlx_audio.server", "--host", "127.0.0.1", "--port", this.port.toString()],
@@ -98,6 +120,8 @@ export class MlxAudioProvider implements TTSProvider {
   }
 
   async stop(): Promise<void> {
+    // Synchronous, before any await: a startup still in flight must see this.
+    this.cancelStartup();
     if (this.managed) {
       const managed = this.managed;
       try {

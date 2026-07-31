@@ -1,6 +1,13 @@
-import { readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
+import {
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { randomUUID } from "node:crypto";
-import { join, dirname } from "path";
+import { basename, join, dirname } from "path";
 import { parse as parseYaml, parseDocument as parseYamlDocument, stringify as stringifyYaml } from "yaml";
 import type { CiceroConfig, ActionConfig, SidecarConfig, DictationConfig } from "./types";
 import type { STTProviderConfig } from "./backends/stt/provider";
@@ -22,9 +29,572 @@ import {
 } from "./platform/secure-storage";
 import { voiceProviderContractForBackend } from "./voice/provider-contract";
 import { webVoiceTokenProblem } from "./web-voice/startup-policy";
+import {
+  MAX_PROCESS_IDENTITY_LENGTH,
+  processIdentitySync,
+  type ProcessIdentity,
+} from "./daemon-pid";
 
 const CONFIG_FILE = "config.yaml";
 const ACTIONS_FILE = "actions.yaml";
+const CONFIG_UPDATE_LOCK_WAIT_MS = 50;
+export const CONFIG_UPDATE_LOCK_TIMEOUT_MS = 35_000;
+
+interface ConfigUpdateLockOwner {
+  pid: number;
+  token: string;
+  acquiredAtMs: number;
+  ticket: number;
+  identity?: string;
+}
+
+interface ConfigUpdateLeaseState {
+  token: string;
+  usable: boolean;
+  cleanupPaths: Set<string>;
+}
+
+interface ConfigLockCleanupObligation {
+  path: string;
+  lease?: ConfigUpdateLeaseState;
+}
+
+export interface ConfigUpdateLock {
+  /** Fail closed unless this exact writer is still the elected lease owner. */
+  assertOwned(): void;
+  release(): void;
+}
+
+export interface ConfigUpdateLockOptions {
+  /** Internal test-only filesystem injection used by focused lock regressions. */
+  unlinkSync?: (path: string) => void;
+  /** Internal test-only filesystem injection used by focused lock regressions. */
+  writeFileSync?: (
+    path: string,
+    data: string,
+    options: { flag: "wx"; mode: number },
+  ) => void;
+  /** Internal test-only process-identity injection used by focused lock regressions. */
+  processIdentitySync?: (pid: number) => ProcessIdentity;
+  /** Internal test-only timeout injection used by focused lock regressions. */
+  timeoutMs?: number;
+}
+
+const configLockWaiter = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+const CONFIG_LOCK_PARTICIPANT_PATTERN =
+  /^(?<prefix>.+\.update-lock-)(?<pid>[1-9]\d*)-(?<token>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?<kind>choosing|owner\.json)$/i;
+const liveConfigUpdateLeases = new Map<string, ConfigUpdateLeaseState>();
+const pendingConfigLockCleanups = new Map<string, ConfigLockCleanupObligation>();
+let configLockExitCleanupInstalled = false;
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: unknown) {
+    return errorCode(error) !== "ESRCH";
+  }
+}
+
+function updateConfigLockExitCleanup(): void {
+  if (pendingConfigLockCleanups.size > 0 && !configLockExitCleanupInstalled) {
+    configLockExitCleanupInstalled = true;
+    process.once("exit", cleanupPendingConfigLocksAtExit);
+  } else if (pendingConfigLockCleanups.size === 0 && configLockExitCleanupInstalled) {
+    process.removeListener("exit", cleanupPendingConfigLocksAtExit);
+    configLockExitCleanupInstalled = false;
+  }
+}
+
+function settleConfigLockCleanup(obligation: ConfigLockCleanupObligation): void {
+  pendingConfigLockCleanups.delete(obligation.path);
+  if (obligation.lease) {
+    obligation.lease.cleanupPaths.delete(obligation.path);
+    if (obligation.lease.cleanupPaths.size === 0) {
+      liveConfigUpdateLeases.delete(obligation.lease.token);
+    }
+  }
+}
+
+/*
+ * Every obligation path is `${configPath}.update-lock-${pid}-${uuid}.*` built from
+ * one acquisition's own freshly generated, never-reused token, so no other
+ * participant can ever hold that exact path. Unlinking it therefore needs no
+ * identity check: whatever is there — a complete owner record, a half-written one
+ * from a failed publication, or nothing — is ours to remove. Reading the file to
+ * confirm identity first is what latched a corrupt record forever, because an
+ * unparseable file could never satisfy the check and so was never unlinked.
+ * Displacing a lease held by a DIFFERENT process is prevented by
+ * reclaimableConfigLock, which still requires a dead or different process
+ * identity (with a liveness fallback); that is a separate path.
+ */
+function tryConfigLockCleanup(
+  obligation: ConfigLockCleanupObligation,
+  unlinkPath: (path: string) => void,
+): boolean {
+  try {
+    unlinkPath(obligation.path);
+    return true;
+  } catch (error: unknown) {
+    // Already gone counts as cleaned; anything else stays pending and is retried.
+    return errorCode(error) === "ENOENT";
+  }
+}
+
+function attemptConfigLockCleanups(
+  obligations: readonly ConfigLockCleanupObligation[],
+  unlinkPath: (path: string) => void,
+): void {
+  // Register the whole rollback before attempting any unlink. Otherwise the
+  // first successful path could make a partly published lease look fully clean.
+  for (const obligation of obligations) {
+    pendingConfigLockCleanups.set(obligation.path, obligation);
+    if (obligation.lease) obligation.lease.cleanupPaths.add(obligation.path);
+  }
+  for (const obligation of obligations) {
+    if (tryConfigLockCleanup(obligation, unlinkPath)) {
+      settleConfigLockCleanup(obligation);
+    }
+  }
+  updateConfigLockExitCleanup();
+}
+
+function retryPendingConfigLockCleanups(): void {
+  for (const obligation of [...pendingConfigLockCleanups.values()]) {
+    if (tryConfigLockCleanup(obligation, unlinkSync)) {
+      settleConfigLockCleanup(obligation);
+    }
+  }
+  updateConfigLockExitCleanup();
+}
+
+function cleanupPendingConfigLocksAtExit(): void {
+  configLockExitCleanupInstalled = false;
+  for (const obligation of [...pendingConfigLockCleanups.values()]) {
+    if (tryConfigLockCleanup(obligation, unlinkSync)) {
+      settleConfigLockCleanup(obligation);
+    }
+  }
+}
+
+interface ConfigLockParticipant {
+  pid: number;
+  token: string;
+  choosingPath?: string;
+  ownerPath?: string;
+}
+
+interface ConfigLockScan {
+  choosing: ConfigLockParticipant[];
+  invalid: ConfigLockParticipant[];
+  owners: Array<{ participant: ConfigLockParticipant; owner: ConfigUpdateLockOwner }>;
+  legacyBlocked: boolean;
+}
+
+function configLockParticipant(path: string, configPath: string): {
+  pid: number;
+  token: string;
+  kind: "choosing" | "owner.json";
+} | null {
+  const match = basename(path).match(CONFIG_LOCK_PARTICIPANT_PATTERN);
+  const groups = match?.groups;
+  if (!groups || groups.prefix !== `${basename(configPath)}.update-lock-`) return null;
+  const pid = Number.parseInt(groups.pid!, 10);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  return {
+    pid,
+    token: groups.token!,
+    kind: groups.kind as "choosing" | "owner.json",
+  };
+}
+
+function validConfigLockOwner(
+  value: unknown,
+  participant: Pick<ConfigLockParticipant, "pid" | "token">,
+): value is ConfigUpdateLockOwner {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const owner = value as Partial<ConfigUpdateLockOwner>;
+  return owner.pid === participant.pid
+    && owner.token === participant.token
+    && typeof owner.acquiredAtMs === "number"
+    && Number.isFinite(owner.acquiredAtMs)
+    && typeof owner.ticket === "number"
+    && Number.isSafeInteger(owner.ticket)
+    && owner.ticket > 0
+    && (
+      owner.identity === undefined
+      || (
+        typeof owner.identity === "string"
+        && owner.identity.length > 0
+        && owner.identity.length <= MAX_PROCESS_IDENTITY_LENGTH
+      )
+    );
+}
+
+function configLockRecordIdentity(
+  value: unknown,
+  participant: Pick<ConfigLockParticipant, "pid" | "token">,
+): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Partial<ConfigUpdateLockOwner>;
+  return record.pid === participant.pid
+    && record.token === participant.token
+    && typeof record.identity === "string"
+    && record.identity.length > 0
+    && record.identity.length <= MAX_PROCESS_IDENTITY_LENGTH
+    ? record.identity
+    : undefined;
+}
+
+function reclaimableConfigLock(
+  participant: ConfigLockParticipant,
+  recordedIdentity: string | undefined,
+  readProcessIdentity: (pid: number) => ProcessIdentity,
+): boolean {
+  if (participant.pid !== process.pid) {
+    /*
+     * Old records and unsupported identity platforms deliberately retain the
+     * previous PID-liveness behavior. That preserves upgrade compatibility and
+     * never makes an unsupported platform easier to wedge than it is today.
+     */
+    if (!recordedIdentity) return !processIsAlive(participant.pid);
+    const currentIdentity = readProcessIdentity(participant.pid);
+    if (currentIdentity.kind === "not-running") return true;
+    if (currentIdentity.kind === "unsupported") return !processIsAlive(participant.pid);
+    return currentIdentity.value !== recordedIdentity;
+  }
+  /*
+   * UUID participant paths are never reused. This process alone may reclaim
+   * one of its paths when the ticket is absent from its live-lease map, because
+   * it knows that ticket is not held. Other processes still require a dead or
+   * different process identity, and a cleanup failure stays in the map until
+   * unlink is confirmed, so neither a live lease nor an unconfirmed release is
+   * ever displaced based on age.
+   */
+  return !liveConfigUpdateLeases.has(participant.token);
+}
+
+function removeStaleConfigLock(
+  participant: ConfigLockParticipant,
+  recordedIdentity: string | undefined,
+  readFreshProcessIdentity: (pid: number) => ProcessIdentity,
+): boolean {
+  // Re-check with an uncached identity immediately before removal so a live
+  // replacement process cannot be displaced by a stale per-acquisition cache.
+  if (!reclaimableConfigLock(participant, recordedIdentity, readFreshProcessIdentity)) return false;
+  for (const path of [participant.choosingPath, participant.ownerPath]) {
+    if (!path) continue;
+    try {
+      unlinkSync(path);
+      const pending = pendingConfigLockCleanups.get(path);
+      if (pending) settleConfigLockCleanup(pending);
+    } catch (error: unknown) {
+      if (errorCode(error) !== "ENOENT") throw error;
+      const pending = pendingConfigLockCleanups.get(path);
+      if (pending) settleConfigLockCleanup(pending);
+    }
+  }
+  updateConfigLockExitCleanup();
+  return true;
+}
+
+function inspectLegacyConfigLock(configPath: string): "absent" | "blocked" | "removed" {
+  const lockPath = `${configPath}.update-lock`;
+  try {
+    const owner = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8")) as
+      Partial<ConfigUpdateLockOwner>;
+    if (
+      typeof owner.pid !== "number"
+      || !Number.isSafeInteger(owner.pid)
+      || owner.pid <= 0
+    ) {
+      return "blocked";
+    }
+    if (processIsAlive(owner.pid)) return "blocked";
+    // New writers never reuse the legacy fixed path. Two recoverers may both
+    // target this dead directory, but neither can target a fresh unique lease.
+    rmSync(lockPath, { recursive: true, force: true });
+    return "removed";
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") return "absent";
+    // A legacy creator may have died between mkdir and owner publication.
+    // Its identity-free directory cannot be recovered without risking a live
+    // old writer, so fail closed instead of stealing it.
+    return "blocked";
+  }
+}
+
+function configUpdateLockTimeoutError(configPath: string): Error {
+  return new Error(
+    `Timed out waiting for another Cicero process to finish updating ${configPath}; retry the command.`,
+  );
+}
+
+function assertConfigUpdateLockDeadline(configPath: string, deadlineMs?: number): void {
+  if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+    throw configUpdateLockTimeoutError(configPath);
+  }
+}
+
+function scanConfigLocks(
+  configPath: string,
+  readProcessIdentity: (pid: number) => ProcessIdentity,
+  readFreshProcessIdentity: (pid: number) => ProcessIdentity,
+  deadlineMs?: number,
+): ConfigLockScan {
+  const readProcessIdentityBeforeDeadline = (pid: number): ProcessIdentity => {
+    assertConfigUpdateLockDeadline(configPath, deadlineMs);
+    return readProcessIdentity(pid);
+  };
+  const readFreshProcessIdentityBeforeDeadline = (pid: number): ProcessIdentity => {
+    assertConfigUpdateLockDeadline(configPath, deadlineMs);
+    return readFreshProcessIdentity(pid);
+  };
+  const directory = dirname(configPath);
+  const participants = new Map<string, ConfigLockParticipant>();
+  let entries: string[];
+  try {
+    entries = readdirSync(directory);
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") {
+      return { choosing: [], invalid: [], owners: [], legacyBlocked: false };
+    }
+    throw error;
+  }
+  for (const entry of entries) {
+    const path = join(directory, entry);
+    const parsed = configLockParticipant(path, configPath);
+    if (!parsed) continue;
+    const key = `${parsed.pid}:${parsed.token}`;
+    const participant = participants.get(key) ?? { pid: parsed.pid, token: parsed.token };
+    if (parsed.kind === "choosing") participant.choosingPath = path;
+    else participant.ownerPath = path;
+    participants.set(key, participant);
+  }
+
+  const choosing: ConfigLockParticipant[] = [];
+  const invalid: ConfigLockParticipant[] = [];
+  const owners: ConfigLockScan["owners"] = [];
+  for (const participant of participants.values()) {
+    let choosingRecord: unknown;
+    if (participant.choosingPath) {
+      try {
+        choosingRecord = JSON.parse(readFileSync(participant.choosingPath, "utf8"));
+      } catch {
+        // Empty pre-identity markers and partial publications use liveness fallback.
+      }
+    }
+
+    let ownerRecord: unknown;
+    let ownerRecordInvalid = false;
+    if (participant.ownerPath) {
+      try {
+        ownerRecord = JSON.parse(readFileSync(participant.ownerPath, "utf8"));
+      } catch (error: unknown) {
+        ownerRecordInvalid = errorCode(error) !== "ENOENT";
+      }
+    }
+
+    const choosingIdentity = configLockRecordIdentity(choosingRecord, participant);
+    const ownerIdentity = configLockRecordIdentity(ownerRecord, participant);
+    const recordedIdentity = choosingIdentity && ownerIdentity && choosingIdentity !== ownerIdentity
+      ? undefined
+      : choosingIdentity ?? ownerIdentity;
+    if (
+      reclaimableConfigLock(participant, recordedIdentity, readProcessIdentityBeforeDeadline)
+      && removeStaleConfigLock(participant, recordedIdentity, readFreshProcessIdentityBeforeDeadline)
+    ) {
+      continue;
+    }
+    if (participant.choosingPath) choosing.push(participant);
+    if (!participant.ownerPath) continue;
+    if (validConfigLockOwner(ownerRecord, participant)) {
+      owners.push({ participant, owner: ownerRecord });
+    } else if (ownerRecordInvalid || ownerRecord !== undefined) {
+      invalid.push(participant);
+    }
+  }
+
+  const legacy = inspectLegacyConfigLock(configPath);
+  return {
+    choosing,
+    invalid,
+    owners,
+    legacyBlocked: legacy === "blocked",
+  };
+}
+
+function compareConfigLockOwners(left: ConfigUpdateLockOwner, right: ConfigUpdateLockOwner): number {
+  if (left.ticket !== right.ticket) return left.ticket - right.ticket;
+  return left.token.localeCompare(right.token);
+}
+
+function configLockIsOwned(
+  configPath: string,
+  expected: ConfigUpdateLockOwner,
+  readProcessIdentity: (pid: number) => ProcessIdentity,
+  readFreshProcessIdentity: (pid: number) => ProcessIdentity,
+): boolean {
+  const scan = scanConfigLocks(configPath, readProcessIdentity, readFreshProcessIdentity);
+  const own = scan.owners.find(({ owner }) =>
+    owner.pid === expected.pid
+    && owner.token === expected.token
+    && owner.ticket === expected.ticket
+  );
+  if (!own || scan.legacyBlocked) return false;
+  return !scan.owners.some(({ owner }) =>
+    owner.token !== expected.token
+    && compareConfigLockOwners(owner, expected) < 0
+  );
+}
+
+function configLockOwnershipError(configPath: string): Error {
+  return new Error(
+    `Lost the config update lease before committing ${configPath}; retry the command.`,
+  );
+}
+
+/**
+ * Serialize whole-file config rewrites across Cicero processes. The lease
+ * uses unique bakery tickets: concurrent recovery can only delete the
+ * exact dead participant it inspected, never a replacement writer's lease.
+ */
+export function acquireConfigUpdateLock(
+  configPath: string = join(ciceroHome(), CONFIG_FILE),
+  options: ConfigUpdateLockOptions = {},
+): ConfigUpdateLock {
+  ensurePrivateDirectorySync(dirname(configPath));
+  retryPendingConfigLockCleanups();
+  const token = randomUUID();
+  const participantBase = `${configPath}.update-lock-${process.pid}-${token}`;
+  const choosingPath = `${participantBase}.choosing`;
+  const ownerPath = `${participantBase}.owner.json`;
+  const deadlineMs = Date.now() + (options.timeoutMs ?? CONFIG_UPDATE_LOCK_TIMEOUT_MS);
+  let owner: ConfigUpdateLockOwner | undefined;
+  const lease: ConfigUpdateLeaseState = {
+    token,
+    usable: true,
+    cleanupPaths: new Set(),
+  };
+  const unlinkPath = options.unlinkSync ?? unlinkSync;
+  const writePath = options.writeFileSync ?? writeFileSync;
+  const identityReader = options.processIdentitySync ?? processIdentitySync;
+  const identityCache = new Map<number, ProcessIdentity>();
+  const readFreshProcessIdentity = (pid: number): ProcessIdentity => {
+    const identity = identityReader(pid);
+    identityCache.set(pid, identity);
+    return identity;
+  };
+  const readProcessIdentity = (pid: number): ProcessIdentity => {
+    const cached = identityCache.get(pid);
+    if (cached) return cached;
+    return readFreshProcessIdentity(pid);
+  };
+
+  liveConfigUpdateLeases.set(token, lease);
+  try {
+    const currentIdentity = readProcessIdentity(process.pid);
+    const identity = currentIdentity.kind === "identified" ? currentIdentity.value : undefined;
+    writePath(choosingPath, JSON.stringify({
+      pid: process.pid,
+      token,
+      identity,
+    }), { flag: "wx", mode: PRIVATE_FILE_MODE });
+    const initial = scanConfigLocks(
+      configPath,
+      readProcessIdentity,
+      readFreshProcessIdentity,
+      deadlineMs,
+    );
+    const highestTicket = initial.owners.reduce(
+      (highest, entry) => Math.max(highest, entry.owner.ticket),
+      0,
+    );
+    if (highestTicket >= Number.MAX_SAFE_INTEGER) {
+      throw new Error(`Config update lease tickets are exhausted for ${configPath}`);
+    }
+    owner = {
+      pid: process.pid,
+      token,
+      acquiredAtMs: Date.now(),
+      ticket: highestTicket + 1,
+      identity,
+    };
+    writePath(ownerPath, JSON.stringify(owner), {
+      flag: "wx",
+      mode: PRIVATE_FILE_MODE,
+    });
+    unlinkPath(choosingPath);
+
+    while (true) {
+      const scan = scanConfigLocks(
+        configPath,
+        readProcessIdentity,
+        readFreshProcessIdentity,
+        deadlineMs,
+      );
+      const own = scan.owners.find(({ owner: candidate }) =>
+        candidate.pid === owner!.pid
+        && candidate.token === owner!.token
+        && candidate.ticket === owner!.ticket
+      );
+      const blockedByOwner = scan.owners.some(({ owner: candidate }) =>
+        candidate.token !== owner!.token
+        && compareConfigLockOwners(candidate, owner!) < 0
+      );
+      if (
+        own
+        && !scan.legacyBlocked
+        && scan.choosing.length === 0
+        && scan.invalid.length === 0
+        && !blockedByOwner
+      ) {
+        assertConfigUpdateLockDeadline(configPath, deadlineMs);
+        return {
+          assertOwned(): void {
+            if (
+              !lease.usable
+              || !configLockIsOwned(
+                configPath,
+                owner!,
+                readProcessIdentity,
+                readFreshProcessIdentity,
+              )
+            ) {
+              throw configLockOwnershipError(configPath);
+            }
+          },
+          release(): void {
+            if (!liveConfigUpdateLeases.has(token)) return;
+            lease.usable = false;
+            attemptConfigLockCleanups([{ path: ownerPath, lease }], unlinkPath);
+          },
+        };
+      }
+
+      const nowMs = Date.now();
+      if (nowMs >= deadlineMs) {
+        throw configUpdateLockTimeoutError(configPath);
+      }
+      Atomics.wait(configLockWaiter, 0, 0, Math.min(CONFIG_UPDATE_LOCK_WAIT_MS, deadlineMs - nowMs));
+    }
+  } catch (error: unknown) {
+    lease.usable = false;
+    // Both paths are this acquisition's own; the owner file may be absent, complete,
+    // or a half-written prefix from a failed publication. All three are removable.
+    attemptConfigLockCleanups([
+      { path: choosingPath, lease },
+      { path: ownerPath, lease },
+    ], unlinkPath);
+    throw error;
+  }
+}
 
 export const DEFAULT_CONFIG: CiceroConfig = {
   tts_enabled: true,
@@ -448,6 +1018,18 @@ export class RuntimeConfig {
   get quickIntents(): CiceroConfig["quick_intents"] { return this.config.quick_intents; }
   get raw(): CiceroConfig { return this.config; }
 
+  /** Commit one validated live provider selection after its candidate is ready. */
+  setVoiceBackend(role: "stt" | "tts", value: STTProviderConfig | TTSProviderConfig): void {
+    if (role === "stt") this.config.stt = { ...value } as CiceroConfig["stt"];
+    else this.config.tts = { ...value } as CiceroConfig["tts"];
+  }
+
+  /** Keep runtime fallback ownership aligned with an atomically persisted swap plan. */
+  setVoiceFallback(role: "stt" | "tts", value: STTProviderConfig | TTSProviderConfig): void {
+    if (role === "stt") this.config.stt_fallback = { ...value } as CiceroConfig["stt_fallback"];
+    else this.config.tts_fallback = { ...value } as CiceroConfig["tts_fallback"];
+  }
+
   get sttBackend(): STTProviderConfig {
     if (this.config.stt) {
       return this.config.stt as STTProviderConfig;
@@ -621,6 +1203,8 @@ export interface ConfigUpdateOptions {
     key: keyof CiceroConfig;
     fields: readonly string[];
   }[];
+  /** Internal final gate run synchronously at the config commit boundary. */
+  validateBeforeCommit?: () => void;
 }
 
 export function updateConfigFields(
@@ -629,55 +1213,62 @@ export function updateConfigFields(
   options: ConfigUpdateOptions = {},
 ): void {
   ensurePrivateDirectorySync(dirname(configPath));
-  let existing: Record<string, unknown> = {};
-  if (ensurePrivateFileIfExistsSync(configPath)) {
-    const original = readFileSync(configPath, "utf-8");
-    try {
-      const parsed = parseYaml(original);
-      existing = requireConfigMapping(
-        parsed === null && isBlankYamlDocument(original) ? {} : parsed,
-        configPath,
-      );
-    } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `Refusing to update ${configPath}: the existing file is not valid mapping YAML. `
-        + `Fix it manually or move it aside, then retry. The original file was not changed. ${detail}`,
-        { cause: error },
-      );
-    }
-  }
-  const incoming = fields as Record<string, unknown>;
-  for (const key of options.replaceTopLevel ?? []) {
-    const name = String(key);
-    const preserveRule = options.preserveTopLevelWhenSame?.find((rule) => rule.key === key);
-    const currentValue = existing[name];
-    const incomingValue = incoming[name];
-    const currentDiscriminator = preserveRule && isMapping(currentValue)
-      ? currentValue[preserveRule.discriminator]
-      : undefined;
-    const incomingDiscriminator = preserveRule && isMapping(incomingValue)
-      ? incomingValue[preserveRule.discriminator]
-      : undefined;
-    const preserve = currentDiscriminator !== undefined
-      && currentDiscriminator === incomingDiscriminator;
-    if (!preserve) delete existing[name];
-  }
-  for (const rule of options.clearNested ?? []) {
-    const currentValue = existing[String(rule.key)];
-    if (!isMapping(currentValue)) continue;
-    for (const field of rule.fields) delete currentValue[field];
-  }
-  const merged = deepMerge(existing, fields);
-  const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
+  const lock = acquireConfigUpdateLock(configPath);
   try {
-    writeFileSync(tmp, stringifyYaml(merged), { flag: "wx", mode: PRIVATE_FILE_MODE });
-    ensurePrivateFileSync(tmp);
-    renameSync(tmp, configPath);
-    ensurePrivateFileSync(configPath);
-  } catch (error: unknown) {
-    try { unlinkSync(tmp); } catch { /* absent after rename, or best-effort cleanup */ }
-    throw error;
+    let existing: Record<string, unknown> = {};
+    if (ensurePrivateFileIfExistsSync(configPath)) {
+      const original = readFileSync(configPath, "utf-8");
+      try {
+        const parsed = parseYaml(original);
+        existing = requireConfigMapping(
+          parsed === null && isBlankYamlDocument(original) ? {} : parsed,
+          configPath,
+        );
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Refusing to update ${configPath}: the existing file is not valid mapping YAML. `
+          + `Fix it manually or move it aside, then retry. The original file was not changed. ${detail}`,
+          { cause: error },
+        );
+      }
+    }
+    const incoming = fields as Record<string, unknown>;
+    for (const key of options.replaceTopLevel ?? []) {
+      const name = String(key);
+      const preserveRule = options.preserveTopLevelWhenSame?.find((rule) => rule.key === key);
+      const currentValue = existing[name];
+      const incomingValue = incoming[name];
+      const currentDiscriminator = preserveRule && isMapping(currentValue)
+        ? currentValue[preserveRule.discriminator]
+        : undefined;
+      const incomingDiscriminator = preserveRule && isMapping(incomingValue)
+        ? incomingValue[preserveRule.discriminator]
+        : undefined;
+      const preserve = currentDiscriminator !== undefined
+        && currentDiscriminator === incomingDiscriminator;
+      if (!preserve) delete existing[name];
+    }
+    for (const rule of options.clearNested ?? []) {
+      const currentValue = existing[String(rule.key)];
+      if (!isMapping(currentValue)) continue;
+      for (const field of rule.fields) delete currentValue[field];
+    }
+    const merged = deepMerge(existing, fields);
+    const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      writeFileSync(tmp, stringifyYaml(merged), { flag: "wx", mode: PRIVATE_FILE_MODE });
+      ensurePrivateFileSync(tmp);
+      options.validateBeforeCommit?.();
+      lock.assertOwned();
+      renameSync(tmp, configPath);
+      ensurePrivateFileSync(configPath);
+    } catch (error: unknown) {
+      try { unlinkSync(tmp); } catch { /* absent after rename, or best-effort cleanup */ }
+      throw error;
+    }
+  } finally {
+    lock.release();
   }
 }
 
@@ -695,58 +1286,64 @@ export function setWebVoiceToken(
   const problem = webVoiceTokenProblem(token);
   if (problem) throw new Error(`web_voice.token ${problem}`);
   ensurePrivateDirectorySync(dirname(configPath));
-  const original = ensurePrivateFileIfExistsSync(configPath)
-    ? readFileSync(configPath, "utf8")
-    : "";
-  let updated: string;
-  const lines = original.split("\n");
-  const webVoiceLine = lines.findIndex((line) => /^web_voice\s*:\s*(?:#.*)?\r?$/.test(line));
-  if (webVoiceLine >= 0) {
-    let blockEnd = lines.length;
-    for (let index = webVoiceLine + 1; index < lines.length; index += 1) {
-      const line = lines[index]!;
-      if (line.trim() === "" || /^\s+#/.test(line)) continue;
-      if (!/^\s/.test(line)) {
-        blockEnd = index;
-        break;
-      }
-    }
-    const tokenLine = lines.findIndex((line, index) => (
-      index > webVoiceLine
-      && index < blockEnd
-      && /^\s+token\s*:/.test(line)
-    ));
-    if (tokenLine >= 0) {
-      const match = lines[tokenLine]!.match(/^(\s+token\s*:\s*)([^#\r]*?)(\s+#.*)?(\r?)$/);
-      if (!match) throw new Error(`Refusing to update ${configPath}: web_voice.token uses an unsupported YAML form`);
-      lines[tokenLine] = `${match[1]}${JSON.stringify(token)}${match[3] ?? ""}${match[4] ?? ""}`;
-    } else {
-      const indentation = lines
-        .slice(webVoiceLine + 1, blockEnd)
-        .map((line) => line.match(/^(\s+)\S/))
-        .find((match) => match)?.[1] ?? "  ";
-      const carriageReturn = lines[webVoiceLine]!.endsWith("\r") ? "\r" : "";
-      lines.splice(webVoiceLine + 1, 0, `${indentation}token: ${JSON.stringify(token)}${carriageReturn}`);
-    }
-    updated = lines.join("\n");
-  } else {
-    const document = parseYamlDocument(original || "{}\n");
-    if (document.errors.length > 0) {
-      throw new Error(`Refusing to update ${configPath}: the existing file is not valid YAML`);
-    }
-    document.setIn(["web_voice", "token"], token);
-    updated = String(document);
-  }
-
-  const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
+  const lock = acquireConfigUpdateLock(configPath);
   try {
-    writeFileSync(tmp, updated, { flag: "wx", mode: PRIVATE_FILE_MODE });
-    ensurePrivateFileSync(tmp);
-    renameSync(tmp, configPath);
-    ensurePrivateFileSync(configPath);
-  } catch (error: unknown) {
-    try { unlinkSync(tmp); } catch { /* absent after rename, or best-effort cleanup */ }
-    throw error;
+    const original = ensurePrivateFileIfExistsSync(configPath)
+      ? readFileSync(configPath, "utf8")
+      : "";
+    let updated: string;
+    const lines = original.split("\n");
+    const webVoiceLine = lines.findIndex((line) => /^web_voice\s*:\s*(?:#.*)?\r?$/.test(line));
+    if (webVoiceLine >= 0) {
+      let blockEnd = lines.length;
+      for (let index = webVoiceLine + 1; index < lines.length; index += 1) {
+        const line = lines[index]!;
+        if (line.trim() === "" || /^\s+#/.test(line)) continue;
+        if (!/^\s/.test(line)) {
+          blockEnd = index;
+          break;
+        }
+      }
+      const tokenLine = lines.findIndex((line, index) => (
+        index > webVoiceLine
+        && index < blockEnd
+        && /^\s+token\s*:/.test(line)
+      ));
+      if (tokenLine >= 0) {
+        const match = lines[tokenLine]!.match(/^(\s+token\s*:\s*)([^#\r]*?)(\s+#.*)?(\r?)$/);
+        if (!match) throw new Error(`Refusing to update ${configPath}: web_voice.token uses an unsupported YAML form`);
+        lines[tokenLine] = `${match[1]}${JSON.stringify(token)}${match[3] ?? ""}${match[4] ?? ""}`;
+      } else {
+        const indentation = lines
+          .slice(webVoiceLine + 1, blockEnd)
+          .map((line) => line.match(/^(\s+)\S/))
+          .find((match) => match)?.[1] ?? "  ";
+        const carriageReturn = lines[webVoiceLine]!.endsWith("\r") ? "\r" : "";
+        lines.splice(webVoiceLine + 1, 0, `${indentation}token: ${JSON.stringify(token)}${carriageReturn}`);
+      }
+      updated = lines.join("\n");
+    } else {
+      const document = parseYamlDocument(original || "{}\n");
+      if (document.errors.length > 0) {
+        throw new Error(`Refusing to update ${configPath}: the existing file is not valid YAML`);
+      }
+      document.setIn(["web_voice", "token"], token);
+      updated = String(document);
+    }
+
+    const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      writeFileSync(tmp, updated, { flag: "wx", mode: PRIVATE_FILE_MODE });
+      ensurePrivateFileSync(tmp);
+      lock.assertOwned();
+      renameSync(tmp, configPath);
+      ensurePrivateFileSync(configPath);
+    } catch (error: unknown) {
+      try { unlinkSync(tmp); } catch { /* absent after rename, or best-effort cleanup */ }
+      throw error;
+    }
+  } finally {
+    lock.release();
   }
 }
 

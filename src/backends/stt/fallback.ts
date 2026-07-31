@@ -251,9 +251,21 @@ export class FallbackSTTProvider implements STTProvider {
       if (primary.status === "rejected" && fallback.status === "rejected") {
         throw new Error(`both STT engines failed to warm: ${this.primaryLogName}, ${this.fallbackLogName}`);
       }
+      // Aggregate availability is enough for ordinary turns, but a live swap's
+      // readiness gate promises that the configured PRIMARY accepted a real
+      // inference. Letting a warm fallback hide this rejection persisted an
+      // unusable primary and reported it active.
+      if (primary.status === "rejected") throw asError(primary.reason);
     } catch (error: unknown) {
       throw error;
     }
+  }
+
+  /** This wrapper owns BOTH engines' startups, so it cancels both. Synchronous
+   *  on purpose: it must land before the lifecycle queue, not inside it. */
+  cancelStartup(): void {
+    this.primary.cancelStartup?.();
+    this.fallback.cancelStartup?.();
   }
 
   private async stopProviders(context: string): Promise<void> {

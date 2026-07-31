@@ -17,11 +17,22 @@ export interface SpawnedSystemTts {
 
 export type SpawnSystemTts = (spec: SystemTtsSpec) => SpawnedSystemTts;
 
-function raceWithStop<T>(work: PromiseLike<T>, signal: AbortSignal): Promise<T> {
+function raceWithCancellation<T>(
+  work: PromiseLike<T>,
+  signals: readonly AbortSignal[],
+): Promise<T> {
   const observed = Promise.resolve(work);
   return new Promise<T>((resolve, reject) => {
     let settled = false;
-    const cleanup = (): void => signal.removeEventListener("abort", onAbort);
+    const listeners = signals.map((signal) => ({
+      signal,
+      onAbort: () => fail(signal.reason),
+    }));
+    const cleanup = (): void => {
+      for (const { signal, onAbort } of listeners) {
+        signal.removeEventListener("abort", onAbort);
+      }
+    };
     const finish = (callback: (value: T) => void, value: T): void => {
       if (settled) return;
       settled = true;
@@ -34,11 +45,17 @@ function raceWithStop<T>(work: PromiseLike<T>, signal: AbortSignal): Promise<T> 
       cleanup();
       reject(error);
     };
-    const onAbort = (): void => fail(signal.reason);
 
-    signal.addEventListener("abort", onAbort, { once: true });
+    for (const { signal, onAbort } of listeners) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
     observed.then((value) => finish(resolve, value), fail);
-    if (signal.aborted) onAbort();
+    for (const { signal, onAbort } of listeners) {
+      if (signal.aborted) {
+        onAbort();
+        break;
+      }
+    }
   });
 }
 
@@ -102,8 +119,8 @@ export class SystemSpeaker implements Speaker {
     private readonly spawn: SpawnSystemTts = spawnSystemTts,
   ) {}
 
-  async speak(text: string): Promise<void> {
-    if (this.stopped) return;
+  async speak(text: string, signal?: AbortSignal): Promise<void> {
+    if (this.stopped || signal?.aborted) return;
     if (this.releaseFailure) throw this.releaseFailure;
     const spec = buildSystemTts(text, this.platform);
     let spawned: SpawnedSystemTts;
@@ -117,6 +134,9 @@ export class SystemSpeaker implements Speaker {
     }
     const child = spawned.process;
     this.active.add(child);
+    const cancellationSignals = signal
+      ? [this.stopController.signal, signal]
+      : [this.stopController.signal];
 
     let exitObserved = false;
     try {
@@ -125,9 +145,9 @@ export class SystemSpeaker implements Speaker {
           if (!spawned.writeInput) {
             throw new Error("system TTS stdin transport did not provide an input writer");
           }
-          await raceWithStop(
+          await raceWithCancellation(
             Promise.resolve(spawned.writeInput(spec.stdinText)),
-            this.stopController.signal,
+            cancellationSignals,
           );
         } catch (error: unknown) {
           this.stopRequested.add(child);
@@ -137,7 +157,7 @@ export class SystemSpeaker implements Speaker {
           } catch (cleanupError: unknown) {
             throw this.rememberReleaseFailure("system TTS input failed and child release is unconfirmed", cleanupError);
           }
-          if (this.stopped) return;
+          if (this.stopped || signal?.aborted) return;
           throw new Error(
             `could not write system TTS input: ${error instanceof Error ? error.message : String(error)}`,
             { cause: error },
@@ -147,7 +167,7 @@ export class SystemSpeaker implements Speaker {
 
       let exitCode: number;
       try {
-        exitCode = await raceWithStop(child.exited, this.stopController.signal);
+        exitCode = await raceWithCancellation(child.exited, cancellationSignals);
         exitObserved = true;
       } catch (error: unknown) {
         // A rejected wait/exit promise does not prove that the native speaker
@@ -164,7 +184,7 @@ export class SystemSpeaker implements Speaker {
             new AggregateError([error, cleanupError], "system TTS exit and cleanup failed"),
           );
         }
-        if (this.stopped) return;
+        if (this.stopped || signal?.aborted) return;
         throw new Error(
           `system TTS exit observation failed: ${error instanceof Error ? error.message : String(error)}`,
           { cause: error },

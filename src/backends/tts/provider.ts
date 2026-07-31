@@ -26,6 +26,14 @@ export interface TTSOptions {
 }
 
 export interface TTSProvider {
+  /**
+   * Optional: abandon a startup that has not resolved yet, synchronously. A
+   * managed backend spawns its child before readiness completes, so an owner
+   * that cannot cancel can only wait the whole launch out — see
+   * startManagedServer. Every wrapper must forward this or the wrapped
+   * provider's startup becomes uncancellable.
+   */
+  cancelStartup?(): void;
   readonly name: string;
   /**
    * Render text to WAV. `voice` optionally overrides the configured voice for

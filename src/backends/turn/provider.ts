@@ -24,6 +24,7 @@ export interface TurnDetector {
    */
   predict(samples: Float32Array, sampleRate: number): Promise<TurnPrediction>;
   health(): Promise<boolean>;
+  cancelStartup?(): void;
   start?(): Promise<void>;
   stop?(): Promise<void>;
 }

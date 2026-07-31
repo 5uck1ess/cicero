@@ -142,6 +142,10 @@ export function wrapSTTWithTap(provider: STTProvider, dir: string, limits?: TapL
     if (provider.stop) await provider.stop();
   };
   if (provider.warmup) wrapped.warmup = () => provider.warmup!();
+  // Synchronous and must stay synchronous: the owner latches this before any
+  // await so a launch in flight sees it. Without forwarding, wrapping a provider
+  // silently made its startup uncancellable.
+  if (provider.cancelStartup) wrapped.cancelStartup = () => provider.cancelStartup!();
   return wrapped;
 }
 
