@@ -42,6 +42,6 @@
     "yaml": "^2.8.3"
   },
   "optionalDependencies": {
-    "playwright": "^1.62.0"
+    "playwright": "^1.62.1"
   }
 }
