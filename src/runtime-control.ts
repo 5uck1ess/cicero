@@ -123,6 +123,27 @@ export function isSwapRequest(value: unknown): value is SwapRequest {
     ));
 }
 
+/**
+ * Bound a shutdown wait, mirroring the web-voice and dashboard servers. Kept
+ * local so the control plane owns its own deadline wording.
+ */
+async function withinStopDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`runtime control listener did not close within ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export async function startRuntimeControl(options: RuntimeControlOptions): Promise<RuntimeControlHandle> {
   const descriptorPath = options.descriptorPath ?? ciceroPath("runtime-control.json");
   const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
@@ -223,7 +244,22 @@ export async function startRuntimeControl(options: RuntimeControlOptions): Promi
         } finally {
           if (drainTimer !== undefined) clearTimeout(drainTimer);
         }
-        await server.stop(true);
+        // Bun 1.4 changed what the stop() promise means. Calling stop(true) still
+        // closes the listener immediately — the port is unreachable from here on —
+        // but the promise it returns now settles only once every in-flight handler
+        // has returned its Response. A swap parked past the drain deadline above
+        // therefore leaves that promise pending indefinitely, so awaiting it
+        // unbounded would reinstate exactly the stall the bounded drain forbids.
+        // Start the close, bound the wait, and keep observing the promise so a
+        // later settlement is never an unhandled rejection.
+        const closed = Promise.resolve(server.stop(true));
+        closed.catch(() => { /* the bounded wait below is what reports this */ });
+        try {
+          await withinStopDeadline(closed, drainTimeoutMs);
+        } catch (error) {
+          // A drain timeout is the more specific diagnosis; keep it if we have it.
+          drainError ??= error;
+        }
         await unlink(descriptorPath).catch(() => {});
         if (drainError) throw drainError;
       })().catch((error) => {

@@ -40,6 +40,8 @@ export const MAX_DASHBOARD_CONTROL_JSON_BYTES = 1_024;
 export const MAX_DASHBOARD_WS_PAYLOAD_BYTES = 1_024;
 export const MAX_CONCURRENT_DASHBOARD_CONTROLS = 8;
 export const MAX_DASHBOARD_CLIENTS = 8;
+/** How often to re-check whether the listener has gone idle during shutdown. */
+const LISTENER_IDLE_POLL_MS = 5;
 
 async function withinShutdownDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -313,16 +315,39 @@ export function startDashboard(opts: DashboardOptions): DashboardHandle | null {
       });
       return task;
     };
+    // Deliberately keyed on this server's OWN accounting, not server.pendingRequests.
+    // Bun 1.4 does not decrement its in-flight count for a connection stop(true)
+    // has already force-closed, so that counter can still read 1 long after the
+    // handler returned — it reports the runtime's bookkeeping, not whether this
+    // server still owes anyone a response. activeControls and clients are tracked
+    // by this module and go to zero exactly when the work is genuinely done.
+    const listenerIdle = (): boolean => clients.size === 0 && activeControls === 0;
     const stopListener = (): Promise<void> => {
       const runtimeStop = stopRuntime();
+      // Bun 1.4 changed what this promise means: stop(true) closes the listener
+      // when it is CALLED, but the promise it returns settles only once the
+      // runtime's own in-flight bookkeeping clears — and a handler that finishes
+      // against a connection stop(true) already force-closed can leave it pending
+      // forever. A retry after the work actually drained must not be held hostage
+      // to that. This is the same judgement the 100ms fallback below already
+      // encodes; evaluating it up front is what lets a retry inside a short
+      // shutdown deadline observe a listener that is genuinely released.
+      // Poll rather than sample once: the runtime clears its in-flight counters a
+      // tick or two after the client's request settles, so a retry issued right
+      // after the work finished would otherwise still read the stale count and
+      // fall back to the pending promise. Polling is bounded by the same drain
+      // deadline the caller enforces, which owns the failure if it never goes idle.
       let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
-      const bookkeepingFallback = new Promise<void>((resolve) => {
-        fallbackTimer = setTimeout(resolve, 100);
-      }).then(() => {
-        if (server.pendingRequests === 0 && clients.size === 0 && activeControls === 0) return;
-        return runtimeStop;
+      const releasedWhenIdle = new Promise<void>((resolve) => {
+        const giveUpAt = Date.now() + shutdownDrainTimeoutMs;
+        const check = (): void => {
+          if (listenerIdle()) { resolve(); return; }
+          if (Date.now() >= giveUpAt) return;
+          fallbackTimer = setTimeout(check, LISTENER_IDLE_POLL_MS);
+        };
+        check();
       });
-      const attempt = Promise.race([runtimeStop, bookkeepingFallback]);
+      const attempt = Promise.race([runtimeStop, releasedWhenIdle]);
       void attempt.then(
         () => { if (fallbackTimer !== undefined) clearTimeout(fallbackTimer); },
         () => { if (fallbackTimer !== undefined) clearTimeout(fallbackTimer); },
