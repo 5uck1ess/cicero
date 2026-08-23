@@ -1797,11 +1797,12 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       const bookkeepingFallback = new Promise<void>((resolve) => {
         fallbackTimer = setTimeout(resolve, 100);
       }).then(() => {
-        if (
-          server.pendingRequests === 0 &&
-          sockets.size === 0 &&
-          isDrained()
-        ) return;
+        // Bun 1.4 additionally leaves server.pendingRequests reading non-zero for
+        // a connection stop(true) already force-closed, so consulting it here
+        // would send an otherwise-drained shutdown back to wait on a promise the
+        // runtime may never settle. sockets and isDrained() are this module's own
+        // accounting and go to zero exactly when no response is still owed.
+        if (sockets.size === 0 && isDrained()) return;
         return runtimeStop;
       });
       const attempt = Promise.race([
