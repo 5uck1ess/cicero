@@ -7,6 +7,11 @@ interface ManifestCheck {
   python: string;
   expectedPins?: string[];
   onlyBinary?: string[];
+  /**
+   * Requirements file whose pins take precedence over the URL a resolved
+   * package declares for the same dependency in its own metadata.
+   */
+  overrides?: string;
 }
 
 const projectRoot = dirname(import.meta.dir);
@@ -19,6 +24,14 @@ const vibeVoiceCheck: ManifestCheck = {
     "vibevoice-api @ git+https://github.com/vibevoice-community/VibeVoice-API.git@72868f93056179bde83b0c6c3e5fb1d3af36ce0b",
   ],
   onlyBinary: ["torch"],
+  // vibevoice-api's own metadata requires `vibevoice` from a bare, unpinned git
+  // URL, while vibevoice-sources.txt pins that same package to a commit. uv
+  // treats the two URLs as conflicting requirements for one package and refuses
+  // to resolve them. Feeding the pin file back in as an override makes this
+  // repository's commits authoritative for both packages -- which is the whole
+  // point of pinning them, since dropping either pin would let an upstream
+  // default branch move under a clean install.
+  overrides: "vibevoice-sources.txt",
 };
 
 const sidecarChecks: ManifestCheck[] = [
@@ -74,6 +87,7 @@ async function resolveManifest(check: ManifestCheck): Promise<string> {
     check.python,
     ...(uvPlatform ? ["--python-platform", uvPlatform] : []),
     ...(check.onlyBinary ?? []).flatMap((name) => ["--only-binary", name]),
+    ...(check.overrides ? ["--override", join(projectRoot, "requirements", check.overrides)] : []),
     "--output-file",
     output,
     ...(platform === "macos" ? ["--prerelease=allow"] : []),
