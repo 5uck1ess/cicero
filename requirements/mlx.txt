@@ -1,5 +1,5 @@
 # macOS 14+ on Apple Silicon: shared STT, TTS, and local-router environment.
-mlx-audio>=0.4.0,<0.5
+mlx-audio>=0.4.0,<0.6
 mlx-lm>=0.31.3,<0.32
 mlx-whisper>=0.4.0,<0.5
 fastapi>=0.115,<1
