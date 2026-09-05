@@ -1,5 +1,5 @@
 # Pocket-TTS controls its own compatible PyTorch dependency.
-pocket-tts>=2.1,<3
+pocket-tts>=2.1,<4
 fastapi>=0.115,<1
 uvicorn>=0.51.0,<1
 pydantic>=2.13.4,<3
