@@ -9,7 +9,7 @@
   },
   "module": "src/index.ts",
   "type": "module",
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "private": true,
   "bin": {
     "cicero": "./src/index.ts"
