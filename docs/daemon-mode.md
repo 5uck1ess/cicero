@@ -119,7 +119,9 @@ Relies on the streaming VAD (`vad.enabled`, on by default). Barge-in stays armed
 
 `cicero do "<goal>"` lets Cicero take actions, not just answer — it picks tools (list/read/write files, run shell, open apps, and optionally a Playwright browser with `--web`) one step at a time. File tools are confined to the current directory by default; choose another boundary explicitly with `--root`. Existing file paths are resolved through symlinks before policy checks, so an alias cannot hide a credential-shaped read. Mutating actions prompt for confirmation, credential-shaped reads also require confirmation, and destructive shell patterns are refused outright.
 
-The browser driver is optional. Install its browser once before using `--web`:
+The browser driver is optional. Install its browser before using `--web`, and
+re-run the same command after every Playwright upgrade — each release pins a
+different Chromium build, and `bun install` does not fetch it:
 
 ```bash
 bun x playwright install chromium
@@ -127,11 +129,11 @@ bun x playwright install chromium
 
 `--web` can only run where Playwright ships a prebuilt browser, so it inherits
 the installed Playwright's platform support — a narrower set than the rest of
-Cicero. **Playwright 1.62 supports Debian 12/13 or Ubuntu 22.04/24.04/26.04
+Cicero. **Playwright 1.63 supports Debian 12/13 or Ubuntu 22.04/24.04/26.04
 (x86-64 or arm64), macOS 14+, and Windows 11+ / Server 2019+ / WSL.** It
-dropped the Debian 11 and macOS 13-and-older builds that 1.61.x still ships,
-so on a dropped platform `playwright install` has no browser to fetch and a
-later `--web` navigation fails at launch. Cicero already requires macOS 14+,
+dropped the Debian 11, Ubuntu 20.04 and macOS 13-and-older builds that earlier
+releases still shipped, so on a dropped platform `playwright install` has no
+browser to fetch and a later `--web` navigation fails at launch. Cicero already requires macOS 14+,
 so only the Linux floor is new here.
 
 Nothing else is affected: the browser package is an optional dependency,
