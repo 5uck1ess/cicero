@@ -28,7 +28,7 @@
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
-    "@types/node": "^26.5.1",
+    "@types/node": "^26.6.1",
     "vitepress": "^1.6.4"
   },
   "peerDependencies": {
