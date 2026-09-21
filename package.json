@@ -39,7 +39,7 @@
     "chalk": "^6.0.0",
     "commander": "^15.0.0",
     "qrcode": "^1.5.4",
-    "yaml": "^2.8.3"
+    "yaml": "^2.9.1"
   },
   "optionalDependencies": {
     "playwright": "^1.63.0"
