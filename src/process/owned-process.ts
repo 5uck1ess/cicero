@@ -90,7 +90,7 @@ export function terminateOwnedProcessTree(
   let graceMs: number;
   let reapTimeoutMs: number;
   try {
-    positiveInteger(proc.pid, "pid");
+    groupLeaderPid(proc.pid, "pid");
     graceMs = nonNegativeInteger(
       options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS,
       "terminateGraceMs",
@@ -175,6 +175,7 @@ async function terminateDirectProcessNow(
 
 /** True while a detached POSIX group with this leader id remains reachable. */
 export function posixProcessGroupExists(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
   try {
     process.kill(-pid, 0);
     return true;
@@ -298,6 +299,11 @@ export function windowsTreeAccountedFor(
 }
 
 function signalPosixTree(proc: OwnedProcess, signal: "SIGTERM" | "SIGKILL"): void {
+  // Never widen a single tree into a whole-user sweep; see groupLeaderPid.
+  if (!Number.isSafeInteger(proc.pid) || proc.pid <= 1) {
+    try { proc.kill(signal); } catch { /* already exited */ }
+    return;
+  }
   try {
     process.kill(-proc.pid, signal);
     return;
@@ -380,6 +386,20 @@ function errorMessage(error: unknown): string {
 
 function positiveInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive integer`);
+  return value;
+}
+
+/**
+ * A pid we are allowed to turn into a process-group target via `kill(-pid, …)`.
+ *
+ * POSIX does not read `kill(-1, sig)` as "the group led by pid 1" — it means
+ * "every process the caller has permission to signal". Passing pid 1 here once
+ * swept an entire logged-in user (systemd --user included) instead of one tree,
+ * so a non-group-leader pid must never reach the negated-pid syscalls.
+ */
+function groupLeaderPid(value: number, name: string): number {
+  positiveInteger(value, name);
+  if (value === 1) throw new RangeError(`${name} must not be 1: kill(-1, …) signals every process the caller owns`);
   return value;
 }
 
