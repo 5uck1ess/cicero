@@ -646,14 +646,14 @@ export class CiceroDaemon {
     if (!this.kanbanWatcher && kw && kw.enabled !== false && kw.command) {
       const listCommand = kw.command;
       this.kanbanWatcher = new KanbanWatcher({
-        list: (signal) => listViaCli(listCommand, { signal }),
+        list: (signal) => listViaCli(listCommand, { signal, preset: kw.preset, assignees: kw.assignees }),
         announce: async (t, signal) => {
           if (!this.webVoice) return;
           // A lane-owned task announces itself in that employee's voice.
           const lane = t.assignee && this.config.brain.lanes?.[t.assignee] ? t.assignee : undefined;
           // Deliverable link (usually the PR) rides along for the screen;
           // the notify path keeps it out of the spoken audio.
-          const link = kw.task_command ? await taskLinkViaCli(t.id, kw.task_command, { signal }) : null;
+          const link = kw.task_command ? await taskLinkViaCli(t.id, kw.task_command, { signal, preset: kw.preset }) : null;
           if (signal.aborted) return;
           const line = link ? `${spokenLine(t, !!lane)} ${link}` : spokenLine(t, !!lane);
           const res = await this.webVoice?.notify(line, lane);
@@ -683,12 +683,12 @@ export class CiceroDaemon {
           await this.webVoice?.notify(nudgeLine(t, waited, nth));
         },
         nudgeAfterMs: (kw.nudge_after_minutes ?? 60) * 60_000,
-        // Parents come from the per-task detail (the list feed omits them), so a
+        // Presets use list parents first, falling back to detail when absent. A
         // gated companion (e.g. a QA card parented to a not-yet-done work card)
         // is recognized as parked-behind-a-dependency, not "nobody picked it up".
-        // Only wired when a task_command exists; without it, nudge on age alone.
+        // Detail fallback is wired only when a task_command exists.
         parents: kw.task_command
-          ? (t, signal) => taskParentsViaCli(t.id, kw.task_command!, { signal })
+          ? (t, signal) => taskParentsViaCli(t.id, kw.task_command!, { signal, preset: kw.preset })
           : undefined,
       });
       // Poll immediately only when no web voice surface will exist (Telegram-only
@@ -1220,8 +1220,8 @@ export class CiceroDaemon {
           // No configured board command = no board to consult (fail closed).
           if (!kw?.command || kw.enabled === false) return null;
           signal.throwIfAborted();
-          const parked = (await listViaCli(kw.command, { signal }))
-            .filter((t) => t.status === "blocked" && t.assignee === lane);
+          const parked = (await listViaCli(kw.command, { signal, preset: kw.preset, assignees: kw.assignees }))
+            .filter((t) => !t.unknown_status && t.status === "blocked" && t.assignee === lane);
           signal.throwIfAborted();
           if (parked.length === 0) return null;
           const list = parked.map((t) => `${t.id} "${t.title}"`).join(", ");
@@ -2026,7 +2026,7 @@ export class CiceroDaemon {
                 ? this.config.notify?.kanban?.command
                 : undefined;
               try {
-                if (boardCommand) board = await listViaCli(boardCommand, { signal });
+                if (boardCommand) board = await listViaCli(boardCommand, { signal, preset: this.config.notify?.kanban?.preset, assignees: this.config.notify?.kanban?.assignees });
               } catch {
                 signal.throwIfAborted();
                 // Board state is optional in the daily briefing.

@@ -310,9 +310,20 @@ notify:
   kanban:
     enabled: false
     interval_seconds: 20
-    # command: [hermes, kanban, list, --json]   # any CLI that prints the board
+    preset: hermes             # default; hermes | multica | paperclip
+    # command: [hermes, kanban, list, --json]   # REQUIRED when enabled
+    # task_command: [hermes, kanban, show]     # optional parent details + deliverable links
+    # Multica (built from upstream source, not live-tested):
+    # preset: multica
+    # command: [multica, issue, list, --output, json]
+    # task_command: [multica, issue, get]       # appends <id> --output json
+    # Paperclip (built from upstream source, not live-tested):
+    # preset: paperclip
+    # command: [paperclipai, issue, list, -C, <company-id>, --json]
+    # task_command: [paperclipai, issue, get]     # appends <id> --json
+    # assignees: { board-agent-id: coder }     # board id -> spoken name / lane name
     # call_back: false          # ring the phone when nobody was listening (never for blocked tasks)
-    # nudge_after_minutes: 60   # remind (once) about tasks nobody picked up; 0 = off
+    # nudge_after_minutes: 60   # repeat reminders for unstarted todo tasks; 0 = off
   # Mirror notifications to a phone via a Telegram bot (text messages;
   # set voice_note: true if you'd rather get spoken clips):
   # telegram:

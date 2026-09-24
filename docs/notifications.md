@@ -16,13 +16,14 @@ Every notification that is delivered (or parked) is also handed to the brain as 
 
 ## Kanban watch
 
-Cicero announces the agent's task board on its own. The daemon polls a harness CLI you configure (`command` — required; hermes shown as the example) and speaks up when a task finishes, blocks, or lands in review — "The coder finished the task: fix the flaky test." No hooks needed on the agent side; anything that can print the board as JSON works:
+Cicero announces the agent's task board on its own. The daemon polls a harness CLI you configure (`command` — required; hermes shown as the example) and speaks up when a task finishes, blocks, or lands in review — "The coder finished the task: fix the flaky test." No hooks needed on the agent side; a built-in preset normalizes the board CLI JSON:
 
 ```yaml
 notify:
   kanban:
     enabled: true
-    command: [hermes, kanban, list, --json]   # required — any CLI that prints the board as a JSON array
+    preset: hermes                         # default when omitted
+    command: [hermes, kanban, list, --json]   # required when enabled
     # task_command: [hermes, kanban, show]    # optional — `<task_command> <id> --json` prints one task; enables the deliverable-link card
     interval_seconds: 20            # poll cadence
     call_back: true                 # ring the phone for done/review — never for blocked
@@ -34,10 +35,79 @@ Announcements fire on `done`/`blocked`/`review`, and an `assignee` matching a la
 Two deliberate policies ride along:
 
 - **Blocked tasks never auto-ring.** Even with `call_back: true`, a blocked transition only sends the text — and the text names the fix: *"Text 'have ada call me' to talk it through."* One text, one decision, zero unwanted calls; you dial back when you care.
-- **Unstarted tasks nag until someone owns them.** A task sitting with no
+- **Unstarted tasks nag until someone owns them.** A task in canonical `todo` with no
   `started_at` past the threshold gets a "nobody's picked this up" reminder,
   repeating with a doubling gap (1h → 2h → 4h cap) until the task starts,
   resolves, or leaves the board.
+
+### Board presets
+
+Keep the config key `notify.kanban`. `preset` accepts `hermes` (the default),
+`multica`, or `paperclip`; an unknown preset is a config error. Enabling the
+watch always requires an explicit `command`. Cicero supplies no default CLI.
+
+| Preset | List command | Optional `task_command` | Verification |
+| --- | --- | --- | --- |
+| `hermes` | `[hermes, kanban, list, --json]` | `[hermes, kanban, show]` | Live-tested board integration |
+| `multica` | `[multica, issue, list, --output, json]` | `[multica, issue, get]` | Built from upstream source, not live-tested |
+| `paperclip` | `[paperclipai, issue, list, -C, <company-id>, --json]` | `[paperclipai, issue, get]` | Built from upstream source, not live-tested |
+
+The Paperclip CLI installs as `paperclipai` and needs a company: pass
+`-C <company-id>`, or drop it when `PAPERCLIP_COMPANY_ID` or a
+`paperclipai context set` profile already supplies one.
+
+Hermes and Paperclip return bare arrays; Multica returns an `issues` array in
+an object. Cicero reads the returned list only; it does not fetch additional
+pages. Configure a complete board list where the CLI permits it. A parent
+omitted by pagination or filtering is treated as satisfied, so a filtered list
+can produce a premature reminder.
+
+All presets normalize to `todo | in_progress | review | blocked | done | cancelled`:
+Hermes `triage/todo/scheduled/ready` become `todo`, `running` becomes
+`in_progress`, and `archived` becomes `cancelled`. Multica/Paperclip `backlog`
+becomes `todo` and `in_review` becomes `review`. Multica custom statuses map by
+their `status_category`: `unstarted` → `todo`, `started` → `in_progress`,
+`done` → `done`, `closed` → `cancelled` (a custom review or blocked status is
+indistinguishable from other started work, so it neither announces nor
+nudges). Unknown statuses retain
+their bounded raw label but never announce or nudge; warnings are deduplicated
+with a bounded budget of 128 distinct statuses per process. All task timestamps
+are unix seconds internally; ISO timestamps are converted at the list boundary.
+A task is unstarted only while `todo` and without a start timestamp, so an
+in-progress Multica issue does not get reminders despite lacking `started_at`.
+
+Multica and Paperclip supply assignee ids rather than names. Map these ids to
+spoken names (use the exact lane name to get that employee's voice):
+
+```yaml
+notify:
+  kanban:
+    enabled: true
+    preset: multica
+    command: [multica, issue, list, --output, json]
+    task_command: [multica, issue, get]
+    assignees:
+      board-agent-id: coder
+      board-user-id: ada
+```
+
+Unmapped ids become an unassigned task; Cicero never speaks the raw id.
+Paperclip prefers `assigneeAgentId`, falling back to `assigneeUserId` when no
+agent is assigned. Hermes keeps its raw lane-name assignee unless mapped.
+Mappings allow at most 256 entries, with non-empty ids and names of at most
+128 characters each.
+
+Multica's `parent_issue_id` and Paperclip's `parentId` gate reminders directly
+from the list, without a detail command. Hermes falls back to detail `parents`
+when `task_command` is configured. Parent ids are capped at 32, each 128
+characters. A present unfinished parent suppresses the child's reminder;
+`done` and `cancelled` parents satisfy the gate. Detail commands append the id,
+then `--output json` for Multica or `--json` for Hermes/Paperclip.
+
+**Deliverable-link lookup is Hermes-only:** it reads `latest_summary` and
+`comments[].body` from task detail. Multica and Paperclip detail payloads do not
+embed these, so Cicero skips the link lookup without spawning a command.
+Announcements still work without a deliverable link.
 
 ## Telegram text and voice notes
 

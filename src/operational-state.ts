@@ -1,6 +1,6 @@
 import { briefingWindow, type BriefingRunStatus, type BriefingStatusStore } from "./notify/briefing-scheduler";
 import { dayOf, parseHm } from "./notify/briefing";
-import { KANBAN_SNAPSHOT_TASK_LIMIT, type KanbanSnapshot, type KanbanTask } from "./notify/kanban-watch";
+import { KANBAN_SNAPSHOT_TASK_LIMIT, isUnstarted, type KanbanSnapshot } from "./notify/kanban-watch";
 import type { OvernightItem, OvernightStore } from "./notify/overnight-store";
 import type { PromptScheduleSnapshot } from "./notify/schedules";
 
@@ -272,7 +272,7 @@ function renderDeferred(value: OperationalSnapshot["deferred"]): Record<string, 
 function renderBoard(value: OperationalSnapshot["board"], nowMs: number): Record<string, unknown> | string {
   if (value === "unknown" || value === null) return "unavailable";
   const selected = (status: "blocked" | "review" | "unstarted") => {
-    const tasks = value.tasks.filter((task) => status === "unstarted" ? isUnstarted(task) : task.status === status);
+    const tasks = value.tasks.filter((task) => status === "unstarted" ? isUnstarted(task) : !task.unknown_status && task.status === status);
     return {
       count: value.truncated ? `≥${tasks.length}` : tasks.length,
       titles: tasks.slice(0, MAX_ITEMS).map((task) => clip(task.title)),
@@ -350,17 +350,13 @@ function addMinutes(at: string, minutes: number): string {
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
-function isUnstarted(task: KanbanTask): boolean {
-  return !task.started_at && !["done", "blocked", "review", "running", "in_progress"].includes(task.status);
-}
-
 function compactBoard(value: OperationalSnapshot["board"], nowMs: number): Record<string, unknown> | string {
   if (value === "unknown" || value === null) return "unavailable";
   return {
     as_of: iso(value.asOfMs),
     freshness: freshness(nowMs, value.asOfMs, 120_000),
-    blocked_count: approximateCount(value, value.tasks.filter((task) => task.status === "blocked").length),
-    review_count: approximateCount(value, value.tasks.filter((task) => task.status === "review").length),
+    blocked_count: approximateCount(value, value.tasks.filter((task) => !task.unknown_status && task.status === "blocked").length),
+    review_count: approximateCount(value, value.tasks.filter((task) => !task.unknown_status && task.status === "review").length),
     unstarted_count: approximateCount(value, value.tasks.filter(isUnstarted).length),
     ...(value.truncated ? { coverage: `partial; board exceeds ${KANBAN_SNAPSHOT_TASK_LIMIT} tasks`, total_tasks: value.totalTasks } : {}),
   };

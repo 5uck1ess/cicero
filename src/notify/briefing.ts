@@ -72,8 +72,8 @@ export function composeBriefing(overnight: string[], board: KanbanTask[] | null,
     parts.push(`While you were away: ${news.join(" ")}`);
   }
   if (board) {
-    const blocked = board.filter((t) => t.status === "blocked");
-    const review = board.filter((t) => t.status === "review");
+    const blocked = board.filter((t) => !t.unknown_status && t.status === "blocked");
+    const review = board.filter((t) => !t.unknown_status && t.status === "review");
     if (blocked.length) parts.push(`Needs your input: ${blocked.map((t) => `"${t.title}"`).join(", ")}.`);
     if (review.length) parts.push(`Waiting on review: ${review.map((t) => `"${t.title}"`).join(", ")}.`);
     if (!blocked.length && !review.length && !news.length) parts.push("All quiet overnight, and the board is clean.");
@@ -112,8 +112,8 @@ export function composeBriefingDigest(
   if (news.length) sections.push(briefingSection("while you were away", news));
 
   if (board) {
-    const blocked = board.filter((t) => t.status === "blocked");
-    const review = board.filter((t) => t.status === "review");
+    const blocked = board.filter((t) => !t.unknown_status && t.status === "blocked");
+    const review = board.filter((t) => !t.unknown_status && t.status === "review");
     if (blocked.length) sections.push(briefingSection("needs your input", blocked.map((t) => `"${t.title}"`)));
     if (review.length) sections.push(briefingSection("waiting on review", review.map((t) => `"${t.title}"`)));
   }
