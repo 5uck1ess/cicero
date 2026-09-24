@@ -18,7 +18,11 @@ Two pieces, split by what each can safely do:
 1. **Bootstrap script** (`scripts/install.sh`, `scripts/install.ps1`) — only the
    prerequisites a browser page cannot provide: Bun (the `packageManager` pin),
    uv, and a check for ffmpeg/openssl; clone or update the repo; `bun install`;
-   then exec `cicero setup`. No models, no venvs, no config.
+   `bun link` to expose the `cicero` CLI, as `docs/setup.md` already requires;
+   then start setup with `bun run src/index.ts setup` from the checkout. That
+   does not depend on `~/.bun/bin` already being on `PATH` in the script's
+   shell; if it is not, the script prints the line to add. No models, no
+   venvs, no config.
 2. **`cicero setup`** — a new CLI command that runs a setup-mode web server
    (not the daemon) and walks the operator through the rest in a browser.
 
@@ -58,14 +62,28 @@ the wizard.
   one is shown with its error and an explicit "back up and start fresh" choice
   (`config.yaml` → `config.yaml.bak-<timestamp>`); never auto-overwritten.
 - Binds `127.0.0.1` on its own port by default and prints a one-time URL with
-  a random setup token to stdout. Reuses the dashboard's loopback Host/Origin
-  gate and custom-header CSRF pattern (`src/dashboard/server.ts:70-87`).
+  a random setup token to stdout. In this default mode it follows the
+  dashboard's pattern: loopback-only Host/Origin gate plus a custom-header CSRF
+  check (`src/dashboard/server.ts:70-87`).
 - `--lan` for headless boxes: binds LAN, uses `ensureTls` (`src/web-voice/tls.ts:358`)
   for a self-signed cert, same token. Plain HTTP off-loopback is refused, as
-  `assertWebTlsPolicy` does today.
+  `assertWebTlsPolicy` does today. The dashboard's loopback gate would reject
+  every LAN request, so LAN mode uses its own gate instead. A request's
+  Host must name loopback or one of the box's LAN addresses on the setup
+  port, the same addresses `tls.ts` puts in the certificate's SANs. Origin,
+  when present, must match Host. The token is required on every request, and
+  the CSRF header on every mutating route. Tests cover both modes separately:
+  in LAN mode a LAN Host is accepted and a foreign Host is rejected.
 - Exits after hand-off. It is a one-shot process, not a daemon surface.
 
 ## Wizard steps
+
+Steps 1–7 only collect choices into one in-memory **draft config**; nothing is
+written to `config.yaml` until step 10, which writes the whole draft once.
+Every choice, including channels, is in the draft that step 9 checks and step
+10 writes, so no setting depends on a later partial update. The only files
+written earlier are ones outside `config.yaml` that a step needs on its own:
+recipe venvs and the call sidecar's `.env` credentials.
 
 1. **System.** Detect OS, arch, Apple Silicon (+ macOS ≥14 via
    `src/platform/python.ts`), NVIDIA GPU + VRAM (lift the `nvidia-smi` probe out
@@ -101,7 +119,7 @@ the wizard.
    copy button and a done-check (on `PATH`, answers `--version`); the
    wizard does not run the install or the sign-in.
 
-3b. **Task board (optional).** Cicero is only the voice; the kanban board is
+4. **Task board (optional).** Cicero is only the voice; the kanban board is
    owned by an external management system. A selector for the systems the
    board presets support (`src/notify/board-presets.ts`, `docs/notifications.md`
    § Board presets): **Hermes**, **Multica**, **Paperclip**, or **None**.
@@ -115,41 +133,21 @@ the wizard.
    - Paperclip needs a company: use `PAPERCLIP_COMPANY_ID` or the active
      `paperclipai context` profile when present, else ask for the id and pass
      `-C <id>`. The id is validated as a single token, never shell text.
-   - Writes `notify.kanban: { enabled: true, preset, command, task_command }`
-     with the list/detail commands from the presets table. The wizard never
+   - Adds `notify.kanban: { enabled: true, preset, command, task_command }`
+     to the draft, with the list/detail commands from the presets table. The wizard never
      installs or configures the board system itself. Multica and Paperclip are
      labeled "not live-tested", matching the docs.
 
-4. **Speech-to-text.** Options filtered by platform: `faster-whisper` (CUDA or
+5. **Speech-to-text.** Options filtered by platform: `faster-whisper` (CUDA or
    CPU), `mlx-whisper` (macOS), `wyoming` (existing server URL). `audiocpp` is
    listed as advanced, Linux/CUDA-only, and points at
    `scripts/provision-audiocpp.sh` rather than running it.
 
-5. **Text-to-speech.** `kokoro`, `pocket-tts` (voice cloning; link to
+6. **Text-to-speech.** `kokoro`, `pocket-tts` (voice cloning; link to
    `docs/voice-cloning.md`), `mlx-audio` (macOS), `elevenlabs` (API key),
    `wyoming`.
 
-6. **Install.** For each chosen Python backend that is not already installed,
-   run its **recipe** (below) with live, streamed logs, a progress state per
-   recipe, and cancel. Then prefetch the model weights so the first voice turn
-   is not a multi-GB silent stall.
-
-7. **Check.** Build the draft config in memory and run
-   `collectChecks(draftConfig, …)` (`src/cli/doctor.ts:751`) against it — it
-   already accepts an injected config and returns structured `Check[]`. Render
-   ok/warn/fail with hints. Fails block the write; warns do not.
-
-8. **Write + pair.** Show the annotated YAML to be written. It is generated as
-   fresh text with its explanatory comments. That is safe because v1 only
-   writes when no config exists, so there are no existing comments to keep.
-   The generated text must parse back to the same config and pass
-   `validateRuntimeConfig`. Then write it (private mode,
-   atomic tmp+rename like `updateConfigFields` in `src/config.ts`) with
-   `web_voice.enabled: true` and a stable generated token (so the pairing QR
-   survives restarts; see `setWebVoiceToken` in `src/config.ts`). Render the
-   pairing QR in the page.
-
-8b. **Channels.** Everything that reaches the operator away from the browser
+7. **Channels.** Everything that reaches the operator away from the browser
    (`docs/channels.md`, `docs/notifications.md`). Telegram is the primary
    remote channel for now: the step opens on it, pre-selected, and the other
    parts follow. Every part stays skippable; none blocks the hand-off.
@@ -164,7 +162,7 @@ the wizard.
         timeout, capped response, a total deadline) and show the sender's
         display name for confirmation. Take the confirmed update only from a
         chat Telegram marks `private` and whose sender id equals the chat id,
-        then write both `chat_id` and `sender_user_id`. Group chats are not
+        then add both `chat_id` and `sender_user_id` to the draft. Group chats are not
         auto-paired: they need `sender_user_id` entered deliberately. After
         pairing, acknowledge the consumed updates so they do not reach the
         daemon (it also discards queued updates on every start).
@@ -199,7 +197,7 @@ the wizard.
      6. **Harden the account:** the README's checklist (add it to your
         phone as a second account, 2FA password, 12-month away setting,
         back up the session file, never "terminate all other sessions").
-     7. **Test:** "ring me now", once the daemon is up (step 9).
+     7. **Test:** "ring me now", once the daemon is up (step 11).
      Progress survives leaving the page: steps whose done-check passes
      are shown complete on return. `briefing.call` and the "call me" flow
      are only offered once calls are set up.
@@ -210,10 +208,30 @@ the wizard.
      explanation that notifications inside quiet hours queue for the
      briefing instead of pinging.
 
-9. **Hand-off + test turn.** Start the daemon the documented way (`cicero start`,
-   or print the service command when a supervisor is detected), wait for
-   `~/.cicero/web-voice/pairing.json`, redirect to web voice, and prompt one
-   spoken test turn ("say: what time is it"). Then setup mode exits.
+8. **Install.** For each chosen Python backend that is not already installed,
+   run its **recipe** (below) with live, streamed logs, a progress state per
+   recipe, and cancel. Then prefetch the model weights so the first voice turn
+   is not a multi-GB silent stall.
+
+9. **Check.** Build the draft config in memory and run
+   `collectChecks(draftConfig, …)` (`src/cli/doctor.ts:751`) against it — it
+   already accepts an injected config and returns structured `Check[]`. Render
+   ok/warn/fail with hints. Fails block the write; warns do not.
+
+10. **Write + pair.** Show the annotated YAML to be written. It is generated as
+    fresh text with its explanatory comments. That is safe because v1 only
+    writes when no config exists, so there are no existing comments to keep.
+    The generated text must parse back to the same config and pass
+    `validateRuntimeConfig`. Then write it (private mode,
+    atomic tmp+rename like `updateConfigFields` in `src/config.ts`) with
+    `web_voice.enabled: true` and a stable generated token (so the pairing QR
+    survives restarts; see `setWebVoiceToken` in `src/config.ts`). Render the
+    pairing QR in the page.
+
+11. **Hand-off + test turn.** Start the daemon the documented way (`cicero start`,
+    or print the service command when a supervisor is detected), wait for
+    `~/.cicero/web-voice/pairing.json`, redirect to web voice, and prompt one
+    spoken test turn ("say: what time is it"). Then setup mode exits.
 
 ## Install recipes
 
