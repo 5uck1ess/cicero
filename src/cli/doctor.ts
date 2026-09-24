@@ -3,6 +3,7 @@ import { describeTextInjection } from "../platform/text-inject-run";
 import { join, dirname } from "node:path";
 import { loadConfig, type RuntimeConfig } from "../config";
 import { ciceroHome } from "../platform/paths";
+import { probeNvidiaGpu } from "../platform/gpu";
 import {
   findVenvPython,
   MLX_MIN_MACOS_MAJOR,
@@ -92,7 +93,6 @@ export type DoctorCommandRunner = (
 ) => Promise<BoundedCommandResult>;
 
 const DOCTOR_IMPORT_TIMEOUT_MS = 10_000;
-const DOCTOR_GPU_TIMEOUT_MS = 3_000;
 const DOCTOR_HTTP_TIMEOUT_MS = 1_500;
 const DOCTOR_HTTP_JSON_LIMIT_BYTES = 256 * 1024;
 
@@ -1087,30 +1087,14 @@ export async function collectChecks(
         : "Telegram voice notes";
     checkBinary(`ffmpeg (${purpose})`, "ffmpeg", checks, which, "apt install ffmpeg   # or brew install ffmpeg / scoop install ffmpeg");
   }
-  const nvidiaSmi = which("nvidia-smi");
-  if (nvidiaSmi) {
-    try {
-      const result = await runCommand([
-        nvidiaSmi,
-        "--query-gpu=name,memory.free",
-        "--format=csv,noheader",
-      ], {
-        timeoutMs: DOCTOR_GPU_TIMEOUT_MS,
-        stdoutLimitBytes: 8 * 1024,
-        stderrLimitBytes: 1024,
-        totalLimitBytes: 9 * 1024,
-        outputLimitBehavior: "error",
-      });
-      const gpu = result.exitCode === 0 ? result.stdout.text.trim().split("\n")[0] : undefined;
-      checks.push(gpu
-        ? { name: "gpu", level: "ok", detail: gpu }
-        : { name: "gpu", level: "warn", detail: "nvidia-smi did not return GPU status before exiting" });
-    } catch {
-      checks.push({ name: "gpu", level: "warn", detail: "nvidia-smi did not respond within its diagnostic deadline" });
-    }
-  } else {
-    checks.push({ name: "gpu", level: "ok", detail: "no nvidia-smi — CPU/Metal mode (pocket-tts and remote engines still work)" });
-  }
+  const gpu = await probeNvidiaGpu({ which, runCommand, includeTotal: false });
+  checks.push(gpu.status === "ok"
+    ? { name: "gpu", level: "ok", detail: gpu.doctorDetail }
+    : gpu.status === "absent"
+      ? { name: "gpu", level: "ok", detail: "no nvidia-smi — CPU/Metal mode (pocket-tts and remote engines still work)" }
+      : gpu.status === "empty"
+        ? { name: "gpu", level: "warn", detail: "nvidia-smi did not return GPU status before exiting" }
+        : { name: "gpu", level: "warn", detail: "nvidia-smi did not respond within its diagnostic deadline" });
 
   return checks;
 }
