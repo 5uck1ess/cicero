@@ -1,4 +1,4 @@
-import { linkSync, lstatSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, lstatSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,7 @@ export type ExistingConfig =
   | { status: "missing" }
   | { status: "valid" }
   | { status: "invalid"; error: string }
+  | { status: "other-file-error"; error: string }
   | { status: "unsafe"; error: string };
 
 function pathFor(home: string): string { return join(home, "config.yaml"); }
@@ -33,12 +34,26 @@ export function inspectExistingConfig(home: string): ExistingConfig {
     throw error;
   }
   if (!info.isFile() || info.isSymbolicLink()) return { status: "unsafe", error: "config.yaml is not a regular file; refusing to follow or replace it" };
+  // Isolate config.yaml from actions.yaml so an actions failure never offers
+  // to back up a valid config. Both checks still use the real loadConfig path.
+  const validationHome = mkdtempSync(join(tmpdir(), "cicero-setup-inspect-"));
   try {
-    // loadConfig uses the same validation and private-file rules as startup.
+    ensurePrivateDirectorySync(validationHome);
+    ensurePrivateFileSync(path);
+    writeFileSync(join(validationHome, "config.yaml"), readFileSync(path), { flag: "wx", mode: PRIVATE_FILE_MODE });
+    try {
+      loadConfig({}, { home: validationHome });
+    } catch (error) {
+      return { status: "invalid", error: redactSnapshotSecrets(error instanceof Error ? error.message : String(error)) };
+    }
+  } finally {
+    rmSync(validationHome, { recursive: true, force: true });
+  }
+  try {
     loadConfig({}, { home });
     return { status: "valid" };
   } catch (error) {
-    return { status: "invalid", error: redactSnapshotSecrets(error instanceof Error ? error.message : String(error)) };
+    return { status: "other-file-error", error: redactSnapshotSecrets(error instanceof Error ? error.message : String(error)) };
   }
 }
 
@@ -98,6 +113,7 @@ export function writeDraft(home: string, draft: SetupDraft, options: SetupCommit
     const state = inspectExistingConfig(home);
     if (state.status === "valid") throw new Error("config.yaml already exists and is valid; edit it or back it up manually");
     if (state.status === "invalid") throw new Error(`config.yaml is invalid: ${state.error}. Use the explicit back up and start fresh action first`);
+    if (state.status === "other-file-error") throw new Error(`Other Cicero home file is invalid: ${state.error}. Fix it before setup can write`);
     if (state.status === "unsafe") throw new Error(state.error);
     const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
     try {

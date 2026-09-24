@@ -50,6 +50,19 @@ describe("setup draft and write", () => {
     expect(inspectExistingConfig(dir).status).toBe("valid");
     expect(() => writeDraft(dir, draft)).toThrow("already exists and is valid");
   });
+  test("bad actions.yaml does not make a valid config eligible for backup", () => {
+    const dir = home();
+    const configPath = join(dir, "config.yaml");
+    writeDraft(dir, createDraft("local-cpu", "d".repeat(64)));
+    const original = readFileSync(configPath, "utf8");
+    writeFileSync(join(dir, "actions.yaml"), "actionz: {}\nactions: {}\n", { mode: 0o600 });
+    const state = inspectExistingConfig(dir);
+    expect(state.status).toBe("other-file-error");
+    if (state.status === "other-file-error") expect(state.error).toContain("actionz is not supported");
+    expect(() => backupInvalidConfig(dir)).toThrow("Only an invalid existing config");
+    expect(() => writeDraft(dir, createDraft("local-cpu"))).toThrow("Other Cicero home file is invalid");
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+  });
   test("invalid config remains until explicit backup", () => {
     const dir = home(); const path = join(dir, "config.yaml");
     writeFileSync(path, "deployment: broken-tier\n", { mode: 0o600 });

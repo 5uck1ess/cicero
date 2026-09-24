@@ -1,6 +1,6 @@
 import { randomBytes, X509Certificate } from "node:crypto";
 import { isIP } from "node:net";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { readRequestJsonLimited, RequestBodyTooLargeError, RequestBodyTimeoutError } from "../http-request-body";
 import { assertWebTlsPolicy, ensureTls, type TlsMaterial } from "../web-voice/tls";
 import { ensurePrivateDirectorySync } from "../platform/secure-storage";
@@ -12,9 +12,48 @@ import { detectSystem, type SystemDeps, type SystemFacts, type Tier } from "./sy
 import { backupInvalidConfig, inspectExistingConfig, writeDraft } from "./write";
 import type { Check, DoctorCheckOptions } from "../cli/doctor";
 import { redactSnapshotSecrets } from "../operational-state";
+import { ciceroHome } from "../platform/paths";
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);
 const TIERS = new Set<Tier>(["local-mlx", "local-cuda", "local-cpu"]);
+
+export interface SetupHandoff {
+  startCommand: string;
+  customHome: boolean;
+  sourceConfigPath: string;
+  defaultConfigPath: string;
+  copyCommand?: string;
+}
+
+/** The daemon has one fixed home; --home is an isolated setup trial. */
+export function setupHandoff(
+  home: string,
+  defaultHome: string = ciceroHome(),
+  platform: string = process.platform,
+  cliAvailable: boolean = Boolean(Bun.which("cicero")),
+): SetupHandoff {
+  const path = platform === "win32" ? win32 : posix;
+  const sourceHome = path.resolve(home);
+  const daemonHome = path.resolve(defaultHome);
+  const sameHome = platform === "win32"
+    ? sourceHome.toLowerCase() === daemonHome.toLowerCase()
+    : sourceHome === daemonHome;
+  const sourceConfigPath = path.join(sourceHome, "config.yaml");
+  const defaultConfigPath = path.join(daemonHome, "config.yaml");
+  const quote = platform === "win32"
+    ? (value: string) => `'${value.replaceAll("'", "''")}'`
+    : (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  const copyCommand = sameHome ? undefined : platform === "win32"
+    ? `New-Item -ItemType Directory -Force -Path ${quote(daemonHome)} | Out-Null; if (Test-Path -LiteralPath ${quote(defaultConfigPath)}) { throw 'Destination config already exists' }; Copy-Item -LiteralPath ${quote(sourceConfigPath)} -Destination ${quote(defaultConfigPath)}`
+    : `mkdir -p ${quote(daemonHome)} && cp -n ${quote(sourceConfigPath)} ${quote(defaultConfigPath)}`;
+  return {
+    startCommand: cliAvailable ? "cicero start" : "bun run src/index.ts start",
+    customHome: !sameHome,
+    sourceConfigPath,
+    defaultConfigPath,
+    ...(copyCommand ? { copyCommand } : {}),
+  };
+}
 
 /** Read the exact LAN IPs the browser certificate covers, including reused pairs. */
 export function certificateLanIPv4s(cert: string): string[] {
@@ -68,6 +107,10 @@ export interface SetupServerOptions {
   /** Test-only timer injection for the hand-off shutdown path. */
   scheduleStop?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout> | number;
   cancelScheduledStop?: (timer: ReturnType<typeof setTimeout> | number) => void;
+  /** Test overrides for deterministic hand-off paths and command selection. */
+  defaultHome?: string;
+  platform?: string;
+  cliAvailable?: boolean;
 }
 
 export interface SetupServer {
@@ -98,24 +141,26 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
   if (!/^[a-f0-9]{32,}$/.test(token)) throw new Error("setup token must contain at least 128 random bits in hexadecimal form");
   const system: SystemFacts = await detectSystem(options.systemDeps);
   let draft: SetupDraft = createDraft(system.recommendedTier);
+  let draftRevision = 0;
   let current = "system";
   let detected: unknown = await SETUP_STEPS[0]!.detect({ system, draft }, options.systemDeps);
   let checks: Check[] | null = null;
+  let checksRevision: number | null = null;
   let written = false;
   let finished = false;
   let stopped = false;
   let stopPromise: Promise<void> | null = null;
   let handoffTimer: ReturnType<typeof setTimeout> | number | null = null;
   const closed = new AbortController();
-  const startCommand = Bun.which("cicero") ? "cicero start" : "bun run src/index.ts start";
+  const handoff = setupHandoff(home, options.defaultHome, options.platform, options.cliAvailable);
 
   const view = () => {
-    const checkGroups = checks === null ? null : classifySetupChecks(checks);
+    const checkGroups = checks === null || checksRevision !== draftRevision ? null : classifySetupChecks(checks);
     const existing = inspectExistingConfig(home);
     return {
       steps: SETUP_STEPS.map(({ id, title, explain, pipeline, available }) => ({ id, title, explain, pipeline, available })),
-      current, detected, system, tier: draft.deployment, checks, checkGroups, yaml: renderDraft(draft),
-      existing, written, finished, startCommand,
+      current, detected, system, tier: draft.deployment, checks: checkGroups ? checks : null, checkGroups, yaml: renderDraft(draft),
+      existing, written, finished, startCommand: handoff.startCommand, handoff,
       canWrite: !written && checkGroups !== null && checkGroups.blocking.length === 0 && existing.status === "missing",
       requiresNotReadyAcknowledgement: (checkGroups?.notReady.length ?? 0) > 0,
     };
@@ -149,16 +194,24 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
           const step = SETUP_STEPS.find((item) => item.id === data.id && item.available);
           if (!step || step.id !== "system" || typeof data.choice !== "string" || !TIERS.has(data.choice as Tier)) return json({ error: "Unknown setup choice" }, 400);
           draft = { ...draft, ...step.contribute({ system, draft }, data.choice) } as SetupDraft;
+          draftRevision += 1;
           checks = null;
+          checksRevision = null;
         } else if (url.pathname === "/api/check") {
+          const revision = draftRevision;
+          const checkedDraft = draft;
           checks = null;
-          checks = await (options.check ?? checkDraft)(draft, options.doctorOptions);
+          checksRevision = null;
+          const result = await (options.check ?? checkDraft)(checkedDraft, options.doctorOptions);
+          if (revision !== draftRevision) return json({ error: "Draft changed during Check. Run Check again" }, 409);
+          checks = result;
+          checksRevision = revision;
           current = "check";
         } else if (url.pathname === "/api/backup") {
           backupInvalidConfig(home, options.now);
           current = "write";
         } else if (url.pathname === "/api/write") {
-          if (checks === null) return json({ error: "Run Check before writing" }, 409);
+          if (checks === null || checksRevision !== draftRevision) return json({ error: "Run Check again before writing" }, 409);
           const groups = classifySetupChecks(checks);
           if (groups.blocking.length > 0) return json({ error: "Resolve config validity failures before writing" }, 409);
           if (groups.notReady.length > 0 && data.acknowledgeNotReady !== true) {

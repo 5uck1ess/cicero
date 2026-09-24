@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { certificateLanIPv4s, startSetupServer, trustedSetupRequest, type SetupServer } from "../../src/setup/server";
+import { certificateLanIPv4s, setupHandoff, startSetupServer, trustedSetupRequest, type SetupServer } from "../../src/setup/server";
+import { createDraft } from "../../src/setup/draft";
+import { writeDraft } from "../../src/setup/write";
 
 const servers: SetupServer[] = [];
 const homes: string[] = [];
@@ -11,6 +13,59 @@ const systemDeps = { platform: () => "linux", arch: () => "x64", release: () => 
 afterEach(async () => { await Promise.all(servers.splice(0).map((server) => server.stop())); for (const path of homes.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
 describe("setup server auth", () => {
+  test("default home keeps the start command; custom homes show OS-specific copy commands", () => {
+    const dir = home();
+    const normal = setupHandoff(dir, dir, "linux", true);
+    expect(normal.customHome).toBe(false);
+    expect(normal.startCommand).toBe("cicero start");
+    expect(normal.copyCommand).toBeUndefined();
+    const trial = setupHandoff(join(dir, "trial home"), dir, "linux", false);
+    expect(trial.customHome).toBe(true);
+    expect(trial.startCommand).toBe("bun run src/index.ts start");
+    expect(trial.sourceConfigPath).toBe(join(dir, "trial home", "config.yaml"));
+    expect(trial.defaultConfigPath).toBe(join(dir, "config.yaml"));
+    expect(trial.copyCommand).toContain("cp -n");
+    expect(trial.copyCommand).toContain(`'${trial.sourceConfigPath}'`);
+    const windows = setupHandoff("C:\\trial home", "C:\\Users\\operator\\.cicero", "win32", true);
+    expect(windows.customHome).toBe(true);
+    expect(windows.copyCommand).toContain("Copy-Item -LiteralPath 'C:\\trial home\\config.yaml'");
+    expect(windows.copyCommand).toContain("-Destination 'C:\\Users\\operator\\.cicero\\config.yaml'");
+  });
+  test("server state carries the custom-home hand-off paths", async () => {
+    let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
+    const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop: () => {} }; }) as unknown as typeof Bun.serve;
+    const defaultHome = home();
+    const trialHome = home();
+    const server = await startSetupServer({ home: trialHome, defaultHome, platform: "linux", cliAvailable: true, systemDeps, output: () => {}, serve });
+    servers.push(server);
+    const response = await handler(new Request(`http://127.0.0.1:${server.port}/api/state`, {
+      headers: { host: `127.0.0.1:${server.port}`, "x-cicero-setup-token": server.token },
+    }));
+    const state = await response.json() as { handoff: { customHome: boolean; sourceConfigPath: string; defaultConfigPath: string; copyCommand: string } };
+    expect(state.handoff.customHome).toBe(true);
+    expect(state.handoff.sourceConfigPath).toBe(join(trialHome, "config.yaml"));
+    expect(state.handoff.defaultConfigPath).toBe(join(defaultHome, "config.yaml"));
+    expect(state.handoff.copyCommand).toContain("cp -n");
+  });
+  test("actions.yaml errors are shown without offering a config backup", async () => {
+    let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
+    const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop: () => {} }; }) as unknown as typeof Bun.serve;
+    const dir = home();
+    writeDraft(dir, createDraft("local-cpu", "e".repeat(64)));
+    writeFileSync(join(dir, "actions.yaml"), "actionz: {}\nactions: {}\n", { mode: 0o600 });
+    const server = await startSetupServer({ home: dir, systemDeps, output: () => {}, serve });
+    servers.push(server);
+    const headers = { host: `127.0.0.1:${server.port}`, "x-cicero-setup-token": server.token };
+    const stateResponse = await handler(new Request(`http://127.0.0.1:${server.port}/api/state`, { headers }));
+    const state = await stateResponse.json() as { existing: { status: string; error: string }; canWrite: boolean };
+    expect(state.existing.status).toBe("other-file-error");
+    expect(state.existing.error).toContain("actionz is not supported");
+    expect(state.canWrite).toBe(false);
+    const backup = await handler(new Request(`http://127.0.0.1:${server.port}/api/backup`, {
+      method: "POST", headers: { ...headers, "x-cicero-setup-csrf": "1" }, body: "{}",
+    }));
+    expect(backup.status).toBe(400);
+  });
   test("loopback rejects missing/wrong token, foreign Host/Origin, and missing CSRF", async () => {
     let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
     const serve = ((options: { fetch: typeof handler }) => {
@@ -123,6 +178,41 @@ describe("setup server auth", () => {
     await server.stop();
     expect(cancelled).toBe(1);
     expect(stopCalls).toBe(1);
+  });
+  test("a Check finishing after a draft choice cannot authorize Write", async () => {
+    let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
+    const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop: () => {} }; }) as unknown as typeof Bun.serve;
+    let checkStarted!: () => void;
+    const started = new Promise<void>((resolve) => { checkStarted = resolve; });
+    let finishOldCheck!: (checks: { name: string; level: "ok"; detail: string }[]) => void;
+    let checkCalls = 0;
+    const server = await startSetupServer({
+      home: home(), systemDeps, output: () => {}, serve,
+      check: async () => {
+        checkCalls += 1;
+        if (checkCalls > 1) return [{ name: "config", level: "ok", detail: "new draft" }];
+        checkStarted();
+        return new Promise((resolve) => { finishOldCheck = resolve; });
+      },
+    });
+    servers.push(server);
+    const headers = { host: `127.0.0.1:${server.port}`, "x-cicero-setup-token": server.token, "x-cicero-setup-csrf": "1" };
+    const send = (path: string, body: object) => handler(new Request(`http://127.0.0.1:${server.port}${path}`, {
+      method: "POST", headers, body: JSON.stringify(body),
+    }));
+    const pending = send("/api/check", {});
+    await started;
+    expect((await send("/api/choice", { id: "system", choice: "local-mlx" })).status).toBe(200);
+    finishOldCheck([{ name: "config", level: "ok", detail: "old draft" }]);
+    expect((await pending).status).toBe(409);
+    const rejected = await send("/api/write", {});
+    expect(rejected.status).toBe(409);
+    expect((await rejected.json() as { error: string }).error).toContain("Run Check again");
+    const checked = await send("/api/check", {});
+    const state = await checked.json() as { tier: string; canWrite: boolean; checks: { detail: string }[] };
+    expect(state.tier).toBe("local-mlx");
+    expect(state.canWrite).toBe(true);
+    expect(state.checks[0]?.detail).toBe("new draft");
   });
   test("config validity failures still block Write even with acknowledgement", async () => {
     let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
