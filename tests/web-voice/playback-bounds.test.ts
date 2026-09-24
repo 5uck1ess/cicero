@@ -74,6 +74,10 @@ describe("web voice playback accounting", () => {
     expect(canQueueAudio(MAX_QUEUED_AUDIO_MS - 1, 1)).toBe(true);
     expect(canQueueAudio(MAX_QUEUED_AUDIO_MS - 1, 2)).toBe(false);
     expect(canQueueAudio(0, Number.NaN)).toBe(false);
+    // An admitted clip longer than the backlog cap still plays on an empty queue
+    // (review: 121 s 8 kHz mono clip was aborted with nothing queued).
+    expect(canQueueAudio(0, 121_000)).toBe(true);
+    expect(canQueueAudio(1, 121_000)).toBe(false);
   });
   test("socket bound rejects before enqueue and detects dropped sends", () => {
     let sent = 0;
