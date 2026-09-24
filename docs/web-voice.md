@@ -139,3 +139,5 @@ separate agent-memory session per device. That would change product semantics
 explicit conversation/session coordinator plus per-session brain lifecycle.
 Until that decision is made, use one actively speaking client at a time when
 the selected brain adapter does not itself serialize concurrent prompts.
+
+ACP streaming turns can speak a short tool-start line and a kind-based spoken-confirmation line through the same turn sink as the reply. A line is dropped when its turn is aborted or superseded. The legacy `POST /api/turn` endpoint returns one completed WAV and cannot deliver a notice while it is waiting; use the streaming WebSocket for live notices (the Telegram call bridge uses it).

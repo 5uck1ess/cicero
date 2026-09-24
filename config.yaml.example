@@ -274,6 +274,7 @@ brain:
     - deploy
   agent_first: true
   thinking_filler: true         # pre-rendered filler covers agent latency
+  tool_start_notice: true      # say one short line when the first ACP tool starts
 
 # ---------------------------------------------------------------------------
 # Computer-use safety. File tools are confined to this root and cap the amount
