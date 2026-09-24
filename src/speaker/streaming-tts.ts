@@ -84,16 +84,26 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     return ++this.epoch;
   }
 
-  async speakStream(sentences: AsyncIterable<string>): Promise<void> {
+  async speakStream(sentences: AsyncIterable<string>, turnAbort: AbortController): Promise<void> {
+    turnAbort.signal.throwIfAborted();
     if (this.stopped) return;
-    await this.retryUnconfirmedOutputRelease();
     const epoch = this.supersedeTurn(); // claim the speaker; supersedes any prior turn
-    const stale = () => this.epoch !== epoch;
+    const stale = () => this.epoch !== epoch || turnAbort.signal.aborted;
+    this.turnCancel = turnAbort;
     // A generic fallback is not interruptible through Speaker, so a replacement
     // turn must wait for its exact output ownership to finish instead of
     // starting a raw player on top of a still-speaking system child.
-    await this.waitForFallbackOutput();
-    if (this.stopped || stale()) return;
+    try {
+      await this.retryUnconfirmedOutputRelease();
+      await this.waitForFallbackOutput();
+    } catch (error) {
+      if (this.turnCancel === turnAbort) this.turnCancel = null;
+      throw error;
+    }
+    if (this.stopped || stale()) {
+      if (this.turnCancel === turnAbort) this.turnCancel = null;
+      return;
+    }
     // Coalescing sits here so every local streaming producer gets one policy.
     // Web voice bypasses the host speaker and applies the same option in its
     // turn pipeline.
@@ -104,13 +114,11 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     // this turn is torn down. return() cannot reach it there — it queues behind
     // the pending read — so teardown aborts this instead, which releases the
     // wait and lets the generator run its own cleanup.
-    const coalesceAbort = this.coalesce ? new AbortController() : null;
     const source = this.coalesce
-      ? coalesceSentences(sentences, this.coalesce, coalesceAbort!.signal)
+      ? coalesceSentences(sentences, this.coalesce, turnAbort.signal)
       : sentences;
     // Published so interrupt/stop/the next turn can reach it. This turn already
     // holds the epoch, so nothing else owns the slot.
-    this.turnCancel = coalesceAbort;
     const iterator = source[Symbol.asyncIterator]();
     this.playing = true;
     this.spoken = [];
@@ -130,11 +138,10 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     // every render issued through it must settle before the pin is released.
     // Two renders can outlive the loop: the look-ahead started while the current
     // sentence plays, and the first sentence when an interrupt lands before the
-    // loop body runs at all. generateAudio takes no caller-owned signal, so
-    // settling is the only way to know the retired provider is idle.
+    // loop body runs at all. Abort both, then settle them before releasing the pin.
     const pendingRenders = new Set<Promise<void>>();
     const prepare = (text: string): PreparedSentence => {
-      const prepared = this.prepareSentence(text, pin.provider);
+      const prepared = this.prepareSentence(text, pin.provider, turnAbort.signal);
       const settled = prepared.audio.then(() => {}, () => {});
       pendingRenders.add(settled);
       void settled.then(() => pendingRenders.delete(settled));
@@ -142,14 +149,14 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     };
 
     try {
-      const first = await this.readNextSentence(iterator);
+      const first = await this.readNextSentence(iterator, turnAbort.signal);
       let current = first ? prepare(first) : null;
-      if (!current) sourceFinished = true;
+      if (!current) sourceFinished = !stale();
 
       while (current && !stale()) {
         // Pull exactly one sentence ahead while the current one synthesizes.
         // This read is deliberately not awaited before playback.
-        const nextText = this.readNextSentence(iterator);
+        const nextText = this.readNextSentence(iterator, turnAbort.signal);
         sourceReadAhead = nextText;
         // Observe early source failures now; awaiting nextPrepared below still
         // propagates them after the current sentence has finished playing.
@@ -197,17 +204,16 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     } finally {
       // Wake read-ahead before waiting for pinned renders so both turn-owned
       // resources can finish their cleanup without blocking each other.
-      coalesceAbort?.abort();
+      if (stale() && !turnAbort.signal.aborted) turnAbort.abort();
       // Release the slot only if it is still ours — a superseding turn has
       // already installed its own controller, and clearing it here would leave
       // that turn's read-ahead unreachable.
-      if (this.turnCancel === coalesceAbort) this.turnCancel = null;
+      if (this.turnCancel === turnAbort) this.turnCancel = null;
       // Releasing the pin lets a waiting swap reap this generation, which for a
       // managed provider means killing its server. Do that only once nothing is
       // still rendering on it: settle the look-ahead chain first (it may not have
-      // issued its render yet), then every render it registered. This delays the
-      // reap, never the interrupt — playback ownership was already revoked by the
-      // epoch change, and the audio these produce is discarded.
+      // issued its render yet), then every render it registered. Playback
+      // ownership has already been revoked by the epoch change.
       if (lookAhead) await lookAhead.then(() => {}, () => {});
       if (pendingRenders.size > 0) await Promise.allSettled([...pendingRenders]);
       // Each speakStream owns its own pin; release regardless of ownership so a
@@ -221,12 +227,10 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
           // immediate, then close after that read settles. Producers backed by
           // external work must also use their caller-owned AbortSignal to cancel
           // the underlying brain/process without waiting for iterator cleanup.
-          // TODO: require speakStream callers to abort BrainTurnOptions.signal
-          // alongside interrupt() once the cancellation stack is the base API.
           if (pendingRead) await pendingRead.catch(() => null);
           try { await iterator.return?.(); } catch { /* best-effort source cleanup */ }
         };
-        if (pendingRead) void closeIterator();
+        if (pendingRead || stale()) void closeIterator();
         else await closeIterator();
       }
       // Only the current owner tears down shared state — a superseded turn must not
@@ -336,10 +340,11 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     if (this.playerReleaseFailure) throw this.playerReleaseFailure;
   }
 
-  private async generateAudioSafe(text: string, provider: TTSProvider): Promise<ArrayBuffer | null> {
+  private async generateAudioSafe(text: string, provider: TTSProvider, signal: AbortSignal): Promise<ArrayBuffer | null> {
     try {
-      return await this.generateAudio(text, provider);
+      return await this.generateAudio(text, provider, signal);
     } catch (err: unknown) {
+      if (signal.aborted) return null;
       const msg = err instanceof Error ? err.message : String(err);
       log("warn", `TTS generation failed for "${text.substring(0, 30)}...": ${msg}`);
       return null; // signal the play site to use the fallback voice instead of going silent
@@ -347,17 +352,26 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
   }
 
   /** Read the next non-empty sentence without making playback wait for it. */
-  private async readNextSentence(iterator: AsyncIterator<string>): Promise<string | null> {
+  private async readNextSentence(iterator: AsyncIterator<string>, signal: AbortSignal): Promise<string | null> {
     while (true) {
-      const { value, done } = await iterator.next();
+      if (signal.aborted) return null;
+      const next = iterator.next();
+      let onAbort!: () => void;
+      const cancelled = new Promise<IteratorResult<string>>((resolve) => {
+        onAbort = () => resolve({ done: true, value: undefined });
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      const { value, done } = await Promise.race([next, cancelled]).finally(() =>
+        signal.removeEventListener("abort", onAbort)
+      );
       if (done) return null;
       const text = value.trim();
       if (text) return text;
     }
   }
 
-  private prepareSentence(text: string, provider: TTSProvider): PreparedSentence {
-    return { text, audio: this.generateAudioSafe(text, provider) };
+  private prepareSentence(text: string, provider: TTSProvider, signal: AbortSignal): PreparedSentence {
+    return { text, audio: this.generateAudioSafe(text, provider, signal) };
   }
 
   /**

@@ -27,7 +27,15 @@ export async function streamBrainToSpeaker(
 ): Promise<void> {
   const sendStream = brain.sendStream;
   if (!sendStream) throw new Error("brain does not support streaming");
-  await speakGuarded(speaker, () => sendStream.call(brain, prompt, options), filler);
+  const turnAbort = new AbortController();
+  const onAbort = () => turnAbort.abort(options?.signal?.reason);
+  if (options?.signal?.aborted) onAbort();
+  else options?.signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    await speakGuarded(speaker, () => sendStream.call(brain, prompt, { ...options, signal: turnAbort.signal }), filler, turnAbort);
+  } finally {
+    options?.signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 /**
@@ -44,7 +52,15 @@ export async function streamAgentNarration(
 ): Promise<void> {
   const streamProgress = brain.streamProgress;
   if (!streamProgress) throw new Error("brain does not support progress narration");
-  await speakGuarded(speaker, () => streamProgress.call(brain, prompt, options), filler);
+  const turnAbort = new AbortController();
+  const onAbort = () => turnAbort.abort(options?.signal?.reason);
+  if (options?.signal?.aborted) onAbort();
+  else options?.signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    await speakGuarded(speaker, () => streamProgress.call(brain, prompt, { ...options, signal: turnAbort.signal }), filler, turnAbort);
+  } finally {
+    options?.signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 /**
@@ -57,7 +73,8 @@ export async function streamAgentNarration(
 async function speakGuarded(
   speaker: StreamingTTSSpeaker,
   source: () => AsyncIterable<string>,
-  filler?: string,
+  filler: string | undefined,
+  turnAbort: AbortController,
 ): Promise<void> {
   let streamError: unknown = null;
   const timer = newTurnTimer();
@@ -88,7 +105,7 @@ async function speakGuarded(
     }
   };
   try {
-    await speaker.speakStream(withFiller());
+    await speaker.speakStream(withFiller(), turnAbort);
   } finally {
     timer.report("brain-turn");
   }

@@ -248,13 +248,13 @@ describe("dictation state machine", () => {
   });
 });
 
-// A transcript that already reached transcription is owned work. Shutdown must
-// drain it rather than letting its typing land after the daemon reports stopped.
-test("stop() during transcription drains the in-flight capture before returning", async () => {
+// Shutdown aborts inference and drains even a provider that ignores the signal.
+test("stop() during transcription aborts inference and prevents late typing", async () => {
   let releaseStt!: () => void;
   const gate = new Promise<void>((r) => { releaseStt = r; });
+  let inferenceSignal: AbortSignal | undefined;
   const { dict, typed } = listener({
-    stt: { transcribe: async () => { await gate; return "landed before shutdown"; } },
+    stt: { transcribe: async (_file, signal) => { inferenceSignal = signal; await gate; return "landed before shutdown"; } },
   });
   await dict.start();
   await dict.toggle();
@@ -265,12 +265,13 @@ test("stop() during transcription drains the in-flight capture before returning"
   const stopping = dict.stop().then(() => { stopped = true; });
   await Bun.sleep(5);
   expect(stopped).toBe(false); // stop() is waiting on the owned transcription
+  expect(inferenceSignal?.aborted).toBe(true);
 
   releaseStt();
   await stopping;
   await finishing;
   expect(stopped).toBe(true);
-  expect(typed).toEqual(["landed before shutdown"]);
+  expect(typed).toEqual([]);
 });
 
 // ...but a wedged provider must not hold the daemon open forever.
@@ -615,12 +616,9 @@ describe("a recorder that will not exit", () => {
     expect(events).toEqual(["acquire", "release", "acquire"]);
   });
 
-  // Round 4 (Codex): a transcription that settles INSIDE the drain window is
-  // delivered — that is what the drain is for — so it reaches typeText after the
-  // typing helper was already released. Releasing only before the drain left a
-  // helper spawned by that delivery with no owner, while stop() reported a
-  // confirmed release and the daemon dropped the listener.
-  test("a transcript delivered during the drain cannot leave a typing helper behind", async () => {
+  // A provider may ignore the abort signal and resolve during the drain. Its
+  // late transcript must not spawn a typing helper after shutdown began.
+  test("a transcript resolved during the drain cannot leave a typing helper behind", async () => {
     const events: string[] = [];
     let releaseStt!: (text: string) => void;
     const sttGate = new Promise<string>((resolve) => { releaseStt = resolve; });
@@ -641,9 +639,7 @@ describe("a recorder that will not exit", () => {
     releaseStt("landed during the drain");
     await stopping;
 
-    // Released once before the drain so an active helper cannot hold it open,
-    // and again after, which is the release stop() actually reports.
-    expect(events).toEqual(["stopTyping", "type:landed during the drain", "stopTyping"]);
+    expect(events).toEqual(["stopTyping", "stopTyping"]);
   });
 
   test("a helper that dies on the post-drain release is not reported unconfirmed", async () => {

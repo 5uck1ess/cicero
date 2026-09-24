@@ -63,6 +63,7 @@ export class ElevenLabsProvider implements TTSProvider {
   }
 
   async generateAudio(text: string, voice?: string, options?: TTSOptions): Promise<ArrayBuffer> {
+    options?.signal?.throwIfAborted();
     const voiceId = this.resolveVoiceId(voice);
     this.requireReady(voiceId);
     const body: Record<string, unknown> = { text, model_id: this.model };
@@ -77,7 +78,7 @@ export class ElevenLabsProvider implements TTSProvider {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
-        signal: providerSignal(this.timeoutMs),
+        signal: providerSignal(this.timeoutMs, options?.signal),
       },
     );
     if (!response.ok) {
@@ -90,6 +91,7 @@ export class ElevenLabsProvider implements TTSProvider {
       PROVIDER_RESPONSE_LIMIT_BYTES.audio,
       "ElevenLabs audio response",
     );
+    options?.signal?.throwIfAborted();
     if (pcm.byteLength === 0) throw new Error("ElevenLabs returned empty audio");
     return wavFromPcm(pcm, { rate: 24_000, width: 2, channels: 1 });
   }

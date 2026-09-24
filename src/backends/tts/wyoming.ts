@@ -1,5 +1,6 @@
-import { TTS_DEFAULT_PORTS, type TTSProvider, type TTSProviderConfig } from "./provider";
+import { TTS_DEFAULT_PORTS, type TTSProvider, type TTSProviderConfig, type TTSOptions } from "./provider";
 import { WyomingClient, type WyomingTransport } from "../wyoming/client";
+import { withWyomingAbort } from "../wyoming/abort";
 import { wavFromPcm, type PcmFormat } from "../wyoming/audio";
 
 export interface WyomingTTSConfig extends TTSProviderConfig {
@@ -49,54 +50,58 @@ export class WyomingTTSProvider implements TTSProvider {
     this.makeClient = makeClient ?? (() => new WyomingClient({ host: this.host, port: this.port }));
   }
 
-  async generateAudio(text: string, voice?: string): Promise<ArrayBuffer> {
+  async generateAudio(text: string, voice?: string, options?: TTSOptions): Promise<ArrayBuffer> {
+    options?.signal?.throwIfAborted();
     const client = this.makeClient();
     try {
-      const data: Record<string, unknown> = { text };
-      const selectedVoice = voice ?? this.voice;
-      if (selectedVoice) data.voice = { name: selectedVoice };
-      await client.send({ type: "synthesize", data });
+      return await withWyomingAbort(client, options?.signal, async () => {
+        const data: Record<string, unknown> = { text };
+        const selectedVoice = voice ?? this.voice;
+        if (selectedVoice) data.voice = { name: selectedVoice };
+        await client.send({ type: "synthesize", data });
 
-      let format: PcmFormat = { ...DEFAULT_FORMAT };
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      const deadline = Date.now() + this.responseTimeoutMs;
-      for (;;) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) {
-          throw new Error(`Wyoming TTS response timed out after ${this.responseTimeoutMs}ms`);
-        }
-        const event = await client.receive(remaining);
-        if (event.type === "audio-start") {
-          const d = event.data ?? {};
-          format = {
-            rate: (d.rate as number) ?? format.rate,
-            width: (d.width as number) ?? format.width,
-            channels: (d.channels as number) ?? format.channels,
-          };
-        } else if (event.type === "audio-chunk") {
-          if (event.payload) {
-            const nextTotal = total + event.payload.byteLength;
-            if (nextTotal > this.maxAudioBytes) {
-              throw new RangeError(
-                `Wyoming TTS audio exceeds ${this.maxAudioBytes} bytes`,
-              );
-            }
-            total = nextTotal;
-            chunks.push(event.payload);
+        let format: PcmFormat = { ...DEFAULT_FORMAT };
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        const deadline = Date.now() + this.responseTimeoutMs;
+        for (;;) {
+          options?.signal?.throwIfAborted();
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            throw new Error(`Wyoming TTS response timed out after ${this.responseTimeoutMs}ms`);
           }
-        } else if (event.type === "audio-stop") {
-          break;
+          const event = await client.receive(remaining);
+          if (event.type === "audio-start") {
+            const d = event.data ?? {};
+            format = {
+              rate: (d.rate as number) ?? format.rate,
+              width: (d.width as number) ?? format.width,
+              channels: (d.channels as number) ?? format.channels,
+            };
+          } else if (event.type === "audio-chunk") {
+            if (event.payload) {
+              const nextTotal = total + event.payload.byteLength;
+              if (nextTotal > this.maxAudioBytes) {
+                throw new RangeError(
+                  `Wyoming TTS audio exceeds ${this.maxAudioBytes} bytes`,
+                );
+              }
+              total = nextTotal;
+              chunks.push(event.payload);
+            }
+          } else if (event.type === "audio-stop") {
+            break;
+          }
         }
-      }
 
-      const pcm = new Uint8Array(total);
-      let offset = 0;
-      for (const c of chunks) {
-        pcm.set(c, offset);
-        offset += c.byteLength;
-      }
-      return wavFromPcm(pcm, format);
+        const pcm = new Uint8Array(total);
+        let offset = 0;
+        for (const c of chunks) {
+          pcm.set(c, offset);
+          offset += c.byteLength;
+        }
+        return wavFromPcm(pcm, format);
+      });
     } catch (error: unknown) {
       throw error instanceof Error ? error : new Error(`Wyoming TTS failed: ${String(error)}`);
     } finally {

@@ -70,9 +70,9 @@ export class TTSSpeaker implements Speaker {
 
       const sentences = this.splitSentences(text);
       if (sentences.length > 2 && text.length > 300) {
-        await this.speakChunked(sentences, pin.provider, stale);
+        await this.speakChunked(sentences, pin.provider, stale, signal);
       } else {
-        await this.speakSingle(text, pin.provider, stale);
+        await this.speakSingle(text, pin.provider, stale, signal);
       }
     } catch (err: unknown) {
       if (stale()) return;
@@ -127,8 +127,9 @@ export class TTSSpeaker implements Speaker {
     text: string,
     provider: TTSProvider,
     stale: () => boolean,
+    signal?: AbortSignal,
   ): Promise<void> {
-    const audioData = await this.generateAudio(text, provider);
+    const audioData = await this.generateAudio(text, provider, signal);
     if (stale()) return;
     log("info", `${provider.name}: ${audioData.byteLength} bytes`);
     await this.playAudio(audioData, stale);
@@ -138,23 +139,26 @@ export class TTSSpeaker implements Speaker {
     sentences: string[],
     provider: TTSProvider,
     stale: () => boolean,
+    signal?: AbortSignal,
   ): Promise<void> {
     log("info", `${provider.name}: chunked mode (${sentences.length} sentences)`);
-    const firstAudio = await this.generateAudio(sentences[0], provider);
+    const firstAudio = await this.generateAudio(sentences[0], provider, signal);
     if (stale()) return;
     const remaining = sentences.slice(1).join(" ");
     const [, restAudio] = await Promise.all([
       this.playAudio(firstAudio, stale),
-      remaining ? this.generateAudio(remaining, provider) : Promise.resolve(null),
+      remaining ? this.generateAudio(remaining, provider, signal) : Promise.resolve(null),
     ]);
     if (restAudio && !stale()) {
       await this.playAudio(restAudio, stale);
     }
   }
 
-  protected async generateAudio(text: string, provider: Pick<TTSProvider, "generateAudio"> = this.provider): Promise<ArrayBuffer> {
+  protected async generateAudio(text: string, provider: Pick<TTSProvider, "generateAudio"> = this.provider, signal?: AbortSignal): Promise<ArrayBuffer> {
+    signal?.throwIfAborted();
     try {
-      const audio = await provider.generateAudio(text);
+      const audio = await provider.generateAudio(text, undefined, { signal });
+      signal?.throwIfAborted();
       return snapshotSynthesizedWav(audio, { allowEmpty: true }).audio;
     } catch (error: unknown) {
       if (error instanceof Error) throw error;

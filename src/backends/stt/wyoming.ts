@@ -5,6 +5,7 @@ import {
   type STTTranscriptionResult,
 } from "./provider";
 import { WyomingClient, type WyomingTransport } from "../wyoming/client";
+import { withWyomingAbort } from "../wyoming/abort";
 import { pcmFromWav } from "../wyoming/audio";
 import { log } from "../../logger";
 
@@ -31,37 +32,44 @@ export class WyomingSTTProvider implements STTProvider {
     this.makeClient = makeClient ?? (() => new WyomingClient({ host: this.host, port: this.port }));
   }
 
-  transcribe(audioFile: string): Promise<string | null> {
-    return this.transcribeResult(audioFile).then((result) => {
+  transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null> {
+    return this.transcribeResult(audioFile, signal).then((result) => {
       if (result.kind === "failure") {
         log("warn", result.reason);
         return null;
       }
       return result.kind === "transcript" ? result.text : null;
     }).catch((err: unknown) => {
+      signal?.throwIfAborted();
       const message = `Wyoming STT failed: ${err instanceof Error ? err.message : String(err)}`;
       log("warn", message);
       return null;
     });
   }
 
-  async transcribeResult(audioFile: string): Promise<STTTranscriptionResult> {
+  async transcribeResult(audioFile: string, signal?: AbortSignal): Promise<STTTranscriptionResult> {
+    signal?.throwIfAborted();
     const client = this.makeClient();
     try {
-      const wav = new Uint8Array(await Bun.file(audioFile).arrayBuffer());
-      const { pcm, format } = pcmFromWav(wav);
-      const meta = { rate: format.rate, width: format.width, channels: format.channels };
+      return await withWyomingAbort(client, signal, async () => {
+        const wav = new Uint8Array(await Bun.file(audioFile).arrayBuffer());
+        signal?.throwIfAborted();
+        const { pcm, format } = pcmFromWav(wav);
+        const meta = { rate: format.rate, width: format.width, channels: format.channels };
 
-      await client.send({ type: "audio-start", data: { ...meta, timestamp: 0 } });
-      for (let i = 0; i < pcm.byteLength; i += CHUNK_BYTES) {
-        await client.send({ type: "audio-chunk", data: meta }, pcm.subarray(i, i + CHUNK_BYTES));
-      }
-      await client.send({ type: "audio-stop", data: { timestamp: 0 } });
+        await client.send({ type: "audio-start", data: { ...meta, timestamp: 0 } });
+        for (let i = 0; i < pcm.byteLength; i += CHUNK_BYTES) {
+          signal?.throwIfAborted();
+          await client.send({ type: "audio-chunk", data: meta }, pcm.subarray(i, i + CHUNK_BYTES));
+        }
+        await client.send({ type: "audio-stop", data: { timestamp: 0 } });
 
-      const event = await client.receiveOfType("transcript");
-      const text = ((event.data?.text as string | undefined) ?? "").trim();
-      return text.length >= 1 ? { kind: "transcript", text } : { kind: "empty" };
+        const event = await client.receiveOfType("transcript");
+        const text = ((event.data?.text as string | undefined) ?? "").trim();
+        return text.length >= 1 ? { kind: "transcript", text } : { kind: "empty" };
+      });
     } catch (err: unknown) {
+      signal?.throwIfAborted();
       return {
         kind: "failure",
         reason: `Wyoming STT failed: ${err instanceof Error ? err.message : String(err)}`,

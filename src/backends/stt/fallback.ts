@@ -47,10 +47,12 @@ export class FallbackSTTProvider implements STTProvider {
     this.fallbackLogName = logName(fallback.name);
   }
 
-  async transcribe(audioFile: string): Promise<string | null> {
+  async transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null> {
+    signal?.throwIfAborted();
     const observation = this.nextObservation();
     try {
-      const primary = await readTranscription(this.primary, audioFile);
+      const primary = await readTranscription(this.primary, audioFile, signal);
+      signal?.throwIfAborted();
       if (primary.kind === "transcript") {
         this.holdFallbackState(observation);
         this.markRecovered(observation);
@@ -67,7 +69,8 @@ export class FallbackSTTProvider implements STTProvider {
         return null;
       }
 
-      const secondary = await readTranscription(this.fallback, audioFile);
+      const secondary = await readTranscription(this.fallback, audioFile, signal);
+      signal?.throwIfAborted();
       if (secondary.kind === "failure") {
         this.markFallbackUnavailable(secondary.reason, observation, true);
         this.markDegraded(
@@ -87,6 +90,7 @@ export class FallbackSTTProvider implements STTProvider {
       this.markDegraded(primary.reason, observation, "available");
       return secondary.kind === "transcript" ? secondary.text : null;
     } catch (error: unknown) {
+      signal?.throwIfAborted();
       this.markDegraded(detail(error), observation, "unknown");
       return null;
     }
@@ -346,14 +350,17 @@ export class FallbackSTTProvider implements STTProvider {
 async function readTranscription(
   provider: STTProvider,
   audioFile: string,
+  signal?: AbortSignal,
 ): Promise<TranscriptionObservation> {
   try {
-    if (provider.transcribeResult) return await provider.transcribeResult(audioFile);
-    const transcript = await provider.transcribe(audioFile);
+    signal?.throwIfAborted();
+    if (provider.transcribeResult) return await provider.transcribeResult(audioFile, signal);
+    const transcript = await provider.transcribe(audioFile, signal);
     return transcript === null
       ? { kind: "ambiguous-empty" }
       : { kind: "transcript", text: transcript };
   } catch (error: unknown) {
+    signal?.throwIfAborted();
     return { kind: "failure", reason: detail(error) };
   }
 }

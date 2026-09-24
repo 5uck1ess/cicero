@@ -1,6 +1,6 @@
 import { pinGeneration, type GenerationPin } from "../backends/hot-swap";
 import { speakable } from "../speaker/speakable";
-import type { TTSProvider } from "../backends/tts/provider";
+import type { TTSProvider, TTSOptions } from "../backends/tts/provider";
 
 /** The narrow TTS surface a web turn holds: synthesis plus a pinnable generation. */
 export type LaneTTS = Pick<TTSProvider, "generateAudio"> & {
@@ -25,10 +25,13 @@ export function createLaneTts(
   laneVoice: () => string | undefined,
 ): LaneTTS {
   const speak = (source: Pick<TTSProvider, "generateAudio">) =>
-    (text: string, _voice?: string, options?: { speed?: number }): Promise<ArrayBuffer> => {
+    async (text: string, _voice?: string, options?: TTSOptions): Promise<ArrayBuffer> => {
+      options?.signal?.throwIfAborted();
       const clean = speakable(text);
-      if (!clean) return Promise.resolve(new ArrayBuffer(0));
-      return source.generateAudio(clean, laneVoice(), options);
+      if (!clean) return new ArrayBuffer(0);
+      const audio = await source.generateAudio(clean, laneVoice(), options);
+      options?.signal?.throwIfAborted();
+      return audio;
     };
   return {
     generateAudio: speak(provider),

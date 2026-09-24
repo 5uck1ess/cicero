@@ -111,7 +111,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     const sttPin = pinGeneration(deps.stt);
     let transcript: string;
     try {
-      transcript = (await sttPin.provider.transcribe(tmpFile))?.trim() ?? "";
+      transcript = (await sttPin.provider.transcribe(tmpFile, deps.signal))?.trim() ?? "";
     } finally {
       sttPin.release();
     }
@@ -142,14 +142,14 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
           const sentences = nonEmptySentences(segmentSentences(oneChunk(detail)));
           for await (const chunk of sentenceGroups(sentences, deps.coalesce, deps.signal)) {
             throwIfTurnAborted(deps.signal);
-            const providerAudio = await ttsPin.provider.generateAudio(chunk.text);
+            const providerAudio = await ttsPin.provider.generateAudio(chunk.text, undefined, { signal: deps.signal });
             throwIfTurnAborted(deps.signal);
             const part = admitProviderAudio(providerAudio, maxAudioBytes);
             if (part.byteLength > 0) parts.append(part);
           }
           return { transcript, reply: detail, audio: parts.finish() };
         }
-        const providerAudio = await ttsPin.provider.generateAudio(detail);
+        const providerAudio = await ttsPin.provider.generateAudio(detail, undefined, { signal: deps.signal });
         throwIfTurnAborted(deps.signal);
         const audio = admitProviderAudio(providerAudio, maxAudioBytes);
         return {
@@ -196,7 +196,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     );
     for await (const chunk of chunks) {
       throwIfTurnAborted(deps.signal);
-      const providerAudio = await ttsPin.provider.generateAudio(chunk.text);
+      const providerAudio = await ttsPin.provider.generateAudio(chunk.text, undefined, { signal: deps.signal });
       throwIfTurnAborted(deps.signal);
       const part = admitProviderAudio(providerAudio, maxAudioBytes);
       if (part.byteLength > 0) {
@@ -940,7 +940,7 @@ export async function streamWebTurn(
     if (deps.signal?.aborted || sink.aborted()) return;
     let transcript: string;
     try {
-      transcript = (await sttPin.provider.transcribe(tmpFile))?.trim() ?? "";
+      transcript = (await sttPin.provider.transcribe(tmpFile, deps.signal))?.trim() ?? "";
     } finally {
       // Release as soon as decoding is done. Holding it across the brain+TTS
       // reply would pin a retired STT generation for the whole turn, and a swap
@@ -1026,7 +1026,7 @@ async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink
       if (sink.aborted()) break;
       for (const part of chunk.parts) sink.sentence(part);
       const audio = admitProviderAudio(
-        await pin.provider.generateAudio(chunk.text, undefined, { speed: deps.voice?.state.rate }),
+        await pin.provider.generateAudio(chunk.text, undefined, { speed: deps.voice?.state.rate, signal: deps.signal }),
       );
       if (sink.aborted()) break;
       if (audio.byteLength > 0) {
@@ -1274,7 +1274,7 @@ async function streamReply(
         let stop = false;
         const render = async (call: { text: string; parts: string[] }): Promise<void> => {
           const audio = admitProviderAudio(
-            await ttsPin.provider.generateAudio(call.text, undefined, { speed: deps.voice?.state.rate }),
+            await ttsPin.provider.generateAudio(call.text, undefined, { speed: deps.voice?.state.rate, signal: turnAbort?.signal ?? deps.signal }),
           );
           if (sink.aborted() && !parked) { stop = true; return; }
           if (audio.byteLength > 0) {
@@ -1354,7 +1354,7 @@ async function streamReply(
         const line = parkCfg.line ?? DEFAULT_PARK_LINE;
         sink.sentence(line);
         const audio = admitProviderAudio(
-          await ttsPin.provider.generateAudio(line, undefined, { speed: deps.voice?.state.rate }),
+          await ttsPin.provider.generateAudio(line, undefined, { speed: deps.voice?.state.rate, signal: turnAbort?.signal ?? deps.signal }),
         );
         if (audio.byteLength > 0) sink.audio(audio);
         sink.done();
@@ -1400,7 +1400,7 @@ async function streamReply(
       }
       sink.sentence(coda);
       const audio = admitProviderAudio(
-        await ttsPin.provider.generateAudio(coda, undefined, { speed: deps.voice?.state.rate }),
+        await ttsPin.provider.generateAudio(coda, undefined, { speed: deps.voice?.state.rate, signal: turnAbort?.signal ?? deps.signal }),
       );
       if (!sink.aborted() && audio.byteLength > 0) {
         sink.audio(audio);
