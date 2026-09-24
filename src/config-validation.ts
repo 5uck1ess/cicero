@@ -1,3 +1,4 @@
+import { MAX_BOARD_ASSIGNEES } from "./notify/board-presets";
 import type { CiceroConfig } from "./types";
 import { log } from "./logger";
 import { TIER_PRESETS } from "./backends/tiers";
@@ -1133,8 +1134,24 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
     if (isRecord(config.notify.kanban)) {
       checkKnownKeys(config.notify.kanban, "notify.kanban", [
-        "enabled", "interval_seconds", "command", "task_command", "call_back", "nudge_after_minutes",
+        "enabled", "interval_seconds", "command", "task_command", "call_back", "nudge_after_minutes", "preset", "assignees",
       ], issues);
+      const { preset, assignees } = config.notify.kanban;
+      if (preset !== undefined && (typeof preset !== "string" || !["hermes", "multica", "paperclip"].includes(preset))) {
+        issues.push("notify.kanban.preset must be hermes, multica, or paperclip");
+      }
+      if (assignees !== undefined) {
+        if (!isRecord(assignees)) {
+          issues.push("notify.kanban.assignees must be a mapping of board ids to non-empty names");
+        } else {
+          const entries = Object.entries(assignees);
+          if (entries.length > MAX_BOARD_ASSIGNEES) issues.push(`notify.kanban.assignees must have at most ${MAX_BOARD_ASSIGNEES} entries`);
+          if (entries.some(([id, name]) => !id.trim() || id.length > 128
+            || typeof name !== "string" || !name.trim() || name.length > 128)) {
+            issues.push("notify.kanban.assignees ids and names must be non-empty strings of at most 128 characters");
+          }
+        }
+      }
       checkOptionalInteger(config.notify.kanban, "interval_seconds", "notify.kanban", issues, { min: 1 });
       checkOptionalInteger(config.notify.kanban, "nudge_after_minutes", "notify.kanban", issues, { min: 0 });
       for (const key of ["command", "task_command"] as const) {

@@ -1,3 +1,4 @@
+import { normalizeBoardList } from "../../src/notify/board-presets";
 import { test, expect } from "bun:test";
 import {
   KanbanWatcher,
@@ -30,7 +31,7 @@ const task = (id: string, status: string, title = "Fix the thing", assignee = "c
 
 test("first poll seeds silently — pre-existing done tasks are old news", async () => {
   const lines: string[] = [];
-  const w = watcher(() => [task("t1", "done"), task("t2", "running")], lines);
+  const w = watcher(() => [task("t1", "done"), task("t2", "in_progress")], lines);
   await w.tick();
   expect(lines).toEqual([]);
 });
@@ -68,7 +69,7 @@ test("snapshot marks boards larger than its task cap as truncated", async () => 
 
 test("a transition into done announces once and never re-announces", async () => {
   const lines: string[] = [];
-  let status = "running";
+  let status = "in_progress";
   const w = watcher(() => [task("t1", status)], lines);
   await w.tick();          // seed
   status = "done";
@@ -79,7 +80,7 @@ test("a transition into done announces once and never re-announces", async () =>
 
 test("a task first seen already-terminal (created+finished between polls) announces", async () => {
   const lines: string[] = [];
-  const board: KanbanTask[] = [task("t1", "running")];
+  const board: KanbanTask[] = [task("t1", "in_progress")];
   const w = watcher(() => board, lines);
   await w.tick();          // seed
   board.push(task("t9", "done", "Ship it"));
@@ -89,10 +90,10 @@ test("a task first seen already-terminal (created+finished between polls) announ
 
 test("blocked and review get their own phrasing; plain status churn is silent", async () => {
   const lines: string[] = [];
-  let s1 = "ready", s2 = "running";
+  let s1 = "todo", s2 = "in_progress";
   const w = watcher(() => [task("t1", s1, "Migrate the db"), task("t2", s2, "Add docs")], lines);
   await w.tick();          // seed
-  s1 = "running"; s2 = "review";
+  s1 = "in_progress"; s2 = "review";
   await w.tick();
   s1 = "blocked";
   await w.tick();
@@ -105,7 +106,7 @@ test("blocked and review get their own phrasing; plain status churn is silent", 
 test("a failing poll is swallowed and doesn't reset seeding", async () => {
   const lines: string[] = [];
   let fail = false;
-  let status = "running";
+  let status = "in_progress";
   const w = new KanbanWatcher({
     list: async () => { if (fail) throw new Error("board down"); return [task("t1", status)]; },
     announce: (t) => lines.push(spokenLine(t)),
@@ -146,7 +147,7 @@ test("nudge: an unstarted task past the threshold nudges from the first poll; ba
   const board: KanbanTask[] = [
     { id: "old", title: "Waiting task", status: "todo", created_at: now - 2 * 3600 },        // 2h old, unstarted
     { id: "fresh", title: "New task", status: "todo", created_at: now - 60 },                // 1 min old
-    { id: "live", title: "Running task", status: "running", created_at: now - 2 * 3600, started_at: now - 3600 },
+    { id: "live", title: "Running task", status: "in_progress", created_at: now - 2 * 3600, started_at: now - 3600 },
     { id: "parked", title: "Blocked task", status: "blocked", created_at: now - 2 * 3600 }, // announce-worthy, not nudge-worthy
   ];
   const w = new KanbanWatcher({
@@ -226,11 +227,11 @@ test("nudge: the gate opens once the parent is done, then the task nudges", asyn
   expect(nudges).toEqual(["qa"]);
 });
 
-test("nudge: a terminal-but-not-done parent (archived) does not gate forever", async () => {
+test("nudge: a terminal-but-not-done parent (cancelled) does not gate forever", async () => {
   const nudges: string[] = [];
   const now = Math.floor(Date.now() / 1000);
   const board: KanbanTask[] = [
-    { id: "work", title: "Implement X", status: "archived", created_at: now - 2 * 3600, started_at: now - 3600 },
+    { id: "work", title: "Implement X", status: "cancelled", created_at: now - 2 * 3600, started_at: now - 3600 },
     { id: "qa", title: "Verify X", status: "todo", created_at: now - 2 * 3600 },
   ];
   const w = new KanbanWatcher({
@@ -242,7 +243,7 @@ test("nudge: a terminal-but-not-done parent (archived) does not gate forever", a
     parents: async (t) => (t.id === "qa" ? ["work"] : []),
   });
   await w.tick();
-  expect(nudges).toEqual(["qa"]); // archived is terminal — the dependency is satisfied
+  expect(nudges).toEqual(["qa"]); // cancelled is terminal — the dependency is satisfied
 });
 
 test("nudge: a self-referential parent does not gate the task against itself", async () => {
@@ -270,7 +271,7 @@ test("nudge: the gate sees the parent even when the child is listed first", asyn
   // list before the nudge loop, so ordering must not affect the gate.
   const board: KanbanTask[] = [
     { id: "qa", title: "Verify X", status: "todo", created_at: now - 2 * 3600 },
-    { id: "work", title: "Implement X", status: "doing", created_at: now - 2 * 3600, started_at: now - 3600 },
+    { id: "work", title: "Implement X", status: "in_progress", created_at: now - 2 * 3600, started_at: now - 3600 },
   ];
   const w = new KanbanWatcher({
     list: async () => board,
@@ -287,7 +288,7 @@ test("nudge: the gate sees the parent even when the child is listed first", asyn
 test("nudge: a parked task re-checks its gate on a cadence, not every poll", async () => {
   const now = Math.floor(Date.now() / 1000);
   const board: KanbanTask[] = [
-    { id: "work", title: "Implement X", status: "doing", created_at: now - 2 * 3600, started_at: now - 3600 },
+    { id: "work", title: "Implement X", status: "in_progress", created_at: now - 2 * 3600, started_at: now - 3600 },
     { id: "qa", title: "Verify X", status: "todo", created_at: now - 2 * 3600 },
   ];
   let lookups = 0;
@@ -319,7 +320,7 @@ test("nudge: parent-gate lookups are bounded per poll and deferred work is retri
     created_at: now - 2 * 3600,
   }));
   const board: KanbanTask[] = [
-    { id: "work", title: "Implement", status: "doing", created_at: now - 2 * 3600, started_at: now - 3600 },
+    { id: "work", title: "Implement", status: "in_progress", created_at: now - 2 * 3600, started_at: now - 3600 },
     ...children,
   ];
   let lookups = 0;
@@ -480,7 +481,7 @@ test("stop aborts an active poll, waits for settlement, and prevents post-stop a
   let activeSettled = false;
   const w = new KanbanWatcher({
     list: async (signal) => {
-      if (phase === "seed") return [task("t1", "running")];
+      if (phase === "seed") return [task("t1", "in_progress")];
       activeStarted = true;
       return await new Promise<KanbanTask[]>((resolve) => {
         signal.addEventListener("abort", () => {
@@ -511,7 +512,7 @@ test("stop aborts an active poll, waits for settlement, and prevents post-stop a
 });
 
 test("an async announcement is part of the poll and shutdown barrier", async () => {
-  let status = "running";
+  let status = "in_progress";
   let listCalls = 0;
   let announceStarted = false;
   let releaseAnnouncement: (() => void) | undefined;
@@ -550,7 +551,7 @@ test("kanban list drains stderr and enforces its wall deadline", async () => {
     `process.stderr.write("d".repeat(60_000)); process.stdout.write(JSON.stringify([{ id: "1", title: "Task", status: "running" }]));`,
   ];
   await expect(listViaCli(command, { timeoutMs: 2_000 })).resolves.toEqual([
-    { id: "1", title: "Task", status: "running" },
+    { id: "1", title: "Task", status: "in_progress", assignee: null, created_at: null, started_at: null, completed_at: null },
   ]);
 
   await expect(listViaCli([process.execPath, "-e", `setInterval(() => {}, 1_000);`], { timeoutMs: 50 }))
@@ -574,4 +575,72 @@ test("task link drains stderr and preserves cancellation instead of swallowing i
   );
   setTimeout(() => controller.abort(), 40);
   await expect(lookup).rejects.toBeInstanceOf(CommandAbortError);
+});
+
+test("Multica in_progress without started_at never nudges, even on repeated overdue polls", async () => {
+  const board = normalizeBoardList({ issues: [{ id: "work", identifier: "DEV-1", title: "Work", status: "in_progress",
+    assignee_type: "agent", assignee_id: "agent-id", parent_issue_id: null,
+    created_at: "2026-09-24T00:00:00Z", updated_at: "2026-09-24T01:00:00Z" }], total: 1, limit: 50, offset: 0, has_more: false }, { preset: "multica" });
+  const nudges: string[] = [];
+  let now = Date.parse("2026-09-24T05:00:00Z");
+  const w = new KanbanWatcher({ list: async () => board, announce: () => {}, intervalMs: 60_000,
+    nudge: (t) => { nudges.push(t.id); }, nudgeAfterMs: 60_000, now: () => now });
+  await w.tick();
+  now += 24 * 3600_000;
+  await w.tick();
+  expect(nudges).toEqual([]);
+});
+
+test("Paperclip list parentId gates without a detail lookup or a task command", async () => {
+  const row = { identifier: "DEV-1", title: "Work", assigneeAgentId: null, assigneeUserId: null,
+    createdAt: "2026-09-24T00:00:00Z", startedAt: null, completedAt: null, cancelledAt: null };
+  let board = normalizeBoardList([{ ...row, id: "child", status: "todo", parentId: "parent" },
+    { ...row, id: "parent", status: "in_progress", parentId: null }], { preset: "paperclip" });
+  const nudges: string[] = [];
+  let details = 0;
+  const opts = { list: async () => board, announce: () => {}, intervalMs: 60_000,
+    nudge: (t: KanbanTask) => { nudges.push(t.id); }, nudgeAfterMs: 60_000,
+    now: () => Date.parse("2026-09-24T05:00:00Z"), gateRecheckMs: 0 };
+  const withoutDetail = new KanbanWatcher(opts);
+  const withDetail = new KanbanWatcher({ ...opts, parents: async () => { details++; return []; } });
+  await withoutDetail.tick();
+  await withDetail.tick();
+  expect(nudges).toEqual([]);
+  const snapshot = withDetail.snapshot()!;
+  snapshot.tasks[0]!.parent_ids!.push("mutated");
+  expect(withDetail.snapshot()!.tasks[0]!.parent_ids).toEqual(["parent"]);
+  board = normalizeBoardList([{ ...row, id: "child", status: "todo", parentId: "parent" },
+    { ...row, id: "parent", status: "cancelled", parentId: null }], { preset: "paperclip" });
+  await withoutDetail.tick();
+  await withDetail.tick();
+  expect(nudges).toEqual(["child", "child"]);
+  expect(details).toBe(0);
+});
+
+test("list parent gates do not spend the bounded detail subprocess budget", async () => {
+  const nudges: string[] = [];
+  let details = 0;
+  const board = Array.from({ length: 32 }, (_, i) => ({ id: String(i), title: "Queued", status: "todo", created_at: 0, parent_ids: [] }));
+  const w = new KanbanWatcher({ list: async () => board, announce: () => {}, intervalMs: 60_000,
+    nudge: (t) => { nudges.push(t.id); }, nudgeAfterMs: 60_000, now: () => 3600_000,
+    parents: async () => { details++; return []; } });
+  await w.tick();
+  expect(nudges).toHaveLength(32);
+  expect(details).toBe(0);
+});
+
+test("unknown and cancelled statuses never announce or nudge, including canonical-name collisions", async () => {
+  let board: KanbanTask[] = [];
+  const announcements: string[] = [], nudges: string[] = [];
+  const w = new KanbanWatcher({ list: async () => board, announce: (t) => { announcements.push(t.id); }, intervalMs: 60_000,
+    nudge: (t) => { nudges.push(t.id); }, nudgeAfterMs: 60_000, now: () => Date.parse("2026-09-24T05:00:00Z") });
+  await w.tick();
+  board = normalizeBoardList({ issues: ["custom-paused", "cancelled", "review"].map((status) => ({ id: status,
+    identifier: "DEV-1", title: "Work", status, assignee_type: null, assignee_id: null, parent_issue_id: null,
+    created_at: "2026-09-24T00:00:00Z", updated_at: "2026-09-24T01:00:00Z" })), total: 3, limit: 50, offset: 0, has_more: false }, { preset: "multica" });
+  await w.tick();
+  await w.tick();
+  expect(announcements).toEqual([]);
+  expect(nudges).toEqual([]);
+  expect(board.find((t) => t.id === "review")).toMatchObject({ status: "review", unknown_status: true });
 });

@@ -1,3 +1,4 @@
+import { boundedParentIds, detailArgs, detailParentIds, normalizeBoardList, type BoardNormalizationOptions } from "./board-presets";
 import { log } from "../logger";
 import { CommandAbortError, runBoundedCommand } from "../process/bounded-command";
 
@@ -7,7 +8,9 @@ const KANBAN_LINK_STDOUT_LIMIT_BYTES = 256 * 1024;
 const KANBAN_STDERR_LIMIT_BYTES = 64 * 1024;
 export const KANBAN_SNAPSHOT_TASK_LIMIT = 1_000;
 
-export interface KanbanCommandOptions {
+export interface KanbanCommandOptions extends BoardNormalizationOptions {
+  /** Injectable bounded runner for offline adapter tests. */
+  runCommand?: typeof runBoundedCommand;
   signal?: AbortSignal;
   timeoutMs?: number;
 }
@@ -28,8 +31,12 @@ export interface KanbanTask {
   assignee?: string | null;
   /** Unix seconds — present in the board CLI's JSON output. */
   created_at?: number | null;
-  /** Unix seconds; missing/null = nobody has picked the task up yet. */
+  /** Unix seconds; started-ness also depends on canonical status. */
   started_at?: number | null;
+  completed_at?: number | null;
+  parent_ids?: string[];
+  /** Raw unknown statuses can collide with canonical names; never act on them. */
+  unknown_status?: boolean;
 }
 
 export interface KanbanSnapshot {
@@ -39,13 +46,13 @@ export interface KanbanSnapshot {
   totalTasks: number;
 }
 
-export interface KanbanWatchConfig {
+export interface KanbanWatchConfig extends BoardNormalizationOptions {
   enabled?: boolean;
   /** Poll cadence. Default 20s — announcements should feel prompt, not instant. */
   interval_seconds?: number;
-  /** Command that prints the board as a JSON array (required to watch a board), e.g. [hermes, kanban, list, --json]. */
+  /** Command that prints the board in the preset JSON shape (required to watch a board), e.g. [hermes, kanban, list, --json]. */
   command?: string[];
-  /** Command whose `<task_command> <id> --json` prints one task's detail; enables the deliverable-link card on announcements. Absent = no link lookup. */
+  /** Command whose `<task_command> <id> <preset detail args>` prints one task's detail; enables the deliverable-link card on announcements. Absent = no link lookup. */
   task_command?: string[];
 }
 
@@ -87,7 +94,7 @@ export async function listViaCli(
   command: string[],
   options: KanbanCommandOptions = {},
 ): Promise<KanbanTask[]> {
-  const result = await runBoundedCommand(command, {
+  const result = await (options.runCommand ?? runBoundedCommand)(command, {
     signal: options.signal,
     timeoutMs: options.timeoutMs ?? KANBAN_COMMAND_TIMEOUT_MS,
     stdoutLimitBytes: KANBAN_LIST_STDOUT_LIMIT_BYTES,
@@ -97,11 +104,13 @@ export async function listViaCli(
     stderrCapture: "tail",
   });
   if (result.exitCode !== 0) {
-    throw new Error(`${command[0]} exited ${result.exitCode}: ${result.stderr.text.slice(-160)}`);
+    // Board CLI stderr may echo credentials; keep the error to the exit code.
+    throw new Error(`kanban list command exited ${result.exitCode}`);
   }
-  const parsed = JSON.parse(result.stdout.text) as unknown;
-  if (!Array.isArray(parsed)) throw new Error("kanban list did not return a JSON array");
-  return parsed as KanbanTask[];
+  let parsed: unknown;
+  try { parsed = JSON.parse(result.stdout.text); }
+  catch { throw new Error("kanban list returned invalid JSON"); }
+  return normalizeBoardList(parsed, options);
 }
 
 /**
@@ -116,9 +125,10 @@ export async function taskLinkViaCli(
   command: string[],
   options: KanbanCommandOptions = {},
 ): Promise<string | null> {
+  if (options.preset && options.preset !== "hermes") return null;
   const URL_RE = /https?:\/\/[^\s<>"')\]]+/;
   try {
-    const result = await runBoundedCommand([...command, id, "--json"], {
+    const result = await (options.runCommand ?? runBoundedCommand)([...command, id, ...detailArgs(options.preset)], {
       signal: options.signal,
       timeoutMs: options.timeoutMs ?? KANBAN_COMMAND_TIMEOUT_MS,
       stdoutLimitBytes: KANBAN_LINK_STDOUT_LIMIT_BYTES,
@@ -154,9 +164,6 @@ export async function taskLinkViaCli(
   }
 }
 
-/** Cap on parent ids read from a task's detail — a sane board has a handful. */
-const MAX_PARENT_IDS = 32;
-
 /** How often a parked (parent-gated) task re-evaluates its gate. */
 const GATE_RECHECK_MS = 5 * 60_000;
 
@@ -185,28 +192,14 @@ const GATE_LOOKUP_TIMEOUT_MS = 3_000;
 const MAX_GATE_LOOKUPS_PER_POLL = 16;
 
 /**
- * Parent statuses that DON'T gate a child — a parent in any of these has
- * reached a terminal state, so the dependency is satisfied. Anything else that
- * is present on the board (todo/doing/blocked/…) is an unfinished parent that
- * gates. Matched case-insensitively. Terminal-but-not-"done" statuses like
- * `archived`/`cancelled` are included so a child is never silenced forever
- * behind a parent that will never reach exactly `done`.
+ * Canonical terminal parents satisfy dependencies. Unknown statuses keep gates closed.
  */
-const SATISFIED_PARENT_STATUSES = new Set([
-  "done",
-  "complete",
-  "completed",
-  "resolved",
-  "closed",
-  "archived",
-  "cancelled",
-  "canceled",
-]);
+const SATISFIED_PARENT_STATUSES = new Set(["done", "cancelled"]);
 
 /**
- * A task's parent ids from `<task_command> <id> --json`. The board's list
- * output omits parents (it is null there), so a dependency gate is only
- * visible via the per-task detail. Returns [] when the task has no parents,
+ * A task's parent ids from `<task_command> <id> <preset detail args>`. Hermes list
+ * output omits parents, so its dependency gates need per-task detail.
+ * Returns [] when the task has no parents,
  * the field is absent/malformed, or the CLI hiccups — a lookup failure must
  * never be mistaken for "gated" (that would silence a genuinely stalled task).
  */
@@ -216,7 +209,7 @@ export async function taskParentsViaCli(
   options: KanbanCommandOptions = {},
 ): Promise<string[]> {
   try {
-    const result = await runBoundedCommand([...command, id, "--json"], {
+    const result = await (options.runCommand ?? runBoundedCommand)([...command, id, ...detailArgs(options.preset)], {
       signal: options.signal,
       timeoutMs: options.timeoutMs ?? GATE_LOOKUP_TIMEOUT_MS,
       stdoutLimitBytes: KANBAN_LINK_STDOUT_LIMIT_BYTES,
@@ -226,12 +219,7 @@ export async function taskParentsViaCli(
       stderrCapture: "tail",
     });
     if (result.exitCode !== 0) return [];
-    const d = JSON.parse(result.stdout.text) as { parents?: unknown };
-    if (!Array.isArray(d.parents)) return [];
-    return d.parents
-      .filter((p): p is string => typeof p === "string")
-      .slice(0, MAX_PARENT_IDS)
-      .map((p) => p.slice(0, 128));
+    return detailParentIds(JSON.parse(result.stdout.text), options.preset);
   } catch (error) {
     if (error instanceof CommandAbortError || options.signal?.aborted) throw error;
     return [];
@@ -268,10 +256,10 @@ export class KanbanWatcher {
     nudge?: (task: KanbanTask, waitedMinutes: number, nth: number, signal: AbortSignal) => void | Promise<void>;
     nudgeAfterMs?: number;
     /**
-     * A task's parent ids (the list feed omits them). When provided, a task
+     * Fallback parent ids when the list feed omits them. A task
      * whose parent is still on the board in a non-terminal status is treated as
      * parked behind a dependency, not neglected, so no "nobody picked this up"
-     * nudge fires. Absent = nudge on age alone (previous behavior).
+     * nudge fires. Absent = use list parents if available, otherwise nudge on age alone.
      */
     parents?: (task: KanbanTask, signal: AbortSignal) => Promise<string[]>;
     /**
@@ -334,7 +322,7 @@ export class KanbanWatcher {
       asOfMs: this.lastSnapshot.asOfMs,
       truncated: this.lastSnapshot.truncated,
       totalTasks: this.lastSnapshot.totalTasks,
-      tasks: this.lastSnapshot.tasks.map((task) => ({ ...task })),
+      tasks: this.lastSnapshot.tasks.map((task) => ({ ...task, ...(task.parent_ids ? { parent_ids: [...task.parent_ids] } : {}) })),
     };
   }
 
@@ -370,7 +358,7 @@ export class KanbanWatcher {
     // parent). A parent absent here (done-and-archived, or off the board) is
     // treated as a satisfied gate.
     this.statusById = new Map(
-      tasks.filter((t) => t?.id && typeof t.status === "string").map((t) => [t.id, t.status]),
+      tasks.filter((t) => t?.id && typeof t.status === "string").map((t) => [t.id, t.unknown_status ? "" : t.status]),
     );
     this.gateLookupsThisPoll = 0; // fresh per-poll subprocess budget
     for (const t of tasks) {
@@ -382,7 +370,7 @@ export class KanbanWatcher {
       if (signal.aborted) return;
       if (!this.seeded) continue;
       const entered = prev === undefined ? ANNOUNCE.has(t.status) : prev !== t.status && ANNOUNCE.has(t.status);
-      if (!entered) continue;
+      if (!entered || t.unknown_status) continue;
       try {
         await this.opts.announce(t, signal);
       } catch (error) {
@@ -417,7 +405,7 @@ export class KanbanWatcher {
   }
 
   /**
-   * A task with no started_at past the nudge threshold gets "nobody's picked
+   * A canonical todo task with no started_at past the nudge threshold gets "nobody's picked
    * this up" reminders that KEEP COMING until someone starts it (deliberate:
    * one ping is missable). Persistent, not spammy — the gap doubles each
    * reminder (1h → 2h → 4h with the default threshold), capped at 4h or the
@@ -428,7 +416,7 @@ export class KanbanWatcher {
   private async checkNudge(t: KanbanTask, signal: AbortSignal): Promise<void> {
     const { nudge, nudgeAfterMs } = this.opts;
     if (!nudge || !nudgeAfterMs) return;
-    if (t.started_at || ANNOUNCE.has(t.status) || typeof t.created_at !== "number") {
+    if (!isUnstarted(t) || typeof t.created_at !== "number" || !Number.isFinite(t.created_at)) {
       this.nudged.delete(t.id); // picked up or resolved — stop reminding
       return;
     }
@@ -442,18 +430,18 @@ export class KanbanWatcher {
     // task every poll. A task parked behind an unfinished parent is waiting by
     // design, not neglected.
     const recheckMs = this.opts.gateRecheckMs ?? GATE_RECHECK_MS;
-    if (this.opts.parents) {
+    if (t.parent_ids !== undefined || this.opts.parents) {
       // Bound the sequential subprocess work in one poll: past the budget, defer
       // this task's gate decision to a later poll rather than let a large board
       // run an unbounded chain of ~seconds-long lookups that would delay every
       // later task's nudge and announcement. Deferred tasks stay due (not the
       // longer gate cooldown) so once the looked-up tasks enter their cooldown
       // the overflow rotates in and no task is starved. Escalation is preserved.
-      if (this.gateLookupsThisPoll >= MAX_GATE_LOOKUPS_PER_POLL) {
+      if (t.parent_ids === undefined && this.gateLookupsThisPoll >= MAX_GATE_LOOKUPS_PER_POLL) {
         this.nudged.set(t.id, { count: state.count, nextAt: now });
         return;
       }
-      this.gateLookupsThisPoll++;
+      if (t.parent_ids === undefined) this.gateLookupsThisPoll++;
       if (await this.isGatedByParent(t, signal)) {
         // The lookup may have awaited across a shutdown; a superseded/aborted
         // poll must not publish a late nudge into a stopped watcher.
@@ -487,18 +475,17 @@ export class KanbanWatcher {
    *   configured list command filters (by assignee/status/tenant), an unfinished
    *   parent it omits looks satisfied; on a filtered board this can still let a
    *   nudge through. That is the safe direction (a spurious reminder, never a
-   *   silenced task) and single-operator Hermes boards are unfiltered.
+   *   silenced task) so configure an unfiltered list when possible.
    * - A terminal-but-not-`done` parent ({@link SATISFIED_PARENT_STATUSES},
-   *   e.g. `archived`) does NOT gate, so a child is never parked forever behind
+   *   e.g. `cancelled`) does NOT gate, so a child is never parked forever behind
    *   a parent that will never reach exactly `done`. A self-parent never gates.
    * The status snapshot is taken once per poll, so a parent that flips right
    * after the snapshot is one poll stale — bounded and self-correcting.
    */
   private async isGatedByParent(t: KanbanTask, signal: AbortSignal): Promise<boolean> {
-    if (!this.opts.parents) return false;
     let parentIds: string[];
     try {
-      parentIds = await this.opts.parents(t, signal);
+      parentIds = t.parent_ids ?? await this.opts.parents?.(t, signal) ?? [];
     } catch (error) {
       if (signal.aborted) return false;
       log("warn", `kanban watch: parent lookup failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -508,7 +495,7 @@ export class KanbanWatcher {
       if (pid === t.id) return false; // a self-parent is not a real dependency
       const status = this.statusById.get(pid);
       if (status === undefined) return false; // not on the board = treated as satisfied
-      return !SATISFIED_PARENT_STATUSES.has(status.toLowerCase());
+      return !SATISFIED_PARENT_STATUSES.has(status);
     });
   }
 }
@@ -519,8 +506,16 @@ function boundedTask(task: KanbanTask): KanbanTask | null {
     id: task.id.slice(0, 128),
     title: typeof task.title === "string" ? task.title.slice(0, 240) : "(untitled)",
     status: task.status.slice(0, 64),
-    assignee: typeof task.assignee === "string" ? task.assignee.slice(0, 128) : task.assignee ?? null,
+    assignee: typeof task.assignee === "string" ? task.assignee.slice(0, 128) : null,
     created_at: typeof task.created_at === "number" && Number.isFinite(task.created_at) ? task.created_at : null,
+    ...(task.unknown_status ? { unknown_status: true } : {}),
+    ...(task.parent_ids !== undefined ? { parent_ids: boundedParentIds(task.parent_ids) } : {}),
+    completed_at: typeof task.completed_at === "number" && Number.isFinite(task.completed_at) ? task.completed_at : null,
     started_at: typeof task.started_at === "number" && Number.isFinite(task.started_at) ? task.started_at : null,
   };
+}
+
+/** Only queued tasks without a start timestamp are eligible for reminders. */
+export function isUnstarted(task: KanbanTask): boolean {
+  return !task.unknown_status && task.status === "todo" && task.started_at == null;
 }

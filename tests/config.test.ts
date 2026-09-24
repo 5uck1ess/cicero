@@ -1443,6 +1443,21 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))).toThrow(/notify\.kanban\.task_command/);
   });
 
+  test("kanban presets and bounded assignee mappings are validated", () => {
+    for (const preset of ["hermes", "multica", "paperclip"]) {
+      expect(loadYaml(`notify:\n  kanban:\n    preset: ${preset}\n    command: [fake-board, list]\n    assignees: { agent-id: coder }\n`)).not.toThrow();
+      expect(loadYaml(`notify:\n  kanban: { preset: ${preset} }\n`)).toThrow(/notify\.kanban\.command is required/);
+    }
+    for (const preset of ["unknown", "42", "null", "[]"]) {
+      expect(loadYaml(`notify:\n  kanban: { enabled: false, preset: ${preset} }\n`)).toThrow(/notify\.kanban\.preset/);
+    }
+    for (const assignees of ["[]", "null", "42", "{ id: '' }", "{ id: ' ' }", "{ id: 42 }", "{ id: null }", "{ '': coder }",
+      JSON.stringify({ id: "x".repeat(129) }), JSON.stringify({ ["x".repeat(129)]: "coder" }),
+      JSON.stringify(Object.fromEntries(Array.from({ length: 257 }, (_, i) => [String(i), "coder"])))]) {
+      expect(loadYaml(`notify:\n  kanban:\n    enabled: false\n    assignees: ${assignees}\n`)).toThrow(/notify\.kanban\.assignees/);
+    }
+  });
+
   test("validates scheduled prompts: time format, prompt presence, and lane existence", () => {
     expect(loadYaml([
       "brain:",

@@ -36,7 +36,7 @@ brain:
 - **`persona`** is a spoken-personality instruction injected into the lane's session — the same agent backend can sound like a different colleague per lane.
 - **`fallbacks`** gives a lane a ladder of alternative backends, so a downed provider doesn't take the employee offline.
 
-Group phrases: **"roll call"** makes every employee check in briefly, each in their own voice, with a natural beat between speakers. **"Status from everyone"** makes each colleague report what it's working on (with the kanban toolset, the front desk can also read the task board back like a standup).
+Group phrases: **"roll call"** makes every employee check in briefly, each in their own voice, with a natural beat between speakers. **"Status from everyone"** makes each colleague report what it's working on (the front desk can also read the normalized board snapshot back like a standup).
 
 ## Think lane
 
@@ -90,6 +90,22 @@ In this topology the conductor writes no code itself — a convention your harne
 > **The worker** (async, on its profile's model) fixes the test, runs the suite, `gh pr create`.
 > **The operator** reads the run and summarizes: *"Done — fixed the token-expiry check, suite's green, PR #142 is up."*
 > **Cicero** speaks it.
+
+### Filing work on a non-Hermes board
+
+The operator lane **files** work using its brain's tools. Give the lane's
+instruction files and board skill the commands and routing conventions for
+your board: for example, `multica issue create …`, the Paperclip CLI, or
+Paperclip's MCP server `@paperclipai/mcp-server` configured in the brain's
+harness. The brain owns task creation, assignment, and updates; this needs no
+Cicero code change and does not depend on a particular brain backend.
+
+Configure the matching [board preset](notifications.md#board-presets) under
+`notify.kanban` for Cicero's reads. Map board assignee ids to lane names with
+`assignees` so a completion or callback reaches the right voice. Roll call and
+status use the same normalized cached snapshot as the board watch, regardless
+of which CLI the operator uses to file work. Multica and Paperclip presets are
+built from upstream source, not live-tested.
 
 ## An example office
 
