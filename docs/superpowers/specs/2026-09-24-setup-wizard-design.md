@@ -22,6 +22,15 @@ Two pieces, split by what each can safely do:
 2. **`cicero setup`** — a new CLI command that runs a setup-mode web server
    (not the daemon) and walks the operator through the rest in a browser.
 
+**Guiding principle: guide everything, automate only what is safe.** The goal is a
+first run that is easy, not one that is hands-free. Every part of setup gets
+a screen, including parts the wizard cannot or should not do itself (system
+installs, account creation, interactive logins). For those, the screen gives
+the exact steps, a copy button for any command, and a **done-check**: a
+re-check that confirms the step worked before moving on. The wizard runs
+things itself only when that is safe: pinned install recipes, read-only
+probes, and writing the config.
+
 ## Setup mode
 
 - Does not call `loadConfig`. A missing config is the normal case. An invalid
@@ -58,14 +67,18 @@ Two pieces, split by what each can safely do:
    Probe all known default ports in parallel on page load and pre-select what
    is running. On select, list the models that runtime reports and pick from
    the list — no free-typed model names for local runtimes. If the chosen
-   runtime is not running, show its official install link and a "re-check"
-   button. The wizard does **not** install Ollama, LM Studio, or llama.cpp;
-   those are system-level installs owned by their vendors.
+   runtime is not installed or not running, guide it: per-OS install steps
+   from the vendor's official instructions, how to start it and load or
+   pull a model, then a done-check that re-probes the port and lists
+   models. The wizard does not run those installs itself; they are
+   system-level installs owned by their vendors.
 
 3. **Brain.** The coding agent Cicero voices. Detect installed CLIs on `PATH`
    (the same `which` checks doctor uses for the brain binary) and offer the
    supported brains from `docs/brains.md`; ACP / OpenAI-compatible brains take a
-   command or URL. Detect only; no installs.
+   command or URL. A missing CLI gets its install and sign-in steps with a
+   copy button and a done-check (on `PATH`, answers `--version`); the
+   wizard does not run the install or the sign-in.
 
 3b. **Task board (optional).** Cicero is only the voice; the kanban board is
    owned by an external management system. A selector for the systems the
@@ -134,14 +147,37 @@ Two pieces, split by what each can safely do:
      The token is never echoed back after save, logged, or included in
      errors; Telegram API errors go through the existing redaction.
    - **Telegram calls** (the userbot call sidecar,
-     `sidecars/telegram-call/`). It needs a second Telegram account, API
-     credentials, and an interactive login. v1 does **not** automate the
-     login or hold the session: it detects whether the sidecar is set up
-     (`~/.cicero/tgcalls-venv` and `~/.cicero/telegram-call/cicero.session`
-     exist, without reading the session), shows a checklist linking
-     `sidecars/telegram-call/README.md`, and offers "ring me now" as the
-     test once the operator has done it. `briefing.call` and the "call me"
-     flow are only offered when this is set up.
+     `sidecars/telegram-call/`). A guided walkthrough of the README's
+     one-time setup, one screen per step, each with a done-check:
+     1. **Read and accept the risk:** it needs a second, expendable
+        Telegram account, and automating a user account is a gray area
+        of Telegram's ToS. Quote the README's note; the operator ticks to
+        continue or skips calls.
+     2. **Environment:** the `telegram-call` install recipe (Python 3.11
+        venv at `~/.cicero/tgcalls-venv`,
+        `requirements/telegram-call.txt`). Done-check: the venv exists
+        and passes an import probe.
+     3. **Create the Cicero account** in the Telegram app (one SMS).
+        Instructions only; done-check is the operator's tick.
+     4. **API credentials:** step-by-step for my.telegram.org (log in
+        *as the new account*, API development tools, title and short name
+        `cicero`, platform Other, "ERROR" means retry). Paste `api_id` and
+        `api_hash` into the page. The wizard writes them, plus
+        `CICERO_TG_ALLOWED` pre-filled from the bot step's
+        `sender_user_id`, to the repo `.env` with the same rules the
+        sidecar enforces: owner-only mode and refuse a symlink.
+     5. **Log in:** interactive (phone number + in-app code), so it stays
+        a terminal command. The page shows the exact
+        `uv run … sidecars/telegram-call/login.py` line with a copy
+        button and polls until `~/.cicero/telegram-call/cicero.session`
+        exists (checking existence only; never reading it).
+     6. **Harden the account:** the README's checklist (add it to your
+        phone as a second account, 2FA password, 12-month away setting,
+        back up the session file, never "terminate all other sessions").
+     7. **Test:** "ring me now", once the daemon is up (step 9).
+     Progress survives leaving the page: steps whose done-check passes
+     are shown complete on return. `briefing.call` and the "call me" flow
+     are only offered once calls are set up.
    - **When to reach you.** Pre-fill `notify.timezone` from the browser's
      `Intl.DateTimeFormat().resolvedOptions().timeZone` — the box clock is
      often UTC, and without it quiet hours and briefings fire at the wrong
@@ -214,7 +250,8 @@ becomes a command, a path, or a package name.
   diff preview; v2).
 - Installing LLM runtimes, CUDA/drivers, the audiocpp build, or a board
   system (Hermes/Multica/Paperclip).
-- Automating the Telegram call sidecar's account login or session storage.
+- Running the Telegram call sidecar's login from the page, or reading its
+  session. The wizard guides the login as a terminal command instead.
 - Hybrid/cloud tiers (deferred in `tiers.ts` today).
 - Fixing the silent MLX-default fallback for a missing config. Worth doing
   separately: `cicero start` with no config should say "run `cicero setup`".
