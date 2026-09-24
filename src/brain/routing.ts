@@ -15,6 +15,7 @@ import { collectPendingConfirmations, hasPendingConfirmations, relayBoundConfirm
 export const DEFAULT_TRIGGERS = ["think hard", "think deeply", "think carefully", "think it through"];
 
 export class RoutingBrain implements Brain {
+  sessionRestored(): boolean { return this.primary.sessionRestored?.() ?? false; }
   /** False until the escalation lane starts cleanly — a dead lane never routes. */
   private escalationUp = false;
   private turnContext = new BrainTurnContext();

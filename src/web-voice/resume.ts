@@ -1,9 +1,6 @@
 /**
- * Session resume: a daemon restart starts a FRESH agent session, which would
- * otherwise forget the conversation mid-thread. The chat history file already
- * holds the recent turns, so we fold a compact recap into the warmup ping the
- * daemon sends at boot — the new session starts knowing what was being
- * discussed, at zero extra latency and with any ACP harness.
+ * A fresh agent session receives a compact recap at daemon startup. An ACP
+ * session successfully loaded from durable storage already has its own history.
  */
 
 export interface ResumeTurn {
@@ -61,7 +58,8 @@ function clip(s: string): string {
  * Build the warmup message that both primes the provider cache and restores
  * conversational context. Returns null when there's nothing to resume.
  */
-export function buildResumePrimer(items: ResumeTurn[]): string | null {
+export function buildResumePrimer(items: ResumeTurn[], sessionRestored = false): string | null {
+  if (sessionRestored) return null;
   const lines: string[] = [];
   let total = 0;
   // Newest turns matter most — walk backwards and keep what fits the budget.

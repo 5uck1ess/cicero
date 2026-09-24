@@ -41,6 +41,34 @@ function checkRecord(value: unknown, path: string, issues: string[]): value is R
   return false;
 }
 
+function checkAcpMcpServers(value: unknown, path: string, issues: string[]): void {
+  if (!Array.isArray(value) || value.length > 8) {
+    issues.push(`${path} must be an array of at most 8 stdio servers`); return;
+  }
+  const names = new Set<string>();
+  for (const [index, server] of value.entries()) {
+    const at = `${path}.${index}`;
+    if (!checkRecord(server, at, issues)) continue;
+    checkKnownKeys(server, at, ["name", "command", "args", "env"], issues);
+    for (const key of ["name", "command"] as const) {
+      if (typeof server[key] !== "string" || !server[key].trim() || server[key].length > 256) {
+        issues.push(`${at}.${key} must be a non-empty string of at most 256 characters`);
+      }
+    }
+    if (typeof server.name === "string") {
+      if (names.has(server.name)) issues.push(`${at}.name must be unique`);
+      names.add(server.name);
+    }
+    if (!Array.isArray(server.args) || server.args.length > 16 || server.args.some((arg) => typeof arg !== "string" || arg.length > 512)) {
+      issues.push(`${at}.args must contain at most 16 strings of at most 512 characters`);
+    }
+    if (server.env !== undefined && (!Array.isArray(server.env) || server.env.length > 16
+      || server.env.some((name) => typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name)))) {
+      issues.push(`${at}.env must contain at most 16 environment variable names`);
+    }
+  }
+}
+
 function normalizedKey(value: string): string {
   return value.replace(/[^a-z0-9]/gi, "").toLowerCase();
 }
@@ -387,7 +415,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
   if (checkRecord(config.brain, "brain", issues)) {
     checkKnownKeys(config.brain, "brain", [
       "backend", "mode", "target_tab", "auto_approve_tools", "confirm_tools", "confirm_retry",
-      "max_queue_bytes", "max_response_bytes", "max_pending_turns", "escalate", "lanes",
+      "max_queue_bytes", "max_response_bytes", "max_pending_turns", "mcp_servers", "session_resume", "session_resume_max_age_hours", "escalate", "lanes",
       "history_compaction",
       "binary", "binary_args", "ollama_port", "ollama_model",
       "base_url", "model", "api_key", "api_key_env", "max_tokens", "timeout_ms", "turn_timeout_ms",
@@ -400,6 +428,17 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     if (config.brain.binary_args !== undefined) checkStringArray(config.brain.binary_args, "brain.binary_args", issues);
     if (config.brain.unset_env !== undefined) checkStringArray(config.brain.unset_env, "brain.unset_env", issues);
     if (config.brain.confirm_tools !== undefined) checkStringArray(config.brain.confirm_tools, "brain.confirm_tools", issues);
+    if (config.brain.mcp_servers !== undefined) checkAcpMcpServers(config.brain.mcp_servers, "brain.mcp_servers", issues);
+    if (config.brain.mcp_servers !== undefined && config.brain.backend !== "acp") {
+      issues.push("brain.mcp_servers requires the acp backend");
+    }
+    checkOptionalBoolean(config.brain, "session_resume", "brain", issues);
+    if (config.brain.session_resume_max_age_hours !== undefined) {
+      checkNumber(config.brain.session_resume_max_age_hours, "brain.session_resume_max_age_hours", issues, { min: 0, max: 720, minExclusive: true });
+    }
+    if ((config.brain.session_resume !== undefined || config.brain.session_resume_max_age_hours !== undefined) && config.brain.backend !== "acp") {
+      issues.push("brain.session_resume and brain.session_resume_max_age_hours require the acp backend");
+    }
     for (const key of ["max_queue_bytes", "max_response_bytes"] as const) {
       if (config.brain[key] !== undefined) {
         checkInteger(config.brain[key], `brain.${key}`, issues, { min: 1, max: MAX_ACP_TEXT_LIMIT_BYTES });
@@ -451,9 +490,9 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       checkKnownKeys(value, path, allowMetadata
         ? [
             "backend", "binary", "binary_args", "unset_env", "env", "voice", "greeting", "persona",
-            "aliases", "fallbacks",
+            "aliases", "fallbacks", "mcp_servers", "session_resume", "session_resume_max_age_hours",
           ]
-        : ["backend", "binary", "binary_args", "unset_env", "env"], issues);
+        : ["backend", "binary", "binary_args", "unset_env", "env", "mcp_servers", "session_resume", "session_resume_max_age_hours"], issues);
       if (value.backend !== undefined && value.backend !== "acp" && value.backend !== "codex") {
         issues.push(`${path}.backend must be 'acp' or 'codex'`);
       }
@@ -462,6 +501,17 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
         if (value[key] !== undefined) checkStringArray(value[key], `${path}.${key}`, issues, { requireEntries: true });
       }
       if (value.env !== undefined) checkStringRecord(value.env, `${path}.env`, issues);
+      if (value.mcp_servers !== undefined) checkAcpMcpServers(value.mcp_servers, `${path}.mcp_servers`, issues);
+      if (value.mcp_servers !== undefined && value.backend === "codex") {
+        issues.push(`${path}.mcp_servers requires an acp lane`);
+      }
+      checkOptionalBoolean(value, "session_resume", path, issues);
+      if (value.session_resume_max_age_hours !== undefined) {
+        checkNumber(value.session_resume_max_age_hours, `${path}.session_resume_max_age_hours`, issues, { min: 0, max: 720, minExclusive: true });
+      }
+      if (value.backend === "codex" && (value.session_resume !== undefined || value.session_resume_max_age_hours !== undefined)) {
+        issues.push(`${path}.session_resume and ${path}.session_resume_max_age_hours require an acp lane`);
+      }
       if (!allowMetadata) return;
       for (const key of ["voice", "greeting", "persona"] as const) checkOptionalString(value, key, path, issues);
       if (value.aliases !== undefined) checkStringArray(value.aliases, `${path}.aliases`, issues, { requireEntries: true });
@@ -479,9 +529,14 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     if (config.brain.escalate !== undefined) {
       if (checkRecord(config.brain.escalate, "brain.escalate", issues)) {
         checkKnownKeys(config.brain.escalate, "brain.escalate", [
-          "binary", "binary_args", "triggers", "unset_env",
+          "binary", "binary_args", "triggers", "unset_env", "mcp_servers", "session_resume", "session_resume_max_age_hours",
         ], issues);
         checkOptionalString(config.brain.escalate, "binary", "brain.escalate", issues);
+        if (config.brain.escalate.mcp_servers !== undefined) checkAcpMcpServers(config.brain.escalate.mcp_servers, "brain.escalate.mcp_servers", issues);
+        checkOptionalBoolean(config.brain.escalate, "session_resume", "brain.escalate", issues);
+        if (config.brain.escalate.session_resume_max_age_hours !== undefined) {
+          checkNumber(config.brain.escalate.session_resume_max_age_hours, "brain.escalate.session_resume_max_age_hours", issues, { min: 0, max: 720, minExclusive: true });
+        }
         for (const key of ["binary_args", "triggers", "unset_env"] as const) {
           if (config.brain.escalate[key] !== undefined) {
             checkStringArray(config.brain.escalate[key], `brain.escalate.${key}`, issues, { requireEntries: true });

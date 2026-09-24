@@ -343,6 +343,7 @@ function normalizeRef(raw: string): string {
 }
 
 export class SwitchboardBrain implements Brain {
+  sessionRestored(): boolean { return this.primary.sessionRestored?.() ?? false; }
   /** Pinned lane name, or null = the front desk (primary). */
   private active: string | null = null;
   /**

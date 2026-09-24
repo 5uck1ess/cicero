@@ -17,6 +17,7 @@ export { SpeculativeSideEffectError } from "../call-intent";
  * exact underlying behavior.
  */
 export class DialBackBrain implements Brain {
+  sessionRestored(): boolean { return this.inner.sessionRestored?.() ?? false; }
   private handler?: DialBackHandler;
   private control = false;
 

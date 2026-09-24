@@ -9,7 +9,7 @@
 export type VoiceState = "idle" | "listening" | "thinking" | "speaking";
 
 export interface DashEvent {
-  type: "state" | "log" | "transcript" | "response" | "config" | "snapshot" | "voice";
+  type: "state" | "log" | "transcript" | "response" | "config" | "snapshot" | "voice" | "structured";
   ts: number;
   state?: VoiceState;
   icon?: string;
@@ -18,6 +18,7 @@ export interface DashEvent {
   config?: Record<string, unknown>;
   history?: DashEvent[];
   voiceActive?: boolean;
+  structured?: { kind: "plan" | "tool_call" | "tool_call_update"; entries?: Array<{ title: string; status: string }>; title?: string; toolKind?: string; status?: string };
 }
 
 type Sub = (e: DashEvent) => void;
@@ -92,6 +93,10 @@ class DashBus {
 
   response(text: string): void {
     this.push({ type: "response", ts: Date.now(), text });
+  }
+
+  structured(update: NonNullable<DashEvent["structured"]>): void {
+    this.push({ type: "structured", ts: Date.now(), structured: update });
   }
 
   private deriveState(message: string): void {

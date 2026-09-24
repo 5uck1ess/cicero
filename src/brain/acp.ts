@@ -1,5 +1,9 @@
-import type { Brain, BrainTurnOptions, PendingConfirmation } from "../types";
+import type { Brain, BrainStructuredUpdate, BrainTurnOptions, PendingConfirmation } from "../types";
 import { log } from "../logger";
+import { createHash } from "node:crypto";
+import { readAcpSession, writeAcpSession, type StoredAcpSession } from "./acp-session-store";
+import { dashBus } from "../dashboard/bus";
+import { redactSnapshotSecrets } from "../operational-state";
 import { BrainTurnContext } from "./turn-context";
 import { confirmationDecision, createConfirmationNonce } from "./approval";
 import {
@@ -32,7 +36,46 @@ import {
   type SessionNotification,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type InitializeResponse,
+  type Stdio,
 } from "@zed-industries/agent-client-protocol";
+
+export type AcpStructuredUpdate = BrainStructuredUpdate;
+export function resumableAcpSession(
+  stored: StoredAcpSession | null,
+  enabled: boolean,
+  maxAgeHours: number,
+  now: number,
+): string | null {
+  return enabled && stored && stored.lastUsedAt <= now
+    && now - stored.lastUsedAt <= maxAgeHours * 3_600_000
+    ? stored.sessionId : null;
+}
+export async function openAcpSession(
+  conn: Pick<ClientSideConnection, "loadSession" | "newSession">,
+  request: { cwd: string; mcpServers: Stdio[] },
+  storedId: string | null,
+  canLoad: boolean,
+  run: <T>(operation: Promise<T>, label: string) => Promise<T>,
+  fatalLoadError: (error: unknown) => boolean = () => false,
+): Promise<{ sessionId: string; restored: boolean }> {
+  if (storedId && canLoad) {
+    try {
+      await run(conn.loadSession({ ...request, sessionId: storedId }), "loadSession");
+      return { sessionId: storedId, restored: true };
+    } catch (error) {
+      if (fatalLoadError(error)) throw error;
+    }
+  }
+  const session = await run(conn.newSession(request), "newSession");
+  return { sessionId: session.sessionId, restored: false };
+}
+const MAX_STRUCTURED_UPDATES = 64;
+const MAX_PLAN_ENTRIES = 32;
+const MAX_STRUCTURED_TITLE = 160;
+function safeTitle(value: string): string {
+  return redactSnapshotSecrets(value.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, MAX_STRUCTURED_TITLE)).slice(0, MAX_STRUCTURED_TITLE);
+}
 
 export class AcpFrameLimitError extends Error {
   constructor(readonly limitBytes: number) {
@@ -323,7 +366,7 @@ export function dropOffSpecUpdates(readable: ReadableStream<unknown>): ReadableS
           if (!warned.has(kind)) {
             if (warned.size < 32) {
               warned.add(kind);
-              log("info", `acp: ignoring off-spec session update '${kind}' from the agent`);
+              log("info", "acp: ignoring off-spec session update from the agent");
             } else if (!warnedAboutLimit) {
               warnedAboutLimit = true;
               log("info", "acp: ignoring additional off-spec session update kinds from the agent");
@@ -397,6 +440,18 @@ export interface AcpBrainConfig {
   args?: string[];
   /** Working directory for the agent session (defaults to the daemon's cwd). */
   cwd?: string;
+  /** Private path for this brain/lane's durable ACP session pointer. */
+  sessionFile?: string;
+  /** Resume a durable session when it is recent enough (default true). */
+  sessionResume?: boolean;
+  /** Maximum idle age for a stored session, in hours (default 12). */
+  sessionResumeMaxAgeHours?: number;
+  /** Clock in milliseconds since the Unix epoch; injectable for tests. */
+  now?: () => number;
+  /** Optional stdio MCP servers supplied at newSession or loadSession. */
+  mcpServers?: Stdio[];
+  /** Receives sanitized, bounded structured updates during a live turn. */
+  onStructuredUpdate?: (update: AcpStructuredUpdate) => void;
   /** Extra env for the agent subprocess. */
   env?: Record<string, string>;
   /** Env vars to drop (e.g. ["CLAUDECODE"] so claude-code-acp can run un-nested). */
@@ -590,6 +645,9 @@ type OwnedAcpProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
 
 interface ActiveAcpTurn {
   queue: ChunkQueue;
+  structured: AcpStructuredUpdate[];
+  onStructuredUpdate?: (update: AcpStructuredUpdate) => void;
+  cancelled: boolean;
   settled: boolean;
   cancellation: Promise<void> | null;
   notifyCancel: () => Promise<void>;
@@ -601,6 +659,9 @@ interface AcpRuntime {
   proc: OwnedAcpProcess;
   conn: ClientSideConnection | null;
   sessionId: string | null;
+  sessionIdentity: string | null;
+  initialize: InitializeResponse | null;
+  restored: boolean;
   activeTurn: ActiveAcpTurn | null;
   stderrDrain: Promise<void>;
   stopped: Promise<void>;
@@ -679,6 +740,13 @@ export class AcpBrain implements Brain {
   private readonly config: AcpBrainConfig;
 
   constructor(config: AcpBrainConfig) {
+    if (config.sessionResume !== undefined && typeof config.sessionResume !== "boolean") {
+      throw new TypeError("sessionResume must be a boolean");
+    }
+    const maxAge = config.sessionResumeMaxAgeHours ?? 12;
+    if (typeof maxAge !== "number" || !Number.isFinite(maxAge) || maxAge <= 0 || maxAge > 720) {
+      throw new RangeError("sessionResumeMaxAgeHours must be greater than 0 and at most 720");
+    }
     for (const [name, value] of [
       ["maxQueuedBytes", config.maxQueuedBytes ?? DEFAULT_ACP_QUEUE_LIMIT_BYTES],
       ["maxResponseBytes", config.maxResponseBytes ?? DEFAULT_ACP_RESPONSE_LIMIT_BYTES],
@@ -701,7 +769,45 @@ export class AcpBrain implements Brain {
         throw new RangeError(`${name} must be a finite non-negative number no greater than ${maximum}`);
       }
     }
+    if (config.mcpServers !== undefined) {
+      if (!Array.isArray(config.mcpServers) || config.mcpServers.length > 8) {
+        throw new RangeError("mcpServers must contain at most 8 stdio servers");
+      }
+      const serverNames = new Set<string>();
+      for (const server of config.mcpServers) {
+        if (!server || typeof server.name !== "string" || !server.name.trim() || server.name.length > 256
+          || Object.keys(server).some((key) => !["name", "command", "args", "env"].includes(key))
+          || serverNames.has(server.name)
+          || typeof server.command !== "string" || !server.command.trim() || server.command.length > 256
+          || !Array.isArray(server.args) || server.args.length > 16
+          || server.args.some((arg) => typeof arg !== "string" || arg.length > 512)
+          || !Array.isArray(server.env) || server.env.length > 16
+          || server.env.some((item) => !item || typeof item.name !== "string"
+            || Object.keys(item).some((key) => !["name", "value"].includes(key))
+            || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(item.name)
+            || typeof item.value !== "string" || item.value.length > 4096)) {
+          throw new RangeError("mcpServers contains an invalid stdio server");
+        }
+        serverNames.add(server.name);
+      }
+    }
     this.config = config;
+  }
+
+  sessionRestored(): boolean { return this.runtime?.restored ?? false; }
+
+  private redactAgentText(text: string): string {
+    let result = redactSnapshotSecrets(text);
+    for (const server of this.config.mcpServers ?? []) {
+      for (const variable of server.env) {
+        if (variable.value) result = result.split(variable.value).join("[redacted]");
+      }
+    }
+    return result;
+  }
+
+  private describeAgentError(error: unknown): string {
+    return this.redactAgentText(describeAcpError(error));
   }
 
   async start(): Promise<void> {
@@ -784,7 +890,7 @@ export class AcpBrain implements Brain {
       this.pendingReservations.delete(reservationToken);
     }).catch((error: unknown) => {
       this.pendingReservations.delete(reservationToken);
-      log("warn", `acp: queued turn reservation failed: ${describeAcpError(error)}`);
+      log("warn", `acp: queued turn reservation failed: ${this.describeAgentError(error)}`);
     });
     let acquired = true;
     const queuedSignal = options.signal;
@@ -841,10 +947,14 @@ export class AcpBrain implements Brain {
         );
         active = {
           queue,
+          structured: [],
+          onStructuredUpdate: options.onStructuredUpdate,
+          cancelled: false,
           settled: false,
           cancellation: null,
           notifyCancel,
           cancel: (error?: Error): void => {
+            active.cancelled = true;
             // Discard already-buffered speech on abort/overflow/stop. A prompt
             // that has settled may still have unread chunks, so discarding is
             // independent of protocol settlement.
@@ -878,11 +988,11 @@ export class AcpBrain implements Brain {
                   await this.stopCurrentRuntime(new Error("ACP turn cancellation did not settle"));
                   if (this.shouldRun(recoveryEpoch)) await this.ensureStarted(recoveryEpoch);
                 } catch (restartError: unknown) {
-                  log("error", `acp: session restart after cancellation failed: ${describeAcpError(restartError)}`);
+                  log("error", `acp: session restart after cancellation failed: ${this.describeAgentError(restartError)}`);
                 }
               }
             })().catch((cancellationError: unknown) => {
-              log("warn", `acp: cancellation cleanup failed: ${describeAcpError(cancellationError)}`);
+              log("warn", `acp: cancellation cleanup failed: ${this.describeAgentError(cancellationError)}`);
             });
           },
         };
@@ -892,18 +1002,26 @@ export class AcpBrain implements Brain {
           prompt: [{ type: "text", text: promptText }],
         });
         void turn.then(
-          (res) => {
+          async (res) => {
             active.settled = true;
             stopReason = (res as { stopReason?: string }).stopReason;
+            if (!active.cancelled && stopReason !== "cancelled" && this.runtime === runtime
+              && !runtime.stopping && this.config.sessionFile && runtime.sessionIdentity) {
+              try {
+                await writeAcpSession(this.config.sessionFile, runtime.sessionIdentity, sessionId, (this.config.now ?? Date.now)());
+              } catch (error: unknown) {
+                log("warn", `acp: could not update session timestamp: ${this.describeAgentError(error)}`);
+              }
+            }
             queue.end();
           },
           (turnError: unknown) => {
             active.settled = true;
-            queue.end(new Error(`ACP agent turn failed: ${describeAcpError(turnError)}`));
+            queue.end(new Error(`ACP agent turn failed: ${this.describeAgentError(turnError)}`));
           },
         ).catch((callbackError: unknown) => {
           active.settled = true;
-          queue.end(new Error(`ACP turn settlement failed: ${describeAcpError(callbackError)}`));
+          queue.end(new Error(`ACP turn settlement failed: ${this.describeAgentError(callbackError)}`));
         });
 
         let yielded = false;
@@ -939,7 +1057,7 @@ export class AcpBrain implements Brain {
         // Do not make the interrupted response wait for ACP settlement, but do
         // keep the next response queued until settlement (or a clean restart).
         void releaseAfterCancellation.then(release, release).catch((releaseError: unknown) => {
-          log("warn", `acp: turn-lock release failed: ${describeAcpError(releaseError)}`);
+          log("warn", `acp: turn-lock release failed: ${this.describeAgentError(releaseError)}`);
           release();
         });
       } else {
@@ -985,11 +1103,11 @@ export class AcpBrain implements Brain {
         until: Date.now() + CONFIRM_GRANT_MS,
         operationKey: pending.operationKey,
       };
-      log("ok", `acp: spoken confirmation received for: ${pending.summary}`);
+      log("ok", `acp: spoken confirmation received for: ${this.redactAgentText(pending.summary)}`);
       if (this.config.confirmRetry !== false) this.nudgeAfterApproval(pending.summary);
     } else {
       this.confirmationGrant = null;
-      log("info", `acp: spoken confirmation cancelled for: ${pending.summary}`);
+      log("info", `acp: spoken confirmation cancelled for: ${this.redactAgentText(pending.summary)}`);
     }
     return true;
   }
@@ -1001,7 +1119,7 @@ export class AcpBrain implements Brain {
         if (reply) this.config.onNudgeReply?.(reply);
       })
       .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = this.describeAgentError(err);
         log("warn", `acp: approved-confirmation auto-retry failed: ${msg}`);
       });
   }
@@ -1014,18 +1132,47 @@ export class AcpBrain implements Brain {
       && runtime.proc.exitCode === null;
   }
 
+  private recordStructured(runtime: AcpRuntime, update: SessionNotification["update"]): void {
+    const turn = runtime.activeTurn;
+    if (!turn || turn.settled || turn.cancelled || turn.structured.length >= MAX_STRUCTURED_UPDATES) return;
+    let record: AcpStructuredUpdate;
+    if (update.sessionUpdate === "plan") {
+      record = { kind: "plan", entries: update.entries.slice(0, MAX_PLAN_ENTRIES).map((entry) => ({
+        title: safeTitle(this.redactAgentText(entry.content)), status: entry.status,
+      })) };
+    } else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+      record = {
+        kind: update.sessionUpdate,
+        ...(typeof update.title === "string" ? { title: safeTitle(this.redactAgentText(update.title)) } : {}),
+        ...(update.kind ? { toolKind: update.kind } : {}),
+        ...(update.status ? { status: update.status } : {}),
+      };
+    } else return;
+    if (record.entries) {
+      for (const entry of record.entries) Object.freeze(entry);
+      Object.freeze(record.entries);
+    }
+    Object.freeze(record);
+    turn.structured.push(record);
+    dashBus.structured(record);
+    try { this.config.onStructuredUpdate?.(record); } catch { /* observer cannot break the turn */ }
+    try { turn.onStructuredUpdate?.(record); } catch { /* observer cannot break the turn */ }
+  }
+
   /** The Client side of ACP: receive streamed text and answer tool-permission asks. */
   private makeClient(runtime?: AcpRuntime): Client {
     return {
       sessionUpdate: async (params: SessionNotification): Promise<void> => {
         try {
-          if (runtime && (this.runtime !== runtime || runtime.sessionId !== params.sessionId)) return;
+          if (runtime && (this.runtime !== runtime || runtime.stopping || runtime.sessionId !== params.sessionId)) return;
           const update = params.update;
           if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
             runtime?.activeTurn?.queue.push(update.content.text);
+          } else if (runtime) {
+            this.recordStructured(runtime, update);
           }
         } catch (error: unknown) {
-          log("warn", `acp: session update rejected: ${describeAcpError(error)}`);
+          log("warn", `acp: session update rejected: ${this.describeAgentError(error)}`);
         }
       },
       requestPermission: async (params: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
@@ -1033,7 +1180,7 @@ export class AcpBrain implements Brain {
           // Permission capabilities belong to one live process/session. Requests
           // arriving from a closing transport fail closed and cannot arm a gate
           // in its replacement runtime.
-          if (runtime && (this.runtime !== runtime || runtime.sessionId !== params.sessionId)) {
+          if (runtime && (this.runtime !== runtime || runtime.stopping || runtime.sessionId !== params.sessionId)) {
             return { outcome: { outcome: "cancelled" } };
           }
           const gated = this.confirmGate(params);
@@ -1047,7 +1194,7 @@ export class AcpBrain implements Brain {
           if (!choice) return { outcome: { outcome: "cancelled" } };
           return { outcome: { outcome: "selected", optionId: choice.optionId } };
         } catch (error: unknown) {
-          log("warn", `acp: permission request failed closed: ${describeAcpError(error)}`);
+          log("warn", `acp: permission request failed closed: ${this.describeAgentError(error)}`);
           return { outcome: { outcome: "cancelled" } };
         }
       },
@@ -1065,7 +1212,8 @@ export class AcpBrain implements Brain {
     const haystack = JSON.stringify(params.toolCall ?? {}).toLowerCase();
     if (!patterns.some((p) => haystack.includes(p.toLowerCase()))) return null;
 
-    const title = (params.toolCall as { title?: string } | undefined)?.title ?? "a guarded tool";
+    const rawTitle = (params.toolCall as { title?: string } | undefined)?.title;
+    const title = typeof rawTitle === "string" ? safeTitle(this.redactAgentText(rawTitle)) : "a guarded tool";
     const operationKey = permissionOperationKey(params.toolCall ?? null);
     const pick = (kinds: string[]) =>
       params.options.find((o) => kinds.includes(o.kind));
@@ -1094,10 +1242,10 @@ export class AcpBrain implements Brain {
     try {
       const notification = this.config.onConfirmationPending?.(title, this.pendingConfirmation.nonce);
       void Promise.resolve(notification).catch((err: unknown) => {
-        log("warn", `acp: confirmation notification failed: ${err instanceof Error ? err.message : String(err)}`);
+        log("warn", `acp: confirmation notification failed: ${this.describeAgentError(err)}`);
       });
     } catch (err: unknown) {
-      log("warn", `acp: confirmation notification failed: ${err instanceof Error ? err.message : String(err)}`);
+      log("warn", `acp: confirmation notification failed: ${this.describeAgentError(err)}`);
     }
     const reject = pick(["reject_once", "reject_always"]);
     if (!reject) return { outcome: { outcome: "cancelled" } };
@@ -1232,6 +1380,9 @@ export class AcpBrain implements Brain {
       proc,
       conn: null,
       sessionId: null,
+      sessionIdentity: null,
+      initialize: null,
+      restored: false,
       activeTurn: null,
       stderrDrain: Promise.resolve(),
       stopped: stoppedPromise,
@@ -1263,7 +1414,7 @@ export class AcpBrain implements Brain {
       onError: (error) => {
         void this.handleUnexpectedRuntimeExit(runtime, `violated the ACP wire contract: ${error.message}`).catch(
           (cleanupError: unknown) => {
-            log("error", `acp: failed to close invalid protocol input: ${describeAcpError(cleanupError)}`);
+            log("error", `acp: failed to close invalid protocol input: ${this.describeAgentError(cleanupError)}`);
           },
         );
       },
@@ -1278,22 +1429,22 @@ export class AcpBrain implements Brain {
       (code) => {
         if (runtime.stopping) return;
         void this.handleUnexpectedRuntimeExit(runtime, `exited with code ${code}`).catch((error: unknown) => {
-          log("error", `acp: failed to clean up exited agent: ${describeAcpError(error)}`);
+          log("error", `acp: failed to clean up exited agent: ${this.describeAgentError(error)}`);
         });
       },
       (error: unknown) => {
         if (runtime.stopping) return;
-        void this.handleUnexpectedRuntimeExit(runtime, `exit wait failed: ${describeAcpError(error)}`).catch((cleanupError: unknown) => {
-          log("error", `acp: failed to clean up broken agent: ${describeAcpError(cleanupError)}`);
+        void this.handleUnexpectedRuntimeExit(runtime, `exit wait failed: ${this.describeAgentError(error)}`).catch((cleanupError: unknown) => {
+          log("error", `acp: failed to clean up broken agent: ${this.describeAgentError(cleanupError)}`);
         });
       },
     ).catch((error: unknown) => {
-      log("error", `acp: process-exit watcher failed: ${describeAcpError(error)}`);
+      log("error", `acp: process-exit watcher failed: ${this.describeAgentError(error)}`);
     });
 
     const timeout = this.config.startTimeoutMs ?? 20_000;
     try {
-      await this.withRuntimeTimeout(
+      runtime.initialize = await this.withRuntimeTimeout(
         conn.initialize({
           protocolVersion: PROTOCOL_VERSION,
           // We are not an editor: the agent uses its own tools, not our filesystem.
@@ -1303,26 +1454,45 @@ export class AcpBrain implements Brain {
         timeout,
         "initialize",
       );
-      const session = await this.withRuntimeTimeout(
-        conn.newSession({ cwd: this.config.cwd ?? process.cwd(), mcpServers: [] }),
-        runtime,
-        timeout,
-        "newSession",
+      const cwd = this.config.cwd ?? process.cwd();
+      const mcpServers = this.config.mcpServers ?? [];
+      const identity = createHash("sha256").update(JSON.stringify([
+        this.config.binary, this.config.args ?? [], cwd,
+        mcpServers.map((server) => ({
+          name: server.name, command: server.command, args: server.args,
+          env: server.env.map((variable) => variable.name),
+        })),
+      ])).digest("hex");
+      const now = (this.config.now ?? Date.now)();
+      const stored = this.config.sessionFile ? await readAcpSession(this.config.sessionFile, identity) : null;
+      const resumableId = resumableAcpSession(stored, this.config.sessionResume !== false, this.config.sessionResumeMaxAgeHours ?? 12, now);
+      const opened = await openAcpSession(
+        conn, { cwd, mcpServers }, resumableId, runtime.initialize.agentCapabilities?.loadSession === true,
+        (operation, label) => this.withRuntimeTimeout(operation, runtime, timeout, label),
+        (error) => runtime.stopping || runtime.proc.exitCode !== null
+          || (error instanceof Error && error.message.startsWith("loadSession timed out")),
       );
-      if (this.runtime !== runtime || runtime.stopping || !this.shouldRun(epoch)) {
-        throw new Error("agent stopped or its startup was superseded during newSession");
+      runtime.sessionId = opened.sessionId;
+      runtime.sessionIdentity = identity;
+      runtime.restored = opened.restored;
+      if (resumableId && runtime.initialize.agentCapabilities?.loadSession === true && !opened.restored) {
+        log("info", "acp: stored session could not be loaded; starting a new session");
       }
-      runtime.sessionId = session.sessionId;
-      log("ok", `🧠 ACP brain connected (${this.config.binary}) session=${runtime.sessionId.slice(0, 8)}`);
+      if (this.runtime !== runtime || runtime.stopping || !this.shouldRun(epoch)) {
+        throw new Error("agent stopped or its startup was superseded during session setup");
+      }
+      if (this.config.sessionFile && runtime.sessionId && !opened.restored) {
+        await writeAcpSession(this.config.sessionFile, identity, runtime.sessionId, now);
+      }
+      log("ok", `🧠 ACP brain connected (${this.config.binary})`);
     } catch (error: unknown) {
       try {
         await this.disposeRuntime(runtime, new Error("ACP brain startup failed"));
       } catch (cleanupError: unknown) {
-        log("error", `acp: startup cleanup failed: ${describeAcpError(cleanupError)}`);
+        log("error", `acp: startup cleanup failed: ${this.describeAgentError(cleanupError)}`);
       }
       throw new Error(
-        `ACP brain failed to start (${this.config.binary} ${(this.config.args ?? []).join(" ")}): ${describeAcpError(error)}`,
-        { cause: error },
+        `ACP brain failed to start (${this.redactAgentText(this.config.binary)} ${this.redactAgentText((this.config.args ?? []).join(" "))}): ${this.describeAgentError(error)}`,
       );
     }
   }
@@ -1364,7 +1534,7 @@ export class AcpBrain implements Brain {
       if (!active.settled) {
         active.cancel(reason);
         const notification = active.notifyCancel().catch((error: unknown) => {
-          log("info", `acp: protocol cancellation ended with the transport: ${describeAcpError(error)}`);
+          log("info", `acp: protocol cancellation ended with the transport: ${this.describeAgentError(error)}`);
         });
         await settlesWithin(notification, STOP_CANCEL_FLUSH_MS);
       }
@@ -1407,7 +1577,7 @@ export class AcpBrain implements Brain {
       const decoder = new TextDecoder();
       for await (const chunk of stderr) {
         const text = decoder.decode(chunk).trim();
-        if (text) log("info", `acp(${this.config.binary}): ${text.slice(0, 200)}`);
+        if (text) log("info", `acp(${this.config.binary}): ${this.redactAgentText(text.slice(0, 200))}`);
       }
     } catch { /* process ended */ }
   }

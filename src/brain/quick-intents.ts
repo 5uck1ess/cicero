@@ -42,6 +42,7 @@ function replies(reply: QuickIntent["reply"]): string[] {
 }
 
 export class QuickIntentsBrain implements Brain {
+  sessionRestored(): boolean { return this.inner.sessionRestored?.() ?? false; }
   private compiled: Array<{ phrases: Set<string>; pattern: RegExp | null; replies: string[] }>;
 
   constructor(

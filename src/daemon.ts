@@ -1315,7 +1315,7 @@ export class CiceroDaemon {
       const resumeTurns = this.config.web_voice?.resume_turns ?? 10;
       if (this.config.web_voice?.enabled && resumeTurns > 0) {
         try {
-          const primer = buildResumePrimer(await history().recent(resumeTurns));
+          const primer = buildResumePrimer(await history().recent(resumeTurns), this.brain.sessionRestored?.() ?? false);
           if (primer) warmMsg = primer;
         } catch { /* no history — plain warmup */ }
       }
