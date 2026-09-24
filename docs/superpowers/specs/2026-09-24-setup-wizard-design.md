@@ -111,6 +111,44 @@ Two pieces, split by what each can safely do:
    survives restarts; see `setWebVoiceToken` in `src/config.ts`). Render the
    pairing QR in the page.
 
+8b. **Channels.** Everything that reaches the operator away from the browser
+   (`docs/channels.md`, `docs/notifications.md`). Telegram is the primary
+   remote channel for now: the step opens on it, pre-selected, and the other
+   parts follow. Every part stays skippable; none blocks the hand-off.
+   - **Telegram text bot** (primary; the two-way text line: chat, `log`,
+     "call me", approvals, notifications). Walk through it in-page:
+     1. Link to @BotFather with the exact steps to create a bot; paste the
+        token. Offer `token_env` (show the `export CICERO_TELEGRAM_TOKEN=…`
+        line for the operator's shell/service) or storing `token` in the
+        private config file; recommend `token_env` for service deployments.
+     2. Validate with `getMe` and show the bot's @name.
+     3. "Send /start to @yourbot now": poll `getUpdates` (bounded: short
+        timeout, capped response, a total deadline) and show the sender's
+        display name for confirmation. Take the confirmed update only from a
+        chat Telegram marks `private` and whose sender id equals the chat id,
+        then write both `chat_id` and `sender_user_id`. Group chats are not
+        auto-paired: they need `sender_user_id` entered deliberately. After
+        pairing, acknowledge the consumed updates so they do not reach the
+        daemon (it also discards queued updates on every start).
+     4. Send a test message, with a voice-note toggle (`voice_note`).
+     The token is never echoed back after save, logged, or included in
+     errors; Telegram API errors go through the existing redaction.
+   - **Telegram calls** (the userbot call sidecar,
+     `sidecars/telegram-call/`). It needs a second Telegram account, API
+     credentials, and an interactive login. v1 does **not** automate the
+     login or hold the session: it detects whether the sidecar is set up
+     (`~/.cicero/tgcalls-venv` and `~/.cicero/telegram-call/cicero.session`
+     exist, without reading the session), shows a checklist linking
+     `sidecars/telegram-call/README.md`, and offers "ring me now" as the
+     test once the operator has done it. `briefing.call` and the "call me"
+     flow are only offered when this is set up.
+   - **When to reach you.** Pre-fill `notify.timezone` from the browser's
+     `Intl.DateTimeFormat().resolvedOptions().timeZone` — the box clock is
+     often UTC, and without it quiet hours and briefings fire at the wrong
+     local time. Optional `quiet_hours` and `briefing.at`, with a one-line
+     explanation that notifications inside quiet hours queue for the
+     briefing instead of pinging.
+
 9. **Hand-off + test turn.** Start the daemon the documented way (`cicero start`,
    or print the service command when a supervisor is detected), wait for
    `~/.cicero/web-voice/pairing.json`, redirect to web voice, and prompt one
@@ -160,6 +198,10 @@ becomes a command, a path, or a package name.
 - Board step: injected `which` + runner for each preset found / not found /
   probe failure / several installed, and Paperclip with and without a
   company id in env.
+- Telegram step with an injected Bot API fetcher: bad token, `getMe` ok,
+  `/start` from a private chat (paired), from a group (not auto-paired), from
+  a sender ≠ chat id (rejected), no update before the deadline, oversized
+  response; the token never appears in thrown errors or logged lines.
 - Round-trip: every wizard output config passes `validateRuntimeConfig`.
 - Setup server auth: missing/wrong token, foreign Host/Origin, missing CSRF
   header — all rejected.
@@ -172,6 +214,7 @@ becomes a command, a path, or a package name.
   diff preview; v2).
 - Installing LLM runtimes, CUDA/drivers, the audiocpp build, or a board
   system (Hermes/Multica/Paperclip).
+- Automating the Telegram call sidecar's account login or session storage.
 - Hybrid/cloud tiers (deferred in `tiers.ts` today).
 - Fixing the silent MLX-default fallback for a missing config. Worth doing
   separately: `cicero start` with no config should say "run `cicero setup`".
