@@ -3,7 +3,7 @@ import { composeBriefing, composeBriefingDigest } from "../../src/notify/briefin
 import { render, snapshot } from "../../src/operational-state";
 import { dashBus } from "../../src/dashboard/bus";
 import { boundedParentIds, normalizeBoardList, type BoardPreset } from "../../src/notify/board-presets";
-import { isUnstarted, listViaCli, taskLinkViaCli, taskParentsViaCli, type KanbanCommandOptions } from "../../src/notify/kanban-watch";
+import { isUnstarted, KANBAN_LIST_STDOUT_LIMIT_BYTES, listViaCli, taskLinkViaCli, taskParentsViaCli, type KanbanCommandOptions } from "../../src/notify/kanban-watch";
 
 function fakeCommand(payload: unknown, calls: string[][] = []): NonNullable<KanbanCommandOptions["runCommand"]> {
   return async (command) => {
@@ -184,3 +184,13 @@ test("list failures do not expose board bodies or stderr", async () => {
   };
   await expect(listViaCli(["fake"], { runCommand: failing })).rejects.toThrow("kanban list command exited 1");
 });
+
+test("real board list past 1MB parses; output past the list cap still fails the poll", async () => {
+  // Hermes prints each task's full body, so a few hundred tasks exceed 1MB.
+  const board = (bytes: number) => [process.execPath, "-e",
+    `const body = "x".repeat(2048); const n = Math.ceil(${bytes} / 2100);
+     process.stdout.write(JSON.stringify(Array.from({ length: n }, (_, i) => ({ id: "t" + i, title: "T", status: "done", body }))));`];
+  const tasks = await listViaCli(board(1.5 * 1024 * 1024));
+  expect(tasks.length).toBeGreaterThan(700);
+  await expect(listViaCli(board(KANBAN_LIST_STDOUT_LIMIT_BYTES + 64 * 1024))).rejects.toThrow("output limit");
+}, 30_000);
