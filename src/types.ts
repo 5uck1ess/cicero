@@ -490,6 +490,7 @@ export interface BrainTurnOptions {
 
 export interface BrainStructuredUpdate {
   kind: "plan" | "tool_call" | "tool_call_update";
+  toolCallId?: string;
   entries?: Array<{ title: string; status: string }>;
   title?: string;
   toolKind?: string;

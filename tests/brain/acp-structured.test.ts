@@ -103,3 +103,36 @@ test("ACP ignores load-history and stale-session updates, and bounds structured 
     unsubscribe();
   }
 });
+
+test("status-only ACP tool updates retain identity and replace the matching bounded turn entry", async () => {
+  const callbacks: AcpStructuredUpdate[] = [];
+  const busEvents: AcpStructuredUpdate[] = [];
+  const brain = new AcpBrain({ binary: "unused" });
+  const activeTurn = { settled: false, cancelled: false, structured: [] as AcpStructuredUpdate[], queue: { push: () => {} }, onStructuredUpdate: (update: AcpStructuredUpdate) => callbacks.push(update) };
+  const runtime = { sessionId: "session-1", activeTurn };
+  const control = brain as unknown as { runtime: typeof runtime; makeClient: (runtime: typeof runtime) => Client };
+  control.runtime = runtime;
+  const client = control.makeClient(runtime);
+  const unsubscribe = dashBus.subscribe((event) => { if (event.structured) busEvents.push(event.structured); });
+  try {
+    await client.sessionUpdate({ sessionId: "session-1", update: { sessionUpdate: "tool_call", toolCallId: "first", title: "Search files", status: "pending" } });
+    await client.sessionUpdate({ sessionId: "session-1", update: { sessionUpdate: "tool_call", toolCallId: "second", title: "Write patch", status: "pending" } });
+    for (let index = 0; index < 62; index++) {
+      await client.sessionUpdate({ sessionId: "session-1", update: { sessionUpdate: "plan", entries: [] } });
+    }
+    await client.sessionUpdate({ sessionId: "session-1", update: { sessionUpdate: "tool_call_update", toolCallId: "second", status: "completed" } });
+    expect(activeTurn.structured).toHaveLength(64);
+    expect(activeTurn.structured[0]).toMatchObject({ toolCallId: "first", title: "Search files", status: "pending" });
+    expect(activeTurn.structured[1]).toMatchObject({ toolCallId: "second", title: "Write patch", status: "completed" });
+    expect(callbacks.at(-1)).toMatchObject({ toolCallId: "second", title: "Write patch", status: "completed" });
+    expect(busEvents.at(-1)).toMatchObject({ toolCallId: "second", title: "Write patch", status: "completed" });
+    for (let index = 0; index < 100; index++) {
+      await client.sessionUpdate({ sessionId: "session-1", update: { sessionUpdate: "tool_call_update", toolCallId: "second", status: index % 2 ? "completed" : "in_progress" } });
+    }
+    expect(activeTurn.structured).toHaveLength(64);
+    expect(callbacks).toHaveLength(128);
+    expect(busEvents).toHaveLength(128);
+  } finally {
+    unsubscribe();
+  }
+});

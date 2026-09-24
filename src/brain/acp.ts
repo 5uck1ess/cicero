@@ -71,6 +71,7 @@ export async function openAcpSession(
   return { sessionId: session.sessionId, restored: false };
 }
 const MAX_STRUCTURED_UPDATES = 64;
+const MAX_STRUCTURED_EVENTS = 128;
 const MAX_PLAN_ENTRIES = 32;
 const MAX_STRUCTURED_TITLE = 160;
 function safeTitle(value: string): string {
@@ -646,6 +647,7 @@ type OwnedAcpProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
 interface ActiveAcpTurn {
   queue: ChunkQueue;
   structured: AcpStructuredUpdate[];
+  structuredEvents: number;
   onStructuredUpdate?: (update: AcpStructuredUpdate) => void;
   cancelled: boolean;
   settled: boolean;
@@ -810,6 +812,13 @@ export class AcpBrain implements Brain {
     return this.redactAgentText(describeAcpError(error));
   }
 
+  private safeToolCallId(value: string): string {
+    // Preserve ordinary ACP IDs for clients. Hash long, unsafe, or secret-like
+    // IDs so correlation remains stable without exposing their original value.
+    if (/^[A-Za-z0-9._:-]{1,128}$/.test(value) && this.redactAgentText(value) === value) return value;
+    return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+  }
+
   async start(): Promise<void> {
     try {
       const epoch = this.setDesiredRunning(true);
@@ -948,6 +957,7 @@ export class AcpBrain implements Brain {
         active = {
           queue,
           structured: [],
+          structuredEvents: 0,
           onStructuredUpdate: options.onStructuredUpdate,
           cancelled: false,
           settled: false,
@@ -1134,18 +1144,25 @@ export class AcpBrain implements Brain {
 
   private recordStructured(runtime: AcpRuntime, update: SessionNotification["update"]): void {
     const turn = runtime.activeTurn;
-    if (!turn || turn.settled || turn.cancelled || turn.structured.length >= MAX_STRUCTURED_UPDATES) return;
+    if (!turn || turn.settled || turn.cancelled || (turn.structuredEvents ?? 0) >= MAX_STRUCTURED_EVENTS) return;
     let record: AcpStructuredUpdate;
+    let replaceAt = -1;
     if (update.sessionUpdate === "plan") {
+      if (turn.structured.length >= MAX_STRUCTURED_UPDATES) return;
       record = { kind: "plan", entries: update.entries.slice(0, MAX_PLAN_ENTRIES).map((entry) => ({
         title: safeTitle(this.redactAgentText(entry.content)), status: entry.status,
       })) };
     } else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+      const toolCallId = this.safeToolCallId(update.toolCallId);
+      replaceAt = turn.structured.findIndex((entry) => entry.toolCallId === toolCallId);
+      if (replaceAt < 0 && turn.structured.length >= MAX_STRUCTURED_UPDATES) return;
+      const previous = replaceAt >= 0 ? turn.structured[replaceAt] : undefined;
       record = {
         kind: update.sessionUpdate,
-        ...(typeof update.title === "string" ? { title: safeTitle(this.redactAgentText(update.title)) } : {}),
-        ...(update.kind ? { toolKind: update.kind } : {}),
-        ...(update.status ? { status: update.status } : {}),
+        toolCallId,
+        ...(typeof update.title === "string" ? { title: safeTitle(this.redactAgentText(update.title)) } : previous?.title ? { title: previous.title } : {}),
+        ...(update.kind ? { toolKind: update.kind } : previous?.toolKind ? { toolKind: previous.toolKind } : {}),
+        ...(update.status ? { status: update.status } : previous?.status ? { status: previous.status } : {}),
       };
     } else return;
     if (record.entries) {
@@ -1153,7 +1170,9 @@ export class AcpBrain implements Brain {
       Object.freeze(record.entries);
     }
     Object.freeze(record);
-    turn.structured.push(record);
+    if (replaceAt >= 0) turn.structured[replaceAt] = record;
+    else turn.structured.push(record);
+    turn.structuredEvents = (turn.structuredEvents ?? 0) + 1;
     dashBus.structured(record);
     try { this.config.onStructuredUpdate?.(record); } catch { /* observer cannot break the turn */ }
     try { turn.onStructuredUpdate?.(record); } catch { /* observer cannot break the turn */ }
