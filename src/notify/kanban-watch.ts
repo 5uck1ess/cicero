@@ -3,7 +3,13 @@ import { log } from "../logger";
 import { CommandAbortError, runBoundedCommand } from "../process/bounded-command";
 
 const KANBAN_COMMAND_TIMEOUT_MS = 10_000;
-const KANBAN_LIST_STDOUT_LIMIT_BYTES = 1024 * 1024;
+/**
+ * Board list cap. Hermes emits every task's full body and result, so a
+ * long-lived board passes 1MB at a few hundred tasks (a real 482-task board
+ * printed 1.3MB and every poll failed). Still bounded: output past this
+ * errors the poll rather than buffering without limit.
+ */
+export const KANBAN_LIST_STDOUT_LIMIT_BYTES = 8 * 1024 * 1024;
 const KANBAN_LINK_STDOUT_LIMIT_BYTES = 256 * 1024;
 const KANBAN_STDERR_LIMIT_BYTES = 64 * 1024;
 export const KANBAN_SNAPSHOT_TASK_LIMIT = 1_000;
