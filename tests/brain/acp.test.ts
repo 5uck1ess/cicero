@@ -41,6 +41,20 @@ test("ACP reloads a stored session, suppresses load history, and passes MCP serv
   expect(readFileSync(logFile, "utf8")).not.toContain("synthetic-secret");
 });
 
+test("explicit ACP restart after a completed turn opens a new session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cicero-acp-reset-"));
+  const sessionFile = join(directory, "session.json");
+  const logFile = join(directory, "agent.jsonl");
+  brain = makeBrain(false, { sessionFile, env: { CICERO_TEST_ACP_LOAD: "yes", CICERO_TEST_ACP_LOG: logFile } });
+  await brain.start();
+  expect(await brain.send("before reset")).toBe("echo:before reset");
+  await brain.restart();
+  expect(brain.sessionRestored()).toBe(false);
+  expect(await brain.send("after reset")).toBe("echo:after reset");
+  const calls = readFileSync(logFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  expect(calls.map((call) => call.method)).toEqual(["new", "new"]);
+});
+
 test("ACP falls back to newSession when loading is absent or refused", async () => {
   for (const mode of ["absent", "refuse"]) {
     const directory = mkdtempSync(join(tmpdir(), "cicero-acp-fallback-"));

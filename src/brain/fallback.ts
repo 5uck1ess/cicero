@@ -171,8 +171,13 @@ export class FallbackBrain implements Brain {
     this.turnContext.inject(context);
   }
 
+  async discardSession(): Promise<void> {
+    await Promise.all(this.tiers.map((brain) => brain.discardSession?.()));
+  }
+
   async restart(): Promise<void> {
     this.turnContext.clear();
+    await Promise.all(this.tiers.map((brain, i) => this.started.has(i) ? undefined : brain.discardSession?.()));
     for (const i of this.started) {
       await this.tiers[i]!.restart().catch(() => { /* it can respawn on next use */ });
     }

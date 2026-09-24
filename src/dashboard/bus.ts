@@ -114,6 +114,8 @@ class DashBus {
   structured(update: NonNullable<DashEvent["structured"]>): void {
     const clean: BrainStructuredUpdate = {
       kind: update.kind,
+      ...(update.sourceId ? { sourceId: boundedLabel(update.sourceId, 48) } : {}),
+      ...(update.turnId ? { turnId: boundedLabel(update.turnId, 32) } : {}),
       ...(update.toolCallId ? { toolCallId: boundedLabel(update.toolCallId, 128) } : {}),
       ...(update.title ? { title: boundedLabel(update.title, 160) } : {}),
       ...(update.toolKind ? { toolKind: boundedLabel(update.toolKind, 32) } : {}),

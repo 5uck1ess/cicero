@@ -1962,6 +1962,11 @@ export class SwitchboardBrain implements Brain {
     this.turnContext.inject(context);
   }
 
+  async discardSession(): Promise<void> {
+    await Promise.all([this.primary.discardSession?.(),
+      ...Object.values(this.lanes).map((lane) => lane.brain.discardSession?.())]);
+  }
+
   async restart(): Promise<void> {
     const lifecycle = ++this.lifecycleSequence;
     this.stopping = true;
@@ -1987,6 +1992,9 @@ export class SwitchboardBrain implements Brain {
         pending.map(([name]) => this.stopLane(name)),
       );
       try {
+        await Promise.all(Object.entries(this.lanes)
+          .filter(([name]) => !started.includes(name))
+          .map(([, lane]) => lane.brain.discardSession?.()));
         await this.primary.restart();
         if (this.lifecycleSequence !== lifecycle) {
           await this.cleanupStalePrimary("retired restart");

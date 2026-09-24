@@ -515,9 +515,11 @@ function time(ts) {
 const toolRows = new Map();
 function addRow(e) {
   if (!cleared) { rows.innerHTML = ''; toolRows.clear(); cleared = true; }
-  const toolCallId = e.type === 'structured' && e.structured && e.structured.toolCallId;
-  let row = toolCallId ? toolRows.get(toolCallId) : null;
-  if (row && !rows.contains(row)) { toolRows.delete(toolCallId); row = null; }
+  const detail = e.type === 'structured' && e.structured;
+  const toolRowKey = detail && detail.sourceId && detail.turnId && detail.toolCallId
+    ? JSON.stringify([detail.sourceId, detail.turnId, detail.toolCallId]) : null;
+  let row = toolRowKey ? toolRows.get(toolRowKey) : null;
+  if (row && !rows.contains(row)) { toolRows.delete(toolRowKey); row = null; }
   const replacing = !!row;
   if (!row) row = document.createElement('div');
   let cls = 'row', icon = e.icon || '•', msg = e.message || '';
@@ -531,12 +533,12 @@ function addRow(e) {
   row.children[0].textContent = time(e.ts);
   row.children[1].textContent = icon + '  ' + msg;
   if (!replacing) {
-    if (toolCallId) { row.dataset.toolCallId = toolCallId; toolRows.set(toolCallId, row); }
+    if (toolRowKey) { row.dataset.toolRowKey = toolRowKey; toolRows.set(toolRowKey, row); }
     rows.appendChild(row);
   }
   while (rows.children.length > 200) {
     const old = rows.firstChild;
-    if (old.dataset.toolCallId) toolRows.delete(old.dataset.toolCallId);
+    if (old.dataset.toolRowKey) toolRows.delete(old.dataset.toolRowKey);
     rows.removeChild(old);
   }
   rows.scrollTop = rows.scrollHeight;

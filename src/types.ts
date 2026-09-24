@@ -490,6 +490,10 @@ export interface BrainTurnOptions {
 
 export interface BrainStructuredUpdate {
   kind: "plan" | "tool_call" | "tool_call_update";
+  /** In-process ACP brain identity for dashboard row correlation. */
+  sourceId?: string;
+  /** One prompt's identity within the ACP brain. */
+  turnId?: string;
   toolCallId?: string;
   entries?: Array<{ title: string; status: string }>;
   title?: string;
@@ -535,6 +539,8 @@ export interface Brain {
    * control replies may defer it, but adapters must not replay it indefinitely.
    */
   injectContext(context: string): void;
+  /** Discard durable conversation state for a cold brain without starting it. */
+  discardSession?(): Promise<void>;
   restart(): Promise<void>;
   health(): Promise<boolean>;
   /** Lane switchboard: name of the pinned lane, or null at the front desk. */

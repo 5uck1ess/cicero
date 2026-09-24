@@ -626,6 +626,22 @@ test("Telegram text captures operational context once for the recording brain", 
   }]);
 });
 
+test("typed restart and clear-context commands reset the brain without an agent turn", async () => {
+  const calls: string[] = [];
+  const deps = {
+    brain: {
+      send: async () => { calls.push("send"); return "unexpected"; },
+      restart: async () => { calls.push("restart"); },
+    },
+    history: { append: async () => { calls.push("history"); } },
+    operationalContext: async () => { calls.push("context"); return null; },
+  };
+  for (const command of ["restart brain", "new session", "clear context"]) {
+    expect(await runOperatorChatTurn(command, deps)).toBe("Brain restarted with a new session.");
+  }
+  expect(calls).toEqual(["restart", "restart", "restart"]);
+});
+
 test("web /api/chat passes its turn signal and operational context to the recording brain", async () => {
   const controller = new AbortController();
   const received: Array<BrainTurnOptions | undefined> = [];

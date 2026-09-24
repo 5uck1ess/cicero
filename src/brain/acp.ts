@@ -1,7 +1,7 @@
 import type { Brain, BrainStructuredUpdate, BrainTurnOptions, PendingConfirmation } from "../types";
 import { log } from "../logger";
-import { createHash } from "node:crypto";
-import { readAcpSession, writeAcpSession, type StoredAcpSession } from "./acp-session-store";
+import { createHash, randomBytes } from "node:crypto";
+import { clearAcpSession, readAcpSession, writeAcpSession, type StoredAcpSession } from "./acp-session-store";
 import { dashBus } from "../dashboard/bus";
 import { redactSnapshotSecrets } from "../operational-state";
 import { BrainTurnContext } from "./turn-context";
@@ -646,6 +646,7 @@ type OwnedAcpProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
 
 interface ActiveAcpTurn {
   queue: ChunkQueue;
+  rowTurnId?: string;
   structured: AcpStructuredUpdate[];
   structuredEvents: number;
   onStructuredUpdate?: (update: AcpStructuredUpdate) => void;
@@ -721,6 +722,14 @@ async function terminateOwnedAcpProcess(proc: OwnedAcpProcess, graceMs: number):
  * requests are auto-approved when {@link AcpBrainConfig.autoApproveTools} is set.
  */
 export class AcpBrain implements Brain {
+  private readonly rowSourceId = (() => {
+    const id = randomBytes(16).toString("hex");
+    return `b${id.slice(0, 16)}|${id.slice(16)}`;
+  })();
+  private rowTurnSequence = 0;
+  private skipStoredSession = false;
+  private sessionPointerEpoch = 0;
+  private sessionPointerWrite: Promise<void> = Promise.resolve();
   private runtime: AcpRuntime | null = null;
   private generation = 0;
   private desiredRunning = false;
@@ -816,7 +825,19 @@ export class AcpBrain implements Brain {
     // Preserve ordinary ACP IDs for clients. Hash long, unsafe, or secret-like
     // IDs so correlation remains stable without exposing their original value.
     if (/^[A-Za-z0-9._:-]{1,128}$/.test(value) && this.redactAgentText(value) === value) return value;
-    return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+    // The dashboard redactor treats one long hash as a secret. Split the full
+    // digest into short chunks so identity survives its second sanitization.
+    const digest = createHash("sha256").update(value).digest("hex");
+    return `h${digest.match(/.{1,16}/g)!.join("|")}`;
+  }
+
+  private saveSessionPointer(path: string, identity: string, sessionId: string, at: number): Promise<void> {
+    const epoch = this.sessionPointerEpoch;
+    const write = this.sessionPointerWrite.catch(() => {}).then(async () => {
+      if (epoch === this.sessionPointerEpoch) await writeAcpSession(path, identity, sessionId, at);
+    });
+    this.sessionPointerWrite = write;
+    return write;
   }
 
   async start(): Promise<void> {
@@ -956,6 +977,7 @@ export class AcpBrain implements Brain {
         );
         active = {
           queue,
+          rowTurnId: `turn-${++this.rowTurnSequence}`,
           structured: [],
           structuredEvents: 0,
           onStructuredUpdate: options.onStructuredUpdate,
@@ -1018,7 +1040,7 @@ export class AcpBrain implements Brain {
             if (!active.cancelled && stopReason !== "cancelled" && this.runtime === runtime
               && !runtime.stopping && this.config.sessionFile && runtime.sessionIdentity) {
               try {
-                await writeAcpSession(this.config.sessionFile, runtime.sessionIdentity, sessionId, (this.config.now ?? Date.now)());
+                await this.saveSessionPointer(this.config.sessionFile, runtime.sessionIdentity, sessionId, (this.config.now ?? Date.now)());
               } catch (error: unknown) {
                 log("warn", `acp: could not update session timestamp: ${this.describeAgentError(error)}`);
               }
@@ -1080,16 +1102,28 @@ export class AcpBrain implements Brain {
     this.turnContext.inject(context);
   }
 
+  async discardSession(): Promise<void> {
+    this.skipStoredSession = true;
+    this.sessionPointerEpoch++;
+    this.setDesiredRunning(false);
+    await this.stopCurrentRuntime(new Error("ACP session discarded"));
+    await this.sessionPointerWrite.catch(() => {});
+    if (this.config.sessionFile) await clearAcpSession(this.config.sessionFile);
+  }
+
   async restart(): Promise<void> {
     this.turnContext.clear();
     this.clearConfirmationState();
+    this.skipStoredSession = true;
+    this.sessionPointerEpoch++;
     const epoch = this.setDesiredRunning(true, true);
-    try {
-      await this.stopCurrentRuntime(new Error("ACP brain restarting"));
-      if (this.shouldRun(epoch)) await this.ensureStarted(epoch);
-    } catch (error: unknown) {
-      throw error;
-    }
+    let stopError: unknown;
+    try { await this.stopCurrentRuntime(new Error("ACP brain restarting")); }
+    catch (error: unknown) { stopError = error; }
+    await this.sessionPointerWrite.catch(() => {});
+    if (this.config.sessionFile) await clearAcpSession(this.config.sessionFile);
+    if (stopError) throw stopError;
+    if (this.shouldRun(epoch)) await this.ensureStarted(epoch);
   }
 
   hasPendingConfirmation(): boolean {
@@ -1165,6 +1199,8 @@ export class AcpBrain implements Brain {
         ...(update.status ? { status: update.status } : previous?.status ? { status: previous.status } : {}),
       };
     } else return;
+    record.sourceId = this.rowSourceId;
+    record.turnId = turn.rowTurnId ?? "turn-0";
     if (record.entries) {
       for (const entry of record.entries) Object.freeze(entry);
       Object.freeze(record.entries);
@@ -1483,7 +1519,8 @@ export class AcpBrain implements Brain {
         })),
       ])).digest("hex");
       const now = (this.config.now ?? Date.now)();
-      const stored = this.config.sessionFile ? await readAcpSession(this.config.sessionFile, identity) : null;
+      const stored = this.config.sessionFile && !this.skipStoredSession
+        ? await readAcpSession(this.config.sessionFile, identity) : null;
       const resumableId = resumableAcpSession(stored, this.config.sessionResume !== false, this.config.sessionResumeMaxAgeHours ?? 12, now);
       const opened = await openAcpSession(
         conn, { cwd, mcpServers }, resumableId, runtime.initialize.agentCapabilities?.loadSession === true,
@@ -1501,7 +1538,10 @@ export class AcpBrain implements Brain {
         throw new Error("agent stopped or its startup was superseded during session setup");
       }
       if (this.config.sessionFile && runtime.sessionId && !opened.restored) {
-        await writeAcpSession(this.config.sessionFile, identity, runtime.sessionId, now);
+        const pointerEpoch = this.sessionPointerEpoch;
+        await this.saveSessionPointer(this.config.sessionFile, identity, runtime.sessionId, now);
+        if (pointerEpoch === this.sessionPointerEpoch && this.runtime === runtime
+          && !runtime.stopping && this.shouldRun(epoch)) this.skipStoredSession = false;
       }
       log("ok", `🧠 ACP brain connected (${this.config.binary})`);
     } catch (error: unknown) {

@@ -1,9 +1,38 @@
 import { test, expect } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Client, SessionNotification } from "@zed-industries/agent-client-protocol";
 import { AcpBrain, openAcpSession, resumableAcpSession, type AcpStructuredUpdate } from "../../src/brain/acp";
+import { readAcpSession, writeAcpSession } from "../../src/brain/acp-session-store";
 import { buildResumePrimer } from "../../src/web-voice/resume";
 import { dashBus } from "../../src/dashboard/bus";
 import { resolveAcpMcpServers } from "../../src/brain";
+
+test("explicit ACP restart discards a completed turn's persisted pointer", async () => {
+  const sessionFile = join(mkdtempSync(join(tmpdir(), "cicero-acp-explicit-reset-")), "session.json");
+  await writeAcpSession(sessionFile, "identity", "completed-session", 1234);
+  const brain = new AcpBrain({ binary: "unused", sessionFile });
+  const control = brain as unknown as {
+    stopCurrentRuntime: () => Promise<void>;
+    ensureStarted: () => Promise<void>;
+    skipStoredSession: boolean;
+  };
+  control.stopCurrentRuntime = async () => {};
+  control.ensureStarted = async () => {};
+  await brain.restart();
+  const stored = await readAcpSession(sessionFile, "identity");
+  expect(stored).toBeNull();
+  expect(control.skipStoredSession).toBe(true);
+  const calls: string[] = [];
+  const connection = {
+    loadSession: async () => { calls.push("load"); return {}; },
+    newSession: async () => { calls.push("new"); return { sessionId: "fresh" }; },
+  } as unknown as Parameters<typeof openAcpSession>[0];
+  await openAcpSession(connection, { cwd: "/work", mcpServers: [] }, stored?.sessionId ?? null, true,
+    async <T>(operation: Promise<T>): Promise<T> => operation);
+  expect(calls).toEqual(["new"]);
+});
 
 test("ACP MCP environment names resolve to bounded protocol values without diagnostics containing values", () => {
   const configured = [{ name: "search", command: "search-mcp", args: ["--stdio"], env: ["SEARCH_TOKEN"] }];

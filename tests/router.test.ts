@@ -116,7 +116,7 @@ const allActions: Record<string, ActionConfig> = {
     category: "local",
     command: "",
     tts_mode: "full",
-    examples: ["restart brain", "restart claude", "reboot the brain", "reset the brain"],
+    examples: ["restart brain", "restart claude", "reboot the brain", "reset the brain", "new session", "clear context"],
   },
   tab_command: {
     category: "terminal",
@@ -649,6 +649,13 @@ describe("FallbackRouter — new intent types", () => {
   test("'restart brain' → runtime_restart_brain", async () => {
     const result = await router.classify("restart brain", allActions);
     expect(result.intent).toBe("runtime_restart_brain");
+  });
+
+  test("'new session' and 'clear context' → runtime_restart_brain", async () => {
+    for (const command of ["new session", "clear context"]) {
+      const result = await router.classify(command, allActions);
+      expect(result.intent).toBe("runtime_restart_brain");
+    }
   });
 
   test("'switch to sales' → terminal category with tab=sales", async () => {

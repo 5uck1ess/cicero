@@ -120,8 +120,13 @@ export class RoutingBrain implements Brain {
     this.turnContext.inject(context);
   }
 
+  async discardSession(): Promise<void> {
+    await Promise.all([this.primary.discardSession?.(), this.escalation.discardSession?.()]);
+  }
+
   async restart(): Promise<void> {
     this.turnContext.clear();
+    if (!this.escalationUp) await this.escalation.discardSession?.();
     await this.primary.restart();
     if (this.escalationUp) {
       await this.escalation.restart().catch((err: unknown) => {
