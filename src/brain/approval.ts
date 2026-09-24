@@ -92,3 +92,14 @@ export function relayBoundConfirmation(brain: Brain, message: string): string | 
     ? decision ? "Approved." : "Cancelled."
     : "That approval is no longer pending.";
 }
+
+/** Speak only protocol-enumerated kinds. Titles, locations and raw input are untrusted. */
+export function permissionNotice(kind: unknown): string {
+  const targets: Record<string, string> = {
+    execute: "run a shell command", read: "read a file", edit: "edit a file",
+    delete: "delete a file", move: "move a file", search: "search files",
+    fetch: "fetch data", switch_mode: "switch modes", think: "use a tool",
+  };
+  const action = typeof kind === "string" && Object.hasOwn(targets, kind) ? targets[kind] : undefined;
+  return `Waiting on your OK to ${action ?? "use a tool"}.`;
+}

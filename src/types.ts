@@ -367,6 +367,8 @@ export interface BrainConfig {
   // including bounded reassurances until content arrives. Default on; false
   // disables both the initial filler and its reassurances.
   thinking_filler?: boolean;
+  // Speak one short notice when an ACP turn first uses a tool. Default on.
+  tool_start_notice?: boolean;
 }
 
 export interface ServersConfig {
@@ -468,6 +470,8 @@ export interface BrainTurnOptions {
    * forward it unchanged and must never retain it as conversation memory.
    */
   systemContext?: string;
+  /** Turn-owned, sanitized ACP activity. Never retain beyond this turn. */
+  onNotice?: (notice: { type: "tool" | "confirmation"; text: string }) => void;
 }
 
 export interface BackgroundTurnOptions extends BrainTurnOptions {

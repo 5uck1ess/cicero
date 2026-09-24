@@ -137,3 +137,7 @@ Built-in actions: focus tab, list tabs.
 ## Validation and startup failures
 
 Cicero validates configuration before it starts providers, subprocesses, listeners, or network servers. Malformed YAML, wrong value types, invalid ports, unknown deployment tiers, and malformed actions stop startup with the config path and every detected issue. Unknown STT, TTS, and LLM backend names also fail closed; Cicero never substitutes a different provider for a misspelled name.
+
+### ACP turn notices
+
+`brain.tool_start_notice` defaults to `true`. On the first ACP tool call of a turn, Cicero speaks a short working line if reply audio has not started and a thinking filler is not playing. Set it to `false` to disable that line. Spoken-confirmation requests matching `brain.confirm_tools` say a short kind-based approval line on the active voice surface; the spoken line never includes command arguments or paths. Telegram approval buttons remain available when configured.

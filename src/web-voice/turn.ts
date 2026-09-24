@@ -1,5 +1,5 @@
 import { unlink } from "node:fs/promises";
-import type { Brain } from "../types";
+import type { Brain, BrainTurnOptions } from "../types";
 import type { STTProvider } from "../backends/stt/provider";
 import type { TTSProvider } from "../backends/tts/provider";
 import { pinGeneration } from "../backends/hot-swap";
@@ -8,6 +8,7 @@ import { coalesceSentenceGroups, type CoalesceOptions, type CoalescedChunk } fro
 import { newTurnTimer } from "../timing";
 import { log } from "../logger";
 import type { PreparedFiller } from "../speaker/filler-bank";
+import { shouldSpeakToolStartNotice } from "../speaker/thinking-filler";
 import type { SpeculativeTurn } from "./speculative";
 import { SpeculativeSideEffectError } from "../call-intent";
 import { beginOwnedTone, settleTone, type OwnedTone, type ToneOptions } from "./tone";
@@ -237,6 +238,8 @@ export interface WebStreamDeps {
    * Omit it (the default) for no filler or reassurance.
    */
   filler?: (transcript?: string) => PreparedFiller | undefined;
+  /** Speak a short ACP tool-start line, once per turn (default on). */
+  toolStartNotice?: boolean;
   /** How long the reply may take before the filler speaks (default 1200ms; 0 = immediately). */
   fillerDelayMs?: number;
   /** Delay between cached reassurances after the first filler (default 4000ms). */
@@ -1137,6 +1140,8 @@ async function streamReply(
   // cuts over only for the next turn; the parked background never synthesizes, so
   // releasing on return (below) does not strand a generation.
   const ttsPin = pinGeneration(deps.tts);
+  let noticeSpeech: Promise<void> = Promise.resolve();
+  let noticeClosed = false;
   try {
     // Latency-gated filler: arm a pre-rendered "let me think…" clip (0 ms synth —
     // it's cached), but only speak it if the brain's first sentence hasn't shown
@@ -1159,6 +1164,12 @@ async function streamReply(
       deps.fillerMaxReassurances,
     );
     let lastFillerText: string | undefined;
+    let firstSentence = false;
+    let firstAudio = false;
+    let parked = false;
+    let noticeCount = 0;
+    let toolNoticeSent = false;
+
     let reassurancesSpoken = 0;
     const nextDistinctFiller = (): PreparedFiller | undefined => {
       for (let attempt = 0; attempt < DISTINCT_FILLER_PICK_ATTEMPTS; attempt++) {
@@ -1216,8 +1227,24 @@ async function streamReply(
         yield t;
       }
     };
+    const onNotice: NonNullable<BrainTurnOptions["onNotice"]> = (notice) => {
+      if (noticeClosed || deps.signal?.aborted || turnAbort?.signal.aborted || sink.aborted() || parked) return;
+      if (notice.type === "tool" && (toolNoticeSent || !shouldSpeakToolStartNotice(deps.toolStartNotice !== false, firstSentence || firstAudio, !!lastFillerText))) return;
+      if (noticeCount >= 32) return;
+      noticeCount++;
+      if (notice.type === "tool") toolNoticeSent = true;
+      cancelFiller();
+      noticeSpeech = noticeSpeech.then(async () => {
+        if (noticeClosed || deps.signal?.aborted || turnAbort?.signal.aborted || sink.aborted() || parked) return;
+        const audio = admitProviderAudio(await ttsPin.provider.generateAudio(notice.text, undefined, { speed: deps.voice?.state.rate }));
+        if (noticeClosed || deps.signal?.aborted || turnAbort?.signal.aborted || sink.aborted() || parked || !audio.byteLength) return;
+        sink.sentence(notice.text);
+        sink.audio(audio);
+        firstAudio = true;
+      }).catch(() => { /* an optional notice cannot fail the reply */ });
+    };
     const turnOptions = turnAbort
-      ? { signal: turnAbort.signal, systemContext: systemContext ?? undefined }
+      ? { signal: turnAbort.signal, systemContext: systemContext ?? undefined, onNotice }
       : undefined;
     const tokens: AsyncIterable<string> = pretokens
       ? timed(pretokens)
@@ -1225,8 +1252,6 @@ async function streamReply(
         ? timed(deps.brain.sendStream(brainInput, turnOptions))
         : timed(oneChunkPromise(deps.brain.send(brainInput, turnOptions)));
 
-    let firstSentence = false;
-    let firstAudio = false;
     let spoken = 0;
     const spokenTexts: string[] = []; // what the user actually HEARD, for barge-in recovery
     let control: boolean | undefined; // control-plane turns (roll call, standup) are never TLDR-gated
@@ -1234,7 +1259,6 @@ async function streamReply(
     // Long-turn parking state: once parked, the loop keeps consuming DETACHED —
     // it ignores sink aborts (the floor belongs to new turns now) and collects
     // text for the notify path instead of speaking.
-    let parked = false;
     let parkDeadline = 0;
     const parkedTexts: string[] = [];
     const stopConsuming = () => {
@@ -1269,14 +1293,17 @@ async function streamReply(
         if (sink.aborted()) break;
         if (!firstSentence) { firstSentence = true; timer.mark("first_sentence"); }
         control ??= deps.brain.wasControlTurn?.() ?? false;
+        await noticeSpeech;
+        if (deps.signal?.aborted || sink.aborted()) break;
         for (const part of chunk.parts) sink.sentence(part);
 
         let stop = false;
         const render = async (call: { text: string; parts: string[] }): Promise<void> => {
+          await noticeSpeech;
           const audio = admitProviderAudio(
             await ttsPin.provider.generateAudio(call.text, undefined, { speed: deps.voice?.state.rate }),
           );
-          if (sink.aborted() && !parked) { stop = true; return; }
+          if ((deps.signal?.aborted || sink.aborted()) && !parked) { stop = true; return; }
           if (audio.byteLength > 0) {
             if (!firstAudio) { firstAudio = true; timer.mark("first_audio"); }
             // Control turns hand the floor between speakers each sentence — give
@@ -1344,7 +1371,7 @@ async function streamReply(
           .catch(() => { /* handled by the awaits below */ })
           .finally(() => { clearTimeout(watchdog); resolve("done"); });
       });
-      if (outcome === "park" && !firstSentence && !sink.aborted()) {
+      if (outcome === "park" && !firstSentence && !firstAudio && !sink.aborted()) {
         // Nothing has been said and the brain is deep in something — hand the
         // floor back. The reply finishes in the background and arrives through
         // onParked (spoken via notify, in the lane's voice).
@@ -1384,6 +1411,8 @@ async function streamReply(
       }
     }
     await consumption;
+    await noticeSpeech;
+    noticeClosed = true;
     // Barge-in after speech started: remember the spoken tail so "continue"
     // can resume. A turn cut off before any audio has nothing to resume.
     if (sink.aborted() && spokenTexts.length > 0) {
@@ -1418,6 +1447,8 @@ async function streamReply(
     // Release before/independent of the parked handoff: the detached background
     // collects text but never synthesizes, so the turn's TTS generation is free
     // the moment streamReply returns.
+    noticeClosed = true;
+    await noticeSpeech;
     ttsPin.release();
     cancelFiller(); // turn over (or failed) — never speak a filler after the fact
     if (!detached) {
