@@ -235,9 +235,20 @@ export interface WebVoiceHandle {
 
 function sendJson(ws: import("bun").ServerWebSocket<WsData>, value: unknown): boolean {
   const json = JSON.stringify(value);
-  if (ws.getBufferedAmount() + Buffer.byteLength(json) > MAX_OUTBOUND_AUDIO_BUFFER_BYTES) return false;
-  try { return ws.send(json) !== 0 && ws.getBufferedAmount() <= MAX_OUTBOUND_AUDIO_BUFFER_BYTES; }
-  catch { return false; }
+  const audioNotify = typeof value === "object" && value !== null
+    && (value as { type?: unknown; audioBase64?: unknown }).type === "notify"
+    && typeof (value as { audioBase64?: unknown }).audioBase64 === "string"
+    && (value as { audioBase64: string }).audioBase64.length > 0;
+  const limit = audioNotify ? MAX_OUTBOUND_AUDIO_BUFFER_BYTES - CONTROL_FRAME_RESERVE_BYTES : MAX_OUTBOUND_AUDIO_BUFFER_BYTES;
+  try {
+    if (ws.getBufferedAmount() + Buffer.byteLength(json) <= limit
+      && ws.send(json) !== 0 && ws.getBufferedAmount() <= limit) return true;
+  } catch { /* closing below for controls */ }
+  if (!audioNotify) {
+    // A terminal/control frame must never disappear while the page waits for it.
+    try { ws.close(1011, "Outbound control delivery failed"); } catch { /* already closed */ }
+  }
+  return false;
 }
 
 function withSession(ws: import("bun").ServerWebSocket<WsData>, value: Record<string, unknown>): Record<string, unknown> {
@@ -335,13 +346,15 @@ export function makeSink(ws: import("bun").ServerWebSocket<WsData>, turn: TurnSt
 }
 
 export const MAX_OUTBOUND_AUDIO_BUFFER_BYTES = 8 * 1024 * 1024;
+export const CONTROL_FRAME_RESERVE_BYTES = 64 * 1024;
 export function sendAudioBounded(socket: Pick<import("bun").ServerWebSocket, "send" | "getBufferedAmount">, frame: ArrayBuffer): void {
-  if (frame.byteLength > MAX_OUTBOUND_AUDIO_BUFFER_BYTES
-    || socket.getBufferedAmount() + frame.byteLength > MAX_OUTBOUND_AUDIO_BUFFER_BYTES) {
+  const audioLimit = MAX_OUTBOUND_AUDIO_BUFFER_BYTES - CONTROL_FRAME_RESERVE_BYTES;
+  if (frame.byteLength > audioLimit
+    || socket.getBufferedAmount() + frame.byteLength > audioLimit) {
     throw new Error("web voice audio backpressure limit exceeded");
   }
   const status = socket.send(frame);
-  if (status === 0 || socket.getBufferedAmount() > MAX_OUTBOUND_AUDIO_BUFFER_BYTES) {
+  if (status === 0 || socket.getBufferedAmount() > audioLimit) {
     throw new Error("web voice audio delivery failed");
   }
 }
@@ -535,10 +548,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     if (!request) return 0;
     let delivered = 0;
     for (const ws of clients) {
-      try {
-        ws.send(JSON.stringify(withSession(ws, request)));
-        delivered += 1;
-      } catch { /* socket closed */ }
+      if (sendJson(ws, withSession(ws, request))) delivered += 1;
     }
     return delivered;
   };

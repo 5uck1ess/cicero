@@ -538,21 +538,39 @@ function resumeListening() {
 function wavEnvelope(buf) {
   try {
     const v = new DataView(buf);
-    const sr = v.getUint32(24, true);
-    let off = 12, dataOff = -1, dataLen = 0;
+    if (v.byteLength < 44 || v.getUint32(0, true) !== 0x46464952 || v.getUint32(8, true) !== 0x45564157) return null;
+    let off = 12, dataOff = -1, dataLen = 0, fmtOff = -1;
     while (off + 8 <= v.byteLength) {           // walk RIFF chunks to find "data"
       const id = String.fromCharCode(v.getUint8(off), v.getUint8(off + 1), v.getUint8(off + 2), v.getUint8(off + 3));
       const len = v.getUint32(off + 4, true);
-      if (id === "data") { dataOff = off + 8; dataLen = len; break; }
+      if (len > v.byteLength - (off + 8)) return null;
+      if (id === "fmt " && len >= 16) fmtOff = off + 8;
+      if (id === "data") { dataOff = off + 8; dataLen = len; }
       off += 8 + len + (len & 1);
     }
-    if (dataOff < 0 || !sr) return null;
-    const n = Math.min(Math.floor(dataLen / 2), Math.floor((v.byteLength - dataOff) / 2));
+    if (fmtOff < 0 || dataOff < 0) return null;
+    const format = v.getUint16(fmtOff, true), channels = v.getUint16(fmtOff + 2, true);
+    const sr = v.getUint32(fmtOff + 4, true), align = v.getUint16(fmtOff + 12, true);
+    const bits = v.getUint16(fmtOff + 14, true), bytes = bits / 8;
+    if (!sr || !channels || channels > 2 || !align || align !== channels * bytes ||
+        !((format === 3 && bits === 32) || (format === 1 && [8, 16, 24, 32].includes(bits)))) return null;
+    const n = Math.floor(Math.min(dataLen, v.byteLength - dataOff) / align);
     const win = Math.max(1, Math.round(sr * 0.05)); // 50ms RMS windows
     const env = []; let peak = 1e-6;
     for (let i = 0; i < n; i += win) {
       let s = 0; const m = Math.min(n, i + win);
-      for (let j = i; j < m; j++) { const x = v.getInt16(dataOff + j * 2, true) / 32768; s += x * x; }
+      for (let j = i; j < m; j++) {
+        let x = 0;
+        for (let c = 0; c < channels; c++) {
+          const p = dataOff + j * align + c * bytes;
+          if (format === 3) x += v.getFloat32(p, true);
+          else if (bits === 8) x += (v.getUint8(p) - 128) / 128;
+          else if (bits === 16) x += v.getInt16(p, true) / 32768;
+          else if (bits === 24) x += ((v.getUint8(p) | (v.getUint8(p + 1) << 8) | (v.getUint8(p + 2) << 16)) << 8 >> 8) / 8388608;
+          else x += v.getInt32(p, true) / 2147483648;
+        }
+        x /= channels; s += x * x;
+      }
       const r = Math.sqrt(s / (m - i));
       env.push(r); if (r > peak) peak = r;
     }
@@ -572,8 +590,8 @@ function enqueueAudio(buf, frame) {
   if (!canQueueAudio(queuedAudioMs, ms)) {
     abortActiveTurn(); stopPlayback(); setStatus("audio backlog exceeded; turn interrupted"); return;
   }
-  audioQueue.push({ buf: buf, env: env, durationMs: ms, sequence: frame.sequence,
-    sessionId: frame.sessionId, turnId: frame.turnId });
+  audioQueue.push({ buf: buf, env: env, durationMs: ms, sequence: frame && frame.sequence,
+    sessionId: frame && frame.sessionId, turnId: frame && frame.turnId });
   queuedAudioMs += ms;
   if (!playing) playNext();
 }
