@@ -32,7 +32,7 @@ Two facts fall out of the table that matter for extension work:
   another authenticated client of the same endpoint. The daemon neither knows
   nor cares that a phone call is on the other side. One precision: the server
   speaks two framings — the built-in page requests protocol v2
-  (`/ws?protocol=2`, tagged `CVP2` frames), while the call sidecar connects
+  (`/ws?protocol=2`, tagged `CVP2` input and `CVA2` sequenced reply frames), while the call sidecar connects
   plain `/ws` and uses the original v1 raw-WAV/untagged-JSON format. A new
   bridge can use either; both are documented in
   [web voice → transport identity](web-voice.md#transport-identity-and-limits).

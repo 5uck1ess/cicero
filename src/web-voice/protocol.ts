@@ -25,6 +25,7 @@ export const MAX_HEALTH_ROWS = 100;
  * the bytes prevents a late binary frame from being attributed to a newer turn.
  */
 const MAGIC = new Uint8Array([0x43, 0x56, 0x50, 0x32]); // "CVP2"
+const REPLY_MAGIC = new Uint8Array([0x43, 0x56, 0x41, 0x32]); // "CVA2"
 const FIXED_HEADER_BYTES = 8;
 export const MAX_PROTOCOL_ID_BYTES = 128;
 export const MAX_WS_PAYLOAD_BYTES = MAX_TURN_AUDIO_BYTES + FIXED_HEADER_BYTES + MAX_PROTOCOL_ID_BYTES * 2;
@@ -39,6 +40,8 @@ export interface TurnAudioFrame {
   sessionId: string;
   turnId: string;
   payload: ArrayBuffer;
+  /** Present on sequenced outbound audio; absent on the original CVP2 envelope. */
+  sequence?: number;
 }
 
 export interface TurnAudioMetadata {
@@ -101,29 +104,61 @@ export function encodeTurnAudioFrame(sessionId: string, turnId: string, payload:
 
 export function decodeTurnAudioFrame(input: Uint8Array): TurnAudioFrame | null {
   if (input.byteLength < FIXED_HEADER_BYTES) return null;
-  for (let i = 0; i < MAGIC.byteLength; i++) {
-    if (input[i] !== MAGIC[i]) return null;
-  }
+  const sequenced = REPLY_MAGIC.every((byte, i) => input[i] === byte);
+  if (!sequenced && !MAGIC.every((byte, i) => input[i] === byte)) return null;
+  const headerBytes = sequenced ? FIXED_HEADER_BYTES + 4 : FIXED_HEADER_BYTES;
+  if (input.byteLength < headerBytes) return null;
   const view = new DataView(input.buffer, input.byteOffset, input.byteLength);
+  const sequence = sequenced ? view.getUint32(8, true) : undefined;
+  if (sequenced && !sequence) return null;
   const sessionLength = view.getUint16(4, true);
   const turnLength = view.getUint16(6, true);
   if (
     sessionLength === 0 || turnLength === 0 ||
     sessionLength > MAX_PROTOCOL_ID_BYTES || turnLength > MAX_PROTOCOL_ID_BYTES
   ) return null;
-  const payloadOffset = FIXED_HEADER_BYTES + sessionLength + turnLength;
+  const payloadOffset = headerBytes + sessionLength + turnLength;
   if (payloadOffset > input.byteLength) return null;
 
   const decoder = new TextDecoder("utf-8", { fatal: true });
   try {
-    const sessionId = decoder.decode(input.subarray(FIXED_HEADER_BYTES, FIXED_HEADER_BYTES + sessionLength));
-    const turnId = decoder.decode(input.subarray(FIXED_HEADER_BYTES + sessionLength, payloadOffset));
+    const sessionId = decoder.decode(input.subarray(headerBytes, headerBytes + sessionLength));
+    const turnId = decoder.decode(input.subarray(headerBytes + sessionLength, payloadOffset));
     if (!isProtocolId(sessionId) || !isProtocolId(turnId)) return null;
     // Copy out of Bun's reusable WebSocket message buffer before async work.
     const payload = new Uint8Array(input.byteLength - payloadOffset);
     payload.set(input.subarray(payloadOffset));
-    return { sessionId, turnId, payload: payload.buffer };
+    return sequenced ? { sessionId, turnId, payload: payload.buffer, sequence } : { sessionId, turnId, payload: payload.buffer };
   } catch {
     return null;
   }
+}
+
+/** Outbound v2 audio uses a distinct magic and a u32 sequence before the ids. */
+export function encodeReplyAudioFrame(sessionId: string, turnId: string, sequence: number, payload: ArrayBuffer): ArrayBuffer {
+  if (!Number.isSafeInteger(sequence) || sequence < 1 || sequence > 0xffffffff) throw new Error("invalid audio sequence");
+  const base = new Uint8Array(encodeTurnAudioFrame(sessionId, turnId, payload));
+  const out = new Uint8Array(base.length + 4);
+  out.set([0x43, 0x56, 0x41, 0x32]); // CVA2
+  out.set(base.subarray(4, 8), 4);
+  new DataView(out.buffer).setUint32(8, sequence, true);
+  out.set(base.subarray(8), 12);
+  return out.buffer;
+}
+
+export function decodeReplyAudioFrame(input: Uint8Array): (TurnAudioFrame & { sequence: number }) | null {
+  const frame = decodeTurnAudioFrame(input);
+  return frame?.sequence ? frame as TurnAudioFrame & { sequence: number } : null;
+}
+
+export type AudioAck = { type: "audio_ack"; sessionId: string; turnId: string; sequence: number; status: "played" | "interrupted"; atMs?: number };
+export function decodeAudioAck(value: unknown): AudioAck | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  if (v.type !== "audio_ack" || !isProtocolId(v.sessionId) || !isProtocolId(v.turnId)
+    || !Number.isSafeInteger(v.sequence) || (v.sequence as number) < 1 || (v.sequence as number) > 0xffffffff
+    || (v.status !== "played" && v.status !== "interrupted")) return null;
+  if (v.status === "interrupted" && (typeof v.atMs !== "number" || !Number.isFinite(v.atMs) || v.atMs < 0 || v.atMs > MAX_TURN_AUDIO_MS)) return null;
+  if (v.status === "played" && v.atMs !== undefined) return null;
+  return v as AudioAck;
 }

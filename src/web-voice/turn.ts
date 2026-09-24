@@ -7,6 +7,7 @@ import { segmentSentences } from "../speaker/sentence-stream";
 import { coalesceSentenceGroups, type CoalesceOptions, type CoalescedChunk } from "../speaker/coalesce";
 import { newTurnTimer } from "../timing";
 import { log } from "../logger";
+import { recoveryTail } from "../speaker/recovery";
 import type { PreparedFiller } from "../speaker/filler-bank";
 import type { SpeculativeTurn } from "./speculative";
 import { SpeculativeSideEffectError } from "../call-intent";
@@ -494,12 +495,14 @@ async function gateForSpeech(reply: string, tldr?: TldrOptions): Promise<string>
 export interface WebReplySink {
   transcript(text: string): void;     // what STT heard
   sentence(text: string): void;       // a reply sentence (text), sent before its audio
-  audio(wav: ArrayBuffer): void;      // synthesized audio for the most recent sentence
+  audio(wav: ArrayBuffer, text?: string): void | Promise<void>; // text belongs to this audio chunk
   control(message: { type: "volume"; delta: number; volume: number } | { type: "rate"; rate: number }): void;
   done(): void;                        // turn complete
   error(message: string): void;
   /** True once the client asked to abort (barge-in). Checked between sentences. */
   aborted(): boolean;
+  /** null for transports without client playback acknowledgements. */
+  playedText?(): string[] | null;
 }
 
 async function* oneChunk(text: string): AsyncGenerator<string> {
@@ -1030,7 +1033,7 @@ async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink
       );
       if (sink.aborted()) break;
       if (audio.byteLength > 0) {
-        sink.audio(audio);
+        await sink.audio(audio, chunk.parts.join(" "));
         spokenTexts.push(...chunk.parts);
       }
     }
@@ -1183,23 +1186,30 @@ async function streamReply(
           cancelFiller();
           return;
         }
-        sink.audio(clip.audio);
-        lastFillerText = clip.text;
-        if (reassurance) reassurancesSpoken += 1;
-        timer.mark(reassurance ? "reassurance_audio" : "filler_audio");
-        if (reassurancesSpoken >= maxReassurances) return;
-        const next = nextDistinctFiller();
-        if (next) {
-          const durationMs = wavDurationMs(clip.audio);
-          // A malformed header cannot safely extend the pacing delay, but an
-          // optional reassurance must not break the chain after audio emission.
-          // Falling back preserves the configured interval used before duration
-          // awareness instead of throwing or silently ending slow-turn coverage.
-          const nextDelayMs = durationMs === null
-            ? reassuranceIntervalMs
-            : Math.max(reassuranceIntervalMs, Math.ceil(durationMs));
-          armFiller(next, nextDelayMs, true);
-        }
+        const fail = (error: unknown) => {
+          cancelFiller();
+          if (!sink.aborted()) sink.error(error instanceof Error ? error.message : String(error));
+        };
+        const continueFiller = () => {
+          if (fillerCancelled || deps.signal?.aborted || sink.aborted()) return;
+          lastFillerText = clip.text;
+          if (reassurance) reassurancesSpoken += 1;
+          timer.mark(reassurance ? "reassurance_audio" : "filler_audio");
+          if (reassurancesSpoken >= maxReassurances) return;
+          const next = nextDistinctFiller();
+          if (next) {
+            const durationMs = wavDurationMs(clip.audio);
+            const nextDelayMs = durationMs === null
+              ? reassuranceIntervalMs
+              : Math.max(reassuranceIntervalMs, Math.ceil(durationMs));
+            armFiller(next, nextDelayMs, true);
+          }
+        };
+        try {
+          const sent = sink.audio(clip.audio, clip.text);
+          if (sent) void sent.then(continueFiller, fail);
+          else continueFiller();
+        } catch (error) { fail(error); }
       }, delayMs);
     };
     if (firstFiller) {
@@ -1228,7 +1238,7 @@ async function streamReply(
     let firstSentence = false;
     let firstAudio = false;
     let spoken = 0;
-    const spokenTexts: string[] = []; // what the user actually HEARD, for barge-in recovery
+    const spokenTexts: string[] = []; // synthesized and emitted; v2 recovery uses acknowledged playback instead
     let control: boolean | undefined; // control-plane turns (roll call, standup) are never TLDR-gated
     const gated: string[] = [];
     // Long-turn parking state: once parked, the loop keeps consuming DETACHED —
@@ -1283,9 +1293,9 @@ async function streamReply(
             // the next voice a human beat instead of cutting in mid-breath.
             if (control && spoken > 0) {
               const beat = silenceWavLike(SPEAKER_BEAT_MS, audio);
-              if (beat.byteLength > 0) sink.audio(beat);
+              if (beat.byteLength > 0) await sink.audio(beat);
             }
-            sink.audio(audio);
+            await sink.audio(audio, call.parts.join(" "));
             spoken += call.parts.length;
             spokenTexts.push(...call.parts);
           }
@@ -1356,7 +1366,7 @@ async function streamReply(
         const audio = admitProviderAudio(
           await ttsPin.provider.generateAudio(line, undefined, { speed: deps.voice?.state.rate }),
         );
-        if (audio.byteLength > 0) sink.audio(audio);
+        if (audio.byteLength > 0) await sink.audio(audio, line);
         sink.done();
         timer.mark("parked");
         detached = true;
@@ -1386,8 +1396,9 @@ async function streamReply(
     await consumption;
     // Barge-in after speech started: remember the spoken tail so "continue"
     // can resume. A turn cut off before any audio has nothing to resume.
-    if (sink.aborted() && spokenTexts.length > 0) {
-      deps.recover?.store(spokenTexts.slice(-3).join(" "));
+    if (sink.aborted()) {
+      const tail = recoveryTail(spokenTexts, sink.playedText?.() ?? null);
+      if (tail) deps.recover?.store(tail);
     }
     if (gated.length > 0 && !sink.aborted()) {
       const remainder = gated.join(" ");
@@ -1403,7 +1414,7 @@ async function streamReply(
         await ttsPin.provider.generateAudio(coda, undefined, { speed: deps.voice?.state.rate }),
       );
       if (!sink.aborted() && audio.byteLength > 0) {
-        sink.audio(audio);
+        await sink.audio(audio, coda);
         spokenTexts.push(coda);
       }
     }
