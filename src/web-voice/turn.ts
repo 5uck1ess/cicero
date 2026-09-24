@@ -1015,6 +1015,7 @@ export async function streamWebTextTurn(text: string, deps: WebStreamDeps, sink:
 
 async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink): Promise<string[]> {
   const spokenTexts: string[] = [];
+  let completed = false;
   // The brain-free fast paths (voice-control ack, repeat, expand) render here and
   // run before streamReply pins anything, so they hold their own pin: a replayed
   // multi-sentence reply must not change provider halfway through.
@@ -1037,11 +1038,15 @@ async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink
         spokenTexts.push(...chunk.parts);
       }
     }
+    if (!sink.aborted()) { sink.done(); completed = true; }
+    return spokenTexts;
   } finally {
     pin.release();
+    if (!completed) {
+      const tail = recoveryTail(spokenTexts, sink.playedText?.() ?? null);
+      if (tail) deps.recover?.store(tail);
+    }
   }
-  sink.done();
-  return spokenTexts;
 }
 
 /** Shared reply pipeline: transcript → brain stream → sentences → TTS → sink.
@@ -1069,7 +1074,7 @@ async function streamReply(
         sink.control({ type: "rate", rate: control.rate });
       }
       const spoken = await speakDirect(control.ack, deps, sink);
-      if (spoken.length > 0) deps.lastReply?.store(spoken.join(" "));
+      if (!sink.aborted() && spoken.length > 0) deps.lastReply?.store(spoken.join(" "));
       return;
     }
   }
@@ -1079,7 +1084,7 @@ async function streamReply(
   if (deps.lastReply && isRepeatRequest(transcript)) {
     const replay = deps.lastReply.pending() || "I haven't said anything yet.";
     const spoken = await speakDirect(replay, deps, sink);
-    if (spoken.length > 0 && replay !== "I haven't said anything yet.") {
+    if (!sink.aborted() && spoken.length > 0 && replay !== "I haven't said anything yet.") {
       deps.lastReply.store(spoken.join(" "));
     }
     return;
@@ -1091,7 +1096,7 @@ async function streamReply(
     const detail = deps.tldr.pending();
     if (detail) {
       const spoken = await speakDirect(detail, deps, sink);
-      if (spoken.length > 0) deps.lastReply?.store(spoken.join(" "));
+      if (!sink.aborted() && spoken.length > 0) deps.lastReply?.store(spoken.join(" "));
       return;
     }
   }
@@ -1135,6 +1140,8 @@ async function streamReply(
     else deps.signal.addEventListener("abort", abortFromTransport, { once: true });
   }
   let detached = false;
+  let completed = false;
+  const spokenTexts: string[] = []; // emitted audio; recovery prefers acknowledged playback
   // Pin one TTS generation for this whole reply — every sentence, the park line,
   // and the TLDR coda synthesize on the provider the turn began on. A live swap
   // cuts over only for the next turn; the parked background never synthesizes, so
@@ -1238,7 +1245,6 @@ async function streamReply(
     let firstSentence = false;
     let firstAudio = false;
     let spoken = 0;
-    const spokenTexts: string[] = []; // synthesized and emitted; v2 recovery uses acknowledged playback instead
     let control: boolean | undefined; // control-plane turns (roll call, standup) are never TLDR-gated
     const gated: string[] = [];
     // Long-turn parking state: once parked, the loop keeps consuming DETACHED —
@@ -1394,12 +1400,6 @@ async function streamReply(
       }
     }
     await consumption;
-    // Barge-in after speech started: remember the spoken tail so "continue"
-    // can resume. A turn cut off before any audio has nothing to resume.
-    if (sink.aborted()) {
-      const tail = recoveryTail(spokenTexts, sink.playedText?.() ?? null);
-      if (tail) deps.recover?.store(tail);
-    }
     if (gated.length > 0 && !sink.aborted()) {
       const remainder = gated.join(" ");
       deps.tldr?.store?.(remainder);
@@ -1422,6 +1422,7 @@ async function streamReply(
       deps.lastReply?.store(spokenTexts.join(" "));
     }
     sink.done();
+    completed = !sink.aborted();
   } catch (error) {
     if (error instanceof Error) throw error;
     throw new Error("streaming web reply failed", { cause: error });
@@ -1434,6 +1435,12 @@ async function streamReply(
     if (!detached) {
       discardCoalescedControlTurnVoices(deps, turnAbort?.signal);
       deps.signal?.removeEventListener("abort", abortFromTransport);
+    }
+    // Includes a rejected credit wait in render, the control beat, parked
+    // hand-back, or TLDR coda. Also runs after shutdown/socket-close aborts.
+    if (!completed && !detached) {
+      const tail = recoveryTail(spokenTexts, sink.playedText?.() ?? null);
+      if (tail) deps.recover?.store(tail);
     }
   }
 }

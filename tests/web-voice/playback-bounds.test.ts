@@ -177,9 +177,27 @@ describe("web voice playback accounting", () => {
     const gate = new AudioPlaybackGate(clock);
     gate.track(1, 12_000);
     const pending = waitForPlaybackCredit(2, gate, 1_000, new AbortController().signal);
-    clock.advance(30_000);
+    clock.advance(42_001);
     await expect(pending).rejects.toThrow("acknowledgement timed out");
     expect(clock.timers.size).toBe(0);
+  });
+  test("sequential expected end uses send times and re-bases after ack progress", async () => {
+    const clock = new FakeClock();
+    const gate = new AudioPlaybackGate(clock);
+    gate.track(1, 31_000);
+    clock.advance(2_000);
+    gate.track(2, 1_000);
+    expect(gate.expectedPlaybackEndMs).toBe(32_000);
+    const pending = gate.waitForCapacity(121_000, new AbortController().signal);
+    clock.advance(38_000); // now 40s; first clip's ack is late but valid progress
+    gate.acknowledge(1);
+    expect(gate.expectedPlaybackEndMs).toBe(41_000);
+    clock.advance(22_001); // old 32s + 30s deadline has passed
+    expect(clock.timers.size).toBe(1);
+    clock.advance(8_000); // now 70.001s, still before new 71s deadline
+    expect(clock.timers.size).toBe(1);
+    clock.advance(1_000);
+    await expect(pending).rejects.toThrow("acknowledgement timed out");
   });
   test("v1 delivery is unpaced even with full outstanding credit", async () => {
     const gate = new AudioPlaybackGate(new FakeClock());

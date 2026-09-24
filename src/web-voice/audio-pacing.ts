@@ -16,7 +16,7 @@ const realClock: PacingClock = {
 };
 
 export class AudioPlaybackGate {
-  private outstanding = new Map<number, number>();
+  private outstanding = new Map<number, { durationMs: number; sentAt: number; expectedEnd: number }>();
   private unplayedMs = 0;
   private waiter: { durationMs: number; resolve: () => void; reject: (error: Error) => void; signal: AbortSignal; onAbort: () => void; timer: ReturnType<typeof setTimeout>; deadline: number } | null = null;
 
@@ -25,19 +25,20 @@ export class AudioPlaybackGate {
 
   get pendingMs(): number { return this.unplayedMs; }
   get pendingClips(): number { return this.outstanding.size; }
+  get expectedPlaybackEndMs(): number { return [...this.outstanding.values()].at(-1)?.expectedEnd ?? this.clock.now(); }
   canSend(durationMs: number): boolean { return this.hasCapacity(durationMs); }
 
   async waitForCapacity(durationMs: number, signal: AbortSignal): Promise<void> {
-    if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 120_000) throw new Error("invalid reply audio duration");
+    if (!Number.isFinite(durationMs) || durationMs <= 0) throw new Error("invalid reply audio duration");
     if (signal.aborted) throw new Error("web voice audio turn aborted");
-    // One already admitted oversized clip is bounded by the protocol's 120 s
-    // maximum; subsequent clips wait until it has been acknowledged.
+    // Admission is owned by snapshotSynthesizedWav; any admitted clip may use
+    // the empty queue even when its duration exceeds the ordinary credit cap.
     if (this.hasCapacity(durationMs)) return;
     if (this.waiter) throw new Error("concurrent web voice audio producers");
     await new Promise<void>((resolve, reject) => {
       const onAbort = () => this.finish(new Error("web voice audio turn aborted"));
-      const deadline = this.clock.now() + this.stallMs;
-      const timer = this.clock.setTimer(() => this.timeout(), this.stallMs);
+      const deadline = this.expectedPlaybackEndMs + this.stallMs;
+      const timer = this.clock.setTimer(() => this.timeout(), Math.max(1, deadline - this.clock.now() + 1));
       this.waiter = { durationMs, resolve, reject, signal, onAbort, timer, deadline };
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) onAbort();
@@ -45,35 +46,43 @@ export class AudioPlaybackGate {
   }
 
   track(sequence: number, durationMs: number): void {
-    this.outstanding.set(sequence, durationMs);
+    const sentAt = this.clock.now();
+    const expectedEnd = Math.max(sentAt, this.expectedPlaybackEndMs) + durationMs;
+    this.outstanding.set(sequence, { durationMs, sentAt, expectedEnd });
     this.unplayedMs += durationMs;
   }
 
   acknowledge(sequence: number): boolean {
-    const duration = this.outstanding.get(sequence);
-    if (duration === undefined) return false;
+    const clip = this.outstanding.get(sequence);
+    if (clip === undefined) return false;
     this.outstanding.delete(sequence);
-    this.unplayedMs = Math.max(0, this.unplayedMs - duration);
+    this.unplayedMs = Math.max(0, this.unplayedMs - clip.durationMs);
+    // The ack is observed playback progress. Rebase the remaining sequential
+    // estimate from this observation, including any chunks queued behind it.
+    let expectedEnd = this.clock.now();
+    for (const pending of this.outstanding.values()) {
+      pending.expectedEnd = expectedEnd += pending.durationMs;
+    }
     if (this.waiter) {
       if (this.hasCapacity(this.waiter.durationMs)) this.finish();
       else {
         this.clock.clearTimer(this.waiter.timer);
-        this.waiter.deadline = this.clock.now() + this.stallMs;
-        this.waiter.timer = this.clock.setTimer(() => this.timeout(), this.stallMs);
+        this.waiter.deadline = this.expectedPlaybackEndMs + this.stallMs;
+        this.waiter.timer = this.clock.setTimer(() => this.timeout(), Math.max(1, this.waiter.deadline - this.clock.now() + 1));
       }
     }
     return true;
   }
 
   private hasCapacity(durationMs: number): boolean {
-    return this.outstanding.size < this.maxClips
-      && (this.unplayedMs + durationMs <= this.maxMs || this.outstanding.size === 0);
+    return this.outstanding.size === 0 || (this.outstanding.size < this.maxClips
+      && this.unplayedMs + durationMs <= this.maxMs);
   }
 
   private timeout(): void {
     if (!this.waiter) return;
     const remaining = this.waiter.deadline - this.clock.now();
-    if (remaining > 0) this.waiter.timer = this.clock.setTimer(() => this.timeout(), remaining);
+    if (remaining >= 0) this.waiter.timer = this.clock.setTimer(() => this.timeout(), remaining + 1);
     else this.finish(new Error("web voice audio acknowledgement timed out"));
   }
 
