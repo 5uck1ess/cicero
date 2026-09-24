@@ -97,6 +97,7 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
       await this.retryUnconfirmedOutputRelease();
       await this.waitForFallbackOutput();
     } catch (error) {
+      if (!turnAbort.signal.aborted) turnAbort.abort();
       if (this.turnCancel === turnAbort) this.turnCancel = null;
       throw error;
     }
@@ -204,7 +205,9 @@ export class StreamingTTSSpeaker extends TTSSpeaker {
     } finally {
       // Wake read-ahead before waiting for pinned renders so both turn-owned
       // resources can finish their cleanup without blocking each other.
-      if (stale() && !turnAbort.signal.aborted) turnAbort.abort();
+      // A source that did not finish naturally still owns a pending producer
+      // read. Error exits must wake it before the look-ahead and pin drains.
+      if (!sourceFinished && !turnAbort.signal.aborted) turnAbort.abort();
       // Release the slot only if it is still ours — a superseding turn has
       // already installed its own controller, and clearing it here would leave
       // that turn's read-ahead unreachable.

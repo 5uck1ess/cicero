@@ -92,7 +92,10 @@ export class AudioCppProvider implements TTSProvider {
    */
   private heldReferences = new Map<string, AudioCppReferenceLease>();
 
-  constructor(config: TTSProviderConfig) {
+  constructor(
+    config: TTSProviderConfig,
+    private readonly acquireLease: typeof acquireAudioCppSafeReference = acquireAudioCppSafeReference,
+  ) {
     this.host = config.host;
     this.port = config.port ?? TTS_DEFAULT_PORTS.audiocpp!;
     this.model = config.model ?? "pocket-tts";
@@ -127,7 +130,7 @@ export class AudioCppProvider implements TTSProvider {
     try {
       const payload: Record<string, unknown> = { model: this.model, input: text };
       if (options?.speed !== undefined) payload.speed = options.speed;
-      const reference = await this.acquireReference(voice);
+      const reference = await this.acquireReference(voice, signal);
       try {
         signal.throwIfAborted();
         if (reference) payload.voice_ref = reference.path;
@@ -172,7 +175,7 @@ export class AudioCppProvider implements TTSProvider {
     }
   }
 
-  private async acquireReference(voice?: string): Promise<AudioCppReferenceUse | null> {
+  private async acquireReference(voice: string | undefined, signal: AbortSignal): Promise<AudioCppReferenceUse | null> {
     let input: string | null = null;
     let preferProvisionedDerivative = false;
     if (voice && voice !== this.voice) {
@@ -201,10 +204,37 @@ export class AudioCppProvider implements TTSProvider {
 
     // Never retain a rejected acquisition. A temporarily missing or malformed
     // source is retried on the next sentence after the operator repairs it.
-    const lease = await acquireAudioCppSafeReference(input, {
+    let ownedLease: AudioCppReferenceLease | undefined;
+    const acquired = this.acquireLease(input, {
       preferProvisionedDerivative,
       cacheRoot: this.referenceCacheRoot,
+    }).then((lease) => {
+      // Acquisition can finish after the request has already returned on
+      // abort. Its continuation still owns and releases that late lease.
+      if (signal.aborted) {
+        lease.release();
+        signal.throwIfAborted();
+      }
+      ownedLease = lease;
+      return lease;
     });
+    let onAbort!: () => void;
+    const cancelled = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new DOMException("Request aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+    let lease: AudioCppReferenceLease;
+    try {
+      lease = await Promise.race([acquired, cancelled]);
+      signal.throwIfAborted();
+      ownedLease = undefined; // the provider's bounded cache now owns it
+    } catch (error: unknown) {
+      ownedLease?.release();
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
     this.heldReferences.set(key, lease);
     while (this.heldReferences.size > MAX_HELD_REFERENCE_LEASES) {
       const oldestKey = this.heldReferences.keys().next().value as string | undefined;

@@ -10,6 +10,7 @@ import type { WyomingTransport } from "../../src/backends/wyoming/client";
 import { FallbackTTSProvider } from "../../src/backends/tts/fallback";
 import { FallbackSTTProvider } from "../../src/backends/stt/fallback";
 import { StreamingTTSSpeaker } from "../../src/speaker/streaming-tts";
+import type { AudioCppReferenceLease } from "../../src/voice/audio-reference";
 import type { TTSProvider } from "../../src/backends/tts/provider";
 import type { STTProvider } from "../../src/backends/stt/provider";
 import type { AudioPlayer } from "../../src/platform/audio";
@@ -110,6 +111,31 @@ test("audio.cpp STT and TTS requests can be in flight concurrently", async () =>
   completeTts(new Response(new Uint8Array([1, 2])));
   expect(await stt).toBe("concurrent transcript");
   expect(new Uint8Array(await tts)).toEqual(new Uint8Array([1, 2]));
+});
+
+test("audio.cpp releases a reference lease that arrives after abort", async () => {
+  let resolveLease!: (lease: AudioCppReferenceLease) => void;
+  let released = 0;
+  let fetches = 0;
+  globalThis.fetch = (async () => { fetches++; return new Response(new Uint8Array([1])); }) as typeof fetch;
+  const provider = new AudioCppProvider(
+    { refAudio: "/synthetic/reference.wav" },
+    () => new Promise<AudioCppReferenceLease>((resolve) => { resolveLease = resolve; }),
+  );
+  const controller = new AbortController();
+  const pending = provider.generateAudio("old turn", undefined, { signal: controller.signal });
+  await Promise.resolve();
+  controller.abort(new DOMException("turn ended", "AbortError"));
+  resolveLease({
+    path: "/synthetic/owned-reference.wav",
+    sourcePath: "/synthetic/reference.wav",
+    sourceFingerprint: "synthetic",
+    isCurrent: async () => true,
+    release: () => { released++; },
+  });
+  await expect(pending).rejects.toHaveProperty("name", "AbortError");
+  expect(released).toBe(1);
+  expect(fetches).toBe(0);
 });
 
 test("abort during ordinary HTTP TTS rejects fetch and releases its request", async () => {
