@@ -20,6 +20,14 @@ const issueStatuses: Record<string, CanonicalKanbanStatus> = {
   backlog: "todo", todo: "todo", in_progress: "in_progress", in_review: "review",
   blocked: "blocked", done: "done", cancelled: "cancelled",
 };
+/**
+ * Multica's lifecycle categories for custom statuses (`IssueStatusCategory`).
+ * A category can't tell review/blocked apart from other started work, so
+ * `started` maps to in_progress: no announcement and no nudge.
+ */
+const multicaCategories: Record<string, CanonicalKanbanStatus> = {
+  unstarted: "todo", started: "in_progress", done: "done", closed: "cancelled",
+};
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -61,8 +69,8 @@ export function normalizeBoardList(value: unknown, options: BoardNormalizationOp
   for (const row of rows) {
     if (!record(row) || typeof row.id !== "string" || !row.id || typeof row.status !== "string") continue;
     const mapped = Object.hasOwn(statuses, row.status) ? statuses[row.status]
-      : preset === "multica" && typeof row.status_category === "string" && Object.hasOwn(statuses, row.status_category)
-        ? statuses[row.status_category] : undefined;
+      : preset === "multica" && typeof row.status_category === "string" && Object.hasOwn(multicaCategories, row.status_category)
+        ? multicaCategories[row.status_category] : undefined;
     const status = mapped ?? row.status.slice(0, 64);
     if (!mapped) {
       const key = `${preset}:${status}`;

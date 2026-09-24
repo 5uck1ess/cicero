@@ -31,15 +31,25 @@ test("Hermes bare list keeps unix seconds and lane names, normalizes running and
 test("Multica wrapped list converts ISO timestamps and uses category only for custom statuses", async () => {
   const issue = { id: "work", identifier: "DEV-1", title: "Work", status: "in_progress", assignee_type: "agent",
     assignee_id: "agent-id", parent_issue_id: "parent", created_at: iso, updated_at: "2026-09-24T11:00:00Z" };
-  const payload = { issues: [issue, { ...issue, id: "custom", status: "qa_custom", status_category: "in_review" },
-    { ...issue, id: "builtin", status: "todo", status_category: "done" }], total: 3, limit: 50, offset: 0, has_more: false };
+  // Real Multica IssueStatusCategory values: unstarted | started | done | closed.
+  const payload = { issues: [issue,
+    { ...issue, id: "triage", status: "triage_custom", status_category: "unstarted" },
+    { ...issue, id: "qa", status: "qa_custom", status_category: "started" },
+    { ...issue, id: "shipped", status: "shipped_custom", status_category: "done" },
+    { ...issue, id: "wontfix", status: "wontfix", status_category: "closed" },
+    { ...issue, id: "builtin", status: "todo", status_category: "done" }], total: 6, limit: 50, offset: 0, has_more: false };
   const tasks = await listViaCli(["fake-multica"], { preset: "multica", runCommand: fakeCommand(payload) });
+  const base = { title: "Work", assignee: null, parent_ids: ["parent"], created_at: seconds, started_at: null, completed_at: null };
   expect(tasks).toEqual([
-    { id: "work", title: "Work", status: "in_progress", assignee: null, parent_ids: ["parent"], created_at: seconds, started_at: null, completed_at: null },
-    { id: "custom", title: "Work", status: "review", assignee: null, parent_ids: ["parent"], created_at: seconds, started_at: null, completed_at: null },
-    { id: "builtin", title: "Work", status: "todo", assignee: null, parent_ids: ["parent"], created_at: seconds, started_at: null, completed_at: null },
+    { id: "work", status: "in_progress", ...base },
+    { id: "triage", status: "todo", ...base },
+    { id: "qa", status: "in_progress", ...base },
+    { id: "shipped", status: "done", ...base },
+    { id: "wontfix", status: "cancelled", ...base },
+    { id: "builtin", status: "todo", ...base },
   ]);
   expect(isUnstarted(tasks[0]!)).toBe(false);
+  expect(isUnstarted(tasks[1]!)).toBe(true);
   expect(normalizeBoardList(payload, { preset: "multica", assignees: { "agent-id": "coder" } })[0]!.assignee).toBe("coder");
 });
 

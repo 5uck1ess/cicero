@@ -50,7 +50,11 @@ watch always requires an explicit `command`. Cicero supplies no default CLI.
 | --- | --- | --- | --- |
 | `hermes` | `[hermes, kanban, list, --json]` | `[hermes, kanban, show]` | Live-tested board integration |
 | `multica` | `[multica, issue, list, --output, json]` | `[multica, issue, get]` | Built from upstream source, not live-tested |
-| `paperclip` | `[paperclip, issue, list, --json]` | `[paperclip, issue, get]` | Built from upstream source, not live-tested |
+| `paperclip` | `[paperclipai, issue, list, -C, <company-id>, --json]` | `[paperclipai, issue, get]` | Built from upstream source, not live-tested |
+
+The Paperclip CLI installs as `paperclipai` and needs a company: pass
+`-C <company-id>`, or drop it when `PAPERCLIP_COMPANY_ID` or a
+`paperclipai context set` profile already supplies one.
 
 Hermes and Paperclip return bare arrays; Multica returns an `issues` array in
 an object. Cicero reads the returned list only; it does not fetch additional
@@ -61,8 +65,11 @@ can produce a premature reminder.
 All presets normalize to `todo | in_progress | review | blocked | done | cancelled`:
 Hermes `triage/todo/scheduled/ready` become `todo`, `running` becomes
 `in_progress`, and `archived` becomes `cancelled`. Multica/Paperclip `backlog`
-becomes `todo` and `in_review` becomes `review`. Multica custom statuses use
-`status_category` when it maps to a built-in status. Unknown statuses retain
+becomes `todo` and `in_review` becomes `review`. Multica custom statuses map by
+their `status_category`: `unstarted` → `todo`, `started` → `in_progress`,
+`done` → `done`, `closed` → `cancelled` (a custom review or blocked status is
+indistinguishable from other started work, so it neither announces nor
+nudges). Unknown statuses retain
 their bounded raw label but never announce or nudge; warnings are deduplicated
 with a bounded budget of 128 distinct statuses per process. All task timestamps
 are unix seconds internally; ISO timestamps are converted at the list boundary.
