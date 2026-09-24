@@ -31,6 +31,27 @@ re-check that confirms the step worked before moving on. The wizard runs
 things itself only when that is safe: pinned install recipes, read-only
 probes, and writing the config.
 
+**Teach as it goes.** The wizard should leave the operator understanding their
+own setup, not just holding a working config. Every screen has:
+
+- **What this is:** one or two plain sentences on the component and where it
+  sits in the pipeline (mic → STT → brain → TTS → speaker, plus the channels).
+  A small pipeline diagram highlights the current step.
+- **Why the recommendation:** the detected facts behind the pre-selection
+  ("RTX 3090, 24 GB free → faster-whisper on CUDA") and what each option
+  trades off (latency, quality, VRAM/RAM, local vs. cloud, voice cloning).
+- **What is about to happen:** before any action, what it will run, where it
+  writes (venv path, config key, `.env`), and roughly how much it downloads.
+  Afterwards, what happened.
+- **Learn more:** a link to the matching doc (`docs/brains.md`,
+  `docs/notifications.md`, `docs/voice-cloning.md`, …) so the docs stay the
+  single source of truth; the page does not duplicate them.
+
+The review screen annotates the YAML being written: each key the wizard sets
+carries a one-line comment saying what it does. That makes the written
+config itself a record of what was set up and why, readable later without
+the wizard.
+
 ## Setup mode
 
 - Does not call `loadConfig`. A missing config is the normal case. An invalid
@@ -118,7 +139,11 @@ probes, and writing the config.
    already accepts an injected config and returns structured `Check[]`. Render
    ok/warn/fail with hints. Fails block the write; warns do not.
 
-8. **Write + pair.** Show the YAML to be written, then write it (private mode,
+8. **Write + pair.** Show the annotated YAML to be written. It is generated as
+   fresh text with its explanatory comments. That is safe because v1 only
+   writes when no config exists, so there are no existing comments to keep.
+   The generated text must parse back to the same config and pass
+   `validateRuntimeConfig`. Then write it (private mode,
    atomic tmp+rename like `updateConfigFields` in `src/config.ts`) with
    `web_voice.enabled: true` and a stable generated token (so the pairing QR
    survives restarts; see `setWebVoiceToken` in `src/config.ts`). Render the
