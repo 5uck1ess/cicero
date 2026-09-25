@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { ciceroHome } from "./platform/paths";
 import { PRIVATE_FILE_MODE, ensurePrivateDirectorySync, ensurePrivateFileIfExistsSync } from "./platform/secure-storage";
 import type { ClientMetric } from "./web-voice/protocol";
+import { LIVE_STT_FAILURES, type LiveSttFailure } from "./backends/stt/live-failure";
 
 export type LatencySurface = "web_voice" | "web_text";
 export interface LatencyRecord {
@@ -14,6 +15,7 @@ export interface LatencyRecord {
   speechEndToReplyMs?: number; speechEndToFillerMs?: number;
   sttMs?: number; brainFirstTokenMs?: number; ttsFirstAudioMs?: number;
   sttFirstPartialMs?: number; sttSource?: "streaming" | "batch_fallback";
+  sttLiveFailure?: LiveSttFailure;
   cancellationSettlementMs?: number; interrupted: boolean; parked: boolean;
   bargeInCount?: number;
 }
@@ -23,6 +25,7 @@ const validMs = (n: number | undefined): number | undefined => n !== undefined &
 export class LatencyTurn {
   private sttFirstPartialMs: number | undefined;
   private sttSource: "streaming" | "batch_fallback" | undefined;
+  private sttLiveFailure: LiveSttFailure | undefined;
   private marks = new Map<string, number>();
   private clientMarks = new Map<"speech_end" | "first_audio_played" | "first_filler_played", number>();
   private abortAt: number | undefined;
@@ -32,6 +35,10 @@ export class LatencyTurn {
   constructor(readonly sessionId: string, readonly turnId: string, readonly surface: LatencySurface, readonly at: number, private readonly clock: () => number = () => performance.now(), private readonly inputLength = 0) {}
   mark(name: string, offsetMs: number): void {
     if (name === "stt_batch_fallback") this.sttSource = "batch_fallback";
+    if (name.startsWith("stt_live_failure:")) {
+      const stage = name.slice("stt_live_failure:".length);
+      if (LIVE_STT_FAILURES.some((value) => value === stage)) this.sttLiveFailure = stage as LiveSttFailure;
+    }
     if (this.marks.size < 16 && !this.marks.has(name)) {
       const ms = validMs(offsetMs);
       if (ms !== undefined) this.marks.set(name, ms);
@@ -79,6 +86,7 @@ export class LatencyTurn {
       ...(stt !== undefined ? { sttMs: stt } : {}),
       ...(this.sttFirstPartialMs !== undefined ? { sttFirstPartialMs: this.sttFirstPartialMs } : {}),
       ...(this.sttSource ? { sttSource: this.sttSource } : {}),
+      ...(this.sttLiveFailure ? { sttLiveFailure: this.sttLiveFailure } : {}),
       ...(token !== undefined && brainStart !== undefined ? { brainFirstTokenMs: validMs(token - brainStart) } : {}),
       ...(audio !== undefined && sentence !== undefined ? { ttsFirstAudioMs: validMs(audio - sentence) } : {}),
       ...(this.abortAt !== undefined ? { cancellationSettlementMs: validMs(this.settledAt! - this.abortAt) } : {}),
@@ -220,12 +228,17 @@ export function percentile(values: number[], fraction: number): number | undefin
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.max(0, Math.ceil(fraction * sorted.length) - 1)];
 }
-export type LatencySummary = Record<LatencySurface, Partial<Record<typeof METRICS[number], Percentiles>>>;
+export type LatencySummary = Record<LatencySurface, Partial<Record<typeof METRICS[number], Percentiles>> & { sttLiveFailures?: Partial<Record<LiveSttFailure, number>> }>;
 export function summarizeLatency(records: readonly LatencyRecord[]): LatencySummary {
   const out: LatencySummary = { web_voice: {}, web_text: {} };
   for (const surface of ["web_voice", "web_text"] as const) for (const metric of METRICS) {
     const values = records.filter((r) => r.surface === surface).map((r) => r[metric]).filter((n): n is number => n !== undefined && Number.isFinite(n));
     if (values.length) out[surface][metric] = { count: values.length, p50: percentile(values, 0.5)!, p95: percentile(values, 0.95)! };
+  }
+  for (const row of records) if (row.sttLiveFailure && row.surface === "web_voice"
+      && LIVE_STT_FAILURES.some((stage) => stage === row.sttLiveFailure)) {
+    const counts = out.web_voice.sttLiveFailures ??= {};
+    counts[row.sttLiveFailure] = (counts[row.sttLiveFailure] ?? 0) + 1;
   }
   return out;
 }

@@ -4,6 +4,7 @@ import { ProviderSlot, SwappableSTTProvider, SwappableTTSProvider } from "../../
 import type { TTSProvider } from "../../src/backends/tts/provider";
 import type { STTProvider } from "../../src/backends/stt/provider";
 import { LatencyTurn } from "../../src/latency";
+import { LiveSttError, liveSttFailureDetail } from "../../src/backends/stt/live-failure";
 
 async function* tokens(...parts: string[]) { for (const p of parts) yield p; }
 
@@ -59,6 +60,38 @@ test("failed live final retries the full WAV once through batch STT", async () =
   expect(calls.transcript).toEqual(["batch words"]);
   expect(batchCalls).toBe(1);
   expect(marks).toContain("stt_batch_fallback");
+  expect(marks).toContain("stt_live_failure:server_error");
+});
+
+test("live failure detail hides URLs and credentials before its 200-character bound", () => {
+  const detail = liveSttFailureDetail(new Error(`connect https://name:password@example.test/path?token=synthetic-secret ${"x".repeat(300)}`));
+  expect(detail).toContain("Error: connect <redacted URL>");
+  expect(detail).not.toContain("password");
+  expect(detail).not.toContain("synthetic-secret");
+  expect(detail.length).toBeLessThanOrEqual(200);
+});
+
+test("typed live failure stage is recorded while batch recovers", async () => {
+  const d = streamDeps();
+  d.streamFinal = Promise.reject(new LiveSttError("push_rejected", new RangeError("synthetic push failure")));
+  const record = new LatencyTurn("s", "t", "web_voice", 1, () => 0);
+  d.timingMark = (name, offset) => record.mark(name, offset);
+  const { sink, calls } = capturingSink();
+  await streamWebTurn(tinyWav([1]), d, sink);
+  expect(calls.transcript).toEqual(["hi there"]);
+  expect(record.finish()).toMatchObject({ sttSource: "batch_fallback", sttLiveFailure: "push_rejected" });
+});
+
+test("empty live final is no speech and does not invoke batch STT", async () => {
+  const d = streamDeps();
+  let batchCalls = 0;
+  d.stt = { transcribe: async () => { batchCalls++; return "stale words"; } };
+  d.streamFinal = Promise.resolve("  \n  ");
+  const { sink, calls } = capturingSink();
+  await streamWebTurn(tinyWav([1]), d, sink);
+  expect(calls.transcript).toEqual([""]);
+  expect(calls.done).toBe(1);
+  expect(batchCalls).toBe(0);
 });
 
 for (const [input, setup] of [

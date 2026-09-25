@@ -11,6 +11,8 @@ test("live STT latency records the first delta and final source without transcri
   expect(turn.finish()).toMatchObject({ sttFirstPartialMs: 983, sttSource: "streaming" });
   turn.mark("stt_batch_fallback", 0);
   expect(turn.finish().sttSource).toBe("batch_fallback");
+  turn.mark("stt_live_failure:open_failed", 0);
+  expect(turn.finish().sttLiveFailure).toBe("open_failed");
 });
 
 test("v2 metric frames admit only bounded identities and durations; unrelated v1 controls stay untouched", () => {
@@ -56,6 +58,16 @@ test("percentile math and report formatting omit unavailable metrics", () => {
   const summary = summarizeLatency(rows);
   expect(summary.web_voice.speechEndToReplyMs).toEqual({ count: 1, p50: 120, p95: 120 });
   expect(formatLatency(summary)).toContain("web_voice  speech_end→reply  1  120  120");
+});
+
+test("JSON summary counts each live failure reason without transcript data", () => {
+  const base = { sessionId: "s", surface: "web_voice" as const, at: 1, interrupted: false, parked: false };
+  const summary = summarizeLatency([
+    { ...base, turnId: "a", sttLiveFailure: "open_failed" },
+    { ...base, turnId: "b", sttLiveFailure: "open_failed" },
+    { ...base, turnId: "c", sttLiveFailure: "deadline" },
+  ]);
+  expect(JSON.parse(JSON.stringify(summary)).web_voice.sttLiveFailures).toEqual({ open_failed: 2, deadline: 1 });
 });
 
 test("private JSONL ring rotates under count and byte caps", async () => {

@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { startWebVoiceServer } from "../../src/web-voice/server";
 import { encodeStreamPcmFrame, encodeTurnAudioFrame } from "../../src/web-voice/protocol";
 import type { LivePcmSession } from "../../src/backends/stt/live-client";
+import { liveSttFailure, type LiveSttFailure } from "../../src/backends/stt/live-failure";
+import { streamWebTurn } from "../../src/web-voice/turn";
 
 function wav(): ArrayBuffer {
   const bytes = new Uint8Array(46);
@@ -35,7 +37,7 @@ function fakeStream() {
     finish(text: string) { if (!settled) { settled = true; resolve(text); } } };
 }
 
-function harness() {
+function harness(config: { openError?: Error; pushError?: Error; realTurn?: boolean } = {}) {
   let handlers: any;
   let socket: any;
   let server: any;
@@ -43,6 +45,8 @@ function harness() {
   const sent: Array<Record<string, unknown>> = [];
   const streams: ReturnType<typeof fakeStream>[] = [];
   const finals: string[] = [];
+  const failureStages: LiveSttFailure[] = [];
+  const streamFinalSupplied: boolean[] = [];
   let batchRetries = 0;
   const serve = ((options: any) => {
     handlers = options;
@@ -67,15 +71,29 @@ function harness() {
   }) as unknown as typeof Bun.serve;
   const handle = startWebVoiceServer({ port: 0, token: "synthetic-token", serve,
     onTurn: async () => ({ transcript: "", reply: "", audio: new ArrayBuffer(0) }),
-    onStreamTurn: async (_wav, sink, options) => {
-      if (!options?.streamFinal) { batchRetries++; sink.done(); return; }
-      const text = await options.streamFinal.catch(() => { batchRetries++; return "batch result"; });
+    onStreamTurn: async (_wav, sink, turnOptions) => {
+      streamFinalSupplied.push(turnOptions?.streamFinal !== undefined);
+      if (config.realTurn) {
+        await streamWebTurn(_wav, {
+          stt: { transcribe: async () => { batchRetries++; return ""; } },
+          brain: { send: async () => "" },
+          tts: { generateAudio: async () => new ArrayBuffer(0) },
+          streamFinal: turnOptions?.streamFinal,
+          signal: turnOptions?.signal,
+          timingMark: turnOptions?.timingMark,
+        }, sink);
+        return;
+      }
+      if (!turnOptions?.streamFinal) { batchRetries++; sink.done(); return; }
+      const text = await turnOptions.streamFinal.catch((error: unknown) => { failureStages.push(liveSttFailure(error)); batchRetries++; return "batch result"; });
       finals.push(text);
       if (!sink.aborted()) sink.transcript(text);
       sink.done();
     },
     resolveSttStream: () => () => {
+      if (config.openError) throw config.openError;
       const stream = fakeStream();
+      if (config.pushError) stream.session.push = () => { throw config.pushError; };
       streams.push(stream);
       return stream.session;
     },
@@ -85,8 +103,13 @@ function harness() {
     handlers.websocket.open(socket);
     return (sent.filter((item) => item.type === "hello").at(-1) as { sessionId: string }).sessionId;
   };
+  const connectV1 = async () => {
+    await handlers.fetch(new Request("http://localhost/ws?token=synthetic-token"), server);
+    handlers.websocket.open(socket);
+  };
   const send = (sessionId: string, turnId: string, payload: ArrayBuffer) =>
     handlers.websocket.message(socket, new Uint8Array(encodeTurnAudioFrame(sessionId, turnId, payload)));
+  const sendV1 = (payload: ArrayBuffer) => handlers.websocket.message(socket, new Uint8Array(payload));
   const pcmBytes = (sessionId: string, turnId: string, sequence: number, bytes: Uint8Array) =>
     send(sessionId, turnId, encodeStreamPcmFrame(sequence, 16_000, bytes).buffer);
   const pcm = (sessionId: string, turnId: string, sequence: number, marker: number) =>
@@ -95,8 +118,50 @@ function harness() {
     handlers.websocket.message(socket, JSON.stringify({ type: "capture_abort", sessionId, turnId }));
   const abortTurn = (sessionId: string, turnId: string) =>
     handlers.websocket.message(socket, JSON.stringify({ type: "abort", sessionId, turnId }));
-  return { handle, connect, send, pcm, pcmBytes, abortCapture, abortTurn, disconnect: () => socket.close(),
-    streams, finals, sent, get batchRetries() { return batchRetries; } };
+  return { handle, connect, connectV1, send, sendV1, pcm, pcmBytes, abortCapture, abortTurn, disconnect: () => socket.close(),
+    streams, finals, failureStages, streamFinalSupplied, sent, get batchRetries() { return batchRetries; } };
+}
+
+test("a v1 raw WAV uses batch directly with streaming configured and logs no live failure", async () => {
+  const h = harness({ realTurn: true });
+  const originalLog = console.log;
+  const lines: string[] = [];
+  try {
+    await h.connectV1();
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    await h.sendV1(wav());
+    expect(h.batchRetries).toBe(1);
+    expect(h.streamFinalSupplied).toEqual([false]);
+    expect(h.failureStages).toEqual([]);
+    expect(lines.some((line) => line.includes("live STT"))).toBe(false);
+  } finally {
+    console.log = originalLog;
+    await h.handle.stop();
+  }
+});
+
+test("a v2 final WAV with no negotiated live PCM uses batch directly", async () => {
+  const h = harness();
+  try {
+    const id = await h.connect();
+    await h.send(id, "short", wav());
+    expect(h.streamFinalSupplied).toEqual([false]);
+    expect(h.failureStages).toEqual([]);
+    expect(h.batchRetries).toBe(1);
+  } finally { await h.handle.stop(); }
+});
+
+for (const stage of ["open_failed", "push_rejected"] as const) {
+  test(`${stage} retains its stage through the final WAV`, async () => {
+    const h = harness(stage === "open_failed" ? { openError: new Error("synthetic open") } : { pushError: new Error("synthetic push") });
+    try {
+      const id = await h.connect();
+      await h.pcm(id, stage, 1, 1);
+      await h.send(id, stage, wav());
+      expect(h.failureStages).toEqual([stage]);
+      expect(h.batchRetries).toBe(1);
+    } finally { await h.handle.stop(); }
+  });
 }
 
 test("a stray new tap cannot abort a pending live final or trigger batch retry", async () => {
