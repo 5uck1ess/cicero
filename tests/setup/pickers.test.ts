@@ -8,7 +8,9 @@ import type { BoundedCommandResult } from "../../src/process/bounded-command";
 import { createDraft, renderDraft } from "../../src/setup/draft";
 import { mergeDraft, startSetupServer } from "../../src/setup/server";
 import { SETUP_STEPS, type StepContext } from "../../src/setup/steps";
-import { detectProvider, detectBrain, detectBoard, detectSpeech, parseProvider, parseBrain, parseBoard, parseSpeech, contributeBoard, probeBoard, probeRemoteProviderModels } from "../../src/setup/pickers";
+import { detectProvider, detectBrain, detectBoard, detectSpeech, parseProvider, parseBrain, parseBoard, parseSpeech, contributeBoard, contributeSpeech, probeBoard, probeRemoteProviderModels } from "../../src/setup/pickers";
+import { audioCppLocalRuntimePaths } from "../../src/backends/tts/audiocpp";
+import { audioCppModelPath } from "../../src/setup/audiocpp";
 import type { SystemFacts } from "../../src/setup/system";
 
 const facts = (platform = "linux", gpu = false): SystemFacts => ({ platform, arch: platform === "darwin" ? "arm64" : "x64", release: platform === "darwin" ? "23.0.0" : "6.8", appleSilicon: platform === "darwin", mlxSupported: platform === "darwin", ramTotalBytes: 32e9, ramFreeBytes: 16e9, disks: { checkout: { path: "/repo", freeBytes: 1e9 }, huggingface: { path: "/hf", freeBytes: 1e9 } }, gpu: gpu ? { status: "ok", name: "NVIDIA", freeMiB: 16000, totalMiB: 24000, doctorDetail: "NVIDIA" } : { status: "absent" }, recommendedTier: platform === "darwin" ? "local-mlx" : gpu ? "local-cuda" : "local-cpu", reason: "fixture" });
@@ -95,8 +97,44 @@ test("speech options follow platform and venv/port status is informational", asy
   expect((await detectSpeech("stt", ctx("darwin"), deps)).options).toEqual(["faster-whisper", "mlx-whisper", "wyoming"]);
   expect((await detectSpeech("tts", ctx("darwin"), deps)).options).toContain("mlx-audio");
   expect((await detectSpeech("stt", ctx("linux", true), deps)).options).toContain("audiocpp");
+  expect((await detectSpeech("tts", ctx("linux", true), deps)).options).toContain("audiocpp");
+  expect((await detectSpeech("tts", ctx("linux"), deps)).options).not.toContain("audiocpp");
   expect((await detectSpeech("stt", ctx("win32"), deps)).options).toEqual(["faster-whisper", "wyoming"]);
   expect((await detectSpeech("tts", ctx("win32"), deps)).status.kokoro).toEqual({ installed: true, running: false });
+});
+
+test("CUDA audio.cpp choices pin the Nemotron and Pocket TTS models", () => {
+  const cuda = ctx("linux", true);
+  expect(contributeSpeech("stt", parseSpeech("stt", { id: "audiocpp" }, cuda))).toEqual({ stt: { backend: "audiocpp", port: 8092, model: "nemotron" } });
+  expect(contributeSpeech("tts", parseSpeech("tts", { id: "audiocpp" }, cuda))).toEqual({ tts: { backend: "audiocpp", port: 8092, model: "pocket-tts" } });
+  expect(contributeSpeech("tts", parseSpeech("tts", { id: "pocket-tts" }, cuda))).toEqual({ tts: { backend: "pocket-tts" } });
+  expect(() => parseSpeech("tts", { id: "audiocpp" }, ctx("darwin"))).toThrow();
+});
+
+test("audio.cpp installed, model, and loaded status drive CUDA recommendations", async () => {
+  const root = "/fixture";
+  const binary = audioCppLocalRuntimePaths(root).binary;
+  const present = new Set([binary, audioCppModelPath(root, "stt"), audioCppModelPath(root, "tts")]);
+  const deps = { checkout: root, exists: (path: string) => present.has(path), probePort: async (_host: string, port: number) => port === 8092,
+    fetcher: (async () => Response.json({ data: [{ id: "nemotron" }, { id: "pocket-tts" }] })) as typeof fetch };
+  const stt = await detectSpeech("stt", ctx("linux", true), deps);
+  const tts = await detectSpeech("tts", ctx("linux", true), deps);
+  expect(stt.status.audiocpp).toEqual({ installed: true, running: true, modelPresent: true, modelLoaded: true });
+  expect(stt.recommended).toBe("audiocpp");
+  expect(tts.recommended).toBe("audiocpp");
+  present.delete(audioCppModelPath(root, "stt"));
+  expect((await detectSpeech("stt", ctx("linux", true), deps)).recommended).toBe("faster-whisper");
+  present.add(audioCppModelPath(root, "stt"));
+  const wrongModel = { ...deps, fetcher: (async () => Response.json({ data: [{ id: "other" }] })) as typeof fetch };
+  expect((await detectSpeech("stt", ctx("linux", true), wrongModel)).recommended).toBe("faster-whisper");
+  const offline = { ...deps, probePort: async () => false };
+  const stopped = await detectSpeech("stt", ctx("linux", true), offline);
+  expect(stopped.recommended).toBe("audiocpp");
+  expect(stopped.status.audiocpp?.modelLoaded).toBeNull();
+  const unverified = { ...deps, fetcher: (async () => new Response("down", { status: 503 })) as typeof fetch };
+  expect((await detectSpeech("stt", ctx("linux", true), unverified)).recommended).toBe("faster-whisper");
+  present.delete(binary);
+  expect((await detectSpeech("tts", ctx("linux", true), deps)).recommended).toBe("kokoro");
 });
 
 test("all picker contributions preserve defaults and round-trip through loadConfig", () => {
