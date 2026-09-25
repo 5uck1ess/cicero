@@ -161,25 +161,27 @@ function httpEndpoint(
 
 function sttPlan(config: STTProviderConfig): EndpointPlan {
   const backend = config.backend ?? "unknown";
+  const hintSummary = `${config.language ? ` · language ${concise(config.language, 64)}` : ""} · vocabulary ${config.vocabulary?.length ?? 0} terms`;
+  const withHints = (plan: EndpointPlan): EndpointPlan => ({ ...plan, summary: `${plan.summary}${hintSummary}` });
   if (!SUPPORTED_STT.has(backend)) {
-    return {
+    return withHints({
       summary: unknownEndpointSummary(backend, config.host, config.port, config.model),
       fatalProblem: `unsupported backend; valid STT backends: ${SUPPORTED_STT_BACKENDS.join(", ")}`,
-    };
+    });
   }
   const port = config.port ?? sttDefaultPort(backend);
   if (backend === "wyoming") {
-    return nativeEndpoint(backend, config.host, port ?? 10300, config.model);
+    return withHints(nativeEndpoint(backend, config.host, port ?? 10300, config.model));
   }
   if (port !== undefined) {
-    if (backend === "mlx-whisper") return httpEndpoint(backend, config.host, port, "/", config.model);
-    if (backend === "faster-whisper") return httpEndpoint(backend, config.host, port, "/health", config.model);
-    if (backend === "audiocpp") return httpEndpoint(backend, config.host, port, "/v1/models", config.model);
+    if (backend === "mlx-whisper") return withHints(httpEndpoint(backend, config.host, port, "/", config.model));
+    if (backend === "faster-whisper") return withHints(httpEndpoint(backend, config.host, port, "/health", config.model));
+    if (backend === "audiocpp") return withHints(httpEndpoint(backend, config.host, port, "/v1/models", config.model));
   }
-  return {
+  return withHints({
     summary: unknownEndpointSummary(backend, config.host, port, config.model),
     unprobedReason: "no status probe is defined for this backend",
-  };
+  });
 }
 
 function ttsPlan(

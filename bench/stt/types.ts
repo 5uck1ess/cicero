@@ -49,4 +49,5 @@ export interface Clip {
   path: string;
   reference: string;
   durationSec: number;
+  expectedTerms?: string[];
 }

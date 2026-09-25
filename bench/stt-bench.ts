@@ -31,11 +31,11 @@ import { MlxWhisperProvider } from "../src/backends/stt/mlx-whisper";
 import { FasterWhisperProvider } from "../src/backends/stt/faster-whisper";
 import type { STTProvider } from "../src/backends/stt/provider";
 import { sanitizeLabel } from "../src/text-utils";
-import { wordErrorRate } from "./stt/wer";
+import { normalizeForWer, wordErrorRate } from "./stt/wer";
 import { transcribeLive, type LiveStreamConnect } from "./stt/live-stream";
 import type { Candidate, Clip, ProviderCandidate, StreamCandidate } from "./stt/types";
 
-interface Args { clipsDir: string; candidatesFile: string; runs: number }
+interface Args { clipsDir: string; candidatesFile: string; runs: number; termsFile?: string }
 
 const MAX_SURFACED_ERROR_CHARS = 512;
 
@@ -43,6 +43,9 @@ const surfacedError = (error: unknown): string =>
   sanitizeLabel(error instanceof Error ? error.message : String(error), MAX_SURFACED_ERROR_CHARS);
 
 function parseArgs(argv: string[]): Args {
+  if (argv.includes("--terms") && (!argv[argv.indexOf("--terms") + 1] || argv[argv.indexOf("--terms") + 1]!.startsWith("--"))) {
+    throw new Error("--terms needs a manifest path");
+  }
   const get = (flag: string): string | undefined => {
     const i = argv.indexOf(flag);
     return i >= 0 ? argv[i + 1] : undefined;
@@ -51,7 +54,37 @@ function parseArgs(argv: string[]): Args {
     clipsDir: resolve(get("--clips") ?? "bench/stt/clips"),
     candidatesFile: resolve(get("--candidates") ?? "bench/stt/candidates.json"),
     runs: Math.max(1, Number(get("--runs") ?? process.env.BENCH_RUNS ?? 3)),
+    termsFile: get("--terms") ? resolve(get("--terms")!) : undefined,
   };
+}
+
+/** Explicit opt-in JSON: {"clips":{"basename":["expected identifier", ...]}}. */
+export function parseTermManifest(json: string): Record<string, string[]> {
+  if (new TextEncoder().encode(json).byteLength > 65_536) throw new Error("term manifest exceeds 64 KiB");
+  const value: unknown = JSON.parse(json);
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      !Object.hasOwn(value, "clips")) throw new Error("term manifest needs a clips mapping");
+  const clips = (value as { clips: unknown }).clips;
+  if (!clips || typeof clips !== "object" || Array.isArray(clips) || Object.keys(clips).length > 1000) {
+    throw new Error("term manifest clips must be a mapping of at most 1000 clips");
+  }
+  for (const [name, terms] of Object.entries(clips)) {
+    if (!name || name.length > 128 || !Array.isArray(terms) || terms.length > 100 ||
+        terms.some((term) => typeof term !== "string" || !term.trim() || term.length > 64)) {
+      throw new Error("term manifest entries need at most 100 non-empty terms of at most 64 characters");
+    }
+  }
+  return clips as Record<string, string[]>;
+}
+
+export function termHits(terms: readonly string[], transcript: string): { hits: number; total: number } {
+  const words = normalizeForWer(transcript);
+  let hits = 0;
+  for (const term of terms) {
+    const target = normalizeForWer(term);
+    if (target.length && words.some((_, index) => target.every((word, offset) => words[index + offset] === word))) hits++;
+  }
+  return { hits, total: terms.length };
 }
 
 /** Find every `X.wav` with a sibling `X.txt` ground-truth transcript. */
@@ -167,6 +200,8 @@ interface Row {
   rtf: number;          // warmMs / audioDuration; <1 = faster than realtime
   errors: number;       // clips that failed/empty
   clips: number;
+  termHits?: number;
+  termTotal?: number;
   streaming?: StreamStats;
 }
 
@@ -231,6 +266,8 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
   let deltasDuringAudio = 0;
   let deltas = 0;
   let errors = 0;
+  let hitCount = 0;
+  let termCount = 0;
 
   for (const clip of clips) {
     const clipFirst: number[] = [];
@@ -273,6 +310,11 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
     deltasDuringAudio += clipDeltasDuringAudio;
     const { wer } = wordErrorRate(clip.reference, transcript);
     wers.push(wer * 100);
+    if (clip.expectedTerms) {
+      const scored = termHits(clip.expectedTerms, transcript);
+      hitCount += scored.hits;
+      termCount += scored.total;
+    }
     // A missing partial is a measured absence, not a sample to discard. Other
     // latency columns include every successful repetition, so this clip only
     // contributes first-delta latency when every repetition produced one.
@@ -292,6 +334,8 @@ export async function benchStreamCandidate(c: StreamCandidate, clips: Clip[], ru
     warmMs: median(totals),
     errors,
     clips: wers.length,
+    termHits: hitCount,
+    termTotal: termCount,
     streaming: {
       // NaN, not 0, when a model emitted no partial at all — 0 would read as
       // "instant" in a latency column, which is the opposite of what happened.
@@ -315,6 +359,8 @@ async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promis
   const coldTimes: number[] = [];
   const rtfs: number[] = [];
   let errors = 0;
+  let hitCount = 0;
+  let termCount = 0;
 
   for (const clip of clips) {
     const times: number[] = [];
@@ -338,6 +384,11 @@ async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promis
 
     const { wer } = wordErrorRate(clip.reference, transcript);
     wers.push(wer * 100);
+    if (clip.expectedTerms) {
+      const scored = termHits(clip.expectedTerms, transcript);
+      hitCount += scored.hits;
+      termCount += scored.total;
+    }
     if (times.length) {
       coldTimes.push(times[0]!);
       const warm = times.length > 1 ? median(times.slice(1)) : times[0]!;
@@ -356,6 +407,8 @@ async function benchCandidate(c: Candidate, clips: Clip[], runs: number): Promis
     rtf: median(rtfs),
     errors,
     clips: wers.length,
+    termHits: hitCount,
+    termTotal: termCount,
   };
 }
 
@@ -385,12 +438,12 @@ const skippedLine = (r: Row): string =>
 const failedLine = (r: Row): string =>
   `- ${r.name} (reachable, but every clip failed — ${r.errors} ${r.errors === 1 ? "error" : "errors"}; no metrics)`;
 
-export function renderTable(rows: Row[]): string {
+export function renderTable(rows: Row[], showTerms = false): string {
   const avail = ranked(rows, "batch");
-  const header = "| Candidate | WER % | warm ms | cold ms | RTF | errors | clips |";
-  const sep = "|---|---:|---:|---:|---:|---:|---:|";
+  const header = `| Candidate | WER % |${showTerms ? " term hit % |" : ""} warm ms | cold ms | RTF | errors | clips |`;
+  const sep = `|---|---:|${showTerms ? "---:|" : ""}---:|---:|---:|---:|---:|`;
   const lines = avail.map((r) =>
-    `| ${r.name} | ${fmt(r.meanWerPct)} | ${fmt(r.warmMs, 0)} | ${fmt(r.coldMs, 0)} | ${r.rtf ? fmt(r.rtf, 3) : "n/a"} | ${r.errors} | ${r.clips} |`,
+    `| ${r.name} | ${fmt(r.meanWerPct)} |${showTerms ? ` ${r.termTotal ? fmt((r.termHits ?? 0) / r.termTotal * 100) : "n/a"} |` : ""} ${fmt(r.warmMs, 0)} | ${fmt(r.coldMs, 0)} | ${r.rtf ? fmt(r.rtf, 3) : "n/a"} | ${r.errors} | ${r.clips} |`,
   );
   const failed = allFailed(rows, "batch").map(failedLine);
   const notStarted = skipped(rows, "batch").map(skippedLine);
@@ -407,13 +460,13 @@ export function renderTable(rows: Row[]): string {
  * comparison that means nothing. Time-to-final is measured from the end of the
  * audio, which is the number a live loop actually waits out.
  */
-export function renderStreamingTable(rows: Row[]): string {
+export function renderStreamingTable(rows: Row[], showTerms = false): string {
   const avail = ranked(rows, "stream");
   const failed = allFailed(rows, "stream");
   const notStarted = skipped(rows, "stream");
   if (!avail.length && !failed.length && !notStarted.length) return "";
-  const header = "| Candidate | WER % | first delta ms | deltas during audio | final after audio ms | errors | clips |";
-  const sep = "|---|---:|---:|---:|---:|---:|---:|";
+  const header = `| Candidate | WER % |${showTerms ? " term hit % |" : ""} first delta ms | deltas during audio | final after audio ms | errors | clips |`;
+  const sep = `|---|---:|${showTerms ? "---:|" : ""}---:|---:|---:|---:|---:|`;
   const lines = avail.map((r) => {
     const s = r.streaming!;
     const during = !s.paced ? "n/a"
@@ -421,7 +474,7 @@ export function renderStreamingTable(rows: Row[]): string {
     // A fast probe is still a real accuracy measurement, so it is ranked — but
     // it is named as what it is, because every latency on its row is withheld.
     const name = s.paced ? r.name : `${r.name} (fast probe)`;
-    return `| ${name} | ${fmt(r.meanWerPct)} | ${fmt(s.firstDeltaMs, 0)} | ${during} | ${fmt(s.finalAfterAudioMs, 0)} | ${r.errors} | ${r.clips} |`;
+    return `| ${name} | ${fmt(r.meanWerPct)} |${showTerms ? ` ${r.termTotal ? fmt((r.termHits ?? 0) / r.termTotal * 100) : "n/a"} |` : ""} ${fmt(s.firstDeltaMs, 0)} | ${during} | ${fmt(s.finalAfterAudioMs, 0)} | ${r.errors} | ${r.clips} |`;
   });
   return [
     "### Streaming (real-time feed, `/v1/audio/transcriptions/live`)",
@@ -447,6 +500,14 @@ async function main(): Promise<void> {
   console.log("🎙️  Cicero STT bench\n");
 
   const clips = await loadClips(args.clipsDir);
+  if (args.termsFile) {
+    const file = Bun.file(args.termsFile);
+    if (file.size > 65_536) throw new Error("term manifest exceeds 64 KiB");
+    const manifest = parseTermManifest(await file.slice(0, 65_537).text());
+    for (const clip of clips) {
+      if (Object.hasOwn(manifest, clip.name)) clip.expectedTerms = manifest[clip.name];
+    }
+  }
   if (!clips.length) {
     console.error(`No clips found in ${args.clipsDir}.`);
     console.error("Add WAV files with a sibling .txt reference (clip1.wav + clip1.txt). See bench/stt/README.md.");
@@ -462,8 +523,8 @@ async function main(): Promise<void> {
     rows.push(await benchCandidate(c, clips, args.runs));
   }
 
-  const table = renderTable(rows);
-  const streamTable = renderStreamingTable(rows);
+  const table = renderTable(rows, !!args.termsFile);
+  const streamTable = renderStreamingTable(rows, !!args.termsFile);
   console.log(`\n${table}\n`);
   if (streamTable) console.log(`${streamTable}\n`);
   console.log("RTF < 1 = faster than real-time. WER lower = better. Recorded clips only — confirm the shortlist with a live mic test.");

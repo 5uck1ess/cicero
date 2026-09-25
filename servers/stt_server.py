@@ -2,7 +2,7 @@
 MLX Whisper STT server for Cicero.
 
 Drop-in replacement for whisper-cpp's whisper-server.
-Accepts POST /inference with multipart form data (file + optional prompt),
+Accepts POST /inference with multipart form data (file + optional prompt/language),
 returns JSON {"text": "transcribed text"}.
 """
 
@@ -32,7 +32,7 @@ from sidecar_limits import (
     copy_upload_to_file_limited,
     model_gate_pair,
     validate_pcm_wav,
-    validate_prompt,
+    validate_stt_hints,
 )
 
 app = FastAPI(title="Cicero MLX Whisper STT")
@@ -82,6 +82,7 @@ async def health():
 async def inference(
     file: UploadFile = File(...),
     prompt: str = Form(default=""),
+    language: str = Form(default=""),
     response_format: str = Form(default="json"),
 ):
     """
@@ -91,12 +92,15 @@ async def inference(
     - Accepts multipart form with 'file' (WAV audio)
     - Returns {"text": "transcribed text"}
     """
+    try:
+        validate_stt_hints(language, prompt)
+    except AdmissionError as err:
+        return JSONResponse({"error": str(err)}, status_code=400)
     if not _ready:
         return JSONResponse({"error": "model not warmed"}, status_code=503)
     tmp_path: str | None = None
     try:
         try:
-            validate_prompt(prompt)
             # The wire contract is WAV. Keeping a fixed suffix also prevents an
             # attacker-controlled filename from becoming an oversized suffix.
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -122,7 +126,7 @@ async def inference(
                 mlx_whisper.transcribe,
                 tmp_path,
                 path_or_hf_repo=_model_path,
-                language="en",
+                language=language or "en",
                 initial_prompt=prompt or None,
             )
         except ModelGateError as err:

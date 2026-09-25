@@ -124,6 +124,8 @@ describe("configured CLI status", () => {
         host: "gpu.example.test",
         port: 9101,
         model: "large-v3-turbo",
+        language: "en",
+        vocabulary: ["Cicero", "TypeGPU"],
       };
       raw.stt_fallback = {
         backend: "wyoming",
@@ -188,6 +190,8 @@ describe("configured CLI status", () => {
     expect(lines.find((line) => line.name === "STT")?.detail).toContain(
       "faster-whisper @ http://gpu.example.test:9101/health",
     );
+    expect(lines.find((line) => line.name === "STT")?.detail).toContain("language en · vocabulary 2 terms");
+    expect(lines.find((line) => line.name === "STT")?.detail).not.toContain("TypeGPU");
     expect(lines.find((line) => line.name === "STT fallback")).toMatchObject({
       level: "info",
     });

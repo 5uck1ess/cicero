@@ -23,6 +23,7 @@ import { ElevenLabsProvider } from "../backends/tts/elevenlabs";
 import { audioCppLocalRuntimePaths } from "../backends/tts/audiocpp";
 import { ttsDefaultPort, type TTSProviderConfig } from "../backends/tts/provider";
 import { sttDefaultPort } from "../backends/stt/provider";
+import { isSttLanguageTag, isWhisperLanguageCode, whisperLanguageCode } from "../backends/stt/language";
 import { LLM_DEFAULT_MODEL, normalizedLlmModel } from "../backends/llm/provider";
 import type { LLMProviderConfig } from "../backends/llm/provider";
 import {
@@ -774,6 +775,26 @@ export async function collectChecks(
   // -- engines -------------------------------------------------------------
   await checkEngine("stt", config.sttBackend, checks, options, config.raw.stt === undefined);
   await checkEngine("stt_fallback", config.sttFallbackBackend ?? undefined, checks, options);
+  for (const [name, seat] of [["STT hints", config.sttBackend], ["STT fallback hints", config.sttFallbackBackend]] as const) {
+    if (!seat) continue;
+    checks.push({
+      name,
+      level: "ok",
+      detail: `${seat.language ? `language ${seat.language}` : "language unset"} · vocabulary ${seat.vocabulary?.length ?? 0} terms`,
+    });
+    if ((seat.backend === "faster-whisper" || seat.backend === "mlx-whisper") && seat.language &&
+        isSttLanguageTag(seat.language)) {
+      const code = whisperLanguageCode(seat.language);
+      if (!isWhisperLanguageCode(code)) {
+        checks.push({
+          name: `${name} compatibility`,
+          level: "warn",
+          detail: `Whisper does not support primary language code ${code}; transcription requests will be rejected`,
+          hint: "choose a language tag whose primary code is supported by Whisper",
+        });
+      }
+    }
+  }
   await checkEngine("tts", config.ttsBackend, checks, options, config.raw.tts === undefined);
   await checkEngine("tts_fallback", config.ttsFallbackBackend ?? undefined, checks, options);
   await checkLlm(config.llmBackend, checks, options, config.raw.llm === undefined);

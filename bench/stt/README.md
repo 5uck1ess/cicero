@@ -8,7 +8,18 @@ Compare transcription backends empirically — the way Pocket-TTS was picked, no
 bun run bench:stt
 # or with flags:
 bun run bench/stt-bench.ts --clips bench/stt/clips --candidates bench/stt/candidates.json --runs 3
+# opt-in identifier accuracy (offline; use your own private manifest):
+bun run bench/stt-bench.ts --terms /private/path/expected-terms.json
 ```
+
+The optional `--terms` file is JSON keyed by clip basename, for example
+`{"clips":{"clip1":["Cicero","TypeGPU"]}}`. For each successfully
+transcribed clip, the report counts expected terms found as whole words or
+contiguous phrases after the same case and punctuation normalization as WER.
+It reports the aggregate term hit percentage alongside WER. Missing clip entries
+add no terms; a row with no expected terms shows `n/a`. The manifest is read
+locally and is never sent to a provider. Keep private identifiers and real
+voice clips out of the repository.
 
 ## 1. Add clips
 
