@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { log } from "../../logger";
 import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE } from "../../platform/secure-storage";
 import { sanitizeLabel } from "../../text-utils";
+import { encodeWav } from "../../platform/wav";
 import type { STTProvider, STTTranscriptionResult } from "./provider";
 
 /**
@@ -137,6 +138,38 @@ export function wrapSTTWithTap(provider: STTProvider, dir: string, limits?: TapL
       return result;
     };
   }
+  if (provider.openStream) {
+    wrapped.openStream = (options) => {
+      const started = performance.now();
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      const session = provider.openStream!(options);
+      const tappedFinal = session.final.then((text) => {
+        if (bytes <= tap.maxCaptureBytes) {
+          void tap.recordStream(chunks, bytes, options.sampleRate, text, Math.round(performance.now() - started));
+        }
+        return text;
+      });
+      void tappedFinal.catch(() => {});
+      return {
+        ...session,
+        get released() { return session.released; },
+        push(pcm) {
+          session.push(pcm);
+          if (bytes + pcm.length <= tap.maxCaptureBytes) {
+            chunks.push(pcm.slice());
+            bytes += pcm.length;
+          } else {
+            bytes = tap.maxCaptureBytes + 1;
+            chunks.length = 0;
+          }
+        },
+        end: () => { void session.end(); return tappedFinal; },
+        abort: () => session.abort(),
+        final: tappedFinal,
+      };
+    };
+  }
   if (provider.requiredHealth) wrapped.requiredHealth = () => provider.requiredHealth!();
   if (provider.start) wrapped.start = () => provider.start!();
   // Always own a stop(): the tap holds a background write that must be drained
@@ -186,6 +219,29 @@ async function ensureTapDirectory(dir: string): Promise<{ looseMode?: number }> 
 }
 
 class SttTap {
+  get maxCaptureBytes(): number { return this.maxAudioBytes - 44; }
+  async recordStream(chunks: readonly Uint8Array[], length: number, sampleRate: number, transcript: string, elapsedMs: number): Promise<void> {
+    if (this.inFlight || this.stopped) return;
+    this.inFlight = true;
+    try {
+      const samples = new Int16Array(length / 2);
+      let offset = 0;
+      for (const chunk of chunks) {
+        const view = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        for (let i = 0; i < chunk.length; i += 2) samples[offset++] = view.getInt16(i, true);
+      }
+      const bytes = Buffer.from(encodeWav(samples, sampleRate));
+      const now = this.clock();
+      const capped = Array.from(transcript).slice(0, this.maxTranscriptChars).join("");
+      await this.persistBounded({ bytes, now, sidecar: {
+        engine: this.engine, transcript: capped, stt_ms: elapsedMs,
+        audio_bytes: bytes.length, at: now.toISOString(),
+      } });
+    } catch {
+      this.inFlight = false;
+      this.warnOnce("capture", "stt tap: streamed capture failed");
+    }
+  }
   private announced = false;
   private captured = 0; // successful captures this process — drives prune cadence
   private counter = 0; // stem disambiguator within a millisecond

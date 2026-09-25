@@ -142,8 +142,8 @@ export interface WebVoiceServerOptions {
   onTurn: (wav: ArrayBuffer, options?: { signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean }) => Promise<WebTurnResult>;
   /** Stream a captured utterance's reply over the WebSocket (Phase 2). Optional. */
   onStreamTurn?: (wav: ArrayBuffer, sink: WebReplySink, opts?: { record?: boolean; spec?: SpeculativeTurn | null; streamFinal?: Promise<string>; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
-  /** Present only when stt.streaming is explicitly enabled. */
-  openSttStream?: (options: { signal: AbortSignal; sampleRate: number; onPartial: (text: string, at: number) => void }) => LivePcmSession;
+  /** Resolve the current wrapped STT provider's live capability for each capture. */
+  resolveSttStream?: () => ((options: { signal: AbortSignal; sampleRate: number; onPartial: (text: string, at: number) => void }) => LivePcmSession) | undefined;
   /** Stream a TYPED message's reply (same pipeline, no STT). Optional. */
   onTextTurn?: (text: string, sink: WebReplySink, opts?: { record?: boolean; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
   /** Optional private latency record store; omitted in standalone/test servers. */
@@ -274,6 +274,8 @@ export interface WebVoiceHandle {
   notify: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal }) => Promise<{ delivered: number; parked: boolean; deferred?: boolean } | null>;
   /** Broadcast a newly pending brain-owned confirmation to live clients. */
   confirmPending: (summary: string, nonce: string) => number;
+  /** Reconcile connected browser handshakes after a provider cutover. */
+  refreshStreamingCapability: () => void;
   /** Quiesce ingress, cancel owned work, close sockets, and drain handlers. */
   stop: () => Promise<void>;
 }
@@ -306,6 +308,11 @@ function withTurn(ws: import("bun").ServerWebSocket<WsData>, turnId: string, val
   return ws.data.protocol === 2
     ? { ...value, sessionId: ws.data.sessionId, turnId }
     : value;
+}
+
+/** One transition per socket; a fresh non-streaming handshake stays quiet. */
+export function streamCapabilityEvent(previous: boolean, available: boolean): "stream_on" | "stream_off" | null {
+  return previous === available ? null : available ? "stream_on" : "stream_off";
 }
 
 function protocolError(ws: import("bun").ServerWebSocket<WsData>, message: string, turnId?: string): void {
@@ -493,7 +500,7 @@ function requestedId(req: Request, url: URL, header: string, query: string): str
  */
 export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle | null {
   const coordinator = opts.coordinator ?? new TurnCoordinator();
-  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onDictate, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, openSttStream, readiness, confirmations, latencyStore } = opts;
+  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onDictate, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, resolveSttStream, readiness, confirmations, latencyStore } = opts;
   const scheme: "http" | "https" = tls ? "https" : "http";
   const configuredDrainTimeout = opts.shutdownDrainTimeoutMs;
   const shutdownDrainTimeoutMs = typeof configuredDrainTimeout === "number" && Number.isFinite(configuredDrainTimeout) && configuredDrainTimeout >= 1
@@ -507,6 +514,18 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   // Transport ownership outlives conversation attachment for the brief span
   // between a goodbye frame and that socket's eventual close callback.
   const sockets = new Set<import("bun").ServerWebSocket<WsData>>();
+  const streamAvailability = new WeakMap<import("bun").ServerWebSocket<WsData>, boolean>();
+  const refreshSocketStream = (ws: import("bun").ServerWebSocket<WsData>): void => {
+    if (ws.data.protocol !== 2) return;
+    const available = typeof resolveSttStream?.() === "function";
+    const previous = streamAvailability.get(ws) ?? false;
+    const event = streamCapabilityEvent(previous, available);
+    if (event) sendJson(ws, withSession(ws, { type: event }));
+    streamAvailability.set(ws, available);
+  };
+  const refreshStreamingCapability = (): void => {
+    for (const ws of clients) refreshSocketStream(ws);
+  };
 
   /*
    * Deciding the conversation is over.
@@ -1754,7 +1773,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               turnId: null,
               maxAudioBytes: MAX_TURN_AUDIO_BYTES,
             });
-            if (openSttStream) sendJson(ws, withSession(ws, { type: "stream_on" }));
+            refreshSocketStream(ws);
           }
           // Tell the client whether mid-pause turn probes are worth sending —
           // without a detector they'd be dead weight on every pause.
@@ -1990,6 +2009,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
 
           // Probe frame = "is the speaker done?" — answered inline, never a turn.
           if (isStreamPcmFrame(u8)) {
+            refreshSocketStream(ws);
+            const openSttStream = resolveSttStream?.();
             if (!openSttStream || ws.data.protocol !== 2) { protocolError(ws, "live PCM is disabled", turnId); return; }
             const frame = decodeStreamPcmFrame(u8);
             if (!frame) { protocolError(ws, "invalid live PCM frame", turnId); return; }
@@ -2287,6 +2308,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       conversationLive: () => clients.size > 0 || conversationEndTimer !== null,
       notify,
       confirmPending,
+      refreshStreamingCapability,
       stop,
     };
   } catch (err: unknown) {

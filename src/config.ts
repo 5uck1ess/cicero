@@ -1217,6 +1217,8 @@ export interface ConfigUpdateOptions {
   }[];
   /** Internal final gate run synchronously at the config commit boundary. */
   validateBeforeCommit?: () => void;
+  /** Validate the exact merged mapping before any temporary file is written. */
+  validateMerged?: (merged: Record<string, unknown>) => void;
 }
 
 export function updateConfigFields(
@@ -1267,6 +1269,7 @@ export function updateConfigFields(
       for (const field of rule.fields) delete currentValue[field];
     }
     const merged = deepMerge(existing, fields);
+    options.validateMerged?.(merged);
     const tmp = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
     try {
       writeFileSync(tmp, stringifyYaml(merged), { flag: "wx", mode: PRIVATE_FILE_MODE });

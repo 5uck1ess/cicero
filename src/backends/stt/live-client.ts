@@ -678,7 +678,7 @@ export interface LivePcmSession {
   abort(): void;
   partials: AsyncIterable<string>;
   final: Promise<string>;
-  /** False when force-closing an owned socket could not be confirmed. */
+  /** False until a socket or pending connection has been confirmed closed. */
   readonly released: boolean;
 }
 
@@ -719,7 +719,8 @@ export function openLivePcm(options: OpenLivePcmOptions): LivePcmSession {
     maxBodyBytes: MAX_LIVE_BODY_BYTES,
   }));
   let socket: Bun.Socket<undefined> | null = null;
-  let releaseConfirmed = true;
+  let releaseConfirmed = false;
+  let connectStarted = false;
   let socketClosed = false;
   let closed = false;
   let ended = false;
@@ -746,6 +747,8 @@ export function openLivePcm(options: OpenLivePcmOptions): LivePcmSession {
         releaseConfirmed = socketClosed;
         if (!releaseConfirmed) reason ??= new Error("live socket release unconfirmed");
       }
+    } else if (!connectStarted) {
+      releaseConfirmed = true;
     }
     const waiter = drain; drain = null;
     if (reason) {
@@ -819,6 +822,7 @@ export function openLivePcm(options: OpenLivePcmOptions): LivePcmSession {
   if (options.language) query.set("language", options.language);
   let work = (async () => {
     if (closed) return;
+    connectStarted = true;
     const pending = connect({
       hostname: options.host, port: options.port,
       socket: {
@@ -843,12 +847,14 @@ export function openLivePcm(options: OpenLivePcmOptions): LivePcmSession {
         try { late.terminate(); releaseConfirmed = true; }
         catch { releaseConfirmed = false; }
       }
-    }, () => {});
+    }, () => { releaseConfirmed = true; });
     socket = await pending;
     if (closed) return;
-    releaseConfirmed = false;
     await writeAll(`POST /v1/audio/transcriptions/live?${query} HTTP/1.1\r\nHost: ${options.host}:${options.port}\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nAccept: text/event-stream\r\n\r\n`);
-  })().catch((error) => fail(error instanceof Error ? error : new Error("live connection failed")));
+  })().catch((error) => {
+    if (!socket) releaseConfirmed = true;
+    fail(error instanceof Error ? error : new Error("live connection failed"));
+  });
   return {
     get released() { return releaseConfirmed; },
     push(pcm) {

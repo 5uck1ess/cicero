@@ -77,7 +77,7 @@ test("a newer audio.cpp live turn supersedes the previous socket and its late ca
   const first = fakeEndpoint([]);
   const second = fakeEndpoint();
   let calls = 0;
-  const provider = new AudioCppSTTProvider({ backend: "audiocpp", model: "nemotron", port: 8092 });
+  const provider = new AudioCppSTTProvider({ backend: "audiocpp", streaming: true, model: "nemotron", port: 8092 });
   provider.liveConnect = (options) => (++calls === 1 ? first : second).connect(options);
   const seen: string[] = [];
   const old = provider.openStream({ sampleRate: 16000, onPartial: (text) => seen.push(text) });
@@ -106,7 +106,7 @@ test("absolute deadline quarantines a connector that settles late", async () => 
 });
 
 test("unconfirmed socket release blocks reuse until the close callback confirms it", async () => {
-  const provider = new AudioCppSTTProvider({ backend: "audiocpp", model: "nemotron", port: 8092 });
+  const provider = new AudioCppSTTProvider({ backend: "audiocpp", streaming: true, model: "nemotron", port: 8092 });
   let callbacks: any;
   let socket: any;
   provider.liveConnect = async (options) => {
@@ -125,4 +125,27 @@ test("unconfirmed socket release blocks reuse until the close callback confirms 
   const recovered = provider.openStream({ sampleRate: 16000 });
   recovered.push(new Uint8Array([1, 0]));
   expect(await recovered.end()).toBe("hello");
+});
+
+test("abort during a pending connect blocks reuse until the late socket is closed", async () => {
+  const provider = new AudioCppSTTProvider({ backend: "audiocpp", streaming: true, model: "nemotron", port: 8092 });
+  let resolveConnect!: (socket: any) => void;
+  provider.liveConnect = () => new Promise((resolve) => { resolveConnect = resolve; });
+  const first = provider.openStream!({ sampleRate: 16000 });
+  expect(first.released).toBe(false);
+  first.abort();
+  await expect(first.final).rejects.toThrow(/aborted/);
+  expect(first.released).toBe(false);
+  expect(() => provider.openStream!({ sampleRate: 16000 })).toThrow(/cleanup is unconfirmed/);
+  let terminated = 0;
+  resolveConnect({ terminate() { terminated++; } });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(terminated).toBe(1);
+  expect(first.released).toBe(true);
+  const peer = fakeEndpoint();
+  provider.liveConnect = peer.connect;
+  const next = provider.openStream!({ sampleRate: 16000 });
+  next.push(new Uint8Array([1, 0]));
+  expect(await next.end()).toBe("hello");
 });

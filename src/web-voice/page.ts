@@ -275,6 +275,12 @@ function abortLiveCapture() {
   if (!streamCaptureEnabled || !streamSeq || !captureTurnId || !ws || ws.readyState !== 1) return;
   try { ws.send(JSON.stringify({ type: "capture_abort", sessionId: wsSessionId, turnId: captureTurnId })); } catch (e) { /* closed */ }
 }
+function applyStreamCapability(available) {
+  if (!available) {
+    abortLiveCapture();
+    streamOn = false; streamCaptureEnabled = false; streamCaptureFailed = true;
+  } else streamOn = true;
+}
 function sendLiveFrame(samples) {
   if (!streamCaptureEnabled || streamCaptureFailed || !captureTurnId || !wsSessionId || !ws || ws.readyState !== 1) return;
   if (ws.bufferedAmount > 512 * 1024 || samples.length > 32768 || streamSeq >= 0xffffffff) {
@@ -816,7 +822,8 @@ function onWsMessage(e) {
   if (msg.type === "notify") { handleNotify(msg); return; } // arrives any time, not just mid-turn
   if (msg.type === "history") { return; } // server replay ignored: each page load starts a fresh chat
   if (msg.type === "probe_on") { probeOn = true; return; } // server has an end-of-turn model
-  if (msg.type === "stream_on") { streamOn = true; return; }
+  if (msg.type === "stream_on") { applyStreamCapability(true); return; }
+  if (msg.type === "stream_off") { applyStreamCapability(false); return; }
   if (msg.type === "partial_transcript" && typeof msg.text === "string" && msg.text.length <= 16384 &&
       ((msg.turnId === captureTurnId && state === "speech") || (msg.turnId === activeTurnId && state === "thinking"))) {
     hintEl.textContent = 'hearing: "' + msg.text + '"'; return;

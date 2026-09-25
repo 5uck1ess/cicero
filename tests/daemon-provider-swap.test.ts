@@ -165,6 +165,37 @@ for (const role of ["stt", "tts"] as const) {
 // These tests assert the swap transaction's model propagation, so they need a
 // backend where propagating a model means something.
 describe(`${role.toUpperCase()} daemon swap transaction`, () => {
+    if (role === "stt") test("promotion strips primary-only streaming before persisting the fallback slot", async () => {
+      root = mkdtempSync(join(tmpdir(), "cicero-stt-streaming-promotion-"));
+      const configPath = join(root, "config.yaml");
+      updateConfigFields({
+        stt: { backend: "audiocpp", host: "old.example.test", model: "nemotron", streaming: true },
+        stt_fallback: { backend: "faster-whisper", host: "fallback.example.test", model: "small" },
+      }, configPath);
+      const config = loadConfig({}, { home: root });
+      const old = new FakeVoiceProvider("old");
+      const candidate = new FakeVoiceProvider("new");
+      const daemon = new CiceroDaemon(config, { configPath, sttProviderFactory: () => candidate });
+      const state = daemon as unknown as SwapHarness;
+      state.running = true;
+      state.lifecycle = "running";
+      state.sttSlot = new ProviderSlot<STTProvider>(old);
+      let refreshes = 0;
+      (state as unknown as { webVoice: { refreshStreamingCapability: () => void } }).webVoice = {
+        refreshStreamingCapability: () => { refreshes++; },
+      };
+      await state.swapVoiceProvider({ role: "stt", backend: "faster-whisper" });
+      const persisted = loadConfig({}, { home: root });
+      expect(persisted.sttBackend.backend).toBe("faster-whisper");
+      expect(persisted.sttFallbackBackend).toMatchObject({ backend: "audiocpp", model: "nemotron" });
+      expect(persisted.sttFallbackBackend?.streaming).toBeUndefined();
+      await state.swapVoiceProvider({ role: "stt", backend: "audiocpp" });
+      const restored = loadConfig({}, { home: root });
+      expect(restored.sttBackend.streaming).toBe(true);
+      expect(restored.sttFallbackBackend?.backend).toBe("faster-whisper");
+      expect(refreshes).toBe(2);
+      await state.sttSlot.stop();
+    });
     test("persists only after candidate readiness and keeps the fallback configured", async () => {
       root = mkdtempSync(join(tmpdir(), `cicero-${role}-swap-`));
       const configPath = join(root, "config.yaml");

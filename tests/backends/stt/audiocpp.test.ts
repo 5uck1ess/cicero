@@ -19,6 +19,11 @@ function captureFetch(payload: unknown, status = 200) {
   return calls;
 }
 
+test("live capability is absent by default and present with the audio.cpp opt-in", () => {
+  expect(new AudioCppSTTProvider({ backend: "audiocpp" }).openStream).toBeUndefined();
+  expect(typeof new AudioCppSTTProvider({ backend: "audiocpp", streaming: true }).openStream).toBe("function");
+});
+
 test("posts the WAV to the audiocpp seat's /v1/audio/transcriptions with the default ASR model", async () => {
   const calls = captureFetch({ text: "  hello world  " });
   const p = new AudioCppSTTProvider({ backend: "audiocpp" });

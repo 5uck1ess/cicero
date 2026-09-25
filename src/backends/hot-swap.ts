@@ -506,7 +506,11 @@ export class SwappableSTTProvider implements STTProvider, PinnableProvider<STTPr
   pinGeneration(): GenerationPin<STTProvider> {
     return pinCurrentGeneration(this.slot);
   }
-  openStream(options: Parameters<NonNullable<STTProvider["openStream"]>>[0]): ReturnType<NonNullable<STTProvider["openStream"]>> {
+  get openStream(): STTProvider["openStream"] {
+    if (!this.slot.currentProvider().openStream) return undefined;
+    return (options) => this.openCurrentStream(options);
+  }
+  private openCurrentStream(options: Parameters<NonNullable<STTProvider["openStream"]>>[0]): ReturnType<NonNullable<STTProvider["openStream"]>> {
     const pin = this.pinGeneration();
     try {
       if (!pin.provider.openStream) throw new Error("current STT backend has no live stream");

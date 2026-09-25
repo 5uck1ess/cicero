@@ -30,6 +30,21 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+test("live capability follows only the primary through the fallback wrapper", async () => {
+  const batchPrimary = fake("batch");
+  const streamingFallback = fake("fallback", { openStream: () => ({
+    push() {}, end: async () => "fallback", abort() {}, final: Promise.resolve("fallback"),
+    partials: { async *[Symbol.asyncIterator]() {} }, released: true,
+  }) });
+  expect(new FallbackSTTProvider(batchPrimary, streamingFallback).openStream).toBeUndefined();
+  const streamingPrimary = fake("primary", { openStream: () => ({
+    push() {}, end: async () => "primary", abort() {}, final: Promise.resolve("primary"),
+    partials: { async *[Symbol.asyncIterator]() {} }, released: true,
+  }) });
+  const wrapped = new FallbackSTTProvider(streamingPrimary, batchPrimary);
+  expect(await wrapped.openStream!({ sampleRate: 16000 }).final).toBe("primary");
+});
+
 test("uses the primary transcript without invoking the fallback", async () => {
   const primary = fake("primary");
   const fallback = fake("fallback");

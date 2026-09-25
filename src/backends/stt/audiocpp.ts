@@ -82,8 +82,10 @@ export class AudioCppSTTProvider implements STTProvider {
   private active = false;
   private cleanupFailure: Error | null = null;
   private readonly lifecycle = new SerializedLifecycle();
+  private readonly streaming: boolean;
 
   constructor(config: STTProviderConfig) {
+    this.streaming = config.streaming === true;
     this.host = config.host;
     this.port = config.port ?? STT_DEFAULT_PORTS.audiocpp!; // beside the audio.cpp TTS seat
     this.model = config.model ?? (config.streaming ? "nemotron" : "qwen3-asr");
@@ -92,7 +94,11 @@ export class AudioCppSTTProvider implements STTProvider {
     this.prompt = sttVocabularyPrompt(config.vocabulary);
   }
 
-  openStream(options: { signal?: AbortSignal; sampleRate: number; onPartial?: (text: string, at: number) => void }): LivePcmSession {
+  get openStream(): STTProvider["openStream"] {
+    return this.streaming ? (options) => this.openLiveStream(options) : undefined;
+  }
+
+  private openLiveStream(options: { signal?: AbortSignal; sampleRate: number; onPartial?: (text: string, at: number) => void }): LivePcmSession {
     if (this.cleanupBlocked?.released) this.cleanupBlocked = null;
     if (this.cleanupBlocked) throw new Error("prior live STT socket cleanup is unconfirmed");
     // One live ASR seat per provider. A newer speech capture supersedes the
