@@ -464,7 +464,7 @@ function hasOllamaModel(models: readonly string[], configured: string): boolean 
   ));
 }
 
-function localGgufProblem(path: string): string | undefined {
+export function localGgufProblem(path: string): string | undefined {
   if (!existsSync(path)) return `GGUF model file does not exist: ${path}`;
   try {
     if (!statSync(path).isFile()) return `GGUF model path is not a regular file: ${path}`;
@@ -475,7 +475,7 @@ function localGgufProblem(path: string): string | undefined {
   return undefined;
 }
 
-function isHuggingFaceGgufRepo(model: string): boolean {
+export function isHuggingFaceGgufRepo(model: string): boolean {
   // llama-server's -hf contract is owner/repo with an optional quant suffix.
   // Reject obvious local-path/config typos before startup reports a false green.
   const [repoId, quant, ...extra] = model.split(":");

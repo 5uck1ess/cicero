@@ -19,7 +19,7 @@ describe("setup draft and write", () => {
     expect(parseYaml(text)).toEqual(draft);
     expect(text).toContain("# Stable private pairing credential");
     expect(text).toContain("# Uses the browser microphone and speaker instead of local audio devices.");
-    expect(text).toContain("# Runs the coding agent as a subprocess without needing a local terminal tab.");
+    expect(text).toContain("# Chooses subprocess or local-terminal tab injection for the coding agent.");
     expect(draft).toMatchObject({ headless: true, brain: { mode: "subprocess" } });
     writeDraft(dir, draft);
     expect(loadConfig({}, { home: dir }).raw.deployment).toBe("local-cpu");

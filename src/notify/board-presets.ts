@@ -3,6 +3,12 @@ import type { KanbanTask } from "./kanban-watch";
 
 export type CanonicalKanbanStatus = "todo" | "in_progress" | "review" | "blocked" | "done" | "cancelled";
 export type BoardPreset = "hermes" | "multica" | "paperclip";
+/** The board CLI argv templates used by setup and documented in notifications.md. */
+export const BOARD_COMMANDS: Readonly<Record<BoardPreset, { command: readonly string[]; task_command: readonly string[] }>> = {
+  hermes: { command: ["hermes", "kanban", "list", "--json"], task_command: ["hermes", "kanban", "show"] },
+  multica: { command: ["multica", "issue", "list", "--output", "json"], task_command: ["multica", "issue", "get"] },
+  paperclip: { command: ["paperclipai", "issue", "list", "--json"], task_command: ["paperclipai", "issue", "get"] },
+};
 export interface BoardNormalizationOptions {
   preset?: BoardPreset;
   assignees?: Record<string, string>;

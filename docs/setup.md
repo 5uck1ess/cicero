@@ -2,15 +2,53 @@
 
 ## Guided setup (preview)
 
-Run `cicero setup` (or `bun run src/index.ts setup`) to open a one-shot local
-setup page. `--home <dir>` lets you try setup without touching the real
-`~/.cicero/config.yaml`; the hand-off shows a copy command for the generated
-config because `cicero start` reads only the default Cicero home.
-`--lan` serves the page over TLS to other devices on your local network.
-The middle provider, brain, board, speech, channels, and install steps are
-placeholders in this preview. The wizard checks and writes a new config only
-after the implemented System and Check steps; use the manual setup below for a
-complete first conversation.
+Run `cicero setup` (or `bun run src/index.ts setup` if `cicero` is not on your
+`PATH` yet). It starts a one-shot setup page and prints its URL with a one-time
+token; open that URL in a browser.
+
+**How the page works.** The first screen is a diagram of Cicero's voice loop:
+you talk, **Hear** turns speech into words, **Think** (a small local model)
+answers everyday talk, **Agent** (your coding agent) does the real work and can
+file **Tasks** on a board, and **Speak** reads the reply back to you. Two more
+boxes sit beside the loop: **Machine** (your hardware) and **Save**. Click any
+box to set up that part; a box shows your pick and turns green once it is set.
+
+![The setup page's voice-loop diagram](images/setup-overview.png)
+
+Each part is one question on one screen. The options are cards that say whether
+the software is running, installed or not found, and the one that fits your
+machine is marked *Recommended*. If you pick something that is missing, the
+screen shows the steps to install it and a *Check again* button. *Why this?*
+opens the longer explanation and a link to the matching doc. The row of step
+names at the top jumps between parts, and the browser's Back button works.
+Nothing is written until you save.
+
+| Part | What it does |
+| --- | --- |
+| Machine | Detects OS, CPU architecture, RAM, free disk, Apple Silicon and NVIDIA VRAM, then recommends a starting preset (NVIDIA GPU, Apple Silicon or CPU only; `local-cuda`, `local-mlx` or `local-cpu` in the config). |
+| Hear | Speech-to-text options for your platform, with whether each engine's venv is installed and its server is running. |
+| Think | Finds a running llama.cpp (`:8080`), Ollama (`:11434`) or LM Studio (`:1234`), and offers MLX on macOS or a cloud or custom OpenAI-compatible API. It lists the runtime's models to pick from. |
+| Agent | Detects the coding-agent CLIs on `PATH` (Claude Code, Codex, Gemini, Qwen, or an ACP harness), or a model API instead. A missing one gets its install and sign-in steps. |
+| Speak | Text-to-speech options, with the same installed and running status as Hear. |
+| Tasks | Optional. Detects `hermes`, `multica` or `paperclipai` and probes the board once. Cicero only watches the board; the board system owns the tasks. |
+| Save | Runs the same checks as `cicero doctor` against the draft. Config errors block saving. Engines that are not installed or running yet are listed with the command to fix them, and you confirm before saving. Then it writes a private, annotated `~/.cicero/config.yaml` with a comment on each key (only when no config exists; an invalid existing config is backed up only if you choose to) and shows the command to start Cicero. *Finish and close setup* stops the setup page. |
+
+Options:
+
+- `--lan` serves the page over HTTPS to other devices on your network, for a
+  headless box. It uses a self-signed certificate, so accept the warning once.
+  If the box runs a firewall, pick a fixed `--port` and allow it from your
+  LAN first. With ufw, for example:
+  `sudo ufw allow from 192.168.1.0/24 to any port <port> proto tcp`. Delete
+  the rule when setup is done.
+- `--home <dir>` writes to another directory instead of `~/.cicero`, so you can
+  try setup without touching your real config. `cicero start` reads only the
+  default home, so the hand-off shows the copy command.
+- `--port <n>` picks the port (default: a free port).
+
+Preview limits: the Channels step (Telegram bot and calls) and the Install
+step (creating engine venvs and downloading models) are not built yet. Use the
+manual steps below for those, then run `cicero doctor`.
 
 ## Your first conversation
 
