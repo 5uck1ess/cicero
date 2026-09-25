@@ -75,6 +75,7 @@ import {
 import { startDashboard, type DashboardHandle, type VoiceControlAction } from "./dashboard/server";
 import { dashBus } from "./dashboard/bus";
 import { startWebVoiceServer, type WebVoiceHandle } from "./web-voice/server";
+import { TurnCoordinator, type TurnLease } from "./turn-coordinator";
 import {
   startWebVoiceTunnel,
   type WebVoiceTunnelHandle,
@@ -180,6 +181,7 @@ export async function runOperatorChatTurn(
     systemContext: systemContext ?? undefined,
   });
   signal?.throwIfAborted();
+  if (reply.length > 64 * 1024) throw new Error("chat reply exceeds turn output limit");
   await deps.history.append({
     t: Date.now(),
     user: text,
@@ -199,11 +201,25 @@ export function createRecordedWebTurn(
 ): RecordedWebTurn {
   let transcript = "";
   const sentences: string[] = [];
+  let retainedSentenceChars = 0;
   let finished = false;
   let persistence = Promise.resolve();
+  const retainSentence = (text: string, publish: () => void): void => {
+    if (text.length > 16_384 || retainedSentenceChars + text.length > 64 * 1024) {
+      sink.error("turn text output limit exceeded");
+      return;
+    }
+    retainedSentenceChars += text.length;
+    sentences.push(text);
+    publish();
+  };
   const recordedSink: WebReplySink = {
     transcript: (t) => { transcript = t; sink.transcript(t); },
-    sentence: (t) => { sentences.push(t); sink.sentence(t); },
+    sentence: (t) => retainSentence(t, () => sink.sentence(t)),
+    notice: (t) => retainSentence(t, () => {
+      if (sink.notice) sink.notice(t);
+      else sink.sentence(t);
+    }),
     audio: (b, text) => sink.audio(b, text),
     control: (m) => sink.control(m),
     done: () => {
@@ -902,6 +918,8 @@ export class CiceroDaemon {
   private readonly webRecentAssistantSpeech: string[] = [];
 
   private activeLocalTurn: AbortController | null = null;
+  private readonly turnCoordinator = new TurnCoordinator();
+  private nextLocalTurnId = 0;
   /** Every local mic/dashboard command, including superseded turns winding down. */
   private localTurnTasks = new Set<Promise<void>>();
   private startupVoiceWarmups = new Map<SwapRole, BackgroundTaskHandle>();
@@ -1294,18 +1312,39 @@ export class CiceroDaemon {
         onHealthLog: (metric, words) => this.logHealth(metric, words),
         onCallMe: dialBack,
         onChat: async (text) => {
-          if (callClassifier) {
-            const intent = await classifyCallIntent(text, callClassifier, Object.keys(this.config.brain.lanes ?? {}));
-            if (intent) return dialBack(intent.who);
+          const lease = this.turnCoordinator.start({
+            sessionId: "telegram", turnId: String(++this.nextLocalTurnId),
+            source: "telegram", text, signal: this.lifecycleAbort.signal,
+          });
+          try {
+            if (callClassifier) {
+              const intent = await classifyCallIntent(text, callClassifier, Object.keys(this.config.brain.lanes ?? {}));
+              if (!lease.active) return null;
+              if (intent) {
+                const reply = await dialBack(intent.who);
+                if (!lease.active) return null;
+                lease.complete();
+                return reply;
+              }
+            }
+            lease.emit({ type: "transcript", text });
+            const reply = await runOperatorChatTurn(text, {
+              brain: this.brain,
+              history: tgHistory,
+              operationalContext: (signal) => this.operationalContext(signal),
+            }, lease.signal);
+            if (!lease.active) return null;
+            lease.emit({ type: "sentence", text: reply });
+            if (!lease.active) return null;
+            lease.complete();
+            return reply;
+          } catch (error) {
+            if (lease.signal.aborted) return null;
+            lease.fail("telegram turn failed");
+            throw error;
+          } finally {
+            lease.settle();
           }
-          // Own the turn under the daemon lifecycle so a slow brain turn is
-          // cancelled on shutdown instead of running (up to the provider timeout)
-          // and publishing a reply / history append after stop() has returned.
-          return runOperatorChatTurn(text, {
-            brain: this.brain,
-            history: tgHistory,
-            operationalContext: (signal) => this.operationalContext(signal),
-          }, this.lifecycleAbort.signal);
         },
       });
       log("ok", "Telegram text surface ready (chat, log, call me, approvals)");
@@ -1752,6 +1791,7 @@ export class CiceroDaemon {
         });
       }
       this.webVoice = (this.options.webVoiceServerStarter ?? startWebVoiceServer)({
+        coordinator: this.turnCoordinator,
         host: webHost,
         port: webPort,
         token,
@@ -1799,6 +1839,7 @@ export class CiceroDaemon {
           // actually hear. A reply of "**" is non-empty text that synthesizes
           // to an empty clip, and recording it would tell the judge Cicero said
           // something the room never heard.
+          if (options?.signal?.aborted) return turn;
           if (turn.audio.byteLength > 0) this.noteWebSpoken(turn.reply);
           return turn;
         },
@@ -2150,7 +2191,7 @@ export class CiceroDaemon {
     // Step 4: Start listener
     logStep(4, totalSteps, "Starting listener...");
     this.listener = createListener(this.config);
-    this.listener.onCommand((text) => this.dispatchCommand(text));
+    this.listener.onCommand((text) => this.dispatchCommand(text, "text"));
 
     // Semantic end-of-turn detector (optional; default off). Launches its own
     // ONNX model server the way STT does. If it can't start, the listener's
@@ -2173,7 +2214,8 @@ export class CiceroDaemon {
 
     // Initialize conversational listener (activated via "voice" command)
     this.conversational = createConversationalListener(this.config, this.providers.stt, audioRecorder, audioPlayer, this.turnDetector ?? undefined, this.aecHub ?? undefined);
-    this.conversational.onCommand((text) => this.dispatchCommand(text));
+    this.conversational.setTurnSupersessionSignal(() => this.turnCoordinator.supersessionSignal("local-mic"));
+    this.conversational.onCommand((text) => this.dispatchCommand(text, "local-mic"));
     // "Was that addressed to me?" veto, off unless switched on AND a classifier
     // is configured. It can only ever decline an utterance the listener would
     // have taken, never cause one to be taken -- so a missing or broken judge
@@ -2287,18 +2329,31 @@ export class CiceroDaemon {
     this.watchActions();
   }
 
-  private dispatchCommand(text: string): Promise<void> {
-    this.activeLocalTurn?.abort("superseded by a newer local turn");
-    const controller = new AbortController();
+  private dispatchCommand(text: string, source: "local-mic" | "text" = "local-mic"): Promise<void> {
+    let lease: TurnLease;
+    try {
+      lease = this.turnCoordinator.start({
+        sessionId: source === "text" ? "stdin" : "local-mic",
+        turnId: String(++this.nextLocalTurnId), source, text,
+        signal: this.lifecycleAbort.signal,
+      });
+    } catch {
+      log("warn", "Local command exceeds turn input limit");
+      return Promise.resolve();
+    }
+    const controller = lease.controller;
     this.activeLocalTurn = controller;
+    lease.emit({ type: "transcript", text });
     let task!: Promise<void>;
     task = this.handleCommand(text, controller.signal)
       .catch((error: unknown) => {
         if (!controller.signal.aborted) {
+          lease.fail("local command failed");
           logError("Local command dispatch failed", error instanceof Error ? error : new Error(String(error)));
         }
       })
       .finally(() => {
+        lease.settle();
         if (this.activeLocalTurn === controller) {
           this.activeLocalTurn = null;
           // A browser departure may have been suppressed while this turn was
@@ -2671,6 +2726,7 @@ export class CiceroDaemon {
 
       // Step 4: Handle tab-directed commands (need daemon's brain.switchTab)
       if (await this.handleTabIntent(result, expanded, signal)) {
+        if (signal.aborted) return;
         this.contextStore.addTurn({
           text: expanded,
           intent: result.intent,
@@ -2793,8 +2849,9 @@ export class CiceroDaemon {
         const ttsMode = action?.tts_mode || (result.category === "brain" ? "summary" : "full");
         if (ttsMode !== "silent") {
           const textToSpeak = ttsMode === "summary"
-            ? await summarizeForTTS(execResult.output, this.providers.llm, { maxTokens: this.config.ttsSummaryMaxTokens })
+            ? await summarizeForTTS(execResult.output, this.providers.llm, { maxTokens: this.config.ttsSummaryMaxTokens, signal })
             : execResult.output;
+          if (signal.aborted) return;
           if (textToSpeak) {
             log("speak", `Speaking result (${ttsMode})... (+${Date.now() - tStart}ms)`);
             // In conversational mode, speak canned/full replies through the SAME
@@ -2888,7 +2945,7 @@ export class CiceroDaemon {
         },
         listenOnce: async () => {
           signal.throwIfAborted();
-          const reply = await this.conversational!.listenOnce();
+          const reply = await this.conversational!.listenOnce(signal);
           signal.throwIfAborted();
           return reply;
         },

@@ -45,9 +45,17 @@ export class TurnHistory {
   /** Append a turn (serialized through a chain so concurrent turns can't interleave writes). */
   append(turn: HistoryTurn): Promise<void> {
     if (!this.available) return Promise.resolve();
+    // Provider text is untrusted. Bound each record before the append chain
+    // retains it, including paths that bypass the streaming coordinator.
+    const bounded: HistoryTurn = {
+      t: turn.t,
+      user: turn.user.slice(0, 16_384),
+      reply: turn.reply.slice(0, 64 * 1024),
+      lane: turn.lane?.slice(0, 128),
+    };
     this.pending = this.pending.then(async () => {
       try {
-        await appendFile(this.file, JSON.stringify(turn) + "\n", { mode: PRIVATE_FILE_MODE });
+        await appendFile(this.file, JSON.stringify(bounded) + "\n", { mode: PRIVATE_FILE_MODE });
         await this.trimIfNeeded();
       } catch (err: unknown) {
         log("info", `web-voice history write skipped: ${err instanceof Error ? err.message : String(err)}`);

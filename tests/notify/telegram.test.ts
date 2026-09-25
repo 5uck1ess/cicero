@@ -691,6 +691,17 @@ test("other texts are chat turns; long replies split at the Telegram cap", async
   expect((calls[1].body.text as string).length).toBe(500);
 });
 
+test("a superseded Telegram chat turn sends no late reply", async () => {
+  const brain = confirmationBrain();
+  brain.hasPendingConfirmation = () => false;
+  const handled = await handleTelegramUpdate({
+    message: privateMessage(13, "what changed"),
+  }, brain, { token: "tok", chat_id: 42 }, "https://unused.invalid", {
+    onChat: async () => null,
+  });
+  expect(handled).toBe(true);
+});
+
 test("a pending gate still wins for yes/no, and chat is NOT consulted for them", async () => {
   const calls: CapturedCall[] = [];
   const server = Bun.serve({
