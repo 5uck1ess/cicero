@@ -37,6 +37,45 @@ test("orb scales with the viewport instead of a fixed pixel size", () => {
   expect(PAGE).not.toContain("width:230px; height:230px");
 });
 
+test("notifications stay in a bounded viewport card with a clickable link and dismiss control", () => {
+  const header = PAGE.match(/  header \{([^}]+)\}/)?.[1] ?? "";
+  const notice = PAGE.match(/  #notice \{([^}]+)\}/)?.[1] ?? "";
+  const noticeText = PAGE.match(/  #noticeText \{([^}]+)\}/)?.[1] ?? "";
+  const shroud = PAGE.match(/  #shroud \{([^}]+)\}/)?.[1] ?? "";
+  expect(header).toContain("position:fixed");
+  expect(header).toContain("safe-area-inset-top");
+  expect(notice).toContain("position:fixed");
+  expect(notice).toContain("safe-area-inset-top");
+  expect(notice).toContain("left:50%; transform:translateX(-50%)");
+  expect(notice).toContain("width:min(92vw,640px)");
+  expect(notice).toContain("--notice-max-height:40dvh");
+  expect(noticeText).toContain("overflow-y:auto");
+  expect(noticeText).toContain("max-height:calc(var(--notice-max-height) - 22px)");
+  expect(Number(notice.match(/z-index:(\d+)/)?.[1])).toBeGreaterThan(Number(shroud.match(/z-index:(\d+)/)?.[1]));
+  expect(PAGE).toContain('<button id="noticeClose" aria-label="dismiss">');
+  const script = PAGE.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "";
+  expect(script).toContain('noticeEl.classList.remove("show")');
+  expect(script).toContain('noticeEl.classList.add("show")');
+  expect(script).toContain('noticeTextEl.appendChild(a)');
+  expect(script).toContain('a.href = url; a.target = "_blank"; a.rel = "noopener"');
+});
+
+test("notify keeps the hint short and confirmations cannot displace the controls", () => {
+  const hint = PAGE.match(/  \.hint \{([^}]+)\}/)?.[1] ?? "";
+  const confirmations = PAGE.match(/  #confirmations \{([^}]+)\}/)?.[1] ?? "";
+  expect(hint).toContain("white-space:nowrap");
+  expect(hint).toContain("text-overflow:ellipsis");
+  expect(confirmations).toContain("max-height:30dvh");
+  expect(confirmations).toContain("min-height:0; flex-shrink:1; overflow:auto");
+  expect(PAGE).toContain("body:has(#confirmations:not(:empty)) #orb { width:clamp(170px, 45vmin, calc(70dvh - 260px)); }");
+  expect(PAGE).toContain("body:has(#confirmations:not(:empty)) #notice { --notice-max-height:25dvh; }");
+  const script = PAGE.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "";
+  const handleNotify = script.slice(script.indexOf("function handleNotify"), script.indexOf("const confirmationEl"));
+  expect(handleNotify).toContain('msg.text.slice(0, 80) + (msg.text.length > 80 ? "…" : "")');
+  expect(handleNotify).toContain("showNotice(msg.text)");
+  expect(handleNotify).not.toContain('hintEl.textContent = "\\uD83D\\uDD14 " + msg.text;');
+});
+
 test("page loads dormant and lights up on the first interaction", () => {
   expect(PAGE).toContain('<body class="pre">');
   expect(PAGE).toContain("body.pre #orb { opacity:0.05; }");
