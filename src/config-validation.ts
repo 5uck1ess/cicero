@@ -8,6 +8,7 @@ import {
   MAX_ACTION_TIMEOUT_SECONDS,
 } from "./action-command-limits";
 import { MAX_ACP_PENDING_TURN_LIMIT, MAX_ACP_TEXT_LIMIT_BYTES } from "./brain/acp-limits";
+import { nameKey, normalizeRef } from "./brain/switchboard-ref";
 import {
   sttDefaultPort,
   sttEndpointKey,
@@ -326,9 +327,24 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
   ], issues);
 
   if (config.switchboard !== undefined && checkRecord(config.switchboard, "switchboard", issues)) {
-    checkKnownKeys(config.switchboard, "switchboard", ["intent_timeout_ms", "intent_min_confidence"], issues);
+    checkKnownKeys(config.switchboard, "switchboard", ["intent_timeout_ms", "intent_min_confidence", "front_desk_aliases"], issues);
     if (config.switchboard.intent_timeout_ms !== undefined) checkInteger(config.switchboard.intent_timeout_ms, "switchboard.intent_timeout_ms", issues, { min: 1, max: 300_000 });
     if (config.switchboard.intent_min_confidence !== undefined) checkNumber(config.switchboard.intent_min_confidence, "switchboard.intent_min_confidence", issues, { min: 0, max: 1 });
+    if (config.switchboard.front_desk_aliases !== undefined) {
+      const aliases = config.switchboard.front_desk_aliases;
+      if (!Array.isArray(aliases) || aliases.length < 1 || aliases.length > 8
+        || aliases.some((name) => typeof name !== "string" || name.length > 40 || !/^[a-z0-9 _-]+$/i.test(name) || name.trim().length === 0)) {
+        issues.push("switchboard.front_desk_aliases must contain 1 to 8 names of at most 40 characters using letters, digits, spaces, underscores, or hyphens");
+      } else {
+        const normalized = aliases.map(nameKey);
+        if (aliases.some((name) => normalizeRef(name).length === 0)) {
+          issues.push("switchboard.front_desk_aliases must not normalize to an empty name");
+        }
+        if (new Set(normalized).size !== normalized.length) {
+          issues.push("switchboard.front_desk_aliases must be unique after normalization");
+        }
+      }
+    }
   }
 
   for (const key of RETIRED_TOP_LEVEL_KEYS) {
@@ -556,6 +572,19 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       for (const [name, lane] of Object.entries(config.brain.lanes)) {
         if (name.trim().length === 0) issues.push("brain.lanes keys must be non-empty strings");
         validateAgent(lane, `brain.lanes.${name}`, true);
+      }
+      // Only explicitly configured names can collide; built-in defaults step aside at runtime.
+      const frontNames = isRecord(config.switchboard) ? config.switchboard.front_desk_aliases : undefined;
+      if (Array.isArray(frontNames)) {
+        const names = new Set(frontNames.filter((name): name is string => typeof name === "string").map(nameKey).filter(Boolean));
+        for (const [laneName, lane] of Object.entries(config.brain.lanes)) {
+          const laneNames = [laneName, ...(isRecord(lane) && Array.isArray(lane.aliases) ? lane.aliases : [])];
+          for (const name of laneNames) {
+            if (typeof name === "string" && names.has(nameKey(name))) {
+              issues.push(`switchboard.front_desk_aliases collides with brain.lanes.${laneName}: ${name}`);
+            }
+          }
+        }
       }
     }
   }

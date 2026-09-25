@@ -1639,3 +1639,15 @@ test("switchboard intent settings validate finite confidence and bounded integer
     expect(() => loadYaml(`switchboard: { intent_timeout_ms: ${value} }\n`)()).toThrow(/intent_timeout_ms/);
   }
 });
+
+test("front-desk aliases validate bounds, characters, and lane collisions", () => {
+  expect(loadYaml("switchboard: { front_desk_aliases: [friday] }\n")().raw.switchboard?.front_desk_aliases).toEqual(["friday"]);
+  for (const aliases of ["[]", "[a,b,c,d,e,f,g,h,i]", "[\"\"]", "[\"a!\"]", "[agent]", "[Jarvis, \" jarvis \"]", `["${"x".repeat(41)}"]`]) {
+    expect(loadYaml(`switchboard: { front_desk_aliases: ${aliases} }\n`)).toThrow(/front_desk_aliases/);
+  }
+  expect(loadYaml("switchboard: { front_desk_aliases: [Friday] }\nbrain:\n  lanes:\n    coder: { aliases: [friday] }\n")).toThrow(/front_desk_aliases collides/);
+  expect(loadYaml("switchboard: { front_desk_aliases: [Friday] }\nbrain:\n  lanes:\n    coder: { aliases: [Friday agent] }\n")).not.toThrow();
+  // Built-in defaults never reject an existing lane alias; the lane keeps the name.
+  expect(loadYaml("brain:\n  lanes:\n    coder: { aliases: [Jarvis agent] }\n")).not.toThrow();
+  expect(loadYaml("brain:\n  lanes:\n    jarvis: {}\n")).not.toThrow();
+});

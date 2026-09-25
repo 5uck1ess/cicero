@@ -1,4 +1,5 @@
-import { classifySwitchboardIntent, type SwitchboardIntent } from "./switchboard-intent";
+import { classifySwitchboardIntent, DEFAULT_FRONT_DESK_ALIASES, type SwitchboardIntent } from "./switchboard-intent";
+import { nameKey, normalizeRef } from "./switchboard-ref";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
 import { dialBackMemo, matchCallMe, SpeculativeSideEffectError } from "../call-intent";
@@ -52,6 +53,7 @@ export interface SwitchboardOptions {
   standupLaneTimeoutMs?: number;
   intentTimeoutMs?: number;
   intentMinConfidence?: number;
+  frontDeskAliases?: string[];
 }
 
 type IntentAction =
@@ -250,7 +252,10 @@ class LaneStartRetiredError extends Error {
 // trailing punctuation removed) so STT decoration ("I said, let me talk to the
 // coder.") can't defeat a transfer. Lead-ins, question forms ("can you…"), and a
 // trailing "please" are all tolerated — real callers don't speak in imperatives.
-const LEAD_IN = "(?:(?:hey|ok(?:ay)?|so|yes|yeah|alright|please|wait|cicero|jarvis|i said|again)\\s+){0,3}";
+function escapeRegex(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function leadIn(aliases: readonly string[]): string {
+  return `(?:(?:hey|ok(?:ay)?|so|yes|yeah|alright|please|wait|${aliases.map(escapeRegex).join("|")}|i said|again)\\s+){0,3}`;
+}
 const ASK_WRAP = "(?:(?:can|could|would|will) you\\s+|(?:can|could|may) i\\s+|i (?:want|need) to\\s+|i(?:'d| would) like to\\s+)?(?:please\\s+)?";
 // STRICT verbs are unambiguous transfer requests — an unknown name gets the
 // spoken roster. LOOSE verbs ("get me", "give me", "talk to", "put") appear in
@@ -261,13 +266,13 @@ const STRICT_VERB = "let me (?:talk|speak) (?:to|with)|switch(?: me)?(?: over)? 
 // name they transfer; with a description ("whoever handles the code") they
 // fall through to the classifier instead of dead-ending at the roster.
 const LOOSE_VERB = "(?:talk|speak) (?:to|with)|put|get me|give me|pass me (?:over |through )?to|hand me (?:over )?to|patch me (?:through |over )?to";
-const PIN_RE = new RegExp(`^${LEAD_IN}${ASK_WRAP}(?:(${STRICT_VERB})|(?:${LOOSE_VERB}))\\s+(?:the\\s+)?(?!me\\b|you\\b|us\\b)(.{1,60}?)(?:\\s+on(?: the line)?)?(?:\\s+please)?$`, "i");
-const RELEASE_RE = new RegExp(`^${LEAD_IN}(?:thanks\\s+|thank you\\s+)?(?:(?:go |switch )?back to (?:you|cicero|jarvis)|(?:cicero|jarvis) come back|switch back|that(?:'s| is) all(?: for now)?|hang up|end (?:the )?(?:call|transfer))(?:\\s+please)?$`, "i");
+const makePinRe = (lead: string) => new RegExp(`^${lead}${ASK_WRAP}(?:(${STRICT_VERB})|(?:${LOOSE_VERB}))\\s+(?:the\\s+)?(?!me\\b|you\\b|us\\b)(.{1,60}?)(?:\\s+on(?: the line)?)?(?:\\s+please)?$`, "i");
+const makeReleaseRe = (lead: string, names: string) => new RegExp(`^${lead}(?:thanks\\s+|thank you\\s+)?(?:(?:go |switch )?back to (?:you|${names})|(?:${names}) come back|switch back|that(?:'s| is) all(?: for now)?|hang up|end (?:the )?(?:call|transfer))(?:\\s+please)?$`, "i");
 // Calling off a transfer that has not connected yet. Deliberately NOT part of
 // RELEASE_RE: with somebody already on the line, "never mind" is something the
 // user is saying TO them ("never mind, I'll do it myself"), not an instruction
 // to hang up. It only means "cancel" while the line is still ringing.
-const CANCEL_PENDING_RE = new RegExp(`^${LEAD_IN}(?:never\\s?mind(?: (?:about )?(?:that|it))?|forget (?:it|that))(?:\\s+please)?$`, "i");
+const makeCancelPendingRe = (lead: string) => new RegExp(`^${lead}(?:never\\s?mind(?: (?:about )?(?:that|it))?|forget (?:it|that))(?:\\s+please)?$`, "i");
 // Roll call: every employee checks in, each sentence rendered in that lane's
 // own voice (the voice queue below feeds activeLaneVoice per sentence).
 // "Group call" style requests land here too — there's no conference mode, so
@@ -277,8 +282,8 @@ const GROUP_ASK = "(?:(?:can|could|would|will) (?:you|we)\\s+)?(?:please\\s+)?(?
 // WITH EVERYONE", "status FROM EACH AGENT" — same request, must not break the match.
 const GROUP_REF = "(?:every(?:one|body)|the (?:team|office|agents?)|all(?:\\s+(?:of\\s+)?(?:them|you|the agents?))?|each(?:\\s+(?:one|agent|of (?:them|you)))?)";
 const GROUP_TAIL = `(?:\\s+(?:with|from|of|for)\\s+${GROUP_REF})?`;
-const ROLLCALL_RE = new RegExp(
-  `^${LEAD_IN}${GROUP_ASK}(?:` +
+const makeRollcallRe = (lead: string) => new RegExp(
+  `^${lead}${GROUP_ASK}(?:` +
     "avengers\\s+assemble|(?:do|let's do) a(?:nother)? roll\\s?-?call|roll\\s?-?call" +
     "|(?:i want\\s+|i'd like\\s+)?(?:to\\s+)?(?:have\\s+|get\\s+|bring\\s+)?every(?:one|body)(?:\\s+to)?\\s+(?:check(?:\\s|-)?in|say (?:hi|hello)|join(?:\\s+(?:in|the (?:call|conversation)))?|come in)" +
     "|(?:have\\s+|get\\s+|bring\\s+)every(?:one|body)(?:\\s+(?:in(?:to the (?:call|conversation))?|on the line|in here))?" +
@@ -289,12 +294,12 @@ const ROLLCALL_RE = new RegExp(
 // (live miss 2026-07-12). Only honored while lastGroupAction is set; any
 // normal brain turn in between clears it, so "again" in ordinary conversation
 // still goes to whoever's on the line.
-const AGAIN_RE = new RegExp(
-  `^${LEAD_IN}(?:do (?:it|that) again|(?:run|say) (?:it|that) again|again|another(?:\\s+one)?|one more(?:\\s+time)?|once more|repeat (?:it|that))(?:\\s+please)?$`, "i");
+const makeAgainRe = (lead: string) => new RegExp(
+  `^${lead}(?:do (?:it|that) again|(?:run|say) (?:it|that) again|again|another(?:\\s+one)?|one more(?:\\s+time)?|once more|repeat (?:it|that))(?:\\s+please)?$`, "i");
 // Standup: every employee reports what it's working on, one line each, in its
 // own voice. Started lanes are actually asked; idle lanes say so.
-const STANDUP_RE = new RegExp(
-  `^${LEAD_IN}${GROUP_ASK}(?:` +
+const makeStandupRe = (lead: string) => new RegExp(
+  `^${lead}${GROUP_ASK}(?:` +
     "(?:daily\\s+)?stand\\s?-?up" +
     "|(?:i (?:want|need)\\s+(?:the\\s+|a\\s+)?)?status(?:\\s+(?:report|update))?\\s+from\\s+(?:every(?:one|body)|each(?:\\s+(?:one|of (?:them|you)))?|the (?:team|office)|all(?: of (?:them|you))?)" +
     "|(?:get|give)\\s+me\\s+(?:a\\s+|the\\s+)?(?:team\\s+)?status(?:\\s+(?:report|update))?(?:\\s+from\\s+every(?:one|body))?" +
@@ -370,19 +375,6 @@ function normalizeUtterance(message: string): string {
   return message.trim().replace(/,/g, "").replace(/\s+/g, " ").replace(/[.!?\s]+$/, "");
 }
 
-/** Normalize a captured lane reference: lowercase, strip filler and punctuation. */
-function normalizeRef(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/[.,!?'"]/g, "")
-    .replace(/\b(?:please|now|again|lane|profile|agent|employee)\b/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    // The pin pattern consumes a leading "the" before its capture, so aliases
-    // written naturally ("the thinker") must drop theirs too or never match.
-    .replace(/^the\s+/, "");
-}
-
 export class SwitchboardBrain implements Brain {
   sessionRestored(): boolean { return this.primary.sessionRestored?.() ?? false; }
   /** Pinned lane name, or null = the front desk (primary). */
@@ -431,6 +423,13 @@ export class SwitchboardBrain implements Brain {
   private readonly standupLaneTimeoutMs: number;
   private readonly intentTimeoutMs: number;
   private readonly intentMinConfidence: number;
+  private readonly frontDeskAliases: readonly string[];
+  private readonly pinRe: RegExp;
+  private readonly releaseRe: RegExp;
+  private readonly cancelPendingRe: RegExp;
+  private readonly rollcallRe: RegExp;
+  private readonly againRe: RegExp;
+  private readonly standupRe: RegExp;
   private acceptedTurnSequence = 0;
   private acceptedTurn: AcceptedTurn | null = null;
   /** Carries the delegating turn to nested public calls made on the delegate's
@@ -451,6 +450,21 @@ export class SwitchboardBrain implements Brain {
     private classify?: (prompt: string, signal?: AbortSignal) => Promise<string>,
     options: SwitchboardOptions = {},
   ) {
+    // Explicit aliases are validated against the roster at config load. The
+    // built-in defaults are not, so a default that names a lane steps aside:
+    // an existing lane alias keeps routing exactly as it did before.
+    const laneRefs = new Set(Object.entries(lanes).flatMap(([name, lane]) => [name, ...(lane.aliases ?? [])]).map(nameKey));
+    this.frontDeskAliases = options.frontDeskAliases
+      ? options.frontDeskAliases.map(nameKey).filter(Boolean)
+      : DEFAULT_FRONT_DESK_ALIASES.map(nameKey).filter((name) => name && !laneRefs.has(name));
+    const lead = leadIn(this.frontDeskAliases);
+    const names = this.frontDeskAliases.map(escapeRegex).join("|");
+    this.pinRe = makePinRe(lead);
+    this.releaseRe = makeReleaseRe(lead, names);
+    this.cancelPendingRe = makeCancelPendingRe(lead);
+    this.rollcallRe = makeRollcallRe(lead);
+    this.againRe = makeAgainRe(lead);
+    this.standupRe = makeStandupRe(lead);
     this.intentTimeoutMs = options.intentTimeoutMs ?? 1500;
     this.intentMinConfidence = options.intentMinConfidence ?? 0.7;
     if (!Number.isSafeInteger(this.intentTimeoutMs) || this.intentTimeoutMs < 1 || this.intentTimeoutMs > 300_000) throw new RangeError("intentTimeoutMs must be an integer in 1..300000");
@@ -975,6 +989,14 @@ export class SwitchboardBrain implements Brain {
   private resolveLane(ref: string): string | null {
     const want = normalizeRef(ref);
     if (!want) return null;
+    // Precedence: an exact lane name/alias, then a front-desk name, then the
+    // lossy normalized lane match — "Friday" must not reach a lane aliased
+    // "Friday agent" when Friday is the front desk.
+    const exact = nameKey(ref.replace(/[.,!?'"]/g, "")).replace(/^the\s+/, "");
+    for (const [name, def] of Object.entries(this.lanes)) {
+      if ([name, ...(def.aliases ?? [])].some((a) => nameKey(a) === exact)) return name;
+    }
+    if (this.isFrontDeskName(ref)) return null;
     for (const [name, def] of Object.entries(this.lanes)) {
       if (normalizeRef(name) === want) return name;
       if (def.aliases?.some((a) => normalizeRef(a) === want)) return name;
@@ -993,6 +1015,11 @@ export class SwitchboardBrain implements Brain {
       return hit;
     }
     return null;
+  }
+
+  private isFrontDeskName(ref: string): boolean {
+    const want = normalizeRef(ref);
+    return want.length > 0 && this.frontDeskAliases.some((name) => normalizeRef(name) === want);
   }
 
   /**
@@ -1279,10 +1306,10 @@ export class SwitchboardBrain implements Brain {
   ): Promise<string | null> {
     this.assertAcceptedTurn(turn);
     const m = normalizeUtterance(message);
-    if (ROLLCALL_RE.test(m)) return this.doRollcall(turn);
-    if (RELEASE_RE.test(m)) return this.doRelease(turn);
+    if (this.rollcallRe.test(m)) return this.doRollcall(turn);
+    if (this.releaseRe.test(m)) return this.doRelease(turn);
     // Only while nobody has picked up: see CANCEL_PENDING_RE.
-    if (this.active === null && this.pendingTransfer !== null && CANCEL_PENDING_RE.test(m)) {
+    if (this.active === null && this.pendingTransfer !== null && this.cancelPendingRe.test(m)) {
       return this.doRelease(turn);
     }
     // Spoken dial-back ("call me", "have ada call me") — must beat PIN_RE:
@@ -1309,11 +1336,14 @@ export class SwitchboardBrain implements Brain {
         return reply;
       }
     }
-    const pin = PIN_RE.exec(m);
+    const pin = this.pinRe.exec(m);
     if (!pin) return null;
     const strict = pin[1] !== undefined;
     const target = pin[2] ?? "";
     const lane = this.resolveLane(target);
+    // "Put me through to <front desk>" is a return, not a transfer: release a
+    // pinned lane, and with nothing pinned let the front desk simply answer.
+    if (!lane && this.isFrontDeskName(target)) return this.doRelease(turn);
     if (!lane) {
       // An unambiguous transfer verb naming nobody we know ("transfer me to my
       // manager") still reads as a transfer request — answer it with the
@@ -1628,12 +1658,12 @@ export class SwitchboardBrain implements Brain {
     if (pendingAck !== null) return pendingAck;
     // "Again" right after a roll call / standup repeats it. Checked before the
     // bare-name transfer so "again" can't be mistaken for a lane name.
-    if (this.lastGroupAction !== null && AGAIN_RE.test(m)) {
+    if (this.lastGroupAction !== null && this.againRe.test(m)) {
       if (this.lastGroupAction === "standup") return "standup";
       const redo = this.doRollcall(turn);
       if (redo !== null) return redo;
     }
-    if (STANDUP_RE.test(m)) return "standup";
+    if (this.standupRe.test(m)) return "standup";
     // A bare name as the ENTIRE utterance is a transfer — the natural
     // correction after a misheard "can I talk to X?" is to repeat the name.
     const bareRaw = /^(?:please\s+)?(?:the\s+)?(\S{1,24}(?:\s\S{1,24})?)$/.exec(m)?.[1];
@@ -1658,7 +1688,7 @@ export class SwitchboardBrain implements Brain {
     const intentStart = performance.now();
     let result: SwitchboardIntent;
     try {
-      result = await classifySwitchboardIntent(this.classify, m, this.lanes, turn.signal, this.intentTimeoutMs);
+      result = await classifySwitchboardIntent(this.classify, m, this.lanes, turn.signal, this.intentTimeoutMs, undefined, this.frontDeskAliases);
     } finally {
       try { options.onIntentMs?.(performance.now() - intentStart); } catch { /* telemetry cannot fail a turn */ }
     }

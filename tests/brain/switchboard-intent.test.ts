@@ -26,6 +26,138 @@ test("targets resolve exact roster names and aliases, never fuzzy guesses", () =
   expect(parseIntent(json({ intent: "transfer", target: "Rick" }), { ...roster, other: { aliases: ["Rick"] } })).toEqual(NONE);
 });
 
+test("front-desk names appear in the classifier prompt and defer to exact lane aliases", async () => {
+  let prompt = "";
+  const result = await classifySwitchboardIntent(async (text) => {
+    prompt = text;
+    return json({ intent: "transfer", target: "FRIDAY" });
+  }, "let me speak with Friday again", roster, signal(), 1500, undefined, ["friday"]);
+  expect(prompt).toContain('Front-desk names: ["friday"]');
+  expect(prompt).toContain("take me back to friday");
+  expect(prompt).toContain("let me speak with friday again");
+  expect(result).toEqual(NONE);
+  expect(parseIntent(json({ intent: "transfer", target: "FRIDAY" }), { friday: {} }, ["friday"]).target).toBe("friday");
+  expect(parseIntent(json({ intent: "transfer", target: "Friday agent" }), roster, [" Friday "])).toEqual(NONE);
+  expect(parseIntent(json({ intent: "transfer", target: "Jarvis agent" }), { coder: { aliases: ["Jarvis agent"] } }).target).toBe("coder");
+});
+
+test("configured front-desk aliases control lexical release", async () => {
+  for (const [aliases, releaseNames, ordinaryName] of [
+    [["friday"], ["friday"], "jarvis"],
+    [undefined, ["jarvis", "cicero"], "friday"],
+  ] as const) {
+    const sb = new SwitchboardBrain(front(), { coder: { brain: front() } }, async () => json({ intent: "none" }), { frontDeskAliases: aliases ? [...aliases] : undefined });
+    try {
+      await sb.send("switch to coder");
+      expect(sb.activeLane()).toBe("coder");
+      expect(await sb.send(`back to ${ordinaryName}`)).toBe("normal turn");
+      expect(sb.activeLane()).toBe("coder");
+      for (const name of releaseNames) {
+        await sb.send(`back to ${name}`);
+        expect(sb.activeLane()).toBeNull();
+        await sb.send("switch to coder");
+      }
+    } finally { await sb.stop(); }
+  }
+});
+
+test("normalized front-desk alias releases without a classifier", async () => {
+  const sb = new SwitchboardBrain(front(), { coder: { brain: front() } }, undefined, { frontDeskAliases: [" Friday "] });
+  try {
+    await sb.send("switch to coder");
+    expect(sb.activeLane()).toBe("coder");
+    expect(await sb.send("back to Friday")).toBe("Back with you.");
+    expect(sb.activeLane()).toBeNull();
+  } finally { await sb.stop(); }
+});
+
+test("an exact lane alias wins over a normalized default front-desk name", async () => {
+  const sb = new SwitchboardBrain(front(), { coder: { brain: front(), aliases: ["Jarvis agent"] } });
+  try {
+    await sb.send("switch to Jarvis agent");
+    expect(sb.activeLane()).toBe("coder");
+  } finally { await sb.stop(); }
+});
+
+test("a default front-desk name that is a lane alias steps aside for that lane", async () => {
+  let prompt = "";
+  const sb = new SwitchboardBrain(front(), { coder: { brain: front(), aliases: ["Jarvis"] } },
+    async (text) => { prompt = text; return json({ intent: "none", request_now: false, confidence: 0 }); });
+  try {
+    await sb.send("switch to jarvis");
+    expect(sb.activeLane()).toBe("coder");
+    await sb.send("tell me something");
+    expect(prompt).toContain('Front-desk names: ["cicero"]');
+    expect(await sb.send("back to cicero")).not.toBe("normal turn");
+    expect(sb.activeLane()).toBeNull();
+  } finally { await sb.stop(); }
+});
+
+test("a lane alias that only normalizes like a front-desk name keeps the default release", async () => {
+  const sb = new SwitchboardBrain(front(), { coder: { brain: front(), aliases: ["Jarvis agent"] } });
+  try {
+    await sb.send("switch to Jarvis agent");
+    expect(sb.activeLane()).toBe("coder");
+    await sb.send("back to Jarvis");
+    expect(sb.activeLane()).toBeNull();
+  } finally { await sb.stop(); }
+});
+
+test("classifier targets keep distinct names that normalizeRef would merge", () => {
+  const lanes = { coder: {}, "coder agent": {} };
+  expect(parseIntent(json({ intent: "transfer", target: "coder agent" }), lanes).target).toBe("coder agent");
+  expect(parseIntent(json({ intent: "transfer", target: "Coder" }), lanes).target).toBe("coder");
+});
+
+test("an exact front-desk name beats a lane that only matches after normalization", async () => {
+  const sb = new SwitchboardBrain(front(), { coder: { brain: front() }, helper: { brain: front(), aliases: ["Friday agent"] } },
+    undefined, { frontDeskAliases: ["Friday"] });
+  try {
+    await sb.send("switch to coder");
+    expect(sb.activeLane()).toBe("coder");
+    await sb.send("put me through to Friday");
+    expect(sb.activeLane()).toBeNull();
+    await sb.send("switch to Friday agent");
+    expect(sb.activeLane()).toBe("helper");
+  } finally { await sb.stop(); }
+});
+
+test("switchboard passes configured aliases to its classifier", async () => {
+  let prompt = "";
+  const sb = new SwitchboardBrain(front(), { coder: { brain: front() } }, async (text) => {
+    prompt = text;
+    return json({ intent: "release" });
+  }, { frontDeskAliases: ["friday"] });
+  try {
+    await sb.send("switch to coder");
+    await sb.send("we are finished here, reception please");
+    expect(prompt).toContain('Front-desk names: ["friday"]');
+    expect(sb.activeLane()).toBeNull();
+  } finally { await sb.stop(); }
+});
+
+test("switchboard passes normalized front-desk aliases to its classifier", async () => {
+  let prompt = "";
+  const sb = new SwitchboardBrain(front(), { coder: { brain: front() } }, async (text) => {
+    prompt = text;
+    return json({ intent: "none" });
+  }, { frontDeskAliases: [" Friday "] });
+  try {
+    await sb.send("hello there");
+    expect(prompt).toContain('Front-desk names: ["friday"]');
+  } finally { await sb.stop(); }
+});
+
+test("front-desk names cannot fuzzy-match a lane transfer", async () => {
+  const sb = new SwitchboardBrain(front(), { frida: { brain: front() }, coder: { brain: front() } },
+    async () => json({ intent: "release" }), { frontDeskAliases: ["friday"] });
+  try {
+    await sb.send("switch to coder");
+    await sb.send("let me talk to Friday");
+    expect(sb.activeLane()).toBeNull();
+  } finally { await sb.stop(); }
+});
+
 test("deadline aborts an uncooperative classifier and ignores its late result", async () => {
   let owned: AbortSignal | undefined;
   let late!: (s: string) => void;
