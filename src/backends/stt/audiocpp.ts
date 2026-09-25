@@ -3,6 +3,7 @@ import { unlink } from "node:fs/promises";
 import { basename } from "node:path";
 import {
   STT_DEFAULT_PORTS,
+  sttVocabularyPrompt,
   type STTProvider,
   type STTProviderConfig,
   type STTTranscriptionResult,
@@ -49,6 +50,8 @@ export class AudioCppSTTProvider implements STTProvider {
   private port: number;
   private model: string;
   private readonly timeoutMs: number;
+  private readonly language?: string;
+  private readonly prompt?: string;
   /** Fresh cancellation scope for one startup; replaces any settled predecessor. */
   private beginStartup(): AbortSignal {
     const abort = new AbortController();
@@ -80,6 +83,8 @@ export class AudioCppSTTProvider implements STTProvider {
     this.port = config.port ?? STT_DEFAULT_PORTS.audiocpp!; // beside the audio.cpp TTS seat
     this.model = config.model ?? "qwen3-asr";
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.stt);
+    this.language = config.language;
+    this.prompt = sttVocabularyPrompt(config.vocabulary);
   }
 
   transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null> {
@@ -106,6 +111,8 @@ export class AudioCppSTTProvider implements STTProvider {
       formData.append("file", file, basename(audioFile) || "audio.wav");
       formData.append("model", this.model);
       formData.append("response_format", "json");
+      if (this.language) formData.append("language", this.language);
+      if (this.prompt) formData.append("prompt", this.prompt);
 
       const res = await fetch(`${httpBase(this.host, this.port)}/v1/audio/transcriptions`, {
         method: "POST",

@@ -289,7 +289,7 @@ class SidecarContractTests(unittest.TestCase):
 
         faster = load_server("stt_faster_whisper_server.py")
         faster._model = object()
-        faster._transcribe_bytes = lambda data: "hello faster"
+        faster._transcribe_bytes = lambda data, *_hints: "hello faster"
         body, content_type = multipart(
             pcm_wav(),
             "audio.wav",
@@ -311,6 +311,62 @@ class SidecarContractTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(response), {"error": "requested model is not loaded"})
+
+    def test_faster_whisper_request_hints_reach_model_and_are_bounded(self) -> None:
+        faster = load_server("stt_faster_whisper_server.py")
+        observed = []
+        faster._model = SimpleNamespace(transcribe=lambda _audio, **kwargs: (observed.append(kwargs) or [SimpleNamespace(text="hello world")], None))
+        faster.sf.read = lambda _source, **_kwargs: (SimpleNamespace(ndim=1), 16000)
+        for fields, expected_status in [
+            ({"language": "es", "prompt": "Cicero, TypeGPU"}, 200),
+            ({"language": "x" * 65}, 400),
+            ({"prompt": "x" * 1025}, 400),
+        ]:
+            body, content_type = multipart(pcm_wav(), "audio.wav", fields)
+            status, _response, _headers = asyncio.run(asgi_request(
+                faster.app, "POST", "/v1/audio/transcriptions", body, content_type,
+            ))
+            self.assertEqual(status, expected_status)
+        self.assertEqual(observed[0]["language"], "es")
+        self.assertEqual(observed[0]["initial_prompt"], "Cicero, TypeGPU")
+        self.assertEqual(observed[0]["hotwords"], "Cicero, TypeGPU")
+
+    def test_mlx_whisper_request_language_reaches_model(self) -> None:
+        mlx = load_server("stt_server.py")
+        observed = []
+        mlx.mlx_whisper.transcribe = lambda _path, **kwargs: (observed.append(kwargs) or {"text": "hello world"})
+        body, content_type = multipart(pcm_wav(), "audio.wav", {"language": "es", "prompt": "Cicero"})
+        status, _response, _headers = asyncio.run(asgi_request(mlx.app, "POST", "/inference", body, content_type))
+        self.assertEqual(status, 200)
+        self.assertEqual(observed[0]["language"], "es")
+        self.assertEqual(observed[0]["initial_prompt"], "Cicero")
+
+    def test_whisper_sidecars_reject_unknown_language_before_inference(self) -> None:
+        mlx = load_server("stt_server.py")
+        mlx.mlx_whisper.transcribe = lambda *_args, **_kwargs: self.fail("unknown language reached MLX")
+        faster = load_server("stt_faster_whisper_server.py")
+        faster._model = object()
+        faster._transcribe_bytes = lambda *_args: self.fail("unknown language reached faster-whisper")
+        for module, path in [(mlx, "/inference"), (faster, "/v1/audio/transcriptions")]:
+            for language in ("zz", "en-US"):
+                body, content_type = multipart(pcm_wav(), "audio.wav", {"language": language})
+                status, response, _headers = asyncio.run(asgi_request(module.app, "POST", path, body, content_type))
+                self.assertEqual(status, 400)
+                self.assertIn("unsupported Whisper language code", json.loads(response)["error"])
+        mlx._ready = False
+        faster._model = None
+        for module, path in [(mlx, "/inference"), (faster, "/v1/audio/transcriptions")]:
+            body, content_type = multipart(pcm_wav(), "audio.wav", {"language": "zz"})
+            status, _response, _headers = asyncio.run(asgi_request(module.app, "POST", path, body, content_type))
+            self.assertEqual(status, 400)
+
+    def test_faster_whisper_startup_rejects_unknown_language_before_model_load(self) -> None:
+        faster = load_server("stt_faster_whisper_server.py")
+        for language in ("zz", "en-US"):
+            with patch.object(sys, "argv", ["stt_faster_whisper_server.py", "--language", language]):
+                with self.assertRaises(SystemExit) as error:
+                    faster.main()
+            self.assertEqual(error.exception.code, 2)
 
     def test_raw_multipart_and_pocket_routes_reject_ambiguous_or_nonfinite_wavs(self) -> None:
         invalid = malformed_wavs()

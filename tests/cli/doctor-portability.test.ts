@@ -755,13 +755,14 @@ describe("doctor setup hints", () => {
       ...structuredClone(DEFAULT_CONFIG),
       headless: true,
       brain: { backend: "ollama" },
-      stt: { backend: "faster-whisper", host: "gpu.internal", port: 18083 },
+      stt: { backend: "faster-whisper", host: "gpu.internal", port: 18083, language: "en", vocabulary: ["Cicero", "TypeGPU"] },
       stt_fallback: { backend: "audiocpp" },
     });
 
     try {
       const checks = await collectChecks(config, { projectRoot: root });
       const fallback = checks.find((check) => check.name === "stt_fallback (audiocpp)");
+      expect(checks.find((check) => check.name === "STT hints")?.detail).toBe("language en · vocabulary 2 terms");
       expect(fallback?.level).toBe("fail");
       expect(fallback?.detail).toContain("local audio.cpp runtime is incomplete");
       expect(fallback?.detail).not.toContain("venv");
@@ -769,6 +770,24 @@ describe("doctor setup hints", () => {
       expect(urls).toContain("http://127.0.0.1:8092/v1/models");
     } catch (error: unknown) {
       throw error instanceof Error ? error : new Error(String(error));
+    }
+  });
+
+  test("warns for an unsupported Whisper primary code but leaves audio.cpp tags alone", async () => {
+    globalThis.fetch = (async () => new Response("down", { status: 503 })) as typeof fetch;
+    for (const backend of ["faster-whisper", "mlx-whisper"]) {
+      const config = new RuntimeConfig({
+        ...structuredClone(DEFAULT_CONFIG),
+        headless: true,
+        brain: { backend: "ollama" },
+        stt: { backend, host: "gpu.internal", language: "zz-US" },
+        stt_fallback: { backend: "audiocpp", host: "native.internal", language: "zz-US" },
+      });
+      const checks = await collectChecks(config);
+      const warnings = checks.filter((check) => check.name.endsWith("hints compatibility"));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatchObject({ level: "warn" });
+      expect(warnings[0]!.detail).toContain("primary language code zz");
     }
   });
 

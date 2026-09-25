@@ -31,6 +31,8 @@ stt:
   port: 8083
   model: Systran/faster-whisper-large-v3-turbo
   timeout_ms: 90000
+  language: en
+  vocabulary: [Cicero, TypeGPU]
 tts:
   backend: kokoro
   port: 8082
@@ -42,6 +44,26 @@ llm:
   model: qwen3.5:0.8b
   timeout_ms: 120000
 ```
+
+`stt.language` is optional and sets the recognition language for audio.cpp,
+faster-whisper, and Cicero's MLX Whisper sidecar. Omit it to use each backend's
+default. A well-formed language tag such as `en-US`, `pt-BR`, or `yue-Hant-HK`
+is accepted. Audio.cpp receives the tag **as written** (the reference Nemotron
+configuration uses `en-US`). Whisper-family providers send only the lowercased
+primary code (`en-US` → `en`). Their sidecars reject codes outside Whisper's
+supported set with HTTP 400; `doctor` warns about an unsupported primary code.
+Language is **not supported** by the current Wyoming STT integration and is
+ignored there. `stt.vocabulary` is an optional list of recognition hints: at
+most 100 non-empty terms, 64 characters per term, and a joined prompt of at
+most 1 KiB. The prompt is sent to audio.cpp, faster-whisper, and MLX Whisper;
+the current audio.cpp Nemotron ASR model **ignores prompt**, so vocabulary has
+no effect with Nemotron today, though language does apply. Faster-whisper uses
+`initial_prompt` and, where its installed version supports it, `hotwords`.
+These hints are best-effort and do not guarantee a spelling. Wyoming
+vocabulary is **not supported** and is ignored. If `stt_fallback` is configured,
+set its own `language` and `vocabulary` keys for that provider; they are not
+inherited from `stt`. `doctor` and `status` show the language and term count,
+without printing the terms.
 
 An optional `classifier:` section takes the same shape as `llm:` and holds a
 small model apart from the reply model for per-utterance decisions. It is off by
