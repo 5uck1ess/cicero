@@ -210,8 +210,9 @@ export function parseBoard(raw: unknown, _ctx: StepContext, deps: PickerDeps = {
   if (id !== "paperclip") return { id };
   const envId = (deps.env ?? process.env).PAPERCLIP_COMPANY_ID;
   if (c.companyId) return { id, companyId: token(c.companyId) };
-  if (envId) { token(envId); return { id }; }
-  return { id, companyId: token(c.companyId) };
+  if (envId) token(envId);
+  // No ID: PAPERCLIP_COMPANY_ID or a `paperclipai context set` profile supplies it; the probe verifies.
+  return { id };
 }
 export function contributeBoard(c: ReturnType<typeof parseBoard>) {
   if (c.id === "none") return {};

@@ -37,7 +37,7 @@ test("each picker parses valid input and rejects malformed input", () => {
   expect(parseBrain({ id: "claude-code", mode: "tab-inject" }, c, { localTerminal: true }).mode).toBe("tab-inject");
   expect(parseBoard({ id: "paperclip", companyId: "company_1" }, c, { env: {} }).companyId).toBe("company_1");
   for (const bad of ["a b", "a;rm", "$(id)", "x".repeat(81)]) expect(() => parseBoard({ id: "paperclip", companyId: bad }, c, { env: {} })).toThrow();
-  expect(() => parseBoard({ id: "paperclip" }, c, { env: {} })).toThrow();
+  expect(parseBoard({ id: "paperclip" }, c, { env: {} })).toEqual({ id: "paperclip" });
   expect(parseSpeech("stt", { id: "wyoming", host: "192.168.1.2", port: 10300 }, c).host).toBe("192.168.1.2");
   for (const bad of ["http://localhost", "bad host", "999.999.999.999", "x".repeat(254)]) expect(() => parseSpeech("stt", { id: "wyoming", host: bad, port: 10300 }, c)).toThrow();
   expect(() => parseSpeech("stt", { id: "wyoming", host: "localhost", port: 70000 }, c)).toThrow();
@@ -127,6 +127,12 @@ test("API state masks stored API keys", async () => {
     expect(retained.storedSecrets.provider).toBe(true);
     expect(retained.yaml).toContain("apiKey: set");
     expect(await (await send("/api/check", {})).text()).not.toContain("synthetic-super-secret");
+    await send("/api/step", { id: "brain" });
+    const shortKey = await (await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "check" } })).json() as { steps: { id: string }[]; selectedChoices: Record<string, string>; yaml: string };
+    expect(shortKey.steps.map((step) => step.id)).toContain("check");
+    expect(shortKey.selectedChoices.brain).toBe("openai-compatible");
+    expect((await send("/api/step", { id: "check" })).status).toBe(200);
+    expect(shortKey.yaml).toContain("api_key: set");
     await send("/api/step", { id: "board" });
     const failedProbe = await (await send("/api/choice", { id: "board", choice: { id: "hermes" } })).json() as { detected: { probe: { ok: boolean } }; yaml: string };
     expect(failedProbe.detected.probe.ok).toBe(false);

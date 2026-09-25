@@ -50,10 +50,13 @@ function draftSecrets(draft: SetupDraft): string[] {
   return secrets;
 }
 
+// Code-defined identifiers the page sends back; a short secret must never rewrite them.
+const IDENTIFIER_KEYS = new Set(["id", "options", "recommended", "cloudPresets", "status"]);
+
 function redactStateValue(value: unknown, secrets: readonly string[]): unknown {
   if (typeof value === "string") return secrets.reduce((text, secret) => secret ? text.replaceAll(secret, "<redacted>") : text, value);
   if (Array.isArray(value)) return value.map((item) => redactStateValue(item, secrets));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactStateValue(item, secrets)]));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, IDENTIFIER_KEYS.has(key) ? item : redactStateValue(item, secrets)]));
   return value;
 }
 
@@ -208,13 +211,15 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
     const safeChecks = checks === null || checksRevision !== draftRevision ? null : publicChecks(checks, draft);
     const checkGroups = safeChecks === null ? null : classifySetupChecks(safeChecks);
     const existing = inspectExistingConfig(home);
-    return redactStateValue({
+    // Only free text and remote-derived values can echo a secret; structural fields stay exact.
+    const free = redactStateValue({ detected, providerModels, checks: safeChecks, checkGroups, existing }, draftSecrets(draft)) as Record<string, unknown>;
+    return {
       steps: SETUP_STEPS.map(({ id, title, explain, pipeline, available }) => ({ id, title, explain, pipeline, available })),
-      current, detected, system, tier: draft.deployment, providerModels, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, typeof choice === "string" ? choice : (choice as { id?: string }).id])), storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), checks: safeChecks, checkGroups, yaml: renderDraft(publicDraft(draft)),
-      existing, written, finished, startCommand: handoff.startCommand, handoff,
+      current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, typeof choice === "string" ? choice : (choice as { id?: string }).id])), storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
+      written, finished, startCommand: handoff.startCommand, handoff,
       canWrite: !written && checkGroups !== null && checkGroups.blocking.length === 0 && existing.status === "missing",
       requiresNotReadyAcknowledgement: (checkGroups?.notReady.length ?? 0) > 0,
-    }, draftSecrets(draft));
+    };
   };
   let server: ReturnType<typeof Bun.serve>;
   server = (options.serve ?? Bun.serve)({

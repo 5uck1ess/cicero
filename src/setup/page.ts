@@ -1,65 +1,605 @@
-/** One self-contained page; dynamic values enter the DOM as text only. */
+/** Self-contained guided setup page: a clickable voice-loop diagram, then one question per step. */
 export function setupPage(): string {
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cicero setup</title><style>
-:root{color-scheme:light dark;font:16px/1.5 system-ui,sans-serif;--bg:#f5f6f8;--panel:#fff;--text:#15202b;--muted:#53616e;--accent:#16658a;--line:#d7dde2}
-@media(prefers-color-scheme:dark){:root{--bg:#101820;--panel:#1c2731;--text:#e8f0f5;--muted:#acbac5;--accent:#68c9ee;--line:#364752}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}header{padding:1rem 1.5rem;border-bottom:1px solid var(--line);background:var(--panel)}h1{font-size:1.25rem;margin:0}main{display:grid;grid-template-columns:minmax(220px,270px) minmax(0,1fr);max-width:1100px;margin:auto;min-height:calc(100vh - 70px)}nav{padding:1.2rem;border-right:1px solid var(--line)}nav button{display:block;width:100%;text-align:left;margin:.25rem 0;padding:.5rem .65rem;background:none;border:1px solid transparent;border-radius:.5rem;color:var(--text);cursor:pointer}nav button[aria-current=true]{background:var(--panel);border-color:var(--accent);font-weight:700}.pipeline{font-size:.8rem;display:flex;flex-wrap:wrap;gap:.2rem;margin:0 0 1rem}.pipeline span{padding:.15rem .25rem;border-radius:.3rem;color:var(--muted)}.pipeline .active{background:var(--accent);color:var(--panel)}article{padding:1.5rem;max-width:760px}h2{margin-top:0}.card{background:var(--panel);border:1px solid var(--line);border-radius:.7rem;padding:1rem;margin:1rem 0}.label{font-weight:700;margin:.7rem 0 .1rem}.muted{color:var(--muted)}button.action{background:var(--accent);color:white;border:0;border-radius:.45rem;padding:.65rem .9rem;cursor:pointer;margin:.3rem .4rem .3rem 0}button.action:disabled{opacity:.5;cursor:not-allowed}select{padding:.4rem;font:inherit}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg);padding:1rem;border-radius:.5rem}.check{border-left:4px solid var(--line);padding:.3rem .7rem;margin:.4rem 0}.check.fail{border-color:#cb4d4d}.check.warn{border-color:#bf8a25}.check.ok{border-color:#2a985c}a{color:var(--accent)}
-.option{display:block;border:1px solid var(--line);border-radius:.5rem;padding:.7rem;margin:.5rem 0;cursor:pointer}.option:has(input:checked){border-color:var(--accent);background:var(--bg)}input[type=text],input[type=password],input[type=url],input[type=number]{font:inherit;max-width:100%;padding:.4rem;width:100%;border:1px solid var(--line);border-radius:.3rem;background:var(--panel);color:var(--text)}
-@media(max-width:700px){main{display:block}nav{border-right:0;border-bottom:1px solid var(--line);padding:.7rem}#steps{display:flex;overflow-x:auto}nav button{white-space:nowrap;width:auto}article{padding:1rem}}
-</style></head><body><header><h1>🎙 Cicero guided setup <small class="muted">preview</small></h1></header><main><nav><div class="pipeline" id="pipeline"></div><div id="steps"></div></nav><article id="content">Loading…</article></main>
-<script>
-const params=new URLSearchParams(location.search);const fresh=params.get('token');if(fresh){sessionStorage.setItem('cicero-setup-token',fresh)}
-const token=sessionStorage.getItem('cicero-setup-token');let state;
-const el=(tag,text,cls)=>{const x=document.createElement(tag);if(text!==undefined)x.textContent=text;if(cls)x.className=cls;return x};
-async function api(path,body){const method=body===undefined?'GET':'POST';const headers={'x-cicero-setup-token':token||''};if(method==='POST'){headers['x-cicero-setup-csrf']='1';headers['content-type']='application/json'}const response=await fetch(path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw Error(data.error||'Request failed');return data}
-function addButton(parent,label,fn,disabled=false){const b=el('button',label,'action');b.disabled=disabled;b.onclick=async()=>{b.disabled=true;try{await fn()}catch(e){alert(e.message)}finally{b.disabled=false}};parent.append(b);return b}
-const names={'llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'Other OpenAI-compatible','claude-code':'Claude Code','faster-whisper':'faster-whisper','mlx-whisper':'mlx-whisper','audiocpp':'audio.cpp','pocket-tts':'Pocket TTS','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming','hermes':'Hermes','multica':'Multica (not live-tested)','paperclip':'Paperclip (not live-tested)','none':'None'};
-const tradeoffs={'llama-cpp':'Local GGUF model; low latency when resident, uses RAM or VRAM.','ollama':'Local model library; easy pulls, may reload between turns.','lm-studio':'Local desktop server; choose a loaded model in LM Studio.','mlx-lm':'Apple Silicon local model; uses unified memory.','openai-compatible':'Your own local, LAN, or cloud endpoint; latency and privacy depend on its host.','claude-code':'Agentic CLI with file and tool access; requires sign-in.','codex':'Agentic CLI with file and tool access; requires sign-in.','gemini':'Agentic CLI with file and tool access; requires sign-in.','qwen':'Agentic CLI with file and tool access; requires sign-in.','acp':'Agentic stdio harness; supply its executable and arguments.','faster-whisper':'Local transcription on CPU or CUDA; larger models use more memory.','mlx-whisper':'Local transcription optimized for Apple Silicon.','audiocpp':'Advanced CUDA path for audio.cpp; provision manually.','wyoming':'Use an existing speech server over the network.','kokoro':'Local speech with preset voices; no voice cloning.','pocket-tts':'CPU-friendly local voice cloning; requires a reference voice.','mlx-audio':'Local Apple Silicon speech; uses unified memory.','elevenlabs':'Cloud speech and voice cloning; needs an API key and real voice ID.','hermes':'Live-tested task board CLI.','multica':'Optional task board; adapter has not been live-tested.','paperclip':'Optional task board; adapter has not been live-tested.','none':'Skip task board notifications.'};
-const instructions={
-  'llama-cpp':['Install llama.cpp from https://github.com/ggml-org/llama.cpp','Start llama-server on port 8080 with a GGUF model.'],
-  ollama:['Install from https://ollama.com/download','Run ollama serve, then ollama pull <model>.'],
-  'lm-studio':['Install from https://lmstudio.ai/','Load a model, then start the local server on port 1234.'],
-  'mlx-lm':['Read the Apple Silicon MLX runtime at https://github.com/ml-explore/mlx-examples','Install the MLX recipe from requirements/README.md; the Install step will automate this later.'],
-  'claude-code':['Install from https://docs.anthropic.com/en/docs/claude-code/setup','Run claude and sign in.'],
-  codex:['Install from https://developers.openai.com/codex/cli/','Run codex login.'],
-  gemini:['Install from https://github.com/google-gemini/gemini-cli','Run gemini and sign in.'],
-  qwen:['Install from https://github.com/QwenLM/qwen-code','Run qwen and sign in.'],
-  hermes:['Install and sign in using https://hermes-agent.nousresearch.com.'],
-  multica:['Install and configure the Multica CLI; see docs/notifications.md.'],
-  paperclip:['Install and configure paperclipai; see docs/notifications.md.'],
-  audiocpp:['Advanced Linux/NVIDIA path: read scripts/provision-audiocpp.sh. Do not run it without reviewing it.'],
-  'pocket-tts':['Install the pocket-tts recipe from requirements/README.md; see docs/voice-cloning.md.'],
-  elevenlabs:['Create an API key, then run cicero voice add to set a real tts.voice ID before starting.'],
-  wyoming:['Start your existing Wyoming server and enter its host and port.']
-};
-function guideFor(option){if(option==='ollama'&&state.system.platform==='win32')return ['On Windows, use the Ollama installer at https://ollama.com/download/windows','Open Ollama, then run ollama pull <model>.'];if(option==='ollama'&&state.system.platform==='darwin')return ['On macOS, use the Ollama installer at https://ollama.com/download/mac','Open Ollama, then run ollama pull <model>.'];if(option==='ollama')return ['On Linux, follow https://ollama.com/download/linux','Run ollama serve, then ollama pull <model>.'];if(option==='llama-cpp')return ['For '+state.system.platform+', follow the build or package instructions at https://github.com/ggml-org/llama.cpp','Start llama-server on port 8080 with your GGUF model.'];return instructions[option]||['Read requirements/README.md for this engine; the later Install step will install its recipe.']}
-function inputField(parent,label,value,type='text'){const wrap=el('label');wrap.append(el('span',label,'label'));const input=el('input');input.type=type;input.value=value||'';wrap.append(input);parent.append(wrap);return input}
-function renderPicker(box,selected){const f=state.detected||{};const id=selected.id;const options=id==='provider'?['llama-cpp','ollama','lm-studio',...(f.mlxAvailable?['mlx-lm']:[]),'openai-compatible',...(f.cloudPresets||[])]:id==='brain'?(f.options||[]):id==='board'?['hermes','multica','paperclip','none']:(f.options||[]);let picked=state.selectedChoices?.[id]||f.recommended||options[0];box.append(el('p',f.reason||'Choose the runtime you want to use.','muted'));const cards=el('div');box.append(cards);const detail=el('div');box.append(detail);function draw(){cards.replaceChildren();detail.replaceChildren();for(const option of options){const label=el('label',undefined,'option');const radio=el('input');radio.type='radio';radio.name='picker';radio.value=option;radio.checked=option===picked;radio.onchange=()=>{picked=option;draw()};label.append(radio,document.createTextNode(' '+(names[option]||option)));
-  const runtime=f.runtimes?.[option], installed=f.installed?.[option], status=f.status?.[option];const facts=runtime?(runtime.running?' running'+(runtime.models.length?' · '+runtime.models.length+' models':''):' offline'):installed!==undefined?(' '+(typeof installed==='object'?(installed.found?'installed '+(installed.version||''):'missing'):(installed?'installed':'missing'))):status?(option==='wyoming'?(' server '+(status.running?'answering':'offline')):(' '+(status.installed?'venv present':'venv missing')+'; '+(status.running?'port answering':'port offline'))):'';label.append(el('small',facts,'muted'),el('span',tradeoffs[option]||'OpenAI-compatible cloud API; needs an account and may incur charges.','muted'));cards.append(label)}
- const runtime=f.runtimes?.[picked];if(runtime?.models?.length)detail.append(el('p','Reported models: '+runtime.models.join(', '),'muted'));
- const fields={};if(picked==='llama-cpp')fields.model=inputField(detail,'GGUF path or HF repo ID',f.defaultModel);
- if(picked==='ollama'||picked==='lm-studio'){const select=el('select');for(const m of runtime?.models||[]){const item=el('option',m);item.value=m;select.append(item)}if(!select.options.length)detail.append(el('p','Start the runtime and Re-check to load its model list.','check warn'));else{const l=el('label','Model: ');l.append(select);detail.append(l)}fields.model=select}
- const remoteProvider=id==='provider'&&picked!=='llama-cpp'&&picked!=='ollama'&&picked!=='lm-studio'&&picked!=='mlx-lm';
- if(remoteProvider){if(picked==='openai-compatible')fields.baseUrl=inputField(detail,'HTTP(S) API base URL',state.providerModels?.id===picked?state.providerModels.baseUrl:'http://127.0.0.1:8000/v1','url');fields.apiKey=inputField(detail,'API key (optional)','', 'password');const l=el('label','Reported model: ');fields.model=el('select');for(const m of state.providerModels?.id===picked?state.providerModels.models:[]){const option=el('option',m);option.value=m;fields.model.append(option)}l.append(fields.model);detail.append(l);addButton(detail,'List models',async()=>{const listed=await api('/api/provider-models',{choice:{id:picked,baseUrl:fields.baseUrl?.value,apiKey:fields.apiKey.value}});fields.model.replaceChildren();for(const m of listed.models){const option=el('option',m);option.value=m;fields.model.append(option)}submit.disabled=!fields.model.options.length})}
- if(id==='brain'){if(picked==='acp')fields.command=inputField(detail,'Command as JSON argv, e.g. ["hermes","-p","voice","acp"]','["hermes","-p","voice","acp"]');if(picked==='openai-compatible'){fields.baseUrl=inputField(detail,'Brain API base URL','','url');fields.model=inputField(detail,'Model ID','');fields.apiKey=inputField(detail,'API key (optional)','','password')}else if(picked==='ollama'||(!['acp','claude-code','codex','gemini','qwen'].includes(picked))){fields.model=inputField(detail,'Model ID',picked==='ollama'?'qwen3.5:0.8b':'');if(picked!=='ollama')fields.apiKey=inputField(detail,'API key (optional)','','password')}if(picked==='claude-code'&&f.localTerminal){const l=el('label');const checkbox=el('input');checkbox.type='checkbox';fields.tab=checkbox;l.append(checkbox,document.createTextNode(' Use tab-inject in this local terminal'));detail.append(l)}}
- if(id==='board'&&picked==='paperclip'&&!f.paperclipEnv)fields.companyId=inputField(detail,'Paperclip company ID','');
- if((id==='stt'||id==='tts')&&picked==='wyoming'){fields.host=inputField(detail,'Wyoming host','127.0.0.1');fields.port=inputField(detail,'Port',id==='stt'?'10300':'10200','number')}if(picked==='elevenlabs')fields.apiKey=inputField(detail,'ElevenLabs API key','','password');
- if(fields.apiKey&&state.storedSecrets?.[id]&&state.selectedChoices?.[id]===picked)fields.apiKey.placeholder='Set — leave blank to keep';
- const installed=f.installed?.[picked];const missing=(runtime&&!runtime.running)||(typeof installed==='object'&&!installed.found)||(installed===false)||(f.status?.[picked]&&picked!=='wyoming'&&!f.status[picked].installed);if(missing||instructions[picked]){const guide=el('div',undefined,'card');guide.append(el('p','Guided setup','label'));for(const line of guideFor(picked)){guide.append(el('p',line));if(!line.startsWith('Install from')&&!line.startsWith('Install llama.cpp'))addButton(guide,'Copy',async()=>navigator.clipboard.writeText(line))}detail.append(guide)}
- if(f.probe)detail.append(el('p',f.probe.message,'check'));
- addButton(detail,'Re-check',async()=>{state=await api('/api/step',{id});render()});const submit=addButton(detail,'Use this choice',async()=>{const c={id:picked};for(const [key,field] of Object.entries(fields)){if(key==='tab'){if(field.checked)c.mode='tab-inject'}else if(key==='command'){c.command=JSON.parse(field.value)}else if(key==='port'){c.port=Number(field.value)}else c[key]=field.value}state=await api('/api/choice',{id,choice:c});render()},(remoteProvider||picked==='ollama'||picked==='lm-studio')&&!fields.model.options.length);}
- draw()}
-function render(){const steps=document.getElementById('steps');const pipe=document.getElementById('pipeline');const content=document.getElementById('content');steps.replaceChildren();pipe.replaceChildren();content.replaceChildren();const selected=state.steps.find(s=>s.id===state.current)||state.steps[0];for(const name of ['mic','stt','brain','tts','speaker']){const span=el('span',name==='mic'?'🎤 mic':name==='speaker'?'🔊 speaker':name.toUpperCase());if(selected.pipeline===name)span.className='active';pipe.append(span);if(name!=='speaker')pipe.append(el('span','→'))}for(const step of state.steps){const b=el('button',step.title+(step.available?'':' · later'));b.setAttribute('aria-current',String(step.id===selected.id));b.onclick=async()=>{state=await api('/api/step',{id:step.id});render()};steps.append(b)}content.append(el('h2',selected.title));const explain=el('div',undefined,'card');for(const [label,key] of [['What this is','what'],['Why this recommendation','why'],['What will happen','happens']]){explain.append(el('p',label,'label'),el('p',selected.explain[key]))}const link=el('a','Learn more');link.href='https://github.com/5uck1ess/cicero/blob/main/'+selected.explain.learnMore;link.target='_blank';link.rel='noopener noreferrer';explain.append(link);content.append(explain);const box=el('div',undefined,'card');content.append(box);
-if(selected.id==='system'){const f=state.detected;box.append(el('p',f.platform+' '+f.arch+' ('+f.release+')'),el('p','RAM: '+fmt(f.ramFreeBytes)+' free / '+fmt(f.ramTotalBytes)+' total'),el('p','Checkout disk: '+fmt(f.disks.checkout.freeBytes)+' free'),el('p','HF cache disk: '+fmt(f.disks.huggingface.freeBytes)+' free'),el('p',f.gpu.status==='ok'?'GPU: '+f.gpu.name+' — '+f.gpu.freeMiB+' / '+f.gpu.totalMiB+' MiB VRAM free/total':'GPU: '+f.gpu.status),el('p',f.reason));if(f.gpuWarning)box.append(el('p',f.gpuWarning,'check warn'));const label=el('label','Starting tier: ');const select=el('select');for(const tier of ['local-mlx','local-cuda','local-cpu']){const option=el('option',tier);option.value=tier;select.append(option)}select.value=state.tier;label.append(select);box.append(label);addButton(box,'Use this tier',async()=>{state=await api('/api/choice',{id:'system',choice:select.value});render()})}
-else if(['provider','brain','board','stt','tts'].includes(selected.id)){renderPicker(box,selected)}
-else if(!selected.available){box.append(el('p','Coming in a later release. This step contributes no settings.','muted'))}
-else if(selected.id==='check'){addButton(box,'Run checks',async()=>{state=await api('/api/check',{});render()});if(state.checkGroups){for(const [key,title] of [['blocking','Config problems — resolve before writing'],['notReady','Not ready yet — finish these before starting Cicero'],['warnings','Warnings'],['ok','Ready']]){const group=state.checkGroups[key];if(!group.length)continue;box.append(el('h3',title));for(const check of group){const item=el('div',check.name+': '+check.detail+(check.hint?' — '+check.hint:''),'check '+check.level);box.append(item)}}}}
-else if(selected.id==='write'){box.append(el('p','Review the annotated YAML preview. Private keys and the web token appear as “set”; their actual values will be written:'));box.append(el('pre',state.yaml));if(state.existing.status==='valid')box.append(el('p','A valid config.yaml already exists. Edit it or back it up manually.'));if(state.existing.status==='invalid'){box.append(el('p','Existing config error: '+state.existing.error));addButton(box,'Back up and start fresh',async()=>{state=await api('/api/backup',{});render()})}if(state.existing.status==='other-file-error')box.append(el('p','Another Cicero home file failed to load: '+state.existing.error+' Fix that file; setup will not back up config.yaml.'));if(state.existing.status==='unsafe')box.append(el('p',state.existing.error));let acknowledged=false;if(state.requiresNotReadyAcknowledgement){box.append(el('h3','Not ready yet — finish these before starting Cicero'));for(const check of state.checkGroups.notReady){box.append(el('div',check.name+': '+check.detail+(check.hint?' — '+check.hint:''),'check fail'))}const label=el('label');const checkbox=el('input');checkbox.type='checkbox';label.append(checkbox,document.createTextNode(' I understand these components are not ready yet and will finish them before starting Cicero.'));box.append(label);checkbox.onchange=()=>{acknowledged=checkbox.checked;writeButton.disabled=!state.canWrite||!acknowledged}}const writeButton=addButton(box,'Write config.yaml',async()=>{state=await api('/api/write',{acknowledgeNotReady:acknowledged});render()},!state.canWrite||state.requiresNotReadyAcknowledgement)}
-else if(selected.id==='handoff'){if(!state.written){box.append(el('p','Write the config before hand-off.'));return}if(state.handoff.customHome){box.append(el('p','Config was written to '+state.handoff.sourceConfigPath+'.'));box.append(el('p','cicero start reads only '+state.handoff.defaultConfigPath+'.'));box.append(el('p','To use this trial config, copy it to the default home:'));box.append(el('pre',state.handoff.copyCommand));box.append(el('p','If a config already exists there, review or back it up before running the copy command.'))}box.append(el('p','Start Cicero with:'));box.append(el('pre',state.startCommand));box.append(el('p','Web voice: https://<this-box>:8090 (the daemon prints its actual URL).'));box.append(el('p','Run cicero pair to show the phone QR.'));addButton(box,'Finish setup',async()=>{state=await api('/api/handoff',{});render()}) ;if(state.finished)box.append(el('p','Setup complete. You can close this page.'))}
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cicero setup</title>
+<style>
+:root{
+  --bg:#F5F7F8; --surface:#FFFFFF; --ink:#16222E; --muted:#5E6B78; --line:#D5DDE3;
+  --accent:#9A6400; --accent-soft:#FBF1DC; --accent-line:#E3B55C;
+  --ok:#23895B; --ok-soft:#E3F3EA; --bad:#B23A2B; --bad-soft:#FBE9E6;
+  --radius-lg:18px; --radius:12px; --radius-sm:8px;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color-scheme:light;
 }
-function fmt(n){return n==null?'unavailable':(n/1024**3).toFixed(1)+' GiB'}
-api('/api/state').then(s=>{state=s;render()}).catch(e=>{document.getElementById('content').textContent=e.message});
-</script></body></html>`;
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0F151B; --surface:#17202A; --ink:#E8EEF2; --muted:#93A1AE; --line:#2A3642;
+  --accent:#F2B33D; --accent-soft:#2B2414; --accent-line:#7A5A1C;
+  --ok:#4CC38A; --ok-soft:#14291F; --bad:#F07A6A; --bad-soft:#2D1714;
+  color-scheme:dark;
+}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+button,input,select{font:inherit;color:inherit}
+a{color:var(--accent)}
+:focus-visible{outline:3px solid var(--accent-line);outline-offset:3px}
+.wrap{max-width:980px;margin:0 auto;padding:40px 24px 96px}
+header.top{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:40px}
+.brand{font-size:20px;font-weight:650;letter-spacing:-.01em;background:none;border:0;padding:0;cursor:pointer}
+.brand span{color:var(--muted);font-weight:450}
+.overview-link{background:none;border:0;color:var(--accent);cursor:pointer;padding:6px 0;font-weight:550}
+h1{font-size:30px;line-height:1.2;letter-spacing:-.02em;font-weight:680;margin:0 0 12px}
+.lede{color:var(--muted);font-size:17px;margin:0 0 36px;max-width:60ch}
+
+/* Overview diagram */
+.diagram{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-lg);padding:28px}
+.diagram svg{display:block;width:100%;height:auto}
+.diagram .tall{display:none}
+@media (max-width:720px){.diagram .wide{display:none}.diagram .tall{display:block}.diagram{padding:16px}}
+.node{cursor:pointer}
+.node rect.box{fill:var(--surface);stroke:var(--line);stroke-width:1.5;transition:stroke .15s,fill .15s}
+.node:hover rect.box,.node:focus-visible rect.box{stroke:var(--accent);fill:var(--accent-soft)}
+.node:focus{outline:none}
+.node .title{font-size:19px;font-weight:650;fill:var(--ink)}
+.node .sub{font-size:13px;fill:var(--muted)}
+.node .value{font-size:14px;font-weight:550;fill:var(--ink)}
+.node.done rect.box{stroke:var(--ok)}
+.node .dot{fill:var(--line)}
+.node.done .dot{fill:var(--ok)}
+.node.todo .dot{fill:var(--accent)}
+.edge{stroke:var(--line);stroke-width:2;fill:none}
+.edge.soft{stroke-dasharray:5 6}
+.edge-label{font-size:12px;fill:var(--muted)}
+.person{fill:var(--accent-soft);stroke:var(--accent-line);stroke-width:1.5}
+.person-label{font-size:13px;font-weight:600;fill:var(--ink)}
+.cta-row{display:flex;justify-content:flex-end;margin-top:28px;gap:12px;flex-wrap:wrap}
+
+/* Chain nav on step screens */
+.chain{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 40px;padding:0;list-style:none}
+.chain button{display:flex;align-items:center;gap:8px;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:7px 14px;cursor:pointer;font-size:14px;color:var(--muted)}
+.chain button[aria-current="step"]{border-color:var(--accent);color:var(--ink);font-weight:600}
+.chain .pip{width:8px;height:8px;border-radius:50%;background:var(--line)}
+.chain .done .pip{background:var(--ok)}
+
+/* Choice cards */
+.choices{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;margin:0 0 28px;padding:0;border:0}
+.choice{position:relative;display:block;background:var(--surface);border:1.5px solid var(--line);border-radius:var(--radius);padding:20px 20px 18px;cursor:pointer;transition:border-color .15s}
+.choice:hover{border-color:var(--accent-line)}
+.choice input{position:absolute;opacity:0;pointer-events:none}
+.choice:has(input:checked){border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.choice:has(input:focus-visible){outline:3px solid var(--accent-line);outline-offset:3px}
+.choice .name{display:block;font-size:17px;font-weight:620;margin-bottom:6px}
+.choice .state ~ .name{padding-right:104px}
+.choice .note{display:block;color:var(--muted);font-size:14px;line-height:1.5}
+.choice .state{position:absolute;top:18px;right:18px;display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted)}
+.choice .state i{width:8px;height:8px;border-radius:50%;background:var(--line);display:inline-block}
+.choice .state.on i{background:var(--ok)}
+.choice .state.on{color:var(--ok)}
+.badge{display:inline-block;margin-top:12px;font-size:12.5px;font-weight:600;color:var(--accent);background:var(--accent-soft);border-radius:999px;padding:2px 10px}
+
+/* Form + panels */
+.fields{display:grid;gap:18px;max-width:560px;margin:0 0 28px}
+.field span{display:block;font-size:14px;font-weight:600;margin-bottom:6px}
+.field input,.field select{width:100%;padding:11px 14px;border:1.5px solid var(--line);border-radius:var(--radius-sm);background:var(--surface)}
+.field input:focus,.field select:focus{border-color:var(--accent);outline:none}
+.check-inline{display:flex;gap:10px;align-items:flex-start;font-size:15px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:20px 22px;margin:0 0 24px;max-width:720px}
+.panel.warn{border-color:var(--accent-line);background:var(--accent-soft)}
+.panel h2{font-size:16px;margin:0 0 10px;font-weight:650}
+.panel p{margin:0 0 10px}
+.panel p:last-child{margin-bottom:0}
+.panel ol{margin:0;padding-left:20px}
+.panel li{margin:0 0 10px}
+details.why{margin:0 0 28px;max-width:720px}
+details.why summary{cursor:pointer;color:var(--accent);font-weight:550;padding:4px 0}
+details.why div{padding:12px 0 0;color:var(--muted)}
+details.why p{margin:0 0 10px}
+.cmd{display:flex;align-items:center;gap:10px;margin:8px 0 0;background:var(--bg);border:1px solid var(--line);border-radius:var(--radius-sm);padding:8px 8px 8px 12px}
+.cmd code{flex:1;font:13.5px/1.5 var(--mono);overflow-x:auto;white-space:pre}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin:0 0 32px}
+.fact{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px}
+.fact b{display:block;font-size:17px;font-weight:620}
+.fact small{color:var(--muted);font-size:13.5px}
+.note-line{color:var(--muted);margin:-12px 0 28px}
+.warnline{color:var(--accent);font-weight:550;margin:0 0 28px}
+
+/* Review */
+.summary{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 28px}
+.pill{border-radius:999px;padding:6px 14px;font-size:14px;font-weight:600;background:var(--surface);border:1px solid var(--line)}
+.pill.ok{color:var(--ok);border-color:var(--ok);background:var(--ok-soft)}
+.pill.todo{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+.pill.bad{color:var(--bad);border-color:var(--bad);background:var(--bad-soft)}
+.rows{list-style:none;margin:0 0 28px;padding:0;max-width:760px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+.rows li{padding:14px 18px;border-top:1px solid var(--line)}
+.rows li:first-child{border-top:0}
+.rows .head{display:flex;gap:10px;align-items:baseline}
+.rows .head i{flex:none;width:9px;height:9px;border-radius:50%;background:var(--line);transform:translateY(-1px)}
+.rows .ok i{background:var(--ok)} .rows .warn i,.rows .notReady i{background:var(--accent)} .rows .blocking i{background:var(--bad)}
+.rows .name{font-weight:600}
+.rows .detail{color:var(--muted);font-size:14px;margin:4px 0 0 19px}
+.rows .cmd{margin-left:19px}
+pre.yaml{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;font:13.5px/1.6 var(--mono);overflow-x:auto;max-width:760px;margin:12px 0 0}
+
+/* Buttons */
+.actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.btn{border-radius:10px;padding:11px 22px;font-weight:620;cursor:pointer;border:1.5px solid var(--line);background:var(--surface)}
+.btn.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.small{padding:6px 12px;font-size:13.5px;font-weight:600;border-radius:8px}
+.error{color:var(--bad);font-weight:550;margin:12px 0 0}
+.done-mark{font-size:40px;line-height:1;margin-bottom:16px;color:var(--ok)}
+@media (max-width:720px){.wrap{padding:24px 16px 72px}h1{font-size:25px}header.top{margin-bottom:28px}.choices{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <button class="brand" id="brand" type="button">Cicero <span>setup</span></button>
+    <button class="overview-link" id="to-overview" type="button" hidden>Back to overview</button>
+  </header>
+  <main id="app" aria-live="polite"></main>
+</div>
+<script>
+var params = new URLSearchParams(location.search);
+var fresh = params.get('token');
+if (fresh) { try { sessionStorage.setItem('cicero-setup-token', fresh); } catch (e) {} history.replaceState(null, '', location.pathname + location.hash); }
+var token = fresh;
+try { token = token || sessionStorage.getItem('cicero-setup-token'); } catch (e) {}
+var state = null;
+var view = 'overview';
+var app = document.getElementById('app');
+
+var ORDER = ['system', 'stt', 'provider', 'brain', 'tts', 'board', 'review'];
+var STEP = {
+  system:   { short: 'Machine', title: 'This machine', lede: 'Cicero picks a starting preset from your hardware. You can change it.', sub: 'Runs everything' },
+  stt:      { short: 'Hear',    title: 'How should Cicero hear you?', lede: 'Speech-to-text turns your voice into words.', sub: 'Speech-to-text' },
+  provider: { short: 'Think',   title: 'Which model handles conversation?', lede: 'A language model answers everyday talk quickly. Coding work goes to the agent.', sub: 'Language model' },
+  brain:    { short: 'Agent',   title: 'Which coding agent does the work?', lede: 'Cicero is the voice. Your agent reads code, runs tools and opens PRs.', sub: 'Coding agent' },
+  tts:      { short: 'Speak',   title: 'How should Cicero speak?', lede: 'Text-to-speech turns replies into audio.', sub: 'Text-to-speech' },
+  board:    { short: 'Tasks',   title: 'Where do your tasks live?', lede: 'Optional. Cicero can announce when tasks on your board finish or get stuck.', sub: 'Optional board' },
+  review:   { short: 'Save',    title: 'Review and save', lede: 'Cicero checks your choices before writing the config.', sub: 'Check and write' }
+};
+var NAMES = {'llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'OpenAI-compatible URL','claude-code':'Claude Code','codex':'Codex','gemini':'Gemini CLI','qwen':'Qwen Code','acp':'ACP agent','faster-whisper':'faster-whisper','mlx-whisper':'MLX Whisper','audiocpp':'audio.cpp','kokoro':'Kokoro','pocket-tts':'Pocket TTS','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming server','hermes':'Hermes','multica':'Multica','paperclip':'Paperclip','none':'No board','cloud':'Cloud or custom API','api':'Model API','local-cuda':'NVIDIA GPU','local-mlx':'Apple Silicon','local-cpu':'CPU only'};
+var NOTES = {
+  'llama-cpp':'Fast local GGUF models.', 'ollama':'Easy local model library.', 'lm-studio':'Desktop app with a local server.', 'mlx-lm':'Local models on Apple Silicon.',
+  'cloud':'Any OpenAI-compatible endpoint or a cloud provider.', 'api':'An OpenAI-compatible model API instead of an agent CLI.',
+  'claude-code':'Anthropic\\u2019s coding agent.', 'codex':'OpenAI\\u2019s coding agent.', 'gemini':'Google\\u2019s coding agent.', 'qwen':'Qwen\\u2019s coding agent.', 'acp':'Any Agent Client Protocol harness, such as Hermes.',
+  'faster-whisper':'Accurate, runs on GPU or CPU.', 'mlx-whisper':'Fast on Apple Silicon.', 'audiocpp':'Advanced CUDA engine. Manual setup.', 'wyoming':'Use a speech server you already run.',
+  'kokoro':'Natural preset voices.', 'pocket-tts':'Clone any voice from a short clip.', 'mlx-audio':'Local voices on Apple Silicon.', 'elevenlabs':'Cloud voices. Needs an API key.',
+  'hermes':'Live-tested.', 'multica':'Supported, not live-tested yet.', 'paperclip':'Supported, not live-tested yet.', 'none':'Skip task announcements.',
+  'local-cuda':'Local speech and models on your NVIDIA card.', 'local-mlx':'Local speech and models on Apple Silicon.', 'local-cpu':'Works anywhere, slower.'
+};
+var GUIDES = {
+  'llama-cpp':[['Build or install llama.cpp','https://github.com/ggml-org/llama.cpp'],['Start the server on port 8080','llama-server -m your-model.gguf --port 8080']],
+  'ollama':[['Install Ollama','https://ollama.com/download'],['Pull a model','ollama pull qwen3.5:4b']],
+  'lm-studio':[['Install LM Studio','https://lmstudio.ai'],['Load a model, then start its local server on port 1234','']],
+  'claude-code':[['Install Claude Code','https://docs.anthropic.com/en/docs/claude-code/setup'],['Sign in','claude']],
+  'codex':[['Install Codex','https://developers.openai.com/codex/cli/'],['Sign in','codex login']],
+  'gemini':[['Install Gemini CLI','https://github.com/google-gemini/gemini-cli'],['Sign in','gemini']],
+  'qwen':[['Install Qwen Code','https://github.com/QwenLM/qwen-code'],['Sign in','qwen']],
+  'hermes':[['Install Hermes','https://hermes-agent.nousresearch.com']],
+  'audiocpp':[['Review, then run the provisioning script','scripts/provision-audiocpp.sh']],
+  'elevenlabs':[['After setup, add a voice','cicero voice add']]
+};
+
+function h(tag, attrs, kids) {
+  var n = document.createElement(tag);
+  if (attrs) for (var k in attrs) {
+    var v = attrs[k];
+    if (v === undefined || v === null || v === false) continue;
+    if (k === 'text') n.textContent = v;
+    else if (k === 'class') n.className = v;
+    else if (k.slice(0, 2) === 'on') n[k] = v;
+    else n.setAttribute(k, v === true ? '' : v);
+  }
+  (kids || []).forEach(function (c) { if (c != null) n.append(c); });
+  return n;
+}
+function svg(tag, attrs, kids) {
+  var n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (var k in attrs || {}) { if (k === 'text') n.textContent = attrs[k]; else n.setAttribute(k, attrs[k]); }
+  (kids || []).forEach(function (c) { if (c) n.append(c); });
+  return n;
+}
+async function api(path, body) {
+  var headers = { 'x-cicero-setup-token': token || '' };
+  if (body !== undefined) { headers['x-cicero-setup-csrf'] = '1'; headers['content-type'] = 'application/json'; }
+  var r = await fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  var data = await r.json().catch(function () { return {}; });
+  if (!r.ok) throw new Error(data.error || 'Setup server did not accept that request.');
+  return data;
+}
+function button(label, cls, fn, errorHost) {
+  var b = h('button', { type: 'button', class: 'btn ' + (cls || ''), text: label });
+  b.onclick = async function () {
+    var host = errorHost || b.parentNode;
+    var old = host && host.querySelector(':scope > .error'); if (old) old.remove();
+    b.disabled = true;
+    try { await fn(); } catch (e) { if (host) host.append(h('p', { class: 'error', role: 'alert', text: e.message })); }
+    finally { b.disabled = false; }
+  };
+  return b;
+}
+function cmd(text) {
+  var copy = h('button', { type: 'button', class: 'btn small', text: 'Copy' });
+  copy.onclick = function () { navigator.clipboard && navigator.clipboard.writeText(text).then(function () { copy.textContent = 'Copied'; setTimeout(function () { copy.textContent = 'Copy'; }, 1500); }); };
+  return h('div', { class: 'cmd' }, [h('code', { text: text }), copy]);
+}
+function isDone(id) {
+  if (id === 'system') return !!(state.selectedChoices && state.selectedChoices.system);
+  if (id === 'review') return !!state.written;
+  return !!(state.selectedChoices && state.selectedChoices[id]);
+}
+function valueFor(id) {
+  if (id === 'system') return NAMES[state.tier] || state.tier;
+  if (id === 'review') return state.written ? 'Saved' : 'Not saved yet';
+  var c = state.selectedChoices && state.selectedChoices[id];
+  return c ? (NAMES[c] || c) : 'Choose';
+}
+function gib(n) { return n == null ? 'unknown' : (n / 1073741824).toFixed(0) + ' GB'; }
+
+async function go(id) {
+  if (location.hash.slice(1) !== (id === 'overview' ? '' : id)) history.pushState(null, '', id === 'overview' ? location.pathname : '#' + id);
+  if (id === 'overview') { view = 'overview'; render(); return; }
+  var serverId = id === 'review' ? 'check' : id;
+  state = await api('/api/step', { id: serverId });
+  view = id;
+  if (id === 'review' && !state.written) state = await api('/api/check', {});
+  render();
+  window.scrollTo(0, 0);
+}
+function next(id) { var i = ORDER.indexOf(id); return ORDER[Math.min(i + 1, ORDER.length - 1)]; }
+
+/* ---------- Overview diagram ---------- */
+function diagram(layout) {
+  var wide = layout === 'wide';
+  var W = wide ? 900 : 360, H = wide ? 420 : 832;
+  var nw = wide ? 180 : 250, nh = 92;
+  var pos = wide ? {
+    stt: [150, 20], provider: [410, 20], brain: [670, 20],
+    tts: [280, 190], board: [670, 190], system: [150, 324], review: [670, 324]
+  } : {
+    system: [55, 0], stt: [55, 120], provider: [55, 240], brain: [55, 360], board: [55, 480], tts: [55, 600], review: [55, 740]
+  };
+  var root = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'group', 'aria-label': 'Cicero voice loop. Choose a part to set it up.', class: wide ? 'wide' : 'tall' });
+  function mid(id, side) {
+    var p = pos[id], x = p[0], y = p[1], w = nw;
+    if (side === 'r') return [x + w, y + nh / 2]; if (side === 'l') return [x, y + nh / 2];
+    if (side === 't') return [x + w / 2, y]; return [x + w / 2, y + nh];
+  }
+  function edge(a, b, soft, label, lx, ly) {
+    root.append(svg('path', { d: 'M' + a[0] + ' ' + a[1] + ' L' + b[0] + ' ' + b[1], class: 'edge' + (soft ? ' soft' : ''), 'marker-end': 'url(#arrow-' + layout + ')' }));
+    if (label) root.append(svg('text', { x: lx, y: ly, class: 'edge-label', 'text-anchor': 'middle', text: label }));
+  }
+  root.append(svg('defs', {}, [svg('marker', { id: 'arrow-' + layout, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, [svg('path', { d: 'M0 0 L10 5 L0 10 z', fill: 'var(--muted)' })])]));
+  if (wide) {
+    root.append(svg('circle', { cx: 56, cy: 66, r: 34, class: 'person' }));
+    root.append(svg('text', { x: 56, y: 71, 'text-anchor': 'middle', class: 'person-label', text: 'You' }));
+    edge([90, 66], mid('stt', 'l'), false, 'talk', 120, 56);
+    edge(mid('stt', 'r'), mid('provider', 'l'), false, 'words', 370, 56);
+    edge(mid('provider', 'r'), mid('brain', 'l'), false, 'code', 630, 56);
+    edge([480, 112], [400, 190], false, 'reply', 462, 158);
+    edge(mid('brain', 'b'), mid('board', 't'), true, 'tasks', 790, 156);
+    edge(mid('tts', 'l'), [72, 96], false, 'hear it', 150, 170);
+  } else {
+    edge(mid('system', 'b'), mid('stt', 't'), true);
+    edge(mid('stt', 'b'), mid('provider', 't'), false);
+    edge(mid('provider', 'b'), mid('brain', 't'), false);
+    edge(mid('brain', 'b'), mid('board', 't'), true);
+    edge(mid('board', 'b'), mid('tts', 't'), false);
+    edge(mid('tts', 'b'), mid('review', 't'), true);
+  }
+  Object.keys(pos).forEach(function (id) {
+    var p = pos[id], w = nw, done = isDone(id);
+    var g = svg('g', { class: 'node ' + (done ? 'done' : 'todo'), tabindex: 0, role: 'button', 'aria-label': STEP[id].short + ': ' + valueFor(id) + (done ? ', done' : ', not set') });
+    g.append(svg('rect', { class: 'box', x: p[0], y: p[1], width: w, height: nh, rx: 16 }));
+    g.append(svg('circle', { class: 'dot', cx: p[0] + w - 20, cy: p[1] + 22, r: 6 }));
+    g.append(svg('text', { class: 'title', x: p[0] + 20, y: p[1] + 32, text: STEP[id].short }));
+    g.append(svg('text', { class: 'sub', x: p[0] + 20, y: p[1] + 52, text: STEP[id].sub }));
+    g.append(svg('text', { class: 'value', x: p[0] + 20, y: p[1] + 76, text: valueFor(id) }));
+    g.onclick = function () { go(id).catch(showFatal); };
+    g.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(id).catch(showFatal); } };
+    root.append(g);
+  });
+  return root;
+}
+function renderOverview() {
+  var firstOpen = ORDER.find(function (id) { return !isDone(id); }) || 'review';
+  app.append(
+    h('h1', { text: 'Set up your voice loop' }),
+    h('p', { class: 'lede', text: 'Click any part to set it up. Nothing is saved until you review it.' }),
+    h('div', { class: 'diagram' }, [diagram('wide'), diagram('tall')]),
+    h('div', { class: 'cta-row' }, [button(isDone('system') ? 'Continue setup' : 'Start with this machine', 'primary', function () { return go(firstOpen); })])
+  );
+}
+
+/* ---------- Step screens ---------- */
+function chain(current) {
+  var ol = h('ol', { class: 'chain', 'aria-label': 'Setup steps' });
+  ORDER.forEach(function (id) {
+    var b = h('button', { type: 'button', 'aria-current': id === current ? 'step' : false }, [h('span', { class: 'pip' }), document.createTextNode(STEP[id].short)]);
+    b.onclick = function () { go(id).catch(showFatal); };
+    ol.append(h('li', { class: isDone(id) ? 'done' : '' }, [b]));
+  });
+  return ol;
+}
+function why(step) {
+  if (!step || !step.explain) return null;
+  var e = step.explain;
+  var body = h('div', {}, [h('p', { text: e.why }), h('p', { text: e.happens })]);
+  if (e.learnMore) body.append(h('p', {}, [h('a', { href: 'https://github.com/5uck1ess/cicero/blob/main/' + e.learnMore, target: '_blank', rel: 'noopener noreferrer', text: 'Read the full guide' })]));
+  return h('details', { class: 'why' }, [h('summary', { text: 'Why this?' }), body]);
+}
+function stateLabel(option, f) {
+  var rt = f.runtimes && f.runtimes[option];
+  if (rt) return rt.running ? ['Running', true] : ['Not running', false];
+  var inst = f.installed && f.installed[option];
+  if (inst !== undefined) { var ok = typeof inst === 'object' ? inst.found : inst; return ok ? ['Installed', true] : ['Not found', false]; }
+  var st = f.status && f.status[option];
+  if (st) { if (st.running) return ['Running', true]; return st.installed ? ['Installed', true] : ['Not installed', false]; }
+  return null;
+}
+function field(label, input) { return h('label', { class: 'field' }, [h('span', { text: label }), input]); }
+function textInput(value, type) { return h('input', { type: type || 'text', value: value || '', autocomplete: 'off' }); }
+function selectOf(items, value) {
+  var s = h('select');
+  items.forEach(function (m) { var o = h('option', { value: m, text: NAMES[m] || m }); if (m === value) o.selected = true; s.append(o); });
+  return s;
+}
+
+function renderSystem(step) {
+  var f = state.detected || state.system;
+  var gpu = f.gpu && f.gpu.status === 'ok' ? f.gpu.name : 'No NVIDIA GPU';
+  var vram = f.gpu && f.gpu.status === 'ok' ? Math.round(f.gpu.totalMiB / 1024) + ' GB VRAM' : 'CPU or Apple GPU';
+  app.append(h('div', { class: 'facts' }, [
+    h('div', { class: 'fact' }, [h('b', { text: gpu }), h('small', { text: vram })]),
+    h('div', { class: 'fact' }, [h('b', { text: gib(f.ramTotalBytes) + ' RAM' }), h('small', { text: gib(f.ramFreeBytes) + ' free' })]),
+    h('div', { class: 'fact' }, [h('b', { text: f.platform === 'darwin' ? 'macOS' : f.platform === 'win32' ? 'Windows' : 'Linux' }), h('small', { text: f.arch })]),
+    h('div', { class: 'fact' }, [h('b', { text: gib(f.disks && f.disks.checkout.freeBytes) }), h('small', { text: 'free disk' })])
+  ]));
+  if (f.gpuWarning) app.append(h('p', { class: 'warnline', text: f.gpuWarning }));
+  var picked = state.tier;
+  var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: 'Starting preset', style: 'position:absolute;left:-9999px' })]);
+  ['local-cuda', 'local-mlx', 'local-cpu'].forEach(function (t) {
+    var input = h('input', { type: 'radio', name: 'tier', value: t });
+    input.checked = t === picked;
+    input.onchange = function () { picked = t; };
+    group.append(h('label', { class: 'choice' }, [input, h('span', { class: 'name', text: NAMES[t] }), h('span', { class: 'note', text: NOTES[t] }), t === f.recommendedTier ? h('span', { class: 'badge', text: 'Recommended' }) : null]));
+  });
+  app.append(group, why(step));
+  var row = h('div', { class: 'actions' });
+  row.append(button('Continue', 'primary', async function () { state = await api('/api/choice', { id: 'system', choice: picked }); await go(next('system')); }, row));
+  app.append(row);
+}
+
+function renderPicker(id, step) {
+  var f = state.detected || {};
+  var options, extra = null;
+  if (id === 'provider') {
+    options = ['llama-cpp', 'ollama', 'lm-studio'].concat(f.mlxAvailable ? ['mlx-lm'] : []).concat(['cloud']);
+    extra = { key: 'cloud', items: ['openai-compatible'].concat(f.cloudPresets || []) };
+  } else if (id === 'brain') {
+    var all = f.options || [];
+    var clis = ['claude-code', 'codex', 'gemini', 'qwen', 'acp'].filter(function (o) { return all.indexOf(o) >= 0; });
+    options = clis.concat(['api']);
+    extra = { key: 'api', items: all.filter(function (o) { return clis.indexOf(o) < 0; }) };
+  } else if (id === 'board') {
+    options = ['hermes', 'multica', 'paperclip', 'none'];
+  } else {
+    options = f.options || [];
+  }
+  var saved = state.selectedChoices && state.selectedChoices[id];
+  var picked = saved || f.recommended || options[0];
+  if (extra && extra.items.indexOf(picked) >= 0) { extra.value = picked; picked = extra.key; }
+  if (extra && !extra.value) extra.value = extra.items[0];
+
+  var group = h('fieldset', { class: 'choices' }, [h('legend', { text: STEP[id].title, style: 'position:absolute;left:-9999px' })]);
+  var detail = h('div');
+  function realId() { return extra && picked === extra.key ? extra.value : picked; }
+  function draw() {
+    group.querySelectorAll('.choice').forEach(function (n) { n.remove(); });
+    options.forEach(function (o) {
+      var input = h('input', { type: 'radio', name: 'pick-' + id, value: o });
+      input.checked = o === picked;
+      input.onchange = function () { picked = o; drawDetail(); };
+      var s = stateLabel(o, f);
+      var rt = f.runtimes && f.runtimes[o];
+      var note = NOTES[o] || '';
+      if (rt && rt.running && rt.models && rt.models.length) note += ' ' + rt.models.length + ' models loaded.';
+      group.append(h('label', { class: 'choice' }, [input,
+        s ? h('span', { class: 'state' + (s[1] ? ' on' : '') }, [h('i'), document.createTextNode(s[0])]) : null,
+        h('span', { class: 'name', text: NAMES[o] || o }), h('span', { class: 'note', text: note }),
+        o === f.recommended || (extra && o === extra.key && extra.items.indexOf(f.recommended) >= 0) ? h('span', { class: 'badge', text: 'Recommended' }) : null]));
+    });
+  }
+  var fields = {};
+  function drawDetail() {
+    detail.replaceChildren(); fields = {};
+    var o = realId();
+    var box = h('div', { class: 'fields' });
+    if (extra && picked === extra.key) {
+      var sel = selectOf(extra.items, extra.value);
+      sel.onchange = function () { extra.value = sel.value; drawDetail(); };
+      box.append(field(id === 'provider' ? 'Provider' : 'Model API', sel));
+    }
+    var rt = f.runtimes && f.runtimes[o];
+    if (id === 'provider' && o === 'llama-cpp') fields.model = textInput(f.defaultModel), box.append(field('Model (GGUF file path or Hugging Face repo)', fields.model));
+    if (id === 'provider' && (o === 'ollama' || o === 'lm-studio') && rt && rt.models.length) fields.model = selectOf(rt.models), box.append(field('Model', fields.model));
+    var remote = id === 'provider' && ['llama-cpp', 'ollama', 'lm-studio', 'mlx-lm'].indexOf(o) < 0;
+    if (remote) {
+      if (o === 'openai-compatible') fields.baseUrl = textInput(state.providerModels && state.providerModels.id === o ? state.providerModels.baseUrl : 'http://127.0.0.1:8000/v1', 'url'), box.append(field('API base URL', fields.baseUrl));
+      fields.apiKey = textInput('', 'password'); box.append(field('API key (optional for local servers)', fields.apiKey));
+      fields.model = selectOf(state.providerModels && state.providerModels.id === o ? state.providerModels.models : []);
+      box.append(field('Model', fields.model));
+      var listRow = h('div', { class: 'actions' });
+      listRow.append(button('Load models', 'small', async function () {
+        var listed = await api('/api/provider-models', { choice: { id: o, baseUrl: fields.baseUrl && fields.baseUrl.value, apiKey: fields.apiKey.value } });
+        fields.model.replaceChildren(); listed.models.forEach(function (m) { fields.model.append(h('option', { value: m, text: m })); });
+      }, listRow));
+      box.append(listRow);
+    }
+    if (id === 'brain') {
+      if (o === 'acp') fields.command = textInput('["hermes","-p","voice","acp"]'), box.append(field('Command (JSON list of arguments)', fields.command));
+      if (o === 'openai-compatible') { fields.baseUrl = textInput('', 'url'); fields.model = textInput(''); fields.apiKey = textInput('', 'password'); box.append(field('API base URL', fields.baseUrl), field('Model', fields.model), field('API key (optional)', fields.apiKey)); }
+      else if (extra && picked === extra.key && o !== 'openai-compatible') { fields.model = textInput(o === 'ollama' ? 'qwen3.5:0.8b' : ''); box.append(field('Model', fields.model)); if (o !== 'ollama') { fields.apiKey = textInput('', 'password'); box.append(field('API key', fields.apiKey)); } }
+      if (o === 'claude-code' && f.localTerminal) { fields.tab = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.tab, document.createTextNode('Type into my open Claude Code terminal tab instead of running it in the background')])); }
+    }
+    if (id === 'board' && o === 'paperclip' && !f.paperclipEnv) fields.companyId = textInput(''), box.append(field('Paperclip company ID (blank uses your paperclipai context)', fields.companyId));
+    if ((id === 'stt' || id === 'tts') && o === 'wyoming') { fields.host = textInput('127.0.0.1'); fields.port = textInput(id === 'stt' ? '10300' : '10200', 'number'); box.append(field('Server host', fields.host), field('Port', fields.port)); }
+    if (o === 'elevenlabs') fields.apiKey = textInput('', 'password'), box.append(field('ElevenLabs API key', fields.apiKey));
+    if (fields.apiKey && state.storedSecrets && state.storedSecrets[id] && saved === o) fields.apiKey.placeholder = 'Saved. Leave blank to keep it.';
+    if (box.childNodes.length) detail.append(box);
+
+    var s = stateLabel(o, f);
+    var guide = GUIDES[o];
+    if (s && !s[1] && o !== 'none') {
+      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: NAMES[o] + ' is not ' + (s[0] === 'Not running' ? 'running' : 'installed') + ' yet' })]);
+      if (guide) {
+        var list = h('ol');
+        guide.forEach(function (g) {
+          var li = h('li', {}, [document.createTextNode(g[0])]);
+          if (g[1] && g[1].indexOf('http') === 0) { li.append(document.createTextNode(': ')); li.append(h('a', { href: g[1], target: '_blank', rel: 'noopener noreferrer', text: g[1].replace(/^https?:[/][/]/, '') })); }
+          else if (g[1]) li.append(cmd(g[1]));
+          list.append(li);
+        });
+        panel.append(list);
+      } else if (id === 'stt' || id === 'tts') {
+        panel.append(h('p', { text: 'You can pick it now. Cicero lists the install command on the Save screen.' }));
+      }
+      var again = h('div', { class: 'actions' });
+      again.append(button('Check again', 'small', async function () { state = await api('/api/step', { id: id }); render(); }, again));
+      panel.append(again);
+      detail.append(panel);
+    }
+    if (f.probe && f.probe.message) detail.append(h('p', { class: 'note-line', text: f.probe.message }));
+  }
+  draw(); drawDetail();
+  app.append(group, detail, why(step));
+  var row = h('div', { class: 'actions' });
+  row.append(button('Continue', 'primary', async function () {
+    var c = { id: realId() };
+    for (var k in fields) {
+      var el = fields[k];
+      if (k === 'tab') { if (el.checked) c.mode = 'tab-inject'; }
+      else if (k === 'command') { try { c.command = JSON.parse(el.value); } catch (e) { throw new Error('The command must be a JSON list, like ["hermes","acp"].'); } }
+      else if (k === 'port') c.port = Number(el.value);
+      else if (k === 'apiKey' && !el.value) continue;
+      else c[k] = el.value;
+    }
+    state = await api('/api/choice', { id: id, choice: c });
+    await go(next(id));
+  }, row));
+  app.append(row);
+}
+
+function checkRow(check, kind) {
+  var hint = check.hint || '';
+  var command = hint;
+  var looksLikeCmd = /^(uv|bun|cicero|ollama|brew|apt|sudo|pip|npm|scoop|winget)\\b/.test(command.trim());
+  return h('li', { class: kind }, [
+    h('div', { class: 'head' }, [h('i'), h('span', { class: 'name', text: check.name })]),
+    h('p', { class: 'detail', text: check.detail }),
+    looksLikeCmd ? cmd(command.trim()) : (hint ? h('p', { class: 'detail', text: hint }) : null)
+  ]);
+}
+function renderReview(step) {
+  if (state.written) { renderDone(); return; }
+  var g = state.checkGroups;
+  if (!g) {
+    var row0 = h('div', { class: 'actions' });
+    row0.append(button('Run checks', 'primary', async function () { state = await api('/api/check', {}); render(); }, row0));
+    app.append(row0); return;
+  }
+  var nReady = g.ok.length + g.warnings.length;
+  app.append(h('div', { class: 'summary' }, [
+    h('span', { class: 'pill ok', text: nReady + ' ready' }),
+    g.notReady.length ? h('span', { class: 'pill todo', text: g.notReady.length + ' to install' }) : null,
+    g.blocking.length ? h('span', { class: 'pill bad', text: g.blocking.length + ' to fix' }) : null
+  ]));
+  if (g.blocking.length) {
+    app.append(h('h2', { text: 'Fix before saving', style: 'font-size:18px;margin:0 0 12px' }));
+    var ul = h('ul', { class: 'rows' }); g.blocking.forEach(function (c) { ul.append(checkRow(c, 'blocking')); }); app.append(ul);
+  }
+  if (g.notReady.length) {
+    app.append(h('h2', { text: 'Install before starting Cicero', style: 'font-size:18px;margin:0 0 6px' }),
+      h('p', { class: 'note-line', style: 'margin:0 0 14px', text: 'You can save now and run these afterwards.' }));
+    var ul2 = h('ul', { class: 'rows' }); g.notReady.forEach(function (c) { ul2.append(checkRow(c, 'notReady')); }); app.append(ul2);
+  }
+  var all = h('ul', { class: 'rows' });
+  g.warnings.forEach(function (c) { all.append(checkRow(c, 'warn')); });
+  g.ok.forEach(function (c) { all.append(checkRow(c, 'ok')); });
+  app.append(h('details', { class: 'why' }, [h('summary', { text: 'Show everything that passed (' + nReady + ')' }), all]));
+  app.append(h('details', { class: 'why' }, [h('summary', { text: 'Preview config.yaml' }), h('pre', { class: 'yaml', text: state.yaml })]));
+
+  var ex = state.existing || {};
+  if (ex.status === 'valid') app.append(h('div', { class: 'panel warn' }, [h('h2', { text: 'A config already exists' }), h('p', { text: 'Setup never overwrites it. Edit or move your current config.yaml, then run setup again.' })]));
+  if (ex.status === 'other-file-error' || ex.status === 'unsafe') app.append(h('div', { class: 'panel warn' }, [h('h2', { text: 'Another Cicero file needs fixing' }), h('p', { text: ex.error })]));
+  var row = h('div', { class: 'actions' });
+  if (ex.status === 'invalid') {
+    app.append(h('div', { class: 'panel warn' }, [h('h2', { text: 'Your current config.yaml has an error' }), h('p', { text: ex.error })]));
+    row.append(button('Back up old config and start fresh', '', async function () { state = await api('/api/backup', {}); state = await api('/api/check', {}); render(); }, row));
+  }
+  app.append(why(step));
+  var ack = null;
+  if (state.requiresNotReadyAcknowledgement) {
+    ack = h('input', { type: 'checkbox' });
+    app.append(h('label', { class: 'check-inline', style: 'margin:0 0 20px' }, [ack, document.createTextNode('I\\u2019ll install the items above before starting Cicero.')]));
+  }
+  var save = button('Save config', 'primary', async function () {
+    state = await api('/api/write', { acknowledgeNotReady: !!(ack && ack.checked) });
+    render();
+  }, row);
+  save.disabled = !state.canWrite || !!ack;
+  if (ack) ack.onchange = function () { save.disabled = !state.canWrite || !ack.checked; };
+  row.append(save);
+  app.append(row);
+}
+function renderDone() {
+  var hd = state.handoff || {};
+  app.append(h('div', { class: 'done-mark', 'aria-hidden': 'true', text: '\\u2713' }), h('h1', { text: 'Cicero is set up' }));
+  if (hd.customHome) {
+    app.append(h('p', { class: 'lede', text: 'This trial config was saved outside your Cicero home. Copy it there to use it.' }), cmd(hd.copyCommand), h('div', { style: 'height:24px' }));
+  } else {
+    app.append(h('p', { class: 'lede', text: 'Start Cicero, then open web voice or pair your phone.' }));
+  }
+  app.append(h('div', { class: 'panel' }, [h('h2', { text: 'Start Cicero' }), cmd(state.startCommand)]),
+    h('div', { class: 'panel' }, [h('h2', { text: 'Pair your phone' }), cmd('cicero pair')]));
+  var row = h('div', { class: 'actions' });
+  if (state.finished) app.append(h('p', { class: 'note-line', style: 'margin:0', text: 'Setup has closed. You can close this tab.' }));
+  else { row.append(button('Finish and close setup', 'primary', async function () { state = await api('/api/handoff', {}); render(); }, row)); app.append(row); }
+}
+function showFatal(e) { app.replaceChildren(h('h1', { text: 'Setup lost contact' }), h('p', { class: 'lede', text: e.message + ' If setup has finished or stopped, run cicero setup again.' })); }
+
+function render() {
+  app.replaceChildren();
+  var toOverview = document.getElementById('to-overview');
+  toOverview.hidden = view === 'overview';
+  if (state.written && view !== 'overview') view = 'review';
+  if (view === 'overview') { renderOverview(); return; }
+  var serverId = view === 'review' ? 'check' : view;
+  var step = state.steps.find(function (s) { return s.id === serverId; });
+  app.append(chain(view));
+  if (!(view === 'review' && state.written)) app.append(h('h1', { text: STEP[view].title }), h('p', { class: 'lede', text: STEP[view].lede }));
+  if (view === 'system') renderSystem(step);
+  else if (view === 'review') renderReview(step);
+  else renderPicker(view, step);
+}
+document.getElementById('brand').onclick = function () { go('overview'); };
+document.getElementById('to-overview').onclick = function () { go('overview'); };
+function fromHash() { var id = location.hash.slice(1); return ORDER.indexOf(id) >= 0 ? id : 'overview'; }
+window.onpopstate = function () { go(fromHash()).catch(showFatal); };
+api('/api/state').then(function (s) {
+  state = s;
+  if (s.written) { view = 'review'; render(); return; }
+  var start = fromHash();
+  if (start === 'overview') render(); else return go(start);
+}).catch(showFatal);
+</script>
+</body>
+</html>`;
 }
