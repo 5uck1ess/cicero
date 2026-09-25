@@ -58,6 +58,49 @@ export interface SwitchboardOptions {
   intentMinConfidence?: number;
 }
 
+type IntentAction =
+  | { intent: "transfer"; target: string }
+  | { intent: "callme"; target: string | null }
+  | { intent: "release" }
+  | { intent: "rollcall" }
+  | { intent: "standup" };
+type IntentPlan =
+  | { kind: "act"; action: IntentAction }
+  | { kind: "fallthrough"; refusedGroupAction: boolean };
+
+interface IntentPlanState {
+  activeLane: string | null;
+  hasPendingTransfer: boolean;
+  lanes: readonly string[];
+  unavailableTargets: ReadonlySet<string>;
+  canCall: boolean;
+  minConfidence: number;
+}
+
+/** Pure decision: no provider calls, cancellation, context mutation, or startup. */
+export function planSwitchboardIntent(result: SwitchboardIntent, state: IntentPlanState): IntentPlan {
+  const fallthrough: IntentPlan = {
+    kind: "fallthrough",
+    refusedGroupAction: result.intent === "rollcall" || result.intent === "standup",
+  };
+  if (!result.request_now || result.confidence < state.minConfidence) return fallthrough;
+  switch (result.intent) {
+    case "none": return fallthrough;
+    case "release":
+      return state.activeLane !== null || state.hasPendingTransfer
+        ? { kind: "act", action: { intent: "release" } } : fallthrough;
+    case "rollcall":
+    case "standup":
+      return state.lanes.length > 0 ? { kind: "act", action: { intent: result.intent } } : fallthrough;
+    case "transfer":
+      return result.target !== null && state.lanes.includes(result.target)
+        && result.target !== state.activeLane && !state.unavailableTargets.has(result.target)
+        ? { kind: "act", action: { intent: "transfer", target: result.target } } : fallthrough;
+    case "callme":
+      return state.canCall ? { kind: "act", action: { intent: "callme", target: result.target } } : fallthrough;
+  }
+}
+
 const DEFAULT_STANDUP_LANE_TIMEOUT_MS = 20_000;
 /** Bun/JavaScript timers overflow above a signed 32-bit millisecond delay. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -1305,49 +1348,35 @@ export class SwitchboardBrain implements Brain {
     return reply;
   }
 
-  /** Resolve a classified intent to a spoken ack, or null for a normal turn. */
+  /** Execute a plan that has already established an action exists. Never redispatch on a no-op. */
   private async actOnIntent(
-    result: SwitchboardIntent,
+    action: IntentAction,
     turn: AcceptedTurn,
     options: BrainTurnOptions,
-  ): Promise<string | "standup" | null> {
+  ): Promise<string | "standup"> {
     this.assertAcceptedTurn(turn);
-    const label = result.intent;
-    if (label === "none" || !result.request_now || result.confidence < this.intentMinConfidence) {
-      this.refusedGroupAction = label === "rollcall" || label === "standup";
-      return null;
+    if (action.intent === "standup") return "standup";
+    if (action.intent === "rollcall" || action.intent === "release") {
+      const reply = action.intent === "rollcall" ? this.doRollcall(turn) : this.doRelease(turn);
+      if (reply === null) throw new Error("planned switchboard action is no longer available");
+      return reply;
     }
-    if (label === "standup") return "standup";
-    if (label === "rollcall") return this.doRollcall(turn);
-    if (label === "release") return this.doRelease(turn);
-    if (label === "callme") {
+    if (action.intent === "callme") {
       const dial = this.callMe;
-      if (!dial) return null;
-      const who = result.target ?? "";
-      // Same refusal as the lexical path — the classifier selects a call the
-      // patterns miss ("phone me now"), so no phrase list can cover this.
+      if (!dial) throw new Error("planned dial-back is no longer available");
+      const who = action.target ?? undefined;
       if (options.speculative) throw new SpeculativeSideEffectError();
       log("info", `switchboard: dial-back requested (classifier)${who ? ` — ${who}` : ""}`);
-      // Handler args match the lexical path — see the note there. The turn
-      // signal was previously withheld here, so an aborted turn's dial-back
-      // kept doing board work; the delegation window is what stops the
-      // handler's transferTo() from superseding this turn.
-      const reply = await this.delegateWithinTurn(turn, () =>
-        dial(who || undefined, { signal: turn.signal }));
-      // Memo before the turn assert: a superseding turn still needs to know.
-      this.leaveMemo(dialBackMemo(who || undefined));
+      // Preserve the initiating turn when the handler calls transferTo().
+      const reply = await this.delegateWithinTurn(turn, () => dial(who, { signal: turn.signal }));
+      // Memo before the turn assertion: even a superseded call may have rung.
+      this.leaveMemo(dialBackMemo(who));
       this.assertAcceptedTurn(turn);
       return reply;
     }
-    if (label === "transfer") {
-      const lane = result.target;
-      if (lane) {
-        const reply = await this.pinLane(lane, turn);
-        this.assertAcceptedTurn(turn);
-        return reply;
-      }
-    }
-    return null;
+    const reply = await this.pinLane(action.target, turn);
+    this.assertAcceptedTurn(turn);
+    return reply;
   }
 
   private current(): Brain {
@@ -1694,16 +1723,32 @@ export class SwitchboardBrain implements Brain {
       try { options.onIntentHeldMs?.(turn.heldIntent?.heldMs() ?? 0); } catch { /* telemetry */ }
     }
     this.assertAcceptedTurn(turn);
-    const actionable = result.intent !== "none" && result.request_now && result.confidence >= this.intentMinConfidence;
-    if (actionable && turn.heldIntent) {
-      // Cancel immediately, but only the eventual dispatch needs settlement.
-      // Roster replies, releases, and unrelated lanes never reuse this brain.
-      void turn.heldIntent.cancel();
-      turn.heldIntent = undefined;
+    const plan = planSwitchboardIntent(result, {
+      activeLane: this.active,
+      hasPendingTransfer: this.pendingTransfer !== null,
+      lanes: Object.keys(this.lanes),
+      // A cold lane is available to start. Only known cleanup/retirement makes
+      // a target unavailable; future startup failures remain action failures.
+      unavailableTargets: new Set(Object.entries(this.lanes)
+        .filter(([name, lane]) => this.retiringIntentBrains.has(lane.brain)
+          || this.laneStops.has(name) || this.laneStarts.get(name)?.retired)
+        .map(([name]) => name)),
+      canCall: this.callMe !== undefined,
+      minConfidence: this.intentMinConfidence,
+    });
+    let routed: string | null = null;
+    if (plan.kind === "act") {
+      if (turn.heldIntent) {
+        // Only a concrete action may discard the in-flight ordinary answer.
+        // Destination dispatches retain their own quarantine/drain checks.
+        void turn.heldIntent.cancel();
+        turn.heldIntent = undefined;
+      }
+      routed = await this.actOnIntent(plan.action, turn, options);
     } else {
+      this.refusedGroupAction = plan.refusedGroupAction;
       turn.heldIntent?.release();
     }
-    const routed = await this.actOnIntent(result, turn, options);
     this.assertAcceptedTurn(turn);
     if (routed === null) {
       // Last stop before the front desk answers: if a transfer is still in
