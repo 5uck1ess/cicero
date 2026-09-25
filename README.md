@@ -140,7 +140,19 @@ uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
 ollama pull qwen3.5:4b
 ```
 
-**3. Create the config.** Make `~/.cicero/config.yaml` with exactly this content (don't copy `config.yaml.example` for a first run — it documents every option and expects backends this quickstart doesn't install):
+**3. Create the config: guided or by hand.**
+
+*Guided (preview):* run `cicero setup`. It prints a one-time URL for a local setup page; on a headless box, run `cicero setup --lan` and open the printed `https://<box-ip>:<port>/?token=…` from another device. The page:
+
+- detects your hardware and recommends a tier
+- detects the runtimes you already have: the LLM provider (llama.cpp, Ollama, LM Studio, MLX or any OpenAI-compatible URL), the coding-agent brain, an optional task board (Hermes, Multica or Paperclip), STT and TTS
+- explains each choice as you go
+- checks the draft with the same checks as `cicero doctor`
+- writes an annotated `~/.cicero/config.yaml`, with a comment on every key it set
+
+It only writes when no config exists yet. It doesn't install speech engines or set up Telegram yet: anything still missing is listed with the command to run, and `cicero doctor` re-checks it. Add `--home <dir>` to try it without touching your real config. Details are in [setup → guided setup](docs/setup.md#guided-setup-preview).
+
+*By hand:* make `~/.cicero/config.yaml` with exactly this content (don't copy `config.yaml.example` for a first run — it documents every option and expects backends this quickstart doesn't install):
 
 ```yaml
 # ~/.cicero/config.yaml — the minimal web-voice setup
@@ -152,7 +164,7 @@ llm: { backend: ollama, port: 11434, model: qwen3.5:4b }
 brain: { backend: claude-code, mode: subprocess } # or acp / codex / gemini / ollama / any OpenAI-compatible URL
 ```
 
-**4. Pick your brain.** The config above expects the Claude Code CLI — install it and log in before continuing. For Hermes or another ACP harness, set `brain: { backend: acp, binary: …, binary_args: […] }` instead — see [Brains](docs/brains.md).
+**4. Pick your brain.** (The guided page does this for you.) The config above expects the Claude Code CLI — install it and log in before continuing. For Hermes or another ACP harness, set `brain: { backend: acp, binary: …, binary_args: […] }` instead — see [Brains](docs/brains.md).
 
 **5. Check, start, talk:**
 

@@ -2,16 +2,35 @@
 
 ## Guided setup (preview)
 
-Run `cicero setup` (or `bun run src/index.ts setup`) to open a one-shot local
-setup page. `--home <dir>` lets you try setup without touching the real
-`~/.cicero/config.yaml`; the hand-off shows a copy command for the generated
-config because `cicero start` reads only the default Cicero home.
-`--lan` serves the page over TLS to other devices on your local network.
-System, LLM provider, brain, optional task board, STT, and TTS now detect
-available runtimes and collect validated choices. Channels and Install remain
-placeholders in this preview. The wizard checks and writes the collected config;
-use the manual setup below to finish any missing runtime installation and
-channel pairing.
+Run `cicero setup` (or `bun run src/index.ts setup` if `cicero` is not on your
+`PATH` yet). It starts a one-shot setup page and prints its URL with a one-time
+token; open that URL in a browser. The page is a walkthrough. Each step says
+what the component is, why an option is recommended for this machine, and what
+will happen, with a link to the matching doc.
+
+| Step | What it does |
+| --- | --- |
+| System | Detects OS, CPU architecture, RAM, free disk, Apple Silicon and NVIDIA VRAM, then recommends a tier (`local-mlx`, `local-cuda` or `local-cpu`). |
+| LLM provider | Finds a running llama.cpp (`:8080`), Ollama (`:11434`) or LM Studio (`:1234`), and offers MLX on macOS or any OpenAI-compatible URL. It lists the runtime's models to pick from. |
+| Brain | Detects the coding-agent CLIs on `PATH`. A missing one gets its install and sign-in steps. |
+| Task board | Optional. Detects `hermes`, `multica` or `paperclipai` and probes the board once. Cicero only watches the board; the board system owns the tasks. |
+| STT / TTS | Options for your platform, with whether each engine's venv is installed and its server is running. |
+| Check | Runs the same checks as `cicero doctor` against the draft. Config errors block the write. Engines that are not installed or running yet are listed as "not ready yet" with the command to fix them, and you confirm before writing. |
+| Write | Shows the YAML, then writes a private, annotated `~/.cicero/config.yaml` with a comment on each key. It only writes when no config exists. An invalid existing config is backed up only if you choose to. |
+| Hand-off | Shows the command to start Cicero, then closes the setup page. |
+
+Options:
+
+- `--lan` serves the page over HTTPS to other devices on your network, for a
+  headless box. It uses a self-signed certificate, so accept the warning once.
+- `--home <dir>` writes to another directory instead of `~/.cicero`, so you can
+  try setup without touching your real config. `cicero start` reads only the
+  default home, so the hand-off shows the copy command.
+- `--port <n>` picks the port (default: a free port).
+
+Preview limits: the Channels step (Telegram bot and calls) and the Install
+step (creating engine venvs and downloading models) are not built yet. Use the
+manual steps below for those, then run `cicero doctor`.
 
 ## Your first conversation
 
