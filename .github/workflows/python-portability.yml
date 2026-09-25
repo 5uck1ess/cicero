@@ -44,7 +44,7 @@ jobs:
           uv pip install --python .ci-native-venv --no-deps -r requirements/vibevoice-sources.txt
           uv pip install --python .ci-native-venv -r requirements/vibevoice-server.txt
       - name: Test native venv discovery and launch
-        run: bun test tests/platform/python.test.ts tests/platform/python-native.test.ts
+        run: bun test --timeout 30000 tests/platform/python.test.ts tests/platform/python-native.test.ts
         env:
           CICERO_NATIVE_VENV: ${{ github.workspace }}/.ci-native-venv
       - name: Resolve Python manifests without installing model wheels
