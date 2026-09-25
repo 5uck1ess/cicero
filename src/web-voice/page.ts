@@ -37,7 +37,7 @@ export const PAGE = `<!doctype html>
 <style>
   :root { color-scheme: dark; }
   body { font-family: -apple-system, system-ui, sans-serif; background:radial-gradient(circle at 50% 32%, #0d1b26 0%, #090d12 62%, #06090d 100%); color:#c9d1d9; margin:0; height:100vh; height:100dvh; overflow:hidden; box-sizing:border-box; padding:3vh 0 10px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; }
-  header { display:flex; align-items:center; gap:10px; }
+  header { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 12px); left:50%; transform:translateX(-50%); z-index:1; display:flex; align-items:center; gap:10px; }
   header svg { filter:drop-shadow(0 0 6px #22d3ee66); }
   h1 { font-weight:600; font-size:16px; color:#7dd3fc; margin:0; letter-spacing:5px; text-shadow:0 0 14px #22d3ee44; }
   h1 small { display:block; font-size:9px; font-weight:500; letter-spacing:2px; color:#4b5f70; text-shadow:none; margin-top:2px; }
@@ -60,16 +60,19 @@ export const PAGE = `<!doctype html>
   .dot.on { background:#3fb950; box-shadow:0 0 8px #3fb95099; }
   #debug { font-family:ui-monospace,monospace; font-size:11px; color:#6e7681; min-height:14px; }
   @media (max-height:700px) { #orb { width:170px; } }
-  .hint { font-size:12px; color:#6e7681; }
+  .hint { font-size:12px; color:#6e7681; max-width:92vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   body.pre #orb { opacity:0.05; }
   body.pre #orbLabel { opacity:0; }
   #shroud { position:fixed; inset:0; background:#05070a; opacity:0; pointer-events:none; transition:opacity 1.2s ease; z-index:2; }
   body.pre.cinema #shroud { opacity:1; }
-  #notice { display:none; max-width:86vw; align-items:flex-start; gap:10px; background:#0e2230; border:1px solid #1f4a5e; border-radius:10px; padding:10px 12px; font-size:13px; color:#a5c8dc; line-height:1.45; }
+  #notice { --notice-max-height:40dvh; display:none; position:fixed; top:calc(env(safe-area-inset-top, 0px) + 60px); left:50%; transform:translateX(-50%); z-index:4; width:min(92vw,640px); box-sizing:border-box; max-height:var(--notice-max-height); align-items:flex-start; gap:10px; background:#0e2230; border:1px solid #1f4a5e; border-radius:10px; padding:10px 12px; font-size:13px; color:#a5c8dc; line-height:1.45; }
   #notice.show { display:flex; }
+  #noticeText { min-width:0; max-height:calc(var(--notice-max-height) - 22px); overflow-y:auto; overflow-wrap:anywhere; white-space:pre-wrap; }
   #notice a { color:#7dd3fc; font-weight:600; word-break:break-all; }
   #notice button { flex:none; background:none; border:0; color:#4b5f70; font-size:16px; cursor:pointer; padding:0 2px; line-height:1; }
-  #confirmations { display:flex; flex-direction:column; gap:8px; width:min(86vw,560px); max-height:30vh; overflow:auto; }
+  #confirmations { display:flex; flex-direction:column; gap:8px; width:min(86vw,560px); max-height:30dvh; min-height:0; flex-shrink:1; overflow:auto; }
+  body:has(#confirmations:not(:empty)) #orb { width:clamp(170px, 45vmin, calc(70dvh - 260px)); }
+  body:has(#confirmations:not(:empty)) #notice { --notice-max-height:25dvh; }
   .confirm-card { display:flex; flex-direction:column; gap:10px; background:#0e2230; border:1px solid #1f4a5e; border-radius:10px; padding:12px; font-size:13px; color:#a5c8dc; line-height:1.45; }
   .confirm-summary { white-space:pre-wrap; overflow-wrap:anywhere; }
   .confirm-actions { display:flex; justify-content:flex-end; gap:8px; }
@@ -760,7 +763,7 @@ function notifyBuf(msg) {
 // Replay persisted turns into the log on first connect only — a mid-session
 // reconnect would otherwise duplicate bubbles that are already on screen.
 function handleNotify(msg) {
-  hintEl.textContent = "\uD83D\uDD14 " + msg.text;
+  hintEl.textContent = "\uD83D\uDD14 " + msg.text.slice(0, 80) + (msg.text.length > 80 ? "…" : "");
   showNotice(msg.text);
   const buf = notifyBuf(msg);
   if (!buf) return;
@@ -1029,8 +1032,6 @@ const noticeTextEl = document.getElementById("noticeText");
 document.getElementById("noticeClose").onclick = function () { noticeEl.classList.remove("show"); };
 const NOTICE_URL_RE = /https?:\\/\\/[^\\s<>"')\\]]+/g;
 function showNotice(text) {
-  NOTICE_URL_RE.lastIndex = 0;
-  if (!NOTICE_URL_RE.test(text)) return;
   NOTICE_URL_RE.lastIndex = 0;
   noticeTextEl.textContent = "";
   let last = 0, m;
