@@ -304,7 +304,10 @@ function removeStaleConfigLock(
   return true;
 }
 
-function inspectLegacyConfigLock(configPath: string): "absent" | "blocked" | "removed" {
+function inspectLegacyConfigLock(
+  configPath: string,
+  readProcessIdentity: (pid: number) => ProcessIdentity,
+): "absent" | "blocked" | "removed" {
   const lockPath = `${configPath}.update-lock`;
   try {
     const owner = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8")) as
@@ -320,7 +323,7 @@ function inspectLegacyConfigLock(configPath: string): "absent" | "blocked" | "re
       if (typeof owner.identity !== "string" || !owner.identity || owner.identity.length > MAX_PROCESS_IDENTITY_LENGTH) {
         return "blocked";
       }
-      const current = processIdentitySync(owner.pid);
+      const current = readProcessIdentity(owner.pid);
       if (current.kind === "identified" && current.value === owner.identity) return "blocked";
       if (current.kind === "unsupported" && processIsAlive(owner.pid)) return "blocked";
     } else if (processIsAlive(owner.pid)) {
@@ -430,7 +433,7 @@ function scanConfigLocks(
     }
   }
 
-  const legacy = inspectLegacyConfigLock(configPath);
+  const legacy = inspectLegacyConfigLock(configPath, readFreshProcessIdentityBeforeDeadline);
   return {
     choosing,
     invalid,

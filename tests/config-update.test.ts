@@ -149,9 +149,17 @@ describe("updateConfigFields", () => {
       token: "synthetic-stale-owner",
       acquiredAtMs: 0,
     }));
-    const lease = acquireConfigUpdateLock(path, { timeoutMs: 20 });
+    let identityReads = 0;
+    const lease = acquireConfigUpdateLock(path, {
+      timeoutMs: 1_000,
+      processIdentitySync: () => {
+        identityReads++;
+        return { kind: "identified", value: "linux:synthetic-current-instance" };
+      },
+    });
     lease.release();
     expect(existsSync(lockPath)).toBe(false);
+    expect(identityReads).toBeGreaterThanOrEqual(2);
   });
 
   test("two racing stale takeovers serialize their config commits", async () => {
