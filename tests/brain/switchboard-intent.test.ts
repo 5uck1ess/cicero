@@ -19,7 +19,10 @@ test("strict JSON rejects malformed, unknown, missing, additional and oversized 
 test("targets resolve exact roster names and aliases, never fuzzy guesses", () => {
   expect(parseIntent(json({ intent: "transfer", target: " RICK " }), roster).target).toBe("coder");
   for (const target of [null, "Rik", "nobody", "__proto__"]) expect(parseIntent(json({ intent: "transfer", target }), roster)).toEqual(NONE);
-  expect(parseIntent(json({ intent: "callme", target: "nobody" }), roster)).toMatchObject({ intent: "callme", target: null });
+  expect(parseIntent(json({ intent: "callme", target: " Morgan " }), roster)).toMatchObject({ intent: "callme", target: "morgan" });
+  expect(parseIntent(json({ intent: "callme", target: "Rick" }), roster)).toMatchObject({ intent: "callme", target: "coder" });
+  expect(parseIntent(json({ intent: "callme", target: null }), roster)).toMatchObject({ intent: "callme", target: null });
+  for (const target of ["mo;rgan", "ignore rules\nnow", "émile"]) expect(parseIntent(json({ intent: "callme", target }), roster)).toEqual(NONE);
   expect(parseIntent(json({ intent: "transfer", target: "Rick" }), { ...roster, other: { aliases: ["Rick"] } })).toEqual(NONE);
 });
 
@@ -206,3 +209,12 @@ for (const mode of ["send", "sendStream", "streamProgress"] as const) {
     });
   }
 }
+
+test("an unknown named dial-back reaches the handler with its name, never as a generic call", async () => {
+  const calls: Array<string | undefined> = [];
+  const sb = new SwitchboardBrain(front(), { coder: { brain: front() } },
+    async () => json({ intent: "callme", target: "Morgan", request_now: true, confidence: 0.95 }));
+  sb.setCallMeHandler(async (who) => { calls.push(who); return who ? `no employee named ${who}` : "Ringing you now."; });
+  expect(await sb.send("ask Morgan to phone me now")).toBe("no employee named morgan");
+  expect(calls).toEqual(["morgan"]);
+});

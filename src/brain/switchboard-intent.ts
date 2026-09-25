@@ -35,6 +35,13 @@ export function parseIntent(raw: string, roster: IntentRoster): SwitchboardInten
     const target = matches.length === 1 ? matches[0]![0] : null;
     if (v.intent === "transfer" && target === null) return NONE;
     if (v.intent === "none") return NONE;
+    if (v.intent === "callme" && ref && target === null) {
+      // A named dial-back must keep its name even when it is not on the roster:
+      // the dial-back handler rejects unknown employees before ringing. Dropping
+      // the name would silently turn "have Morgan call me" into a generic call.
+      if (!/^[a-z0-9 _-]+$/.test(ref)) return NONE;
+      return { intent: "callme", target: ref, request_now: v.request_now, confidence: v.confidence };
+    }
     return { intent: v.intent, target: v.intent === "transfer" || v.intent === "callme" ? target : null, request_now: v.request_now, confidence: v.confidence };
   } catch { return NONE; }
 }
