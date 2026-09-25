@@ -1490,3 +1490,77 @@ test("an STT swap during a long reply drains without waiting for the reply to fi
   await turn;
   await slot.stop();
 });
+
+test("ACP tool notice speaks before reply and is suppressed after reply starts", async () => {
+  const { sink, calls } = capturingSink();
+  const base = streamDeps({ stream: ["Done."] });
+  base.brain = {
+    send: async () => "",
+    sendStream: async function* (_text, options) {
+      options?.onNotice?.({ type: "tool", text: "Working on it now." });
+      options?.onNotice?.({ type: "tool", text: "Duplicate tool." });
+      yield "Done.";
+      options?.onNotice?.({ type: "tool", text: "Late tool." });
+    },
+  };
+  await streamWebTextTurn("run it", base, sink);
+  expect(calls.sentence).toEqual(["Working on it now.", "Done."]);
+});
+
+test("ACP tool notice obeys per-turn switch", async () => {
+  const { sink, calls } = capturingSink();
+  const base = streamDeps({ stream: ["Done."] });
+  base.toolStartNotice = false;
+  base.brain = {
+    send: async () => "",
+    sendStream: async function* (_text, options) {
+      options?.onNotice?.({ type: "tool", text: "Working on it now." });
+      yield "Done.";
+    },
+  };
+  await streamWebTextTurn("run it", base, sink);
+  expect(calls.sentence).toEqual(["Done."]);
+});
+
+test("a completed web turn cannot publish a late ACP notice into the next turn", async () => {
+  const { sink, calls } = capturingSink();
+  let late: ((notice: { type: "tool" | "confirmation"; text: string }) => void) | undefined;
+  const base = streamDeps({ stream: ["Done."] });
+  base.brain = {
+    send: async () => "",
+    sendStream: async function* (_text, options) {
+      late = options?.onNotice;
+      yield "Done.";
+    },
+  };
+  await streamWebTextTurn("run it", base, sink);
+  late?.({ type: "confirmation", text: "Waiting on your OK to run a shell command." });
+  await Promise.resolve();
+  expect(calls.sentence).toEqual(["Done."]);
+});
+
+test("aborted web turn drops a notice whose TTS finishes late", async () => {
+  const controller = new AbortController();
+  let finishAudio!: (audio: ArrayBuffer) => void;
+  let noticeStarted!: () => void;
+  const started = new Promise<void>((resolve) => { noticeStarted = resolve; });
+  const pendingAudio = new Promise<ArrayBuffer>((resolve) => { finishAudio = resolve; });
+  const { sink, calls } = capturingSink();
+  const base = streamDeps({ stream: [] });
+  base.signal = controller.signal;
+  base.tts = { generateAudio: () => { noticeStarted(); return pendingAudio; } };
+  base.brain = {
+    send: async () => "",
+    sendStream: async function* (_text, options) {
+      options?.onNotice?.({ type: "confirmation", text: "Waiting on your OK to use a tool." });
+      yield "Done.";
+    },
+  };
+  const turn = streamWebTextTurn("run it", base, sink);
+  await started;
+  controller.abort();
+  finishAudio(tinyWav([1]));
+  await turn;
+  expect(calls.sentence).not.toContain("Waiting on your OK to use a tool.");
+  expect(calls.audio).toBe(0);
+});

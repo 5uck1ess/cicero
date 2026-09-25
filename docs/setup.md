@@ -1,5 +1,17 @@
 # Setup
 
+## Guided setup (preview)
+
+Run `cicero setup` (or `bun run src/index.ts setup`) to open a one-shot local
+setup page. `--home <dir>` lets you try setup without touching the real
+`~/.cicero/config.yaml`; the hand-off shows a copy command for the generated
+config because `cicero start` reads only the default Cicero home.
+`--lan` serves the page over TLS to other devices on your local network.
+The middle provider, brain, board, speech, channels, and install steps are
+placeholders in this preview. The wizard checks and writes a new config only
+after the implemented System and Check steps; use the manual setup below for a
+complete first conversation.
+
 ## Your first conversation
 
 This is the opinionated first-run path: Cicero runs on a Linux box (GPU or not),

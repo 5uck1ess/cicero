@@ -8,7 +8,7 @@ First run today is the seven-step `docs/setup.md`: per-OS package installs,
 hand-created venvs, a hand-written `~/.cicero/config.yaml`, then `cicero doctor`.
 Worse, a missing config is not an error — `loadConfig` (`src/config.ts:1112`)
 silently falls back to `DEFAULT_CONFIG`, which is macOS/MLX-flavored
-(`src/config.ts:1038,1088`), so a Linux or Windows user gets a daemon that boots
+(`DEFAULT_CONFIG`, `src/config.ts`, plus the MLX fallbacks in its `RuntimeConfig` getters), so a Linux or Windows user gets a daemon that boots
 and then fails at engine start.
 
 ## Shape
@@ -64,9 +64,9 @@ the wizard.
 - Binds `127.0.0.1` on its own port by default and prints a one-time URL with
   a random setup token to stdout. In this default mode it follows the
   dashboard's pattern: loopback-only Host/Origin gate plus a custom-header CSRF
-  check (`src/dashboard/server.ts:70-87`).
-- `--lan` for headless boxes: binds LAN, uses `ensureTls` (`src/web-voice/tls.ts:358`)
-  for a self-signed cert, same token. Plain HTTP off-loopback is refused, as
+  check (`src/dashboard/server.ts`: the loopback gate and `isTrustedControlRequest`).
+- `--lan` for headless boxes: binds LAN, uses `ensureTls` (`src/web-voice/tls.ts`), generated into a setup-owned directory,
+  for a self-signed cert, same token. A `null` result from `ensureTls` (openssl failed) is a hard `--lan` startup failure. Plain HTTP off-loopback is refused, as
   `assertWebTlsPolicy` does today. The dashboard's loopback gate would reject
   every LAN request, so LAN mode uses its own gate instead. A request's
   Host must name loopback or one of the box's LAN addresses on the setup
@@ -95,17 +95,27 @@ recipe venvs and the call sidecar's `.env` credentials.
 
 2. **LLM provider.** A selector for the local runtime the operator already
    uses:
-   - **llama.cpp** → `llm.backend: llama-cpp` (probe `:8080/v1/models`)
-   - **Ollama** → `llm.backend: ollama` (probe `:11434/api/tags`)
-   - **LM Studio** → `llm.backend: openai` with a local base URL
-     (probe `:1234/v1/models`; `llm/openai.ts:94` already treats local
-     OpenAI-compatible servers as keyless)
+   - **llama.cpp** → `llm.backend: llama-cpp` (probe `GET :8080/health`, as
+     `llm/llama-cpp.ts` does). `llm.model` must be a local `.gguf` path or an
+     HF GGUF repo id `owner/repo[:quant]` (doctor rejects anything else), so
+     this option takes one of those. Default: the `local-cuda` tier's model.
+   - **Ollama** → `llm.backend: ollama` (probe `:11434/api/tags`; list the
+     pulled models).
+   - **LM Studio** → `llm.backend: openai` with `baseUrl:
+     http://127.0.0.1:1234/v1` (LM Studio's own default; probe `/v1/models`
+     and list its models). Local hosts need no key (`isKeylessHost`,
+     `src/backends/net.ts`).
+   - **MLX** (macOS only) → `llm.backend: mlx-lm`, the `local-mlx` tier's
+     default (port 8081).
    - **Other OpenAI-compatible URL** (vLLM, llama-swap, a LAN host) and the
-     existing cloud presets (`llm/openai.ts:23-67`) with an API key field.
+     existing cloud presets (`llm/openai.ts`) with an API key field. The
+     LLM keys are `baseUrl` / `apiKey`; the brain's are `brain.base_url` /
+     `brain.api_key`. Keep the two spellings separate.
 
-   Probe all known default ports in parallel on page load and pre-select what
-   is running. On select, list the models that runtime reports and pick from
-   the list — no free-typed model names for local runtimes. If the chosen
+   Probe all known default endpoints in parallel on page load and pre-select
+   what is running. Where the runtime reports a model list (Ollama, LM Studio,
+   OpenAI-compatible), pick from it. No free-typed model names except
+   llama.cpp's validated GGUF path or repo id. If the chosen
    runtime is not installed or not running, guide it: per-OS install steps
    from the vendor's official instructions, how to start it and load or
    pull a model, then a done-check that re-probes the port and lists
@@ -134,7 +144,7 @@ recipe venvs and the call sidecar's `.env` credentials.
      `paperclipai context` profile when present, else ask for the id and pass
      `-C <id>`. The id is validated as a single token, never shell text.
    - Adds `notify.kanban: { enabled: true, preset, command, task_command }`
-     to the draft, with the list/detail commands from the presets table. The wizard never
+     to the draft, with the list/detail commands from the presets table, which the wizard reads from code: move the three command templates next to the preset type in `src/notify/board-presets.ts` (today they are only in `docs/notifications.md`). The wizard never
      installs or configures the board system itself. Multica and Paperclip are
      labeled "not live-tested", matching the docs.
 
@@ -168,7 +178,7 @@ recipe venvs and the call sidecar's `.env` credentials.
         daemon (it also discards queued updates on every start).
      4. Send a test message, with a voice-note toggle (`voice_note`).
      The token is never echoed back after save, logged, or included in
-     errors; Telegram API errors go through the existing redaction.
+     errors. The wizard's Bot API client strips the token and `/bot<token>/` the same way `redactTelegramText` in `src/notify/telegram.ts` does; export that helper rather than copying it.
    - **Telegram calls** (the userbot call sidecar,
      `sidecars/telegram-call/`). A guided walkthrough of the README's
      one-time setup, one screen per step, each with a done-check:
@@ -191,7 +201,7 @@ recipe venvs and the call sidecar's `.env` credentials.
         sidecar enforces: owner-only mode and refuse a symlink.
      5. **Log in:** interactive (phone number + in-app code), so it stays
         a terminal command. The page shows the exact
-        `uv run … sidecars/telegram-call/login.py` line with a copy
+        `uv run --python <absolute venv dir> -- python sidecars/telegram-call/login.py` line (absolute path, so it works on Windows too) with a copy
         button and polls until `~/.cicero/telegram-call/cicero.session`
         exists (checking existence only; never reading it).
      6. **Harden the account:** the README's checklist (add it to your
@@ -205,33 +215,53 @@ recipe venvs and the call sidecar's `.env` credentials.
      `Intl.DateTimeFormat().resolvedOptions().timeZone` — the box clock is
      often UTC, and without it quiet hours and briefings fire at the wrong
      local time. Optional `quiet_hours` and `briefing.at`, with a one-line
-     explanation that notifications inside quiet hours queue for the
-     briefing instead of pinging.
+     explanation that non-urgent notifications inside quiet hours queue for the
+     briefing instead of pinging (an urgent notification still pings).
 
 8. **Install.** For each chosen Python backend that is not already installed,
    run its **recipe** (below) with live, streamed logs, a progress state per
    recipe, and cancel. Then prefetch the model weights so the first voice turn
    is not a multi-GB silent stall.
 
-9. **Check.** Build the draft config in memory and run
-   `collectChecks(draftConfig, …)` (`src/cli/doctor.ts:751`) against it — it
-   already accepts an injected config and returns structured `Check[]`. Render
-   ok/warn/fail with hints. Fails block the write; warns do not.
+9. **Check.** Render the draft YAML into a private temp Cicero home, run the
+   real `loadConfig({}, { home: tmp })` on it (tier expansion and defaults
+   only happen there), then `collectChecks(resolved, { ciceroHome: tmp })`
+   (`src/cli/doctor.ts`). Render ok/warn/fail with hints, in two groups:
+   - **Blocking:** the draft does not load or validate, or a check about the
+     config itself fails (config, web-voice token, TLS). These block the write.
+   - **Not ready yet:** an engine or runtime readiness check fails (a venv
+     not installed, a server not running, a brain binary missing). These are
+     listed with their hints as "finish before starting Cicero". The write
+     proceeds after an explicit acknowledgement, because installs can
+     legitimately still be pending.
+
+   The browser-only default draft sets `headless: true` and
+   `brain.mode: subprocess`, like the minimal web-voice config in
+   `docs/setup.md`. Tab-inject needs a local terminal, and without `headless`
+   a missing `sox` is a fail. ElevenLabs is not ready until `tts.voice` is a
+   real voice id (`cicero voice add`).
 
 10. **Write + pair.** Show the annotated YAML to be written. It is generated as
     fresh text with its explanatory comments. That is safe because v1 only
     writes when no config exists, so there are no existing comments to keep.
     The generated text must parse back to the same config and pass
-    `validateRuntimeConfig`. Then write it (private mode,
-    atomic tmp+rename like `updateConfigFields` in `src/config.ts`) with
-    `web_voice.enabled: true` and a stable generated token (so the pairing QR
-    survives restarts; see `setWebVoiceToken` in `src/config.ts`). Render the
-    pairing QR in the page.
+    the real `loadConfig`. Then write it with the same private `wx` temp + rename
+    pattern `updateConfigFields` uses, but not through `updateConfigFields`
+    itself, which re-stringifies and would drop the comments. Write it with
+    `web_voice.enabled: true` and a stable generated token of at least 16
+    characters (`src/web-voice/startup-policy.ts` rejects shorter ones), so
+    the pairing QR survives restarts.
 
 11. **Hand-off + test turn.** Start the daemon the documented way (`cicero start`,
-    or print the service command when a supervisor is detected), wait for
-    `~/.cicero/web-voice/pairing.json`, redirect to web voice, and prompt one
-    spoken test turn ("say: what time is it"). Then setup mode exits.
+    or print the service command when a supervisor is detected). Wait for
+    `~/.cicero/web-voice/pairing.json`, which the daemon writes only after web
+    voice binds. Then render the phone pairing QR the way `cicero pair` does:
+    `readPairingState` + `selectPairingUrl` plus the stored token. A QR made
+    before that file exists falls back to a guessed URL. Redirect to web voice
+    and prompt one spoken test turn: "What can you help me with?", the
+    shell-free `help` action and the first utterance `docs/setup.md` already
+    uses. ("What time is it" runs `date` through `sh -c`, which fails on
+    Windows.) Then setup mode exits.
 
 ## Install recipes
 
@@ -245,8 +275,11 @@ becomes a command, a path, or a package name.
 - Executed as argv arrays through `uv` (no shell), with the resolved POSIX /
   Windows venv layout from `src/platform/python.ts`.
 - Each run has one owner, an absolute deadline, a log-size cap, and cancel
-  that kills its own process tree only. A timed-out or cancelled run leaves the
-  venv marked incomplete and retryable, never silently "installed".
+  that kills its own process tree only, through `runBoundedCommand`
+  (`src/process/bounded-command.ts`). A timed-out or cancelled run leaves the
+  venv marked incomplete and retryable, never silently "installed". On
+  Windows, tree kill after the root exits is not guaranteed there, so a retry
+  waits until the previous run is confirmed reaped.
 - "Installed" means the interpreter exists **and** an import probe of the
   backend's module succeeds, not just that the directory exists.
 - **Weights prefetch** uses the backend's own loader or `huggingface_hub`
