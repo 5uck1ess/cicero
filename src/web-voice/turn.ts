@@ -16,6 +16,7 @@ import { beginOwnedTone, settleTone, type OwnedTone, type ToneOptions } from "./
 import { writeSecureTempAudio } from "../platform/secure-temp-audio";
 import type { TurnLease } from "../turn-coordinator";
 import { MAX_TURN_AUDIO_BYTES } from "./protocol";
+import { liveSttFailure, liveSttFailureDetail } from "../backends/stt/live-failure";
 import {
   MAX_DECODED_WAV_BYTES,
   MAX_DECODED_WAV_DURATION_MS,
@@ -917,11 +918,15 @@ export async function streamWebTurn(
   let streamedFinal: Promise<string | null> | undefined;
   const liveTranscript = (): Promise<string | null> => {
     if (!deps.streamFinal) return Promise.resolve(null);
-    streamedFinal ??= deps.streamFinal.then((text) => boundedTranscript(text.trim())).catch(() => {
-      if (!deps.signal?.aborted) {
-        log("warn", "web voice: live STT failed; retrying full WAV with batch STT");
-        deps.timingMark?.("stt_batch_fallback", 0);
-      }
+    streamedFinal ??= deps.streamFinal.then((text) => boundedTranscript(text.trim())).catch((error: unknown) => {
+      const signalReason = deps.signal?.reason;
+      const superseded = deps.signal?.aborted && /supersed/i.test(signalReason instanceof Error ? signalReason.message : String(signalReason ?? ""));
+      const stage = superseded ? "superseded" : liveSttFailure(error);
+      log(deps.signal?.aborted ? "info" : "warn", deps.signal?.aborted
+        ? `web voice: live STT ${stage} (${liveSttFailureDetail(error)})`
+        : `web voice: live STT ${stage} (${liveSttFailureDetail(error)}); retrying full WAV with batch STT`);
+      deps.timingMark?.(`stt_live_failure:${stage}`, 0);
+      if (!deps.signal?.aborted) deps.timingMark?.("stt_batch_fallback", 0);
       return null;
     });
     return streamedFinal;

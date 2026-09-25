@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { openLivePcm, type LiveStreamConnect } from "../../../src/backends/stt/live-client";
 import { AudioCppSTTProvider } from "../../../src/backends/stt/audiocpp";
+import { liveSttFailure } from "../../../src/backends/stt/live-failure";
 
 const encoder = new TextEncoder();
 const delta = (text: string) => `data: ${JSON.stringify({ type: "transcript.text.delta", delta: text })}\n\n`;
@@ -50,12 +51,46 @@ test("live PCM uses one full-duplex request and yields ordered cumulative partia
   expect(peer.terminated).toBe(1);
 });
 
+test("a terminal whitespace transcript is a successful no-speech result even after partials", async () => {
+  const peer = fakeEndpoint([delta("tentative")], done("  \n "));
+  const stream = openLivePcm({ host: "127.0.0.1", port: 8092, model: "nemotron", sampleRate: 16000, connect: peer.connect });
+  stream.push(new Uint8Array([1, 0]));
+  expect(await stream.end()).toBe("");
+  expect(peer.terminated).toBe(1);
+});
+
+test("queued PCM stays ordered ahead of stream end while the socket is still opening", async () => {
+  const peer = fakeEndpoint();
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => { open = resolve; });
+  const stream = openLivePcm({ host: "127.0.0.1", port: 8092, model: "nemotron", sampleRate: 16000,
+    connect: async (options) => { await gate; return peer.connect(options); } });
+  stream.push(new Uint8Array([1, 0]));
+  stream.push(new Uint8Array([2, 0]));
+  const final = stream.end();
+  open();
+  expect(await final).toBe("hello");
+  expect(peer.written.indexOf("\x01\0")).toBeLessThan(peer.written.indexOf("\x02\0"));
+  expect(peer.written.indexOf("\x02\0")).toBeLessThan(peer.written.indexOf("0\r\n\r\n"));
+});
+
 test("live response bounds reject an oversized partial", async () => {
   const peer = fakeEndpoint([delta("x".repeat(16_385))]);
   const stream = openLivePcm({ host: "127.0.0.1", port: 8092, model: "nemotron", sampleRate: 16000, connect: peer.connect });
   stream.push(new Uint8Array([1, 0]));
   await expect(stream.end()).rejects.toThrow(/character limit/);
   expect(peer.terminated).toBe(1);
+});
+
+test("a provider error event keeps its diagnostic stage", async () => {
+  const peer = fakeEndpoint([], `data: ${JSON.stringify({ error: { message: "synthetic provider failure at https://user:password@example.test/?token=synthetic-secret" } })}\n\n`);
+  const stream = openLivePcm({ host: "127.0.0.1", port: 8092, model: "nemotron", sampleRate: 16000, connect: peer.connect });
+  stream.push(new Uint8Array([1, 0]));
+  const failure = await stream.end().catch((error: unknown) => error);
+  expect(liveSttFailure(failure)).toBe("server_error");
+  expect(failure.message).toContain("synthetic provider failure");
+  expect(failure.message).not.toContain("password");
+  expect(failure.message).not.toContain("synthetic-secret");
 });
 
 test("abort closes the owned socket and drops a late partial", async () => {

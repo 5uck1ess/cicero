@@ -15,6 +15,7 @@
  */
 import { decodeWav } from "../../platform/wav";
 import { sanitizeLabel } from "../../text-utils";
+import { LiveSttError, liveSttFailureDetail } from "./live-failure";
 /** Candidate shape shared with the benchmark adapter. */
 export interface StreamCandidate {
   name: string; kind: "stream"; model: string; port: number; host?: string;
@@ -767,9 +768,8 @@ export function openLivePcm(options: OpenLivePcmOptions): LivePcmSession {
   if (options.signal?.aborted) onAbort();
   const maybeFinish = (): void => {
     if (!requestEnded || !reader.complete || closed) return;
-    if (finalText === null) fail(new Error("live transcription missing terminal event"));
-    else if (!finalText.trim()) fail(new Error("live transcription was empty"));
-    else stop();
+    if (finalText === null) fail(new LiveSttError("empty_final", new Error("live transcription missing terminal event")));
+    else stop(); // An empty terminal transcript means no speech, just like batch STT.
   };
   const consumeEvent = (block: string): void => {
     const data = block.split(/\r?\n/).filter((line) => line.startsWith("data:"))
@@ -779,7 +779,12 @@ export function openLivePcm(options: OpenLivePcmOptions): LivePcmSession {
     try { value = JSON.parse(data); } catch { throw new Error("malformed live SSE event"); }
     if (!value || typeof value !== "object") throw new Error("malformed live SSE event");
     const event = value as Record<string, unknown>;
-    if (event.error) throw new Error("live transcription server error");
+    if (event.error) {
+      const detail = typeof event.error === "object" && event.error !== null
+        && "message" in event.error && typeof event.error.message === "string"
+        ? liveSttFailureDetail(new Error(event.error.message)) : "unknown server error";
+      throw new LiveSttError("server_error", new Error(`live transcription server error: ${detail}`));
+    }
     if (event.type === "transcript.text.delta") {
       if (typeof event.delta !== "string") throw new Error("invalid live transcript delta");
       if (transcript.length + event.delta.length > MAX_LIVE_PARTIAL_CHARS)
@@ -853,7 +858,7 @@ export function openLivePcm(options: OpenLivePcmOptions): LivePcmSession {
     await writeAll(`POST /v1/audio/transcriptions/live?${query} HTTP/1.1\r\nHost: ${options.host}:${options.port}\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nAccept: text/event-stream\r\n\r\n`);
   })().catch((error) => {
     if (!socket) releaseConfirmed = true;
-    fail(error instanceof Error ? error : new Error("live connection failed"));
+    fail(new LiveSttError("open_failed", error instanceof Error ? error : new Error("live connection failed")));
   });
   return {
     get released() { return releaseConfirmed; },

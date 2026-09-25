@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { startWebVoiceServer } from "../../src/web-voice/server";
 import { encodeStreamPcmFrame, encodeTurnAudioFrame } from "../../src/web-voice/protocol";
 import type { LivePcmSession } from "../../src/backends/stt/live-client";
+import { liveSttFailure, type LiveSttFailure } from "../../src/backends/stt/live-failure";
 
 function wav(): ArrayBuffer {
   const bytes = new Uint8Array(46);
@@ -35,7 +36,7 @@ function fakeStream() {
     finish(text: string) { if (!settled) { settled = true; resolve(text); } } };
 }
 
-function harness() {
+function harness(options: { openError?: Error; pushError?: Error } = {}) {
   let handlers: any;
   let socket: any;
   let server: any;
@@ -43,6 +44,7 @@ function harness() {
   const sent: Array<Record<string, unknown>> = [];
   const streams: ReturnType<typeof fakeStream>[] = [];
   const finals: string[] = [];
+  const failureStages: LiveSttFailure[] = [];
   let batchRetries = 0;
   const serve = ((options: any) => {
     handlers = options;
@@ -69,13 +71,15 @@ function harness() {
     onTurn: async () => ({ transcript: "", reply: "", audio: new ArrayBuffer(0) }),
     onStreamTurn: async (_wav, sink, options) => {
       if (!options?.streamFinal) { batchRetries++; sink.done(); return; }
-      const text = await options.streamFinal.catch(() => { batchRetries++; return "batch result"; });
+      const text = await options.streamFinal.catch((error: unknown) => { failureStages.push(liveSttFailure(error)); batchRetries++; return "batch result"; });
       finals.push(text);
       if (!sink.aborted()) sink.transcript(text);
       sink.done();
     },
     resolveSttStream: () => () => {
+      if (options.openError) throw options.openError;
       const stream = fakeStream();
+      if (options.pushError) stream.session.push = () => { throw options.pushError; };
       streams.push(stream);
       return stream.session;
     },
@@ -96,7 +100,30 @@ function harness() {
   const abortTurn = (sessionId: string, turnId: string) =>
     handlers.websocket.message(socket, JSON.stringify({ type: "abort", sessionId, turnId }));
   return { handle, connect, send, pcm, pcmBytes, abortCapture, abortTurn, disconnect: () => socket.close(),
-    streams, finals, sent, get batchRetries() { return batchRetries; } };
+    streams, finals, failureStages, sent, get batchRetries() { return batchRetries; } };
+}
+
+test("a final WAV with no live PCM reports never opened and takes the batch path", async () => {
+  const h = harness();
+  try {
+    const id = await h.connect();
+    await h.send(id, "short", wav());
+    expect(h.failureStages).toEqual(["never_opened"]);
+    expect(h.batchRetries).toBe(1);
+  } finally { await h.handle.stop(); }
+});
+
+for (const stage of ["open_failed", "push_rejected"] as const) {
+  test(`${stage} retains its stage through the final WAV`, async () => {
+    const h = harness(stage === "open_failed" ? { openError: new Error("synthetic open") } : { pushError: new Error("synthetic push") });
+    try {
+      const id = await h.connect();
+      await h.pcm(id, stage, 1, 1);
+      await h.send(id, stage, wav());
+      expect(h.failureStages).toEqual([stage]);
+      expect(h.batchRetries).toBe(1);
+    } finally { await h.handle.stop(); }
+  });
 }
 
 test("a stray new tap cannot abort a pending live final or trigger batch retry", async () => {

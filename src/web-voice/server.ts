@@ -16,6 +16,7 @@ import { redactSecrets } from "../redact";
 import type { TlsMaterial } from "./tls";
 import type { SpeculativeTurn, Speculator } from "./speculative";
 import type { LivePcmSession } from "../backends/stt/live-client";
+import { LiveSttError } from "../backends/stt/live-failure";
 import { isProbeFrame, decodeProbeFrame } from "./probe";
 import { snapshotSynthesizedWav } from "../platform/wav";
 import {
@@ -63,6 +64,7 @@ interface LiveCapture {
   latestPartial: string;
   session: LivePcmSession | null;
   failed: boolean;
+  failure?: Error;
   abort: AbortController;
   finalizing: boolean;
   /** PCM retained while the preceding ended stream owns the live seat. */
@@ -1991,6 +1993,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 ws.data.liveCapture.session?.abort();
                 ws.data.liveCapture.pendingPcm = [];
                 ws.data.liveCapture.failed = true;
+                ws.data.liveCapture.failure = new LiveSttError("aborted", new Error("live capture was aborted"));
               }
               return;
             }
@@ -2071,6 +2074,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               const openOwner = (): void => {
                 if (owner.abort.signal.aborted || (!owner.finalizing && ws.data.liveCapture !== owner)
                     || !accepting || !sockets.has(ws)) {
+                  owner.failed = true;
+                  owner.failure ??= new LiveSttError("aborted", new Error("live capture was aborted before opening"));
                   owner.pendingPcm = [];
                   return;
                 }
@@ -2094,12 +2099,20 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                   });
                   void owner.session.final.then(
                     () => { if (ws.data.liveCapture === owner) ws.data.liveCapture = null; },
-                    () => { owner.failed = true; if (ws.data.liveCapture === owner && owner.finalizing) ws.data.liveCapture = null; },
+                    (error: unknown) => {
+                      owner.failed = true;
+                      owner.failure ??= error instanceof Error ? error : new Error("live stream failed");
+                      if (ws.data.liveCapture === owner && owner.finalizing) ws.data.liveCapture = null;
+                    },
                   );
-                  for (const pcm of owner.pendingPcm) owner.session.push(pcm);
+                  for (const pcm of owner.pendingPcm) {
+                    try { owner.session.push(pcm); }
+                    catch (error) { throw new LiveSttError("push_rejected", error); }
+                  }
                   owner.pendingPcm = [];
-                } catch {
+                } catch (error) {
                   owner.failed = true;
+                  owner.failure = error instanceof LiveSttError ? error : new LiveSttError("open_failed", error);
                   owner.pendingPcm = [];
                   owner.session?.abort();
                 }
@@ -2127,8 +2140,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 else if (capture.pendingPcm.length < MAX_PENDING_PCM_FRAMES) capture.pendingPcm.push(frame.pcm.slice());
                 else throw new RangeError("live PCM buffer has too many frames");
               }
-              catch {
+              catch (error) {
                 capture.failed = true;
+                capture.failure = new LiveSttError("push_rejected", error);
                 capture.pendingPcm = [];
                 capture.session?.abort();
               }
@@ -2198,7 +2212,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             ws.data.liveCapture.pendingPcm = []; ws.data.liveCapture = null;
           }
           const endSession = (): Promise<string> => {
-            if (!capture?.session || capture.failed) return Promise.reject(new Error("live transcription failed"));
+            if (!capture?.session || capture.failed) return Promise.reject(capture?.failure ?? new LiveSttError("never_opened", new Error("live stream never opened")));
             const session = capture.session;
             let result: Promise<string>;
             try { result = session.end(); }
@@ -2216,9 +2230,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           };
           const streamFinal = capture
             ? capture.failed
-              ? Promise.reject(new Error("live transcription failed"))
+              ? Promise.reject(capture.failure ?? new LiveSttError("never_opened", new Error("live stream never opened")))
               : capture.waitingForSeat ? capture.waitingForSeat.then(endSession) : endSession()
-            : undefined;
+            : resolveSttStream?.() ? Promise.reject(new LiveSttError("never_opened", new Error("no live PCM arrived before the final WAV"))) : undefined;
           if (streamFinal) {
             endedCaptureFinals.add(streamFinal);
             void streamFinal.finally(() => { endedCaptureFinals.delete(streamFinal); }).catch(() => {});
