@@ -142,15 +142,20 @@ ollama pull qwen3.5:4b
 
 **3. Create the config: guided or by hand.**
 
-*Guided (preview):* run `cicero setup`. It prints a one-time URL for a local setup page; on a headless box, run `cicero setup --lan` and open the printed `https://<box-ip>:<port>/?token=…` from another device. The page:
+*Guided (preview):* run `cicero setup`. It prints a one-time URL for a local setup page; on a headless box, run `cicero setup --lan` and open the printed `https://<box-ip>:<port>/?token=…` from another device.
 
-- detects your hardware and recommends a tier
-- detects the runtimes you already have: the LLM provider (llama.cpp, Ollama, LM Studio, MLX or any OpenAI-compatible URL), the coding-agent brain, an optional task board (Hermes, Multica or Paperclip), STT and TTS
-- explains each choice as you go
-- checks the draft with the same checks as `cicero doctor`
-- writes an annotated `~/.cicero/config.yaml`, with a comment on every key it set
+The page opens on a diagram of the voice loop: **Hear** (speech-to-text) → **Think** (the small local model) → **Agent** (your coding agent, with an optional **Tasks** board) → **Speak** (text-to-speech), plus **Machine** and **Save**. Click any box to set up that part.
 
-It only writes when no config exists yet. It doesn't install speech engines or set up Telegram yet: anything still missing is listed with the command to run, and `cicero doctor` re-checks it. Add `--home <dir>` to try it without touching your real config. Details are in [setup → guided setup](docs/setup.md#guided-setup-preview).
+![The setup page's voice-loop diagram: click Hear, Think, Agent, Speak, Tasks, Machine or Save to set up that part](docs/images/setup-overview.png)
+
+Each part is one question with a few option cards:
+
+- each card says whether that software is running, installed or not found on this machine, and one is marked *Recommended* for your hardware
+- LLM runtimes it finds: llama.cpp, Ollama, LM Studio, MLX or any OpenAI-compatible URL; agents: Claude Code, Codex, Gemini, Qwen or an ACP harness; boards: Hermes, Multica or Paperclip
+- pick something that's missing and it shows the install steps and a *Check again* button; *Why this?* opens the longer explanation
+- **Save** runs the same checks as `cicero doctor`, then writes an annotated `~/.cicero/config.yaml` with a comment on every key it set
+
+Nothing is written until you save. It only writes when no config exists yet. It doesn't install speech engines or set up Telegram yet: anything still missing is listed with the command to run, and `cicero doctor` re-checks it. Add `--home <dir>` to try it without touching your real config. Details are in [setup → guided setup](docs/setup.md#guided-setup-preview).
 
 *By hand:* make `~/.cicero/config.yaml` with exactly this content (don't copy `config.yaml.example` for a first run — it documents every option and expects backends this quickstart doesn't install):
 

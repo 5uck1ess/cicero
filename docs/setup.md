@@ -4,20 +4,34 @@
 
 Run `cicero setup` (or `bun run src/index.ts setup` if `cicero` is not on your
 `PATH` yet). It starts a one-shot setup page and prints its URL with a one-time
-token; open that URL in a browser. The page is a walkthrough. Each step says
-what the component is, why an option is recommended for this machine, and what
-will happen, with a link to the matching doc.
+token; open that URL in a browser.
 
-| Step | What it does |
+**How the page works.** The first screen is a diagram of Cicero's voice loop:
+you talk, **Hear** turns speech into words, **Think** (a small local model)
+answers everyday talk, **Agent** (your coding agent) does the real work and can
+file **Tasks** on a board, and **Speak** reads the reply back to you. Two more
+boxes sit beside the loop: **Machine** (your hardware) and **Save**. Click any
+box to set up that part; a box shows your pick and turns green once it is set.
+
+![The setup page's voice-loop diagram](images/setup-overview.png)
+
+Each part is one question on one screen. The options are cards that say whether
+the software is running, installed or not found, and the one that fits your
+machine is marked *Recommended*. If you pick something that is missing, the
+screen shows the steps to install it and a *Check again* button. *Why this?*
+opens the longer explanation and a link to the matching doc. The row of step
+names at the top jumps between parts, and the browser's Back button works.
+Nothing is written until you save.
+
+| Part | What it does |
 | --- | --- |
-| System | Detects OS, CPU architecture, RAM, free disk, Apple Silicon and NVIDIA VRAM, then recommends a tier (`local-mlx`, `local-cuda` or `local-cpu`). |
-| LLM provider | Finds a running llama.cpp (`:8080`), Ollama (`:11434`) or LM Studio (`:1234`), and offers MLX on macOS or any OpenAI-compatible URL. It lists the runtime's models to pick from. |
-| Brain | Detects the coding-agent CLIs on `PATH`. A missing one gets its install and sign-in steps. |
-| Task board | Optional. Detects `hermes`, `multica` or `paperclipai` and probes the board once. Cicero only watches the board; the board system owns the tasks. |
-| STT / TTS | Options for your platform, with whether each engine's venv is installed and its server is running. |
-| Check | Runs the same checks as `cicero doctor` against the draft. Config errors block the write. Engines that are not installed or running yet are listed as "not ready yet" with the command to fix them, and you confirm before writing. |
-| Write | Shows the YAML, then writes a private, annotated `~/.cicero/config.yaml` with a comment on each key. It only writes when no config exists. An invalid existing config is backed up only if you choose to. |
-| Hand-off | Shows the command to start Cicero, then closes the setup page. |
+| Machine | Detects OS, CPU architecture, RAM, free disk, Apple Silicon and NVIDIA VRAM, then recommends a starting preset (NVIDIA GPU, Apple Silicon or CPU only; `local-cuda`, `local-mlx` or `local-cpu` in the config). |
+| Hear | Speech-to-text options for your platform, with whether each engine's venv is installed and its server is running. |
+| Think | Finds a running llama.cpp (`:8080`), Ollama (`:11434`) or LM Studio (`:1234`), and offers MLX on macOS or a cloud or custom OpenAI-compatible API. It lists the runtime's models to pick from. |
+| Agent | Detects the coding-agent CLIs on `PATH` (Claude Code, Codex, Gemini, Qwen, or an ACP harness), or a model API instead. A missing one gets its install and sign-in steps. |
+| Speak | Text-to-speech options, with the same installed and running status as Hear. |
+| Tasks | Optional. Detects `hermes`, `multica` or `paperclipai` and probes the board once. Cicero only watches the board; the board system owns the tasks. |
+| Save | Runs the same checks as `cicero doctor` against the draft. Config errors block saving. Engines that are not installed or running yet are listed with the command to fix them, and you confirm before saving. Then it writes a private, annotated `~/.cicero/config.yaml` with a comment on each key (only when no config exists; an invalid existing config is backed up only if you choose to) and shows the command to start Cicero. *Finish and close setup* stops the setup page. |
 
 Options:
 

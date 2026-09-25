@@ -355,7 +355,7 @@ function renderOverview() {
   var firstOpen = ORDER.find(function (id) { return !isDone(id); }) || 'review';
   app.append(
     h('h1', { text: 'Set up your voice loop' }),
-    h('p', { class: 'lede', text: 'Click any part to set it up. Nothing is saved until you review it.' }),
+    h('p', { class: 'lede', text: 'Click any part to set it up. Nothing is written until you save.' }),
     h('div', { class: 'diagram' }, [diagram('wide'), diagram('tall')]),
     h('div', { class: 'cta-row' }, [button(isDone('system') ? 'Continue setup' : 'Start with this machine', 'primary', function () { return go(firstOpen); })])
   );
