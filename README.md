@@ -98,7 +98,7 @@ Replies stream sentence-by-sentence, so speech starts while the brain is still g
 - **An OS.** Linux is the reference setup, with an NVIDIA GPU (CUDA) or plain CPU; macOS 14+ on Apple Silicon and Windows (CUDA) are supported — see [setup](docs/setup.md) for those paths.
 - **A GPU is recommended, not required.** The latency numbers above come from an NVIDIA card. On Linux, everything also runs on CPU: transcription gets noticeably slower, but the default voice engine (pocket-tts) is CPU-friendly at roughly half a second per sentence. On Apple Silicon (measured on an M4), the local MLX stack transcribes a spoken command in about a second and pocket-tts runs ~0.4 s per sentence (≈9× realtime) — see [stored results](docs/performance-portability-evaluation.md#stored-results--apple-silicon-m4) for the measured numbers.
 - **Disk and patience for first start.** The speech models and the small local LLM download on first use — expect a few GB.
-- **Tools:** [Bun](https://bun.sh) (the runtime), [uv](https://docs.astral.sh/uv/) (manages the Python model servers), ffmpeg, [Ollama](https://ollama.com) (runs the small local router model), and OpenSSL (used once, to create the HTTPS certificate).
+- **Tools:** [Bun](https://bun.sh) (the runtime), [uv](https://docs.astral.sh/uv/) (manages the Python model servers), ffmpeg, a local LLM runtime for the small router model ([Ollama](https://ollama.com) in the by-hand setup below; the guided setup also takes llama.cpp, LM Studio or MLX), and OpenSSL (used once, to create the HTTPS certificate).
 - **A coding agent, installed and authenticated.** Cicero ships no brain — bring Claude Code, Codex, Gemini, or any ACP/OpenAI-compatible harness.
 
 ## Try it in two minutes (sidecar mode)

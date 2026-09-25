@@ -1,3 +1,15 @@
+import { brandLogo, brandMark } from "../brand";
+
+const FAVICON = "data:image/svg+xml," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#090d12"/>${brandMark("#F5F4F0", "#CB9459")}</svg>`);
+
+/** Brand header: the shared logo files, or the mark plus a text wordmark if assets are missing. */
+function brandHeader(): string {
+  const light = brandLogo("light");
+  const dark = brandLogo("dark");
+  if (light && dark) return `<span class="logo logo-light">${light}</span><span class="logo logo-dark">${dark}</span>`;
+  return `<svg class="mark" viewBox="0 0 64 64" aria-hidden="true">${brandMark("currentColor", "var(--accent)")}</svg><span class="wordmark">Cicero</span>`;
+}
+
 /** Self-contained guided setup page: a clickable voice-loop diagram, then one question per step. */
 export function setupPage(): string {
   return `<!doctype html>
@@ -6,51 +18,64 @@ export function setupPage(): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cicero setup</title>
+<link rel="icon" href="${FAVICON}">
 <style>
 :root{
-  --bg:#F5F7F8; --surface:#FFFFFF; --ink:#16222E; --muted:#5E6B78; --line:#D5DDE3;
-  --accent:#9A6400; --accent-soft:#FBF1DC; --accent-line:#E3B55C;
-  --ok:#23895B; --ok-soft:#E3F3EA; --bad:#B23A2B; --bad-soft:#FBE9E6;
-  --radius-lg:18px; --radius:12px; --radius-sm:8px;
+  --bg:#F5F4F0; --surface:#FCFBF8; --ink:#17181C; --muted:#5E5F66; --line:#DFDBD1;
+  --accent:#A9713A; --accent-text:#835525; --accent-soft:#F2E7D8; --accent-line:#D6B28B;
+  --ok:#2A7A55; --ok-soft:#E4F0E8; --bad:#B23A2B; --bad-soft:#F8E6E2;
+  --r-outer:14px; --r-inner:12px; --r-ctl:8px;
+  --ease:cubic-bezier(.16,1,.3,1);
+  --shadow:0 1px 2px rgb(23 24 28/.05), 0 10px 28px -14px rgb(23 24 28/.22);
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   color-scheme:light;
 }
 @media (prefers-color-scheme:dark){:root{
-  --bg:#0F151B; --surface:#17202A; --ink:#E8EEF2; --muted:#93A1AE; --line:#2A3642;
-  --accent:#F2B33D; --accent-soft:#2B2414; --accent-line:#7A5A1C;
-  --ok:#4CC38A; --ok-soft:#14291F; --bad:#F07A6A; --bad-soft:#2D1714;
+  --bg:#090D12; --surface:#11161D; --ink:#F5F4F0; --muted:#9A9DA4; --line:#252B34;
+  --accent:#CB9459; --accent-text:#D9A56B; --accent-soft:#241C14; --accent-line:#6E5234;
+  --ok:#5CBF8C; --ok-soft:#12251B; --bad:#F07A6A; --bad-soft:#2A1512;
+  --shadow:0 1px 2px rgb(0 0 0/.3), 0 12px 32px -16px rgb(0 0 0/.6);
   color-scheme:dark;
 }}
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
 button,input,select{font:inherit;color:inherit}
-a{color:var(--accent)}
+a{color:var(--accent-text)}
 :focus-visible{outline:3px solid var(--accent-line);outline-offset:3px}
-.wrap{max-width:980px;margin:0 auto;padding:40px 24px 96px}
-header.top{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:40px}
-.brand{font-size:20px;font-weight:650;letter-spacing:-.01em;background:none;border:0;padding:0;cursor:pointer}
-.brand span{color:var(--muted);font-weight:450}
-.overview-link{background:none;border:0;color:var(--accent);cursor:pointer;padding:6px 0;font-weight:550}
-h1{font-size:30px;line-height:1.2;letter-spacing:-.02em;font-weight:680;margin:0 0 12px}
-.lede{color:var(--muted);font-size:17px;margin:0 0 36px;max-width:60ch}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.wrap{max-width:980px;margin:0 auto;padding:36px 24px 96px}
+header.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:44px}
+.brand{display:flex;align-items:center;gap:12px;background:none;border:0;padding:0;cursor:pointer;color:var(--ink)}
+.brand .logo svg{display:block;height:30px;width:auto}
+.brand .logo-dark{display:none}
+@media (prefers-color-scheme:dark){.brand .logo-light{display:none}.brand .logo-dark{display:block}}
+.brand .mark{width:34px;height:34px}
+.brand .wordmark{font-size:21px;font-weight:700;letter-spacing:-.01em}
+.brand .tag{color:var(--muted);font-size:15px;font-weight:500;padding-left:12px;border-left:1px solid var(--line);line-height:1.2}
+.overview-link{background:none;border:0;color:var(--accent-text);cursor:pointer;padding:6px 0;font-weight:600;transition:opacity .2s var(--ease)}
+.overview-link:hover{opacity:.75}
+h1{font-size:30px;line-height:1.15;letter-spacing:-.02em;font-weight:700;margin:0 0 12px;text-wrap:balance}
+.lede{color:var(--muted);font-size:17px;margin:0 0 36px;max-width:60ch;text-wrap:pretty}
+.section-h2{font-size:18px;font-weight:600;margin:0 0 12px}
+#app{transition:opacity .2s var(--ease)}
+#app[aria-busy="true"]{opacity:.6;pointer-events:none}
 
 /* Overview diagram */
-.diagram{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-lg);padding:28px}
+.diagram{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-outer);padding:28px;box-shadow:var(--shadow)}
 .diagram svg{display:block;width:100%;height:auto}
 .diagram .tall{display:none}
 @media (max-width:720px){.diagram .wide{display:none}.diagram .tall{display:block}.diagram{padding:16px}}
 .node{cursor:pointer}
-.node rect.box{fill:var(--surface);stroke:var(--line);stroke-width:1.5;transition:stroke .15s,fill .15s}
+.node rect.box{fill:var(--surface);stroke:var(--line);stroke-width:1.5;transition:stroke .2s var(--ease),fill .2s var(--ease)}
 .node:hover rect.box,.node:focus-visible rect.box{stroke:var(--accent);fill:var(--accent-soft)}
 .node:focus{outline:none}
-.node .title{font-size:19px;font-weight:650;fill:var(--ink)}
+.node .title{font-size:19px;font-weight:700;fill:var(--ink)}
 .node .sub{font-size:13px;fill:var(--muted)}
-.node .value{font-size:14px;font-weight:550;fill:var(--ink)}
+.node .value{font-size:14px;font-weight:600;fill:var(--ink)}
 .node.done rect.box{stroke:var(--ok)}
 .node .dot{fill:var(--line)}
 .node.done .dot{fill:var(--ok)}
-.node.todo .dot{fill:var(--accent)}
 .edge{stroke:var(--line);stroke-width:2;fill:none}
 .edge.soft{stroke-dasharray:5 6}
 .edge-label{font-size:12px;fill:var(--muted)}
@@ -60,86 +85,94 @@ h1{font-size:30px;line-height:1.2;letter-spacing:-.02em;font-weight:680;margin:0
 
 /* Chain nav on step screens */
 .chain{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 40px;padding:0;list-style:none}
-.chain button{display:flex;align-items:center;gap:8px;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:7px 14px;cursor:pointer;font-size:14px;color:var(--muted)}
+.chain button{display:flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:7px 14px;cursor:pointer;font-size:14px;color:var(--muted);transition:color .2s var(--ease),border-color .2s var(--ease)}
+.chain button:hover{color:var(--ink);border-color:var(--accent-line)}
 .chain button[aria-current="step"]{border-color:var(--accent);color:var(--ink);font-weight:600}
-.chain .pip{width:8px;height:8px;border-radius:50%;background:var(--line)}
-.chain .done .pip{background:var(--ok)}
+.chain .tick{color:var(--ok);font-weight:700;font-size:13px}
 
 /* Choice cards */
 .choices{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;margin:0 0 28px;padding:0;border:0}
-.choice{position:relative;display:block;background:var(--surface);border:1.5px solid var(--line);border-radius:var(--radius);padding:20px 20px 18px;cursor:pointer;transition:border-color .15s}
+.choice{position:relative;display:block;background:var(--surface);border:1.5px solid var(--line);border-radius:var(--r-inner);padding:20px 20px 18px;cursor:pointer;transition:border-color .2s var(--ease),box-shadow .2s var(--ease),transform .2s var(--ease)}
 .choice:hover{border-color:var(--accent-line)}
+.choice:active{transform:scale(.98)}
 .choice input{position:absolute;opacity:0;pointer-events:none}
-.choice:has(input:checked){border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.choice:has(input:checked){border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset,var(--shadow)}
 .choice:has(input:focus-visible){outline:3px solid var(--accent-line);outline-offset:3px}
-.choice .name{display:block;font-size:17px;font-weight:620;margin-bottom:6px}
+.choice .name{display:block;font-size:17px;font-weight:600;margin-bottom:6px}
 .choice .state ~ .name{padding-right:104px}
-.choice .note{display:block;color:var(--muted);font-size:14px;line-height:1.5}
-.choice .state{position:absolute;top:18px;right:18px;display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted)}
-.choice .state i{width:8px;height:8px;border-radius:50%;background:var(--line);display:inline-block}
-.choice .state.on i{background:var(--ok)}
+.choice .note{display:block;color:var(--muted);font-size:14px;line-height:1.5;text-wrap:pretty}
+.choice .state{position:absolute;top:18px;right:18px;display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:500;color:var(--muted)}
+.choice .state i{width:7px;height:7px;border-radius:50%;background:var(--ok);display:none}
+.choice .state.on i{display:inline-block}
 .choice .state.on{color:var(--ok)}
-.badge{display:inline-block;margin-top:12px;font-size:12.5px;font-weight:600;color:var(--accent);background:var(--accent-soft);border-radius:999px;padding:2px 10px}
+.badge{display:inline-block;margin-top:12px;font-size:12.5px;font-weight:600;color:var(--accent-text);background:var(--accent-soft);border-radius:4px;padding:2px 8px}
 
 /* Form + panels */
 .fields{display:grid;gap:18px;max-width:560px;margin:0 0 28px}
 .field span{display:block;font-size:14px;font-weight:600;margin-bottom:6px}
-.field input,.field select{width:100%;padding:11px 14px;border:1.5px solid var(--line);border-radius:var(--radius-sm);background:var(--surface)}
-.field input:focus,.field select:focus{border-color:var(--accent);outline:none}
-.check-inline{display:flex;gap:10px;align-items:flex-start;font-size:15px}
-.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:20px 22px;margin:0 0 24px;max-width:720px}
+.field small{display:block;color:var(--muted);font-size:13px;margin-top:6px}
+.field input,.field select{width:100%;padding:11px 14px;border:1.5px solid var(--line);border-radius:var(--r-ctl);background:var(--surface);transition:border-color .2s var(--ease),box-shadow .2s var(--ease)}
+.field input:focus,.field select:focus{border-color:var(--accent);outline:none;box-shadow:0 0 0 3px var(--accent-soft)}
+.check-inline{display:flex;gap:10px;align-items:flex-start;font-size:15px;margin:0 0 20px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-outer);padding:20px 22px;margin:0 0 24px;max-width:720px}
 .panel.warn{border-color:var(--accent-line);background:var(--accent-soft)}
-.panel h2{font-size:16px;margin:0 0 10px;font-weight:650}
-.panel p{margin:0 0 10px}
+.panel h2{font-size:16px;margin:0 0 10px;font-weight:600}
+.panel p{margin:0 0 10px;text-wrap:pretty}
 .panel p:last-child{margin-bottom:0}
 .panel ol{margin:0;padding-left:20px}
 .panel li{margin:0 0 10px}
 details.why{margin:0 0 28px;max-width:720px}
-details.why summary{cursor:pointer;color:var(--accent);font-weight:550;padding:4px 0}
+details.why summary{cursor:pointer;color:var(--accent-text);font-weight:600;padding:4px 0}
 details.why div{padding:12px 0 0;color:var(--muted)}
 details.why p{margin:0 0 10px}
-.cmd{display:flex;align-items:center;gap:10px;margin:8px 0 0;background:var(--bg);border:1px solid var(--line);border-radius:var(--radius-sm);padding:8px 8px 8px 12px}
+.cmd{display:flex;align-items:center;gap:10px;margin:8px 0 0;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-ctl);padding:8px 8px 8px 12px}
 .cmd code{flex:1;font:13.5px/1.5 var(--mono);overflow-x:auto;white-space:pre}
-.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin:0 0 32px}
-.fact{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px}
-.fact b{display:block;font-size:17px;font-weight:620}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:20px 0;margin:0 0 32px}
+.fact{padding:2px 20px;border-left:1px solid var(--line)}
+.fact b{display:block;font-size:17px;font-weight:600;font-variant-numeric:tabular-nums}
 .fact small{color:var(--muted);font-size:13.5px}
 .note-line{color:var(--muted);margin:-12px 0 28px}
-.warnline{color:var(--accent);font-weight:550;margin:0 0 28px}
+.note-line.tight{margin:0 0 14px}
+.warnline{color:var(--accent-text);font-weight:600;margin:0 0 28px}
 
 /* Review */
 .summary{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 28px}
-.pill{border-radius:999px;padding:6px 14px;font-size:14px;font-weight:600;background:var(--surface);border:1px solid var(--line)}
+.pill{border-radius:var(--r-ctl);padding:6px 14px;font-size:14px;font-weight:600;background:var(--surface);border:1px solid var(--line);font-variant-numeric:tabular-nums}
 .pill.ok{color:var(--ok);border-color:var(--ok);background:var(--ok-soft)}
-.pill.todo{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+.pill.todo{color:var(--accent-text);border-color:var(--accent-line);background:var(--accent-soft)}
 .pill.bad{color:var(--bad);border-color:var(--bad);background:var(--bad-soft)}
-.rows{list-style:none;margin:0 0 28px;padding:0;max-width:760px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+.rows{list-style:none;margin:0 0 28px;padding:0;max-width:760px;border:1px solid var(--line);border-radius:var(--r-outer);background:var(--surface)}
 .rows li{padding:14px 18px;border-top:1px solid var(--line)}
 .rows li:first-child{border-top:0}
-.rows .head{display:flex;gap:10px;align-items:baseline}
-.rows .head i{flex:none;width:9px;height:9px;border-radius:50%;background:var(--line);transform:translateY(-1px)}
-.rows .ok i{background:var(--ok)} .rows .warn i,.rows .notReady i{background:var(--accent)} .rows .blocking i{background:var(--bad)}
 .rows .name{font-weight:600}
-.rows .detail{color:var(--muted);font-size:14px;margin:4px 0 0 19px}
-.rows .cmd{margin-left:19px}
-pre.yaml{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;font:13.5px/1.6 var(--mono);overflow-x:auto;max-width:760px;margin:12px 0 0}
+.rows .detail{color:var(--muted);font-size:14px;margin:4px 0 0}
+pre.yaml{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-outer);padding:18px 20px;font:13.5px/1.6 var(--mono);overflow-x:auto;max-width:760px;margin:12px 0 0}
 
 /* Buttons */
 .actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:8px}
-.btn{border-radius:10px;padding:11px 22px;font-weight:620;cursor:pointer;border:1.5px solid var(--line);background:var(--surface)}
+.btn{border-radius:var(--r-ctl);padding:11px 22px;font-weight:600;cursor:pointer;border:1.5px solid var(--line);background:var(--surface);transition:transform .2s var(--ease),background-color .2s var(--ease),border-color .2s var(--ease),filter .2s var(--ease)}
+.btn:hover:not(:disabled){border-color:var(--accent-line)}
+.btn:active:not(:disabled){transform:translateY(1px)}
 .btn.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.btn.primary:hover:not(:disabled){filter:brightness(1.18);border-color:var(--ink)}
 .btn:disabled{opacity:.45;cursor:not-allowed}
-.btn.small{padding:6px 12px;font-size:13.5px;font-weight:600;border-radius:8px}
-.error{color:var(--bad);font-weight:550;margin:12px 0 0}
+.btn.small{padding:6px 12px;font-size:13.5px}
+.error{color:var(--bad);font-weight:600;margin:12px 0 0}
 .done-mark{font-size:40px;line-height:1;margin-bottom:16px;color:var(--ok)}
-@media (max-width:720px){.wrap{padding:24px 16px 72px}h1{font-size:25px}header.top{margin-bottom:28px}.choices{grid-template-columns:1fr}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+.spacer{height:24px}
+@media (max-width:720px){.wrap{padding:24px 16px 72px}h1{font-size:25px}header.top{margin-bottom:28px}.choices{grid-template-columns:1fr}.brand .tag{display:none}}
+@media (prefers-reduced-motion:no-preference){
+  #app > *{animation:rise .35s var(--ease) both}
+  #app > :nth-child(2){animation-delay:40ms} #app > :nth-child(3){animation-delay:80ms} #app > :nth-child(4){animation-delay:120ms} #app > :nth-child(n+5){animation-delay:160ms}
+  @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header class="top">
-    <button class="brand" id="brand" type="button">Cicero <span>setup</span></button>
+    <button class="brand" id="brand" type="button" aria-label="Cicero setup overview">${brandHeader()}<span class="tag">Setup</span></button>
     <button class="overview-link" id="to-overview" type="button" hidden>Back to overview</button>
   </header>
   <main id="app" aria-live="polite"></main>
@@ -244,6 +277,10 @@ function valueFor(id) {
 function gib(n) { return n == null ? 'unknown' : (n / 1073741824).toFixed(0) + ' GB'; }
 
 async function go(id) {
+  app.setAttribute('aria-busy', 'true');
+  try { await goInner(id); } finally { app.removeAttribute('aria-busy'); }
+}
+async function goInner(id) {
   if (location.hash.slice(1) !== (id === 'overview' ? '' : id)) history.pushState(null, '', id === 'overview' ? location.pathname : '#' + id);
   if (id === 'overview') { view = 'overview'; render(); return; }
   var serverId = id === 'review' ? 'check' : id;
@@ -322,9 +359,10 @@ function renderOverview() {
 function chain(current) {
   var ol = h('ol', { class: 'chain', 'aria-label': 'Setup steps' });
   ORDER.forEach(function (id) {
-    var b = h('button', { type: 'button', 'aria-current': id === current ? 'step' : false }, [h('span', { class: 'pip' }), document.createTextNode(STEP[id].short)]);
+    var done = isDone(id);
+    var b = h('button', { type: 'button', 'aria-current': id === current ? 'step' : false, 'aria-label': STEP[id].short + (done ? ', done' : '') }, [done ? h('span', { class: 'tick', 'aria-hidden': 'true', text: '\\u2713' }) : null, document.createTextNode(STEP[id].short)]);
     b.onclick = function () { go(id).catch(showFatal); };
-    ol.append(h('li', { class: isDone(id) ? 'done' : '' }, [b]));
+    ol.append(h('li', {}, [b]));
   });
   return ol;
 }
@@ -364,7 +402,7 @@ function renderSystem(step) {
   ]));
   if (f.gpuWarning) app.append(h('p', { class: 'warnline', text: f.gpuWarning }));
   var picked = state.tier;
-  var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: 'Starting preset', style: 'position:absolute;left:-9999px' })]);
+  var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: 'Starting preset' })]);
   ['local-cuda', 'local-mlx', 'local-cpu'].forEach(function (t) {
     var input = h('input', { type: 'radio', name: 'tier', value: t });
     input.checked = t === picked;
@@ -398,7 +436,7 @@ function renderPicker(id, step) {
   if (extra && extra.items.indexOf(picked) >= 0) { extra.value = picked; picked = extra.key; }
   if (extra && !extra.value) extra.value = extra.items[0];
 
-  var group = h('fieldset', { class: 'choices' }, [h('legend', { text: STEP[id].title, style: 'position:absolute;left:-9999px' })]);
+  var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: STEP[id].title })]);
   var detail = h('div');
   function realId() { return extra && picked === extra.key ? extra.value : picked; }
   function draw() {
@@ -452,7 +490,7 @@ function renderPicker(id, step) {
     if (id === 'board' && o === 'paperclip' && !f.paperclipEnv) fields.companyId = textInput(''), box.append(field('Paperclip company ID (blank uses your paperclipai context)', fields.companyId));
     if ((id === 'stt' || id === 'tts') && o === 'wyoming') { fields.host = textInput('127.0.0.1'); fields.port = textInput(id === 'stt' ? '10300' : '10200', 'number'); box.append(field('Server host', fields.host), field('Port', fields.port)); }
     if (o === 'elevenlabs') fields.apiKey = textInput('', 'password'), box.append(field('ElevenLabs API key', fields.apiKey));
-    if (fields.apiKey && state.storedSecrets && state.storedSecrets[id] && saved === o) fields.apiKey.placeholder = 'Saved. Leave blank to keep it.';
+    if (fields.apiKey && state.storedSecrets && state.storedSecrets[id] && saved === o) fields.apiKey.parentNode.append(h('small', { text: 'A key is saved. Leave blank to keep it.' }));
     if (box.childNodes.length) detail.append(box);
 
     var s = stateLabel(o, f);
@@ -502,7 +540,7 @@ function checkRow(check, kind) {
   var command = hint;
   var looksLikeCmd = /^(uv|bun|cicero|ollama|brew|apt|sudo|pip|npm|scoop|winget)\\b/.test(command.trim());
   return h('li', { class: kind }, [
-    h('div', { class: 'head' }, [h('i'), h('span', { class: 'name', text: check.name })]),
+    h('div', { class: 'head' }, [h('span', { class: 'name', text: check.name })]),
     h('p', { class: 'detail', text: check.detail }),
     looksLikeCmd ? cmd(command.trim()) : (hint ? h('p', { class: 'detail', text: hint }) : null)
   ]);
@@ -522,12 +560,12 @@ function renderReview(step) {
     g.blocking.length ? h('span', { class: 'pill bad', text: g.blocking.length + ' to fix' }) : null
   ]));
   if (g.blocking.length) {
-    app.append(h('h2', { text: 'Fix before saving', style: 'font-size:18px;margin:0 0 12px' }));
+    app.append(h('h2', { class: 'section-h2', text: 'Fix before saving' }));
     var ul = h('ul', { class: 'rows' }); g.blocking.forEach(function (c) { ul.append(checkRow(c, 'blocking')); }); app.append(ul);
   }
   if (g.notReady.length) {
-    app.append(h('h2', { text: 'Install before starting Cicero', style: 'font-size:18px;margin:0 0 6px' }),
-      h('p', { class: 'note-line', style: 'margin:0 0 14px', text: 'You can save now and run these afterwards.' }));
+    app.append(h('h2', { class: 'section-h2', text: 'Install before starting Cicero' }),
+      h('p', { class: 'note-line tight', text: 'You can save now and run these afterwards.' }));
     var ul2 = h('ul', { class: 'rows' }); g.notReady.forEach(function (c) { ul2.append(checkRow(c, 'notReady')); }); app.append(ul2);
   }
   var all = h('ul', { class: 'rows' });
@@ -548,7 +586,7 @@ function renderReview(step) {
   var ack = null;
   if (state.requiresNotReadyAcknowledgement) {
     ack = h('input', { type: 'checkbox' });
-    app.append(h('label', { class: 'check-inline', style: 'margin:0 0 20px' }, [ack, document.createTextNode('I\\u2019ll install the items above before starting Cicero.')]));
+    app.append(h('label', { class: 'check-inline' }, [ack, document.createTextNode('I\\u2019ll install the items above before starting Cicero.')]));
   }
   var save = button('Save config', 'primary', async function () {
     state = await api('/api/write', { acknowledgeNotReady: !!(ack && ack.checked) });
@@ -563,14 +601,14 @@ function renderDone() {
   var hd = state.handoff || {};
   app.append(h('div', { class: 'done-mark', 'aria-hidden': 'true', text: '\\u2713' }), h('h1', { text: 'Cicero is set up' }));
   if (hd.customHome) {
-    app.append(h('p', { class: 'lede', text: 'This trial config was saved outside your Cicero home. Copy it there to use it.' }), cmd(hd.copyCommand), h('div', { style: 'height:24px' }));
+    app.append(h('p', { class: 'lede', text: 'This trial config was saved outside your Cicero home. Copy it there to use it.' }), cmd(hd.copyCommand), h('div', { class: 'spacer' }));
   } else {
     app.append(h('p', { class: 'lede', text: 'Start Cicero, then open web voice or pair your phone.' }));
   }
   app.append(h('div', { class: 'panel' }, [h('h2', { text: 'Start Cicero' }), cmd(state.startCommand)]),
     h('div', { class: 'panel' }, [h('h2', { text: 'Pair your phone' }), cmd('cicero pair')]));
   var row = h('div', { class: 'actions' });
-  if (state.finished) app.append(h('p', { class: 'note-line', style: 'margin:0', text: 'Setup has closed. You can close this tab.' }));
+  if (state.finished) app.append(h('p', { class: 'note-line tight', text: 'Setup has closed. You can close this tab.' }));
   else { row.append(button('Finish and close setup', 'primary', async function () { state = await api('/api/handoff', {}); render(); }, row)); app.append(row); }
 }
 function showFatal(e) { app.replaceChildren(h('h1', { text: 'Setup lost contact' }), h('p', { class: 'lede', text: e.message + ' If setup has finished or stopped, run cicero setup again.' })); }
