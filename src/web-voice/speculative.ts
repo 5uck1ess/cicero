@@ -6,6 +6,7 @@ import { beginOwnedTone, settleTone, type ToneOptions } from "./tone";
 import { captureOperationalContext } from "./turn";
 import { writeSecureTempAudio } from "../platform/secure-temp-audio";
 import { SpeculativeSideEffectError } from "../brain/dial-back";
+import { SpeculativePermissionHold } from "../brain/speculative-permissions";
 
 /**
  * Speculative turns: when a mid-pause probe comes back "complete" with high
@@ -66,6 +67,8 @@ export interface SpeculativeTurn {
    * (timeout, replaced) — the caller then just runs the normal path.
    */
   claim(): boolean;
+  /** Release held ACP permissions only after the final recording is accepted. */
+  adopt?(): boolean;
   /** True when the final utterance's duration says the tail we transcribed was the whole thing. */
   coverageOk(finalMs: number): boolean;
   /** The tail transcript; null when STT failed or heard nothing (never rejects). */
@@ -171,6 +174,7 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
     let pumpSettled = true;
     const startedAt = performance.now();
     const turnAbort = new AbortController();
+    const permissionHold = new SpeculativePermissionHold();
 
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let abortTask: Promise<void> | null = null;
@@ -231,6 +235,7 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
             // Tells every wrapper this turn may be discarded, so anything it
             // cannot take back must refuse instead of acting.
             speculative: true,
+            speculativePermissionHold: permissionHold,
           })[Symbol.asyncIterator]();
           while (!aborted) {
             const next = it.next();
@@ -295,6 +300,7 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
     const doAbort = (why: string): Promise<void> => {
       if (!aborted) {
         aborted = true;
+        permissionHold.cancel();
         turnAbort.abort(new Error(`speculative turn aborted: ${why}`));
         if (buffer && !pumpSettled) log("info", `speculative: aborted (${why}) — cancelling the agent turn`);
       }
@@ -333,6 +339,11 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
         claimed = true;
         clearTimeout(timeout);
         log("info", `speculative: claimed ${Math.round(performance.now() - startedAt)}ms after the probe`);
+        return true;
+      },
+      adopt() {
+        if (aborted || !claimed) return false;
+        permissionHold.adopt();
         return true;
       },
       coverageOk(finalMs: number) {

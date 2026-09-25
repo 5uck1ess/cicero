@@ -147,3 +147,21 @@ Until that decision is made, use one actively speaking client at a time when
 the selected brain adapter does not itself serialize concurrent prompts.
 
 ACP streaming turns can speak a short tool-start line and a kind-based spoken-confirmation line through the same turn sink as the reply. A line is dropped when its turn is aborted or superseded. The legacy `POST /api/turn` endpoint returns one completed WAV and cannot deliver a notice while it is waiting; use the streaming WebSocket for live notices (the Telegram call bridge uses it).
+
+### Speculative turns and ACP tools
+
+`web_voice.speculative.enabled` is off by default and requires `turn.enabled`.
+When enabled, a confident mid-pause probe starts transcription and an agent turn
+before the final recording arrives. An ACP brain holds each tool permission
+request until that recording passes the adoption checks. Adoption applies the
+normal `auto_approve_tools` policy and `confirm_tools` spoken gate. Discard or
+abort cancels pending requests. The hold also works through ACP-only lanes and
+fallbacks. An ACP/CLI mix needs `allow_tool_brains: true`, as do subprocess CLI
+brains and other tool-capable backends without a permission round-trip. That
+setting retains its existing opt-in behavior for early tool execution.
+
+The hold covers only tools the agent routes through ACP `requestPermission`.
+Tools the agent auto-approves on its own side, such as in a yolo or auto-approve
+mode, can still run during speculation. Cicero logs this limitation at startup
+when ACP speculation is enabled. Speculation stays off while the intent judge
+runs, even with an ACP brain.

@@ -675,6 +675,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   };
   const serverOwnedSpec = (spec: SpeculativeTurn): SpeculativeTurn => ({
     claim: () => spec.claim(),
+    adopt: () => spec.adopt?.() ?? true,
     coverageOk: (finalMs) => spec.coverageOk(finalMs),
     transcript: () => spec.transcript(),
     tokens: () => spec.tokens(),

@@ -1,6 +1,13 @@
 import { test, expect } from "bun:test";
-import { brainExecutesTools } from "../../src/brain/capabilities";
+import { brainExecutesTools, canSpeculateWithBrain } from "../../src/brain/capabilities";
 import { OPENAI_COMPATIBLE_BACKENDS } from "../../src/backends/llm/openai";
+import { AcpBrain } from "../../src/brain/acp";
+import { DialBackBrain } from "../../src/brain/dial-back";
+import { FallbackBrain } from "../../src/brain/fallback";
+import { QuickIntentsBrain } from "../../src/brain/quick-intents";
+import { RoutingBrain } from "../../src/brain/routing";
+import { SwitchboardBrain } from "../../src/brain/switchboard";
+import type { Brain } from "../../src/types";
 
 /**
  * The gate that keeps speculative turns off brains that can change the world.
@@ -56,4 +63,28 @@ test("fails closed on an unrecognized backend", () => {
   // agent is the mistake that cannot be undone, so unknown means tool-executing.
   expect(brainExecutesTools({ backend: "some-future-agent", mode: "subprocess" })).toBe(true);
   expect(brainExecutesTools({ backend: "", mode: "subprocess" })).toBe(true);
+});
+
+test("ACP hold enables speculation by default while non-deferrable tool brains still need opt-in", () => {
+  const acp = { backend: "acp", mode: "subprocess" };
+  const codex = { backend: "codex", mode: "subprocess" };
+  const hold = { canDeferSpeculativePermissions: () => true };
+  const noHold = { canDeferSpeculativePermissions: () => false };
+  expect(canSpeculateWithBrain(acp, hold)).toBe(true);
+  expect(canSpeculateWithBrain(acp, noHold)).toBe(false);
+  expect(canSpeculateWithBrain(codex, noHold)).toBe(false);
+  expect(canSpeculateWithBrain(codex, noHold, true)).toBe(true);
+  expect(canSpeculateWithBrain({ backend: "ollama", mode: "subprocess" }, noHold)).toBe(true);
+});
+
+test("wrappers advertise the hold only when every reachable route supports it", () => {
+  const acp = new AcpBrain({ binary: "unused" });
+  const cli = {} as Brain;
+  expect(new DialBackBrain(acp).canDeferSpeculativePermissions()).toBe(true);
+  expect(new QuickIntentsBrain(acp, []).canDeferSpeculativePermissions()).toBe(true);
+  expect(new RoutingBrain(acp, acp).canDeferSpeculativePermissions()).toBe(true);
+  expect(new RoutingBrain(acp, cli).canDeferSpeculativePermissions()).toBe(false);
+  expect(new FallbackBrain([acp, cli], "coder").canDeferSpeculativePermissions()).toBe(false);
+  expect(new SwitchboardBrain(acp, { coder: { brain: acp } }).canDeferSpeculativePermissions()).toBe(true);
+  expect(new SwitchboardBrain(acp, { coder: { brain: cli } }).canDeferSpeculativePermissions()).toBe(false);
 });

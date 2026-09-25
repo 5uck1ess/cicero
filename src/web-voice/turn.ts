@@ -917,57 +917,85 @@ export async function streamWebTurn(
   // Adopt it when the final WAV's duration says nothing new was said — the
   // tail transcript IS the transcript, and the brain may already be talking.
   if (spec?.claim()) {
-    const finalMs = wavDurationMs(wav);
-    if (finalMs !== null && spec.coverageOk(finalMs)) {
-      const transcript = boundedTranscript((await spec.transcript())?.trim() ?? "");
-      if (deps.signal?.aborted || sink.aborted()) {
-        await spec.abort();
-        return;
-      }
-      if (transcript) {
-        timer.mark("stt");
-        // Same ordering as the normal path: nothing is announced, and so
-        // nothing is persisted, until the turn has passed the veto.
-        if (!(await dispatchAllowed(transcript, deps))) {
-          await spec.abort();
-          sink.done();
-          return;
-        }
-        sink.transcript(transcript);
+    let abortTask: Promise<void> | null = null;
+    const abortSpec = (): Promise<void> => {
+      if (!abortTask) abortTask = spec.abort();
+      return abortTask;
+    };
+    // A final-turn barge-in must reject held permissions immediately, even if
+    // transcript/dispatch work has not reached its next cancellation check.
+    const abortSpecOnSignal = (): void => {
+      void abortSpec().catch((error: unknown) => {
+        log("warn", `speculative cancellation failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    };
+    deps.signal?.addEventListener("abort", abortSpecOnSignal, { once: true });
+    if (deps.signal?.aborted) abortSpecOnSignal();
+    try {
+      const finalMs = wavDurationMs(wav);
+      if (finalMs !== null && spec.coverageOk(finalMs)) {
+        const transcript = boundedTranscript((await spec.transcript())?.trim() ?? "");
         if (deps.signal?.aborted || sink.aborted()) {
-          await spec.abort();
+          await abortSpec();
           return;
         }
-        try {
-          await streamReply(transcript, deps, sink, timer, spec.tokens() ?? undefined);
-        } catch (err: unknown) {
-          // A wrapper refused mid-flight, AFTER we adopted its stream — the
-          // semantic dial-back classifier can resolve well after transcript()
-          // settles. Nothing was spoken, and treating the ended stream as a
-          // finished turn would swallow the request silently: the user asked to
-          // be phoned and the phone would never ring. Re-run the utterance on
-          // the normal path, where the side effect is allowed to happen.
-          if (err instanceof SpeculativeSideEffectError) {
-            log("info", "web voice: speculation refused after adoption — re-running the turn on the normal path");
-            try {
-              await streamReply(transcript, deps, sink, timer);
-            } catch (retryErr: unknown) {
-              sink.error(retryErr instanceof Error ? retryErr.message : String(retryErr));
-            }
-          } else {
-            sink.error(err instanceof Error ? err.message : String(err));
+        if (transcript) {
+          timer.mark("stt");
+          // Same ordering as the normal path: nothing is announced, and so
+          // nothing is persisted, until the turn has passed the veto.
+          if (!(await dispatchAllowed(transcript, deps))) {
+            await abortSpec();
+            sink.done();
+            return;
           }
-        } finally {
-          // Token exhaustion is not the whole speculative lifetime: the probe
-          // tone classifier (and third-party provider work) may still be live.
-          // abort() is the turn's idempotent completion/cleanup barrier.
-          await spec.abort();
-          timer.report("web-turn-speculative");
+          if (deps.signal?.aborted || sink.aborted()) {
+            await abortSpec();
+            return;
+          }
+          // The final recording has passed coverage and veto. Until this point
+          // ACP permission requests from the speculative agent stay unanswered.
+          if (spec.adopt?.() === false) {
+            await abortSpec();
+            return;
+          }
+          sink.transcript(transcript);
+          if (deps.signal?.aborted || sink.aborted()) {
+            await abortSpec();
+            return;
+          }
+          try {
+            await streamReply(transcript, deps, sink, timer, spec.tokens() ?? undefined);
+          } catch (err: unknown) {
+            // A wrapper refused mid-flight, AFTER we adopted its stream — the
+            // semantic dial-back classifier can resolve well after transcript()
+            // settles. Nothing was spoken, and treating the ended stream as a
+            // finished turn would swallow the request silently: the user asked to
+            // be phoned and the phone would never ring. Re-run the utterance on
+            // the normal path, where the side effect is allowed to happen.
+            if (err instanceof SpeculativeSideEffectError) {
+              log("info", "web voice: speculation refused after adoption — re-running the turn on the normal path");
+              try {
+                await streamReply(transcript, deps, sink, timer);
+              } catch (retryErr: unknown) {
+                sink.error(retryErr instanceof Error ? retryErr.message : String(retryErr));
+              }
+            } else {
+              sink.error(err instanceof Error ? err.message : String(err));
+            }
+          } finally {
+            // Token exhaustion is not the whole speculative lifetime: the probe
+            // tone classifier (and third-party provider work) may still be live.
+            // abort() is the turn's idempotent completion/cleanup barrier.
+            await abortSpec();
+            timer.report("web-turn-speculative");
+          }
+          return;
         }
-        return;
       }
+      await abortSpec(); // longer utterance / unparseable WAV / dry STT — full pipeline below
+    } finally {
+      deps.signal?.removeEventListener("abort", abortSpecOnSignal);
     }
-    await spec.abort(); // longer utterance / unparseable WAV / dry STT — full pipeline below
   }
 
   // Tone classifies in parallel with STT (same WAV, different question); the

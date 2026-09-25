@@ -481,6 +481,79 @@ test("adoption: the speculative transcript and tokens are used, final STT is ski
   expect(calls.done).toBe(1);
 });
 
+test("final-audio adoption releases a speculative tool permission", async () => {
+  let toolRuns = 0;
+  const started = deferred();
+  const brain: SpeculatorDeps["brain"] = {
+    sendStream: (_message, options) => (async function* () {
+      started.resolve();
+      const response = await options!.speculativePermissionHold!.defer(() => ({
+        outcome: { outcome: "selected", optionId: "allow" },
+      }));
+      if (response.outcome.outcome === "selected") toolRuns++;
+      yield "Done.";
+    })(),
+  };
+  const turn = makeSpeculator(deps({ brain, transcript: "make a file" }).deps)(pcm(1000), 16_000, 1000, 0.95)!;
+  await turn.transcript();
+  await started.promise;
+  expect(toolRuns).toBe(0);
+  const sttCalls: string[] = [];
+  const { sink, calls } = capturingSink();
+  await streamWebTurn(wavOf(1000), turnDeps(sttCalls), sink, turn);
+  expect(toolRuns).toBe(1);
+  expect(sttCalls).toEqual([]);
+  expect(calls.sentence).toEqual(["Done."]);
+});
+
+test("discarded and aborted speculative turns cancel tool permission; late adoption stays inert", async () => {
+  for (const discardByCoverage of [true, false]) {
+    let toolRuns = 0;
+    const started = deferred();
+    const brain: SpeculatorDeps["brain"] = {
+      sendStream: (_message, options) => (async function* () {
+        started.resolve();
+        const response = await options!.speculativePermissionHold!.defer(() => ({
+          outcome: { outcome: "selected", optionId: "allow" },
+        }));
+        if (response.outcome.outcome === "selected") toolRuns++;
+      })(),
+    };
+    const turn = makeSpeculator(deps({ brain, transcript: "make a file" }).deps)(pcm(1000), 16_000, 1000, 0.95)!;
+    await turn.transcript();
+    await started.promise;
+    if (discardByCoverage) {
+      const sttCalls: string[] = [];
+      await streamWebTurn(wavOf(4000), turnDeps(sttCalls), capturingSink().sink, turn);
+      expect(sttCalls).toEqual(["stt"]);
+    } else {
+      await turn.abort();
+    }
+    expect(turn.adopt?.()).toBe(false);
+    expect(toolRuns).toBe(0);
+  }
+});
+
+test("final-turn abort cancels a claimed speculation while its transcript is pending", async () => {
+  const entered = deferred();
+  const release = deferred();
+  const controller = new AbortController();
+  let aborts = 0;
+  const spec = fakeSpec({
+    transcript: async () => { entered.resolve(); await release.promise; return "make a file"; },
+    abort: async () => { aborts++; },
+  });
+  const running = streamWebTurn(
+    wavOf(1000), { ...turnDeps([]), signal: controller.signal }, capturingSink().sink, spec,
+  );
+  await entered.promise;
+  controller.abort();
+  await Promise.resolve();
+  expect(aborts).toBe(1);
+  release.resolve();
+  await running;
+});
+
 test("adopted speculation never captures a second operational snapshot", async () => {
   const sttCalls: string[] = [];
   let captures = 0;
