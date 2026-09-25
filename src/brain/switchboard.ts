@@ -1,4 +1,5 @@
 import { classifySwitchboardIntent, DEFAULT_FRONT_DESK_ALIASES, type SwitchboardIntent } from "./switchboard-intent";
+import { normalizeRef } from "./switchboard-ref";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
 import { dialBackMemo, matchCallMe, SpeculativeSideEffectError } from "../call-intent";
@@ -374,19 +375,6 @@ function normalizeUtterance(message: string): string {
   return message.trim().replace(/,/g, "").replace(/\s+/g, " ").replace(/[.!?\s]+$/, "");
 }
 
-/** Normalize a captured lane reference: lowercase, strip filler and punctuation. */
-function normalizeRef(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/[.,!?'"]/g, "")
-    .replace(/\b(?:please|now|again|lane|profile|agent|employee)\b/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    // The pin pattern consumes a leading "the" before its capture, so aliases
-    // written naturally ("the thinker") must drop theirs too or never match.
-    .replace(/^the\s+/, "");
-}
-
 export class SwitchboardBrain implements Brain {
   sessionRestored(): boolean { return this.primary.sessionRestored?.() ?? false; }
   /** Pinned lane name, or null = the front desk (primary). */
@@ -462,7 +450,13 @@ export class SwitchboardBrain implements Brain {
     private classify?: (prompt: string, signal?: AbortSignal) => Promise<string>,
     options: SwitchboardOptions = {},
   ) {
-    this.frontDeskAliases = [...(options.frontDeskAliases ?? DEFAULT_FRONT_DESK_ALIASES)];
+    // Explicit aliases are validated against the roster at config load. The
+    // built-in defaults are not, so a default that names a lane steps aside:
+    // an existing lane alias keeps routing exactly as it did before.
+    const laneRefs = new Set(Object.entries(lanes).flatMap(([name, lane]) => [name, ...(lane.aliases ?? [])]).map(normalizeRef));
+    this.frontDeskAliases = options.frontDeskAliases
+      ? options.frontDeskAliases.map(normalizeRef).filter(Boolean)
+      : DEFAULT_FRONT_DESK_ALIASES.map(normalizeRef).filter((name) => name && !laneRefs.has(name));
     const lead = leadIn(this.frontDeskAliases);
     const names = this.frontDeskAliases.map(escapeRegex).join("|");
     this.pinRe = makePinRe(lead);
@@ -995,11 +989,11 @@ export class SwitchboardBrain implements Brain {
   private resolveLane(ref: string): string | null {
     const want = normalizeRef(ref);
     if (!want) return null;
-    if (this.isFrontDeskName(ref)) return null;
     for (const [name, def] of Object.entries(this.lanes)) {
       if (normalizeRef(name) === want) return name;
       if (def.aliases?.some((a) => normalizeRef(a) === want)) return name;
     }
+    if (this.isFrontDeskName(ref)) return null;
     // Fuzzy pass — STT mishears names ("talk to Thank" for think). One edit
     // of slack, two for longer refs, and only when exactly ONE lane matches.
     const budget = want.length >= 7 ? 2 : 1;
@@ -1018,7 +1012,7 @@ export class SwitchboardBrain implements Brain {
 
   private isFrontDeskName(ref: string): boolean {
     const want = normalizeRef(ref);
-    return this.frontDeskAliases.some((name) => normalizeRef(name) === want);
+    return this.frontDeskAliases.includes(want);
   }
 
   /**
@@ -1339,8 +1333,8 @@ export class SwitchboardBrain implements Brain {
     if (!pin) return null;
     const strict = pin[1] !== undefined;
     const target = pin[2] ?? "";
-    if (this.isFrontDeskName(target)) return null;
     const lane = this.resolveLane(target);
+    if (!lane && this.isFrontDeskName(target)) return null;
     if (!lane) {
       // An unambiguous transfer verb naming nobody we know ("transfer me to my
       // manager") still reads as a transfer request — answer it with the
@@ -1664,7 +1658,7 @@ export class SwitchboardBrain implements Brain {
     // A bare name as the ENTIRE utterance is a transfer — the natural
     // correction after a misheard "can I talk to X?" is to repeat the name.
     const bareRaw = /^(?:please\s+)?(?:the\s+)?(\S{1,24}(?:\s\S{1,24})?)$/.exec(m)?.[1];
-    if (bareRaw !== undefined && !this.isFrontDeskName(bareRaw)) {
+    if (bareRaw !== undefined) {
       const bare = normalizeRef(bareRaw); // the utterance keeps its case; refs don't
       // Exact names/aliases only — no fuzzy on bare words ("start" must not
       // route to stark), so resolveLane's fuzzy pass is bypassed here.
