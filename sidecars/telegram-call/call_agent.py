@@ -403,7 +403,7 @@ async def connect_daemon_socket():
         version=getattr(websockets, "__version__", ""),
     )
     return await websockets.connect(
-        websocket_url(WEB_URL),
+        websocket_url(WEB_URL) + "?client=call",
         ssl=ssl_context(),
         open_timeout=WS_OPEN_TIMEOUT_S,
         close_timeout=10,

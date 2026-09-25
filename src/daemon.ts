@@ -102,6 +102,7 @@ import { TurnHistory } from "./web-voice/history";
 import { classifyCallIntent, sendTelegramVoice, sendTelegramText, startTelegramUpdatePoller, telegramToken } from "./notify/telegram";
 import { briefingTurnContext, notificationTurnContext } from "./notify/context";
 import { KanbanWatcher, listViaCli, nudgeLine, spokenLine, taskLinkViaCli, taskParentsViaCli, type KanbanTask } from "./notify/kanban-watch";
+import { kanbanChannel } from "./notify/kanban-escalation";
 import { inQuietHours, composeBriefing, composeBriefingDigest, chunkBriefingDigest, minutesPrompt, worthMinutes, callMinutesThresholdMs, dayOf } from "./notify/briefing";
 import { PromptScheduler, scheduleLabel } from "./notify/schedules";
 import {
@@ -678,25 +679,49 @@ export class CiceroDaemon {
     }
     const kw = this.config.notify?.kanban;
     if (!this.kanbanWatcher && kw && kw.enabled !== false && kw.command) {
+      if (kw.escalation === "priority" && (kw.preset ?? "hermes") === "hermes") {
+        log("warn", "kanban watch: priority escalation ignored for Hermes preset (no priority field)");
+      }
       const listCommand = kw.command;
       this.kanbanWatcher = new KanbanWatcher({
         list: (signal) => listViaCli(listCommand, { signal, preset: kw.preset, assignees: kw.assignees }),
         announce: async (t, signal) => {
-          if (!this.webVoice) return;
           // A lane-owned task announces itself in that employee's voice.
           const lane = t.assignee && this.config.brain.lanes?.[t.assignee] ? t.assignee : undefined;
+          const channel = kanbanChannel(t, kw.escalation, kw.preset, new Date(),
+            this.config.notify?.quiet_hours, this.config.notify?.timezone);
+          if (channel === "briefing") {
+            await this.getOvernightStore().enqueue(spokenLine(t, !!lane));
+            return;
+          }
+          if (channel === "legacy" && !this.webVoice) return;
           // Deliverable link (usually the PR) rides along for the screen;
           // the notify path keeps it out of the spoken audio.
           const link = kw.task_command ? await taskLinkViaCli(t.id, kw.task_command, { signal, preset: kw.preset }) : null;
           if (signal.aborted) return;
           const line = link ? `${spokenLine(t, !!lane)} ${link}` : spokenLine(t, !!lane);
-          const res = await this.webVoice?.notify(line, lane);
+          if (channel !== "legacy" && this.config.notify?.telegram) {
+            try {
+              await sendTelegramText(this.config.notify.telegram, line, undefined, {}, signal);
+            } catch (error) {
+              if (signal.aborted) return;
+              log("warn", `kanban watch: priority text delivery failed: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            if (signal.aborted) return;
+          }
+          const callConsumerReady = channel === "call" && this.webVoice ? await callbackConsumerAlive() : false;
           if (signal.aborted) return;
-          // Callback: nobody was listening (parked) — ring the phone.
-          // The parked clip speaks the news the moment the call connects.
-          // Blocked tasks never auto-ring (the user's call): their text
-          // names the "have <name> call me" dial-back instead.
-          if (res?.parked && kw.call_back && t.status !== "blocked") {
+          const res = channel === "legacy"
+            ? await this.webVoice!.notify(line, lane)
+            : await this.webVoice?.notify(line, lane, {
+              urgent: true, telegramMirror: false, signal,
+              textOnly: channel === "text", parkForCall: callConsumerReady,
+            });
+          if (signal.aborted) return;
+          // Priority P0 reserves a clip for the call socket even when a browser
+          // heard it. Legacy callbacks still require nobody to be listening;
+          // legacy blocked tasks never auto-ring.
+          if (res?.parked && (callConsumerReady || (channel === "legacy" && kw.call_back && t.status !== "blocked"))) {
             const callbackRequest = JSON.stringify({ reason: line, at: Date.now() });
             const queued = await writeProactiveCallback(async () => {
               signal.throwIfAborted();

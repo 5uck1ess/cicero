@@ -1502,6 +1502,14 @@ describe("Config — fail-fast validation", () => {
     }
   });
 
+  test("kanban escalation accepts only priority", () => {
+    expect(loadYaml("notify:\n  kanban: { enabled: false, escalation: priority }\n")).not.toThrow();
+    for (const value of ["status", "none", "true", "42", "null", "[]"]) {
+      expect(loadYaml(`notify:\n  kanban: { enabled: false, escalation: ${value} }\n`))
+        .toThrow(/notify\.kanban\.escalation must be priority/);
+    }
+  });
+
   test("validates scheduled prompts: time format, prompt presence, and lane existence", () => {
     expect(loadYaml([
       "brain:",

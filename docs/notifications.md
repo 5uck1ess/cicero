@@ -27,14 +27,25 @@ notify:
     # task_command: [hermes, kanban, show]    # optional — `<task_command> <id> --json` prints one task; enables the deliverable-link card
     interval_seconds: 20            # poll cadence
     call_back: true                 # ring the phone for done/review — never for blocked
+    # escalation: priority          # optional: route Multica/Paperclip by board priority instead
     nudge_after_minutes: 60         # remind about tasks nobody picked up; 0 = off
 ```
 
 Announcements fire on `done`/`blocked`/`review`, and an `assignee` matching a lane name speaks in that employee's voice.
 
+`notify.kanban.escalation: priority` opts Multica or Paperclip into priority-based delivery for those transitions. With the key unset, the status-based behavior below is unchanged. The priority mode uses this table regardless of `call_back`:
+
+| Priority | Day | Quiet hours (`notify.quiet_hours` in `notify.timezone`) |
+| --- | --- | --- |
+| P0 | Call and text | Text |
+| P1 | Text | Text |
+| P2 | Next scheduled briefing | Next scheduled briefing |
+
+Multica `urgent` and Paperclip `critical` map to P0; `high` maps to P1 for either preset. All other values, including missing or unknown priority, map to P2. P0 also calls for a `blocked` transition by day. Text bypasses quiet-hour deferral in this mode; P2 news is placed in the existing briefing store, so configure `notify.briefing.at` to receive it. Hermes has no priority field, so the key is ignored for that preset with one startup warning. Manual requests such as “have ada call me” still work.
+
 Two deliberate policies ride along:
 
-- **Blocked tasks never auto-ring.** Even with `call_back: true`, a blocked transition only sends the text — and the text names the fix: *"Text 'have ada call me' to talk it through."* One text, one decision, zero unwanted calls; you dial back when you care.
+- **With the default status routing, blocked tasks never auto-ring.** Even with `call_back: true`, a blocked transition only sends the text — and the text names the fix: *"Text 'have ada call me' to talk it through."* Priority mode follows the table above.
 - **Unstarted tasks nag until someone owns them.** A task in canonical `todo` with no
   `started_at` past the threshold gets a "nobody's picked this up" reminder,
   repeating with a doubling gap (1h → 2h → 4h cap) until the task starts,
@@ -45,6 +56,7 @@ Two deliberate policies ride along:
 Keep the config key `notify.kanban`. `preset` accepts `hermes` (the default),
 `multica`, or `paperclip`; an unknown preset is a config error. Enabling the
 watch always requires an explicit `command`. Cicero supplies no default CLI.
+`escalation` accepts only `priority`; omit it for status routing.
 
 | Preset | List command | Optional `task_command` | Verification |
 | --- | --- | --- | --- |

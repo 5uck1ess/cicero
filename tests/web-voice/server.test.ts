@@ -1920,6 +1920,56 @@ test("handle.notify() forwards urgent so an in-process alert can skip quiet hour
   expect(seen).toEqual([true, undefined]);
 });
 
+test("handle.notify() textOnly delivers a card without synthesizing audio", async () => {
+  let renders = 0;
+  start({ onStreamTurn: async () => { /* unused */ }, onNotify: async () => { renders++; return wav(1); } });
+  const h = handle!;
+  const message = new Promise<string>((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${h.port}/ws?token=${TOKEN}`);
+    const timer = setTimeout(() => reject(new Error("ws timeout")), 3000);
+    ws.onopen = async () => {
+      expect(await h.notify("P1 needs you soon", undefined, { textOnly: true })).toEqual({ delivered: 1, parked: false });
+    };
+    ws.onmessage = (event: MessageEvent) => { clearTimeout(timer); ws.close(); resolve(String(event.data)); };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error("ws error")); };
+  });
+  expect(JSON.parse(await message)).toMatchObject({ type: "notify", text: "P1 needs you soon", audioBase64: "" });
+  expect(renders).toBe(0);
+});
+
+test("handle.notify() can retain P0 lane audio for the callback after a live browser delivery", async () => {
+  const voices: Array<string | undefined> = [];
+  start({ onStreamTurn: async () => { /* unused */ }, onNotify: async (_text, voice) => {
+    voices.push(voice);
+    return wav(3);
+  } });
+  const h = handle!;
+  const first = new WebSocket(`ws://127.0.0.1:${h.port}/ws?token=${TOKEN}`);
+  await new Promise<void>((resolve, reject) => { first.onopen = () => resolve(); first.onerror = () => reject(new Error("ws error")); });
+  expect(await h.notify("Ada here — broken deploy", "ada", { parkForCall: true }))
+    .toEqual({ delivered: 1, parked: true });
+  const browserMessages: string[] = [];
+  const secondBrowser = new WebSocket(`ws://127.0.0.1:${h.port}/ws?token=${TOKEN}`);
+  await new Promise<void>((resolve, reject) => {
+    secondBrowser.onopen = () => resolve();
+    secondBrowser.onerror = () => reject(new Error("ws error"));
+    secondBrowser.onmessage = (event: MessageEvent) => browserMessages.push(String(event.data));
+  });
+  await Bun.sleep(20);
+  expect(browserMessages).toEqual([]);
+  const next = await new Promise<string>((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${h.port}/ws?token=${TOKEN}&client=call`);
+    const timer = setTimeout(() => reject(new Error("ws timeout")), 3000);
+    ws.onmessage = (event: MessageEvent) => { clearTimeout(timer); ws.close(); resolve(String(event.data)); };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error("ws error")); };
+  });
+  first.close();
+  secondBrowser.close();
+  expect(JSON.parse(next)).toMatchObject({ type: "notify", text: "Ada here — broken deploy" });
+  expect(JSON.parse(next).audioBase64).not.toBe("");
+  expect(voices).toEqual(["ada"]);
+});
+
 test("/api/say renders text to WAV without broadcasting; 501/400 guarded", async () => {
   let notified = 0;
   let said = 0;

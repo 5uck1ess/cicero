@@ -338,6 +338,7 @@ notify:
     # task_command: [paperclipai, issue, get]     # appends <id> --json
     # assignees: { board-agent-id: coder }     # board id -> spoken name / lane name
     # call_back: false          # ring the phone when nobody was listening (never for blocked tasks)
+    # escalation: priority      # Multica/Paperclip: P0 call by day/text at night, P1 text, P2 briefing
     # nudge_after_minutes: 60   # repeat reminders for unstarted todo tasks; 0 = off
   # Mirror notifications to a phone via a Telegram bot (text messages;
   # set voice_note: true if you'd rather get spoken clips):
