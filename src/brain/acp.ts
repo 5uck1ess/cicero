@@ -658,6 +658,8 @@ interface ActiveAcpTurn {
   cancel: (error?: Error) => void;
   onNotice?: BrainTurnOptions["onNotice"];
   toolNoticeSent: boolean;
+  permissionHold?: BrainTurnOptions["speculativePermissionHold"];
+  speculative: boolean;
 }
 
 interface AcpRuntime {
@@ -725,6 +727,7 @@ async function terminateOwnedAcpProcess(proc: OwnedAcpProcess, graceMs: number):
  * requests are auto-approved when {@link AcpBrainConfig.autoApproveTools} is set.
  */
 export class AcpBrain implements Brain {
+  canDeferSpeculativePermissions(): boolean { return true; }
   private readonly rowSourceId = (() => {
     const id = randomBytes(16).toString("hex");
     return `b${id.slice(0, 16)}|${id.slice(16)}`;
@@ -990,8 +993,11 @@ export class AcpBrain implements Brain {
           notifyCancel,
           onNotice: options.onNotice,
           toolNoticeSent: false,
+          permissionHold: options.speculative ? options.speculativePermissionHold : undefined,
+          speculative: options.speculative === true,
           cancel: (error?: Error): void => {
             active.cancelled = true;
+            active.permissionHold?.cancelOwner(active);
             // Discard already-buffered speech on abort/overflow/stop. A prompt
             // that has settled may still have unread chunks, so discarding is
             // independent of protocol settlement.
@@ -1041,6 +1047,7 @@ export class AcpBrain implements Brain {
         void turn.then(
           async (res) => {
             active.settled = true;
+            active.permissionHold?.cancelOwner(active);
             stopReason = (res as { stopReason?: string }).stopReason;
             if (!active.cancelled && stopReason !== "cancelled" && this.runtime === runtime
               && !runtime.stopping && this.config.sessionFile && runtime.sessionIdentity) {
@@ -1054,10 +1061,12 @@ export class AcpBrain implements Brain {
           },
           (turnError: unknown) => {
             active.settled = true;
+            active.permissionHold?.cancelOwner(active);
             queue.end(new Error(`ACP agent turn failed: ${this.describeAgentError(turnError)}`));
           },
         ).catch((callbackError: unknown) => {
           active.settled = true;
+          active.permissionHold?.cancelOwner(active);
           queue.end(new Error(`ACP turn settlement failed: ${this.describeAgentError(callbackError)}`));
         });
 
@@ -1251,16 +1260,30 @@ export class AcpBrain implements Brain {
           if (runtime && (this.runtime !== runtime || runtime.stopping || runtime.sessionId !== params.sessionId)) {
             return { outcome: { outcome: "cancelled" } };
           }
-          const gated = this.confirmGate(params);
-          if (gated) return gated;
-          const wantKinds = this.config.autoApproveTools
-            ? ["allow_once", "allow_always"]
-            : ["reject_once", "reject_always"];
-          // Never fall back to options[0]: an allow-only request with auto-approve
-          // disabled must be cancelled, not silently authorized.
-          const choice = params.options.find((o) => wantKinds.includes(o.kind));
-          if (!choice) return { outcome: { outcome: "cancelled" } };
-          return { outcome: { outcome: "selected", optionId: choice.optionId } };
+          const active = runtime?.activeTurn;
+          if (runtime && (!active || active.cancelled || active.settled)) {
+            return { outcome: { outcome: "cancelled" } };
+          }
+          const decide = (): RequestPermissionResponse => {
+            // A held callback can settle after the agent turn or runtime ended.
+            // Never apply an old request to a newer turn's approval policy.
+            if (runtime && (this.runtime !== runtime || runtime.stopping || runtime.sessionId !== params.sessionId
+              || runtime.activeTurn !== active || !active || active.cancelled || active.settled)) {
+              return { outcome: { outcome: "cancelled" } };
+            }
+            const gated = this.confirmGate(params);
+            if (gated) return gated;
+            const wantKinds = this.config.autoApproveTools
+              ? ["allow_once", "allow_always"]
+              : ["reject_once", "reject_always"];
+            // Never fall back to options[0]: an allow-only request with auto-approve
+            // disabled must be cancelled, not silently authorized.
+            const choice = params.options.find((o) => wantKinds.includes(o.kind));
+            if (!choice) return { outcome: { outcome: "cancelled" } };
+            return { outcome: { outcome: "selected", optionId: choice.optionId } };
+          };
+          if (active?.speculative && !active.permissionHold) return { outcome: { outcome: "cancelled" } };
+          return active?.permissionHold ? await active.permissionHold.defer(decide, active) : decide();
         } catch (error: unknown) {
           log("warn", `acp: permission request failed closed: ${this.describeAgentError(error)}`);
           return { outcome: { outcome: "cancelled" } };
@@ -1607,6 +1630,7 @@ export class AcpBrain implements Brain {
 
     const active = runtime.activeTurn;
     if (active) {
+      active.permissionHold?.cancelOwner(active);
       active.queue.end(reason, true);
       if (!active.settled) {
         active.cancel(reason);

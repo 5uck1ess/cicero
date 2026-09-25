@@ -109,7 +109,7 @@ import {
   type BriefingRunResult,
 } from "./notify/briefing-scheduler";
 import { OvernightStore } from "./notify/overnight-store";
-import { brainExecutesTools, sendUnattended } from "./brain/capabilities";
+import { brainExecutesTools, canSpeculateWithBrain, sendUnattended } from "./brain/capabilities";
 import { buildResumePrimer, buildRosterNote } from "./web-voice/resume";
 import { HealthStore, briefLine } from "./health/store";
 import {
@@ -1749,12 +1749,11 @@ export class CiceroDaemon {
       // confident "complete" probe the tail is transcribed and the brain
       // started before the final WAV lands — see speculative.ts for the gates.
       const specCfg = wv.speculative;
-      // A speculative turn runs on speech the user has not finished. Tokens
-      // from a wrong guess are discarded; a tool call is not recallable. So a
-      // tool-executing brain stays out of the speculative path unless the
-      // operator has accepted that trade explicitly.
+      // ACP permission requests can be held until final-audio adoption. Every
+      // reachable route must support that hold; otherwise keep the opt-in gate.
       const specToolBrain = brainExecutesTools(this.config.brain);
-      const specSideEffectsAllowed = !specToolBrain || specCfg?.allow_tool_brains === true;
+      const specPermissionHold = this.brain.canDeferSpeculativePermissions?.() === true;
+      const specSideEffectsAllowed = canSpeculateWithBrain(this.config.brain, this.brain, specCfg?.allow_tool_brains === true);
       if (specCfg?.enabled && this.config.turn.enabled && !specSideEffectsAllowed) {
         log(
           "warn",
@@ -1785,6 +1784,9 @@ export class CiceroDaemon {
             operationalContext: (signal) => this.operationalContext(signal),
           })
         : undefined;
+      if (speculator && specPermissionHold) {
+        log("warn", "ACP speculation holds tools routed through requestPermission until adoption; agent-side auto-approved tools can still run during speculation");
+      }
       // Speech gate (Silero VAD): fetch-and-verify the pinned assets in the
       // background; the /vad routes 404 (and the page stays energy-only)
       // until they land. `speech_gate: false` skips the download entirely.

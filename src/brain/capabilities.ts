@@ -42,6 +42,17 @@ export function brainExecutesTools(
   return (config.base_url ?? "").trim() !== "";
 }
 
+/** The operator opt-in remains necessary for any tool route without a hold. */
+export function canSpeculateWithBrain(
+  config: Pick<BrainConfig, "backend" | "mode" | "base_url">,
+  brain: Pick<Brain, "canDeferSpeculativePermissions">,
+  allowToolBrains = false,
+): boolean {
+  return !brainExecutesTools(config)
+    || brain.canDeferSpeculativePermissions?.() === true
+    || allowToolBrains;
+}
+
 type OptionalBrainKey = {
   [K in keyof Brain]-?: object extends Pick<Brain, K> ? K : never;
 }[keyof Brain];
