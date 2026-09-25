@@ -140,6 +140,20 @@ describe("updateConfigFields", () => {
     expect(existsSync(lockPath)).toBe(false);
   });
 
+  test("a legacy lock with a recorded identity is stale after PID reuse", () => {
+    const lockPath = `${path}.update-lock`;
+    mkdirSync(lockPath, { mode: 0o700 });
+    writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+      pid: process.pid,
+      identity: "linux:synthetic-reused-instance",
+      token: "synthetic-stale-owner",
+      acquiredAtMs: 0,
+    }));
+    const lease = acquireConfigUpdateLock(path, { timeoutMs: 20 });
+    lease.release();
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
   test("two racing stale takeovers serialize their config commits", async () => {
     const lockPath = `${path}.update-lock`;
     mkdirSync(lockPath, { mode: 0o700 });

@@ -316,7 +316,16 @@ function inspectLegacyConfigLock(configPath: string): "absent" | "blocked" | "re
     ) {
       return "blocked";
     }
-    if (processIsAlive(owner.pid)) return "blocked";
+    if (owner.identity !== undefined) {
+      if (typeof owner.identity !== "string" || !owner.identity || owner.identity.length > MAX_PROCESS_IDENTITY_LENGTH) {
+        return "blocked";
+      }
+      const current = processIdentitySync(owner.pid);
+      if (current.kind === "identified" && current.value === owner.identity) return "blocked";
+      if (current.kind === "unsupported" && processIsAlive(owner.pid)) return "blocked";
+    } else if (processIsAlive(owner.pid)) {
+      return "blocked";
+    }
     // New writers never reuse the legacy fixed path. Two recoverers may both
     // target this dead directory, but neither can target a fresh unique lease.
     rmSync(lockPath, { recursive: true, force: true });

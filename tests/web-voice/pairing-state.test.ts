@@ -38,6 +38,24 @@ describe("web-voice pairing state", () => {
     }
   });
 
+  test("a pairing state with a reused PID is stale even while that PID is alive", () => {
+    const root = mkdtempSync(join(tmpdir(), "cicero-pairing-reuse-"));
+    const path = join(root, "pairing.json");
+    try {
+      writePairingState({ ...STATE, identity: "linux:boot:100" }, path);
+      expect(readPairingState(path, {
+        pidAlive: () => true,
+        processIdentity: () => ({ kind: "identified", value: "linux:boot:101" }),
+      })).toBeNull();
+      expect(readPairingState(path, {
+        pidAlive: () => true,
+        processIdentity: () => ({ kind: "identified", value: "linux:boot:100" }),
+      })?.identity).toBe("linux:boot:100");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("refuses symlink state paths and only removes state owned by the stopping PID", () => {
     const root = mkdtempSync(join(tmpdir(), "cicero-pairing-state-safe-"));
     const target = join(root, "target.json");

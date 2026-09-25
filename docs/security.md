@@ -99,8 +99,16 @@ config key — see [What leaves the box](data-flows.md).
 - **Local daemon control** — `~/.cicero/cicero.pid` is created exclusively at
   mode `0600` and includes the process-start identity. Duplicate starts fail,
   cleanup removes only the marker lease owned by that daemon, and `stop` never
-  trusts a PID without matching its recorded identity. Symlinked, non-regular,
+  trusts a PID without matching its recorded identity. Linux stop prefers a
+  pidfd for the final signal and falls back to an identity-checked numeric
+  signal when that API is unavailable; the fallback and other platforms retain
+  a PID-reuse window after the final check. Symlinked, non-regular,
   permissive, and legacy integer markers fail closed.
+- **Owned POSIX subprocess groups** — on Linux, the kernel retains a process
+  group ID while any task uses it as a group or session ID. Group signals can
+  therefore reach surviving descendants after the leader exits. An empty group
+  returns `ESRCH`, with a narrow numeric reuse window only after it empties.
+  The daemon pidfd protects `cicero stop`, not group signals.
 - **Incoming Telegram calls** — the optional call sidecar is fail-closed:
   `--listen` requires a non-empty `CICERO_TG_ALLOWED` user-id allowlist. The
   conspicuous `CICERO_TG_ALLOW_ANY_CALLER=I_UNDERSTAND` escape hatch opens the

@@ -53,8 +53,8 @@ jobs:
       # resolves a PID to a start-time identity through PowerShell on win32 and
       # /proc on Linux. The Linux reader runs in the `test` job; without this the
       # win32 reader had no runner and its only evidence was that it typechecked.
-      - name: Test brain spawning, generated TLS, history trimming, and config leases on Windows
-        run: bun test tests/brain-subprocess-cli.test.ts tests/web-voice/tls.test.ts tests/web-voice/history.test.ts tests/config-update.test.ts
+      - name: Test brain spawning, process jobs, generated TLS, history, and config leases on Windows
+        run: bun test tests/brain-subprocess-cli.test.ts tests/process/windows-job.test.ts tests/process/owned-process.test.ts tests/web-voice/tls.test.ts tests/web-voice/history.test.ts tests/config-update.test.ts
 
   python-sidecars:
     name: Python sidecars (${{ matrix.python-version }}, ${{ matrix.resolution }})

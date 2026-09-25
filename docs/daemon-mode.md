@@ -9,8 +9,11 @@ The same voice loop as web-voice, but with a local mic/speaker on the box itself
 Only one daemon can claim `~/.cicero/cicero.pid`. The marker is a private
 versioned record containing both the PID and the operating system's process
 start identity, not a bare PID. `cicero status` and `cicero stop` verify that
-identity before reporting or signaling the process, so a stale marker cannot
-target an unrelated process after PID reuse. A crashed daemon's verified-stale
+identity before reporting or signaling the process. On Linux, `cicero stop`
+prefers a pidfd opened through libc's raw syscall interface, checks identity
+again, and signals through that descriptor. If the API is unavailable, it
+rechecks identity and falls back to a numeric `SIGTERM`. That fallback, and the
+macOS and Windows stop paths, retain a final PID-reuse window. A crashed daemon's verified-stale
 marker is replaced on the next start. Unsafe legacy, symlinked, non-regular, or
 non-private markers are rejected with an actionable error instead of followed
 or overwritten.
