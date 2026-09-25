@@ -91,6 +91,11 @@ export class AudioCppProvider implements TTSProvider {
    * use or after the selected source fingerprint changes.
    */
   private heldReferences = new Map<string, AudioCppReferenceLease>();
+  /**
+   * Set when the served model rejects runtime style controls (pocket-tts
+   * refuses any `speed`, even 1.0). Renders then omit `speed` until stop().
+   */
+  private styleUnsupported = false;
 
   constructor(
     config: TTSProviderConfig,
@@ -129,7 +134,7 @@ export class AudioCppProvider implements TTSProvider {
     const signal = providerSignal(this.timeoutMs, options?.signal);
     try {
       const payload: Record<string, unknown> = { model: this.model, input: text };
-      if (options?.speed !== undefined) payload.speed = options.speed;
+      if (options?.speed !== undefined && !this.styleUnsupported) payload.speed = options.speed;
       const reference = await this.acquireReference(voice, signal);
       try {
         signal.throwIfAborted();
@@ -158,8 +163,15 @@ export class AudioCppProvider implements TTSProvider {
           response = await fetch(url, init);
         }
 
+        let detail = response.ok ? "" : await readErrorDetail(response);
+        if (!response.ok && payload.speed !== undefined && detail.includes("does not support runtime style controls")) {
+          // pocket-tts rejects any speed; latch it off and resend this sentence once.
+          this.styleUnsupported = true;
+          delete payload.speed;
+          response = await fetch(url, { ...init, body: JSON.stringify(payload) });
+          detail = response.ok ? "" : await readErrorDetail(response);
+        }
         if (!response.ok) {
-          const detail = await readErrorDetail(response);
           throw new Error(`audio.cpp returned ${response.status}${detail ? `: ${detail}` : ""}`);
         }
 
@@ -312,6 +324,7 @@ export class AudioCppProvider implements TTSProvider {
     // Synchronous, before any await: a startup still in flight must see this.
     this.cancelStartup();
     this.acceptingRenders = false;
+    this.styleUnsupported = false;
     this.lifecycleIntent += 1;
     if (this.lifecycleTailKind === "stop" && this.stopTask) return this.stopTask;
     this.lifecycleTailKind = "stop";

@@ -287,6 +287,43 @@ test("throws with the status + body on a non-OK response", async () => {
   await expect(p.generateAudio("hi")).rejects.toThrow(/503/);
 });
 
+test("forwards speed when the served model accepts it", async () => {
+  const calls = captureFetch(new Uint8Array([0]));
+  const p = new AudioCppProvider({ backend: "audiocpp" });
+  await p.generateAudio("hi", undefined, { speed: 1.2 });
+  expect(JSON.parse(String(calls[0].init.body)).speed).toBe(1.2);
+});
+
+test("a model that rejects style controls gets the sentence resent without speed, then never sees speed", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  globalThis.fetch = (async (_url: unknown, init: unknown) => {
+    const body = JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>;
+    bodies.push(body);
+    if ("speed" in body) {
+      return new Response(
+        JSON.stringify({ error: { message: "PocketTTS framework session does not support runtime style controls", type: "server_error" } }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response(new Uint8Array([0x52]), { status: 200, headers: { "Content-Type": "audio/wav" } });
+  }) as unknown as typeof fetch;
+
+  const p = new AudioCppProvider({ backend: "audiocpp" });
+  expect(new Uint8Array(await p.generateAudio("one", undefined, { speed: 1 }))).toEqual(new Uint8Array([0x52]));
+  expect(bodies.map((b) => "speed" in b)).toEqual([true, false]);
+
+  await p.generateAudio("two", undefined, { speed: 1.2 });
+  expect(bodies.length).toBe(3);
+  expect("speed" in bodies[2]).toBe(false);
+});
+
+test("other 500s are not retried without speed", async () => {
+  const calls = captureFetch("mimi_encoder graph allocation failed", 500, "application/json");
+  const p = new AudioCppProvider({ backend: "audiocpp" });
+  await expect(p.generateAudio("hi", undefined, { speed: 1 })).rejects.toThrow(/500/);
+  expect(calls.length).toBe(1);
+});
+
 test("health is true when /v1/models responds ok, false when unreachable", async () => {
   const calls = captureFetch(JSON.stringify({ object: "list", data: [{ id: "pocket-tts" }] }), 200, "application/json");
   const p = new AudioCppProvider({ backend: "audiocpp" });
