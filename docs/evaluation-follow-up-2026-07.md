@@ -144,6 +144,28 @@ Behavioral tests for the current transport paths should be the migration oracle.
 This is a maintainability and multi-device feature, not a prerequisite for the
 single-operator product to work.
 
+### Turn coordination shipped
+
+`src/turn-coordinator.ts` now owns foreground admission across local microphone,
+stdin text, browser voice/text, the HTTP voice and chat endpoints used by the
+Telegram call bridge, and the direct Telegram text bot. A new foreground turn
+aborts the previous foreground turn in the same session; separate browser
+sockets and HTTP requests remain independent. The coordinator drops events from
+a superseded turn and emits one terminal outcome. The web turn pipeline emits
+transcript, reply text, audio, and terminal events through a coordinator sink;
+web protocol framing and playback stay in the server. The local microphone's
+existing router, executor, and speaker pipeline remains behind coordinator
+ownership and cancellation, preserving its classification and barge-in behavior.
+Microphone capture and STT still precede command admission in the listener.
+They observe the local microphone session's foreground generation: a new local
+turn cancels an in-flight local STT call and drops a late addressed-to-me verdict.
+Silence, echo, and addressed-to-me filtering stay in the listener, and pre-dispatch
+local capture does not emit coordinator events.
+Web tone and parked continuations accepted by the server's background tracker
+have separate background leases and are not superseded by foreground admission.
+The existing per-session context policy and bounded web history remain in place;
+the coordinator also caps input and emitted output.
+
 ### Performance changes require an end-to-end benchmark
 
 First-audio streaming, finite local-LLM and owned-subprocess deadlines, bounded
