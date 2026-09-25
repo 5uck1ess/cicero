@@ -391,7 +391,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       "history_compaction",
       "binary", "binary_args", "ollama_port", "ollama_model",
       "base_url", "model", "api_key", "api_key_env", "max_tokens", "timeout_ms", "turn_timeout_ms",
-      "headers", "session_header", "narrate_progress", "unset_env", "agent_first", "thinking_filler",
+      "headers", "session_header", "narrate_progress", "unset_env", "agent_first", "thinking_filler", "tool_start_notice",
     ], issues);
     checkString(config.brain.backend, "brain.backend", issues);
     if (config.brain.mode !== "subprocess" && config.brain.mode !== "tab-inject") {
@@ -411,7 +411,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
         max: MAX_ACP_PENDING_TURN_LIMIT,
       });
     }
-    for (const key of ["auto_approve_tools", "confirm_retry", "narrate_progress", "agent_first", "thinking_filler"]) {
+    for (const key of ["auto_approve_tools", "confirm_retry", "narrate_progress", "agent_first", "thinking_filler", "tool_start_notice"]) {
       checkOptionalBoolean(config.brain, key, "brain", issues);
     }
     if (config.brain.history_compaction !== undefined
