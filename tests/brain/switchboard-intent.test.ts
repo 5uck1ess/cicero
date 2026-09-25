@@ -7,7 +7,7 @@ import type { Brain } from "../../src/types";
 const roster = { coder: { aliases: ["Rick", "the coder"] }, reviewer: { aliases: ["Ada"] } };
 const json = (extra = {}) => JSON.stringify({ intent: "rollcall", target: null, request_now: true, confidence: 0.9, ...extra });
 const signal = () => new AbortController().signal;
-const front = (): Brain => ({ start: async () => {}, stop: async () => {}, send: async () => "normal turn", isRunning: () => true });
+const front = (): Brain => ({ start: async () => {}, stop: async () => {}, send: async () => "normal turn", injectContext: () => {}, restart: async () => {}, health: async () => true });
 
 test("strict JSON rejects malformed, unknown, missing, additional and oversized fields", () => {
   for (const raw of ["rollcall", "```json\n" + json() + "\n```", "null", "[]", "{}", json({ intent: "dance" }), json({ confidence: 1.1 }), json({ confidence: "0.9" }), json({ request_now: 1 }), json({ target: 12 }), json({ extra: 1 }), json({ target: "x".repeat(129) }), " ".repeat(MAX_INTENT_BYTES) + json(), JSON.stringify({ intent: "none", target: null, confidence: 1 })]) {
@@ -232,7 +232,9 @@ test("discarded uncooperative brain is quarantined, then retryable after settlem
   };
   let verdicts = 0;
   const sb = new SwitchboardBrain(brain, { coder: { brain: front() } }, async () => json({ intent: verdicts++ === 0 ? "rollcall" : "none" }), { intentDrainTimeoutMs: 10 });
-  await expect(sb.send("gather the gang")).rejects.toThrow("still settling");
+  expect(await sb.send("gather the gang")).toContain("checking in");
+  // The control did not dispatch to the retiring brain; ordinary work does.
+  await expect(sb.send("ordinary work while retiring")).rejects.toThrow("still settling");
   expect(count).toBe(1);
   late.resolve("discarded late text");
   await tick();
