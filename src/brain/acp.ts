@@ -659,6 +659,7 @@ interface ActiveAcpTurn {
   onNotice?: BrainTurnOptions["onNotice"];
   toolNoticeSent: boolean;
   permissionHold?: BrainTurnOptions["speculativePermissionHold"];
+  speculative: boolean;
 }
 
 interface AcpRuntime {
@@ -993,9 +994,10 @@ export class AcpBrain implements Brain {
           onNotice: options.onNotice,
           toolNoticeSent: false,
           permissionHold: options.speculative ? options.speculativePermissionHold : undefined,
+          speculative: options.speculative === true,
           cancel: (error?: Error): void => {
             active.cancelled = true;
-            active.permissionHold?.cancel();
+            active.permissionHold?.cancelOwner(active);
             // Discard already-buffered speech on abort/overflow/stop. A prompt
             // that has settled may still have unread chunks, so discarding is
             // independent of protocol settlement.
@@ -1045,7 +1047,7 @@ export class AcpBrain implements Brain {
         void turn.then(
           async (res) => {
             active.settled = true;
-            active.permissionHold?.cancel();
+            active.permissionHold?.cancelOwner(active);
             stopReason = (res as { stopReason?: string }).stopReason;
             if (!active.cancelled && stopReason !== "cancelled" && this.runtime === runtime
               && !runtime.stopping && this.config.sessionFile && runtime.sessionIdentity) {
@@ -1059,12 +1061,12 @@ export class AcpBrain implements Brain {
           },
           (turnError: unknown) => {
             active.settled = true;
-            active.permissionHold?.cancel();
+            active.permissionHold?.cancelOwner(active);
             queue.end(new Error(`ACP agent turn failed: ${this.describeAgentError(turnError)}`));
           },
         ).catch((callbackError: unknown) => {
           active.settled = true;
-          active.permissionHold?.cancel();
+          active.permissionHold?.cancelOwner(active);
           queue.end(new Error(`ACP turn settlement failed: ${this.describeAgentError(callbackError)}`));
         });
 
@@ -1259,6 +1261,9 @@ export class AcpBrain implements Brain {
             return { outcome: { outcome: "cancelled" } };
           }
           const active = runtime?.activeTurn;
+          if (runtime && (!active || active.cancelled || active.settled)) {
+            return { outcome: { outcome: "cancelled" } };
+          }
           const decide = (): RequestPermissionResponse => {
             // A held callback can settle after the agent turn or runtime ended.
             // Never apply an old request to a newer turn's approval policy.
@@ -1277,7 +1282,8 @@ export class AcpBrain implements Brain {
             if (!choice) return { outcome: { outcome: "cancelled" } };
             return { outcome: { outcome: "selected", optionId: choice.optionId } };
           };
-          return active?.permissionHold ? await active.permissionHold.defer(decide) : decide();
+          if (active?.speculative && !active.permissionHold) return { outcome: { outcome: "cancelled" } };
+          return active?.permissionHold ? await active.permissionHold.defer(decide, active) : decide();
         } catch (error: unknown) {
           log("warn", `acp: permission request failed closed: ${this.describeAgentError(error)}`);
           return { outcome: { outcome: "cancelled" } };
@@ -1624,7 +1630,7 @@ export class AcpBrain implements Brain {
 
     const active = runtime.activeTurn;
     if (active) {
-      active.permissionHold?.cancel();
+      active.permissionHold?.cancelOwner(active);
       active.queue.end(reason, true);
       if (!active.settled) {
         active.cancel(reason);

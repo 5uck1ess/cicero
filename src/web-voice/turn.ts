@@ -964,7 +964,7 @@ export async function streamWebTurn(
             return;
           }
           try {
-            await streamReply(transcript, deps, sink, timer, spec.tokens() ?? undefined);
+            await streamReply(transcript, deps, sink, timer, spec.tokens() ?? undefined, undefined, spec);
           } catch (err: unknown) {
             // A wrapper refused mid-flight, AFTER we adopted its stream — the
             // semantic dial-back classifier can resolve well after transcript()
@@ -1134,6 +1134,7 @@ async function streamReply(
   timer: ReturnType<typeof newTurnTimer>,
   pretokens?: AsyncIterable<string>,
   toneTag?: string | null,
+  speculativeTurn?: SpeculativeTurn,
 ): Promise<void> {
   // Spoken voice controls are session-local fast paths: no brain turn, no
   // conversation-state perturbation. Volume applies on the client before the
@@ -1338,6 +1339,7 @@ async function streamReply(
         firstAudio = true;
       }).catch(() => { /* an optional notice cannot fail the reply */ });
     };
+    speculativeTurn?.attachNotices?.(onNotice);
     const turnOptions = turnAbort
       ? { signal: turnAbort.signal, systemContext: systemContext ?? undefined, onNotice }
       : undefined;

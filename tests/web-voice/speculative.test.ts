@@ -2,6 +2,8 @@ import { test, expect } from "bun:test";
 import {
   MAX_SPECULATIVE_TOKEN_BYTES,
   MAX_SPECULATIVE_TOKEN_ITEMS,
+  MAX_SPECULATIVE_NOTICE_BYTES,
+  MAX_SPECULATIVE_NOTICE_ITEMS,
   makeSpeculator,
   pcmToWav,
   type SpeculatorDeps,
@@ -430,10 +432,11 @@ import { streamWebTurn, type WebStreamDeps, type WebReplySink } from "../../src/
 import type { SpeculativeTurn } from "../../src/web-voice/speculative";
 
 function capturingSink() {
-  const calls = { transcript: [] as string[], sentence: [] as string[], audio: 0, done: 0, error: [] as string[] };
+  const calls = { transcript: [] as string[], sentence: [] as string[], notice: [] as string[], audio: 0, done: 0, error: [] as string[] };
   const sink: WebReplySink = {
     transcript: (t) => calls.transcript.push(t),
     sentence: (t) => calls.sentence.push(t),
+    notice: (t) => calls.notice.push(t),
     audio: () => { calls.audio++; },
     control: () => { /* unused */ },
     done: () => { calls.done++; },
@@ -504,6 +507,69 @@ test("final-audio adoption releases a speculative tool permission", async () => 
   expect(toolRuns).toBe(1);
   expect(sttCalls).toEqual([]);
   expect(calls.sentence).toEqual(["Done."]);
+});
+
+test("a notice raised before adoption is spoken exactly once after adoption", async () => {
+  const raised = deferred();
+  const brain: SpeculatorDeps["brain"] = {
+    sendStream: (_message, options) => (async function* () {
+      options?.onNotice?.({ type: "tool", text: "Starting a tool." });
+      options?.onNotice?.({ type: "confirmation", text: "Waiting on your OK…" });
+      raised.resolve();
+      yield "Done.";
+    })(),
+  };
+  const turn = makeSpeculator(deps({ brain, transcript: "do the guarded task" }).deps)(pcm(1000), 16_000, 1000, 0.95)!;
+  await turn.transcript();
+  await raised.promise;
+  const { sink, calls } = capturingSink();
+  expect(calls.notice).toEqual([]);
+  await streamWebTurn(wavOf(1000), turnDeps([]), sink, turn);
+  expect(calls.notice).toEqual(["Starting a tool.", "Waiting on your OK…"]);
+});
+
+test("a discarded speculation never forwards buffered notices", async () => {
+  const raised = deferred();
+  const brain: SpeculatorDeps["brain"] = {
+    sendStream: (_message, options) => (async function* () {
+      options?.onNotice?.({ type: "confirmation", text: "Waiting on your OK…" });
+      raised.resolve();
+      yield "Should be dropped.";
+    })(),
+  };
+  const turn = makeSpeculator(deps({ brain, transcript: "do the guarded task" }).deps)(pcm(1000), 16_000, 1000, 0.95)!;
+  await turn.transcript();
+  await raised.promise;
+  const { sink, calls } = capturingSink();
+  await streamWebTurn(wavOf(4000), turnDeps([]), sink, turn);
+  expect(calls.notice).toEqual([]);
+  expect(calls.sentence).not.toContain("Should be dropped.");
+});
+
+test("pre-adoption notices have item and byte bounds and replay only once", async () => {
+  const raised = deferred();
+  const brain: SpeculatorDeps["brain"] = {
+    sendStream: (_message, options) => (async function* () {
+      options?.onNotice?.({ type: "confirmation", text: "x".repeat(MAX_SPECULATIVE_NOTICE_BYTES + 1) });
+      for (let i = 0; i < MAX_SPECULATIVE_NOTICE_ITEMS + 3; i++) {
+        options?.onNotice?.({ type: "confirmation", text: `notice ${i}` });
+      }
+      raised.resolve();
+      yield "Done.";
+    })(),
+  };
+  const turn = makeSpeculator(deps({ brain, transcript: "status" }).deps)(pcm(1000), 16_000, 1000, 0.95)!;
+  await turn.transcript();
+  await raised.promise;
+  const seen: string[] = [];
+  expect(turn.claim()).toBe(true);
+  expect(turn.adopt?.()).toBe(true);
+  turn.attachNotices?.((notice) => seen.push(notice.text));
+  turn.attachNotices?.((notice) => seen.push(`again: ${notice.text}`));
+  expect(seen).toHaveLength(MAX_SPECULATIVE_NOTICE_ITEMS);
+  expect(seen[0]).toBe("notice 0");
+  expect(seen.at(-1)).toBe(`notice ${MAX_SPECULATIVE_NOTICE_ITEMS - 1}`);
+  await turn.abort();
 });
 
 test("discarded and aborted speculative turns cancel tool permission; late adoption stays inert", async () => {
