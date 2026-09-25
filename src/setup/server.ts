@@ -8,14 +8,61 @@ import { checkDraft, createDraft, renderDraft, type SetupDraft } from "./draft";
 import { classifySetupChecks } from "./checks";
 import { setupPage } from "./page";
 import { SETUP_STEPS } from "./steps";
-import { detectSystem, type SystemDeps, type SystemFacts, type Tier } from "./system";
+import { detectSystem, type SystemDeps, type SystemFacts } from "./system";
+import { probeRemoteProviderModels, type PickerDeps, type ProviderModelList } from "./pickers";
 import { backupInvalidConfig, inspectExistingConfig, writeDraft } from "./write";
 import type { Check, DoctorCheckOptions } from "../cli/doctor";
 import { redactSnapshotSecrets } from "../operational-state";
 import { ciceroHome } from "../platform/paths";
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);
-const TIERS = new Set<Tier>(["local-mlx", "local-cuda", "local-cpu"]);
+export function mergeDraft<T extends Record<string, unknown>>(base: T, contribution: Record<string, unknown>): T {
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(contribution)) {
+    const previous = merged[key];
+    merged[key] = value && typeof value === "object" && !Array.isArray(value) && previous && typeof previous === "object" && !Array.isArray(previous)
+      ? mergeDraft(previous as Record<string, unknown>, value as Record<string, unknown>) : value;
+  }
+  return merged as T;
+}
+
+function publicDraft(draft: SetupDraft): SetupDraft {
+  const copy = structuredClone(draft);
+  function mask(value: Record<string, unknown>): void {
+    for (const [key, child] of Object.entries(value)) {
+      if (["apiKey", "api_key", "token"].includes(key) && typeof child === "string") value[key] = "set";
+      else if (child && typeof child === "object" && !Array.isArray(child)) mask(child as Record<string, unknown>);
+    }
+  }
+  mask(copy);
+  return copy;
+}
+
+function draftSecrets(draft: SetupDraft): string[] {
+  const secrets: string[] = [];
+  function collect(value: Record<string, unknown>): void {
+    for (const [key, child] of Object.entries(value)) {
+      if (["apiKey", "api_key", "token"].includes(key) && typeof child === "string") secrets.push(child);
+      else if (child && typeof child === "object" && !Array.isArray(child)) collect(child as Record<string, unknown>);
+    }
+  }
+  collect(draft);
+  return secrets;
+}
+
+function redactStateValue(value: unknown, secrets: readonly string[]): unknown {
+  if (typeof value === "string") return secrets.reduce((text, secret) => secret ? text.replaceAll(secret, "<redacted>") : text, value);
+  if (Array.isArray(value)) return value.map((item) => redactStateValue(item, secrets));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactStateValue(item, secrets)]));
+  return value;
+}
+
+function publicChecks(checks: Check[] | null, draft: SetupDraft): Check[] | null {
+  if (!checks) return null;
+  const secrets = draftSecrets(draft);
+  const hide = (line: string | undefined) => line === undefined ? undefined : secrets.reduce((text, secret) => secret ? text.replaceAll(secret, "<redacted>") : text, line);
+  return checks.map((check) => ({ ...check, name: hide(check.name)!, detail: hide(check.detail)!, ...(check.hint ? { hint: hide(check.hint) } : {}) }));
+}
 
 export interface SetupHandoff {
   startCommand: string;
@@ -92,6 +139,7 @@ export interface SetupServerOptions {
   lan?: boolean;
   port?: number;
   systemDeps?: SystemDeps;
+  pickerDeps?: PickerDeps;
   doctorOptions?: DoctorCheckOptions;
   /** Test-only check runner; production runs the real loadConfig + doctor path. */
   check?: typeof checkDraft;
@@ -141,6 +189,8 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
   if (!/^[a-f0-9]{32,}$/.test(token)) throw new Error("setup token must contain at least 128 random bits in hexadecimal form");
   const system: SystemFacts = await detectSystem(options.systemDeps);
   let draft: SetupDraft = createDraft(system.recommendedTier);
+  const choices = new Map<string, unknown>();
+  let providerModels: ProviderModelList | null = null;
   let draftRevision = 0;
   let current = "system";
   let detected: unknown = await SETUP_STEPS[0]!.detect({ system, draft }, options.systemDeps);
@@ -155,15 +205,16 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
   const handoff = setupHandoff(home, options.defaultHome, options.platform, options.cliAvailable);
 
   const view = () => {
-    const checkGroups = checks === null || checksRevision !== draftRevision ? null : classifySetupChecks(checks);
+    const safeChecks = checks === null || checksRevision !== draftRevision ? null : publicChecks(checks, draft);
+    const checkGroups = safeChecks === null ? null : classifySetupChecks(safeChecks);
     const existing = inspectExistingConfig(home);
-    return {
+    return redactStateValue({
       steps: SETUP_STEPS.map(({ id, title, explain, pipeline, available }) => ({ id, title, explain, pipeline, available })),
-      current, detected, system, tier: draft.deployment, checks: checkGroups ? checks : null, checkGroups, yaml: renderDraft(draft),
+      current, detected, system, tier: draft.deployment, providerModels, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, typeof choice === "string" ? choice : (choice as { id?: string }).id])), storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), checks: safeChecks, checkGroups, yaml: renderDraft(publicDraft(draft)),
       existing, written, finished, startCommand: handoff.startCommand, handoff,
       canWrite: !written && checkGroups !== null && checkGroups.blocking.length === 0 && existing.status === "missing",
       requiresNotReadyAcknowledgement: (checkGroups?.notReady.length ?? 0) > 0,
-    };
+    }, draftSecrets(draft));
   };
   let server: ReturnType<typeof Bun.serve>;
   server = (options.serve ?? Bun.serve)({
@@ -184,16 +235,51 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
         const body = await readRequestJsonLimited(req, { maxBytes: 2048, timeoutMs: 5000 });
         if (!body || typeof body !== "object" || Array.isArray(body)) return json({ error: "Expected JSON object" }, 400);
         const data = body as Record<string, unknown>;
-        if (url.pathname === "/api/step") {
+        if (url.pathname === "/api/provider-models") {
+          const prior = choices.get("provider") as { id?: string; apiKey?: string } | undefined;
+          const raw = data.choice && typeof data.choice === "object" && !Array.isArray(data.choice) ? data.choice as Record<string, unknown> : null;
+          const savedKey = prior && raw && raw.id === prior.id && !raw.apiKey ? prior.apiKey : undefined;
+          providerModels = await probeRemoteProviderModels(savedKey && raw ? { ...raw, apiKey: savedKey } : data.choice, options.pickerDeps);
+          return json({ models: providerModels.models });
+        } else if (url.pathname === "/api/step") {
           const step = SETUP_STEPS.find((item) => item.id === data.id);
           if (!step) return json({ error: "Unknown step" }, 400);
-          detected = await step.detect({ system, draft }, options.systemDeps);
+          detected = await step.detect({ system, draft }, options.pickerDeps);
           current = step.id;
         } else if (url.pathname === "/api/choice") {
           if (written) return json({ error: "Config already written" }, 409);
-          const step = SETUP_STEPS.find((item) => item.id === data.id && item.available);
-          if (!step || step.id !== "system" || typeof data.choice !== "string" || !TIERS.has(data.choice as Tier)) return json({ error: "Unknown setup choice" }, 400);
-          draft = { ...draft, ...step.contribute({ system, draft }, data.choice) } as SetupDraft;
+          const step = SETUP_STEPS.find((item) => item.id === data.id && item.available && !["check", "write", "handoff"].includes(item.id));
+          if (!step) return json({ error: "Unknown setup choice" }, 400);
+          const prior = choices.get(step.id);
+          let rawChoice = data.choice;
+          if (rawChoice && typeof rawChoice === "object" && !Array.isArray(rawChoice)
+            && prior && typeof prior === "object"
+            && (rawChoice as { id?: string }).id === (prior as { id?: string }).id) {
+            if (!(rawChoice as { companyId?: unknown }).companyId && typeof (prior as { companyId?: unknown }).companyId === "string")
+              rawChoice = { ...(rawChoice as Record<string, unknown>), companyId: (prior as { companyId: string }).companyId };
+            const priorKey = (prior as Record<string, unknown>).apiKey ?? (prior as Record<string, unknown>).api_key;
+            if (!(rawChoice as { apiKey?: unknown }).apiKey && typeof priorKey === "string") rawChoice = { ...(rawChoice as Record<string, unknown>), apiKey: priorKey };
+          }
+          const parsed = step.parseChoice(rawChoice, { system, draft, ...(current === step.id ? { detected } : {}) }, { ...options.pickerDeps, allowedModels: providerModels });
+          if (parsed && typeof parsed === "object" && prior && typeof prior === "object"
+            && (parsed as { id?: string }).id === (prior as { id?: string }).id) {
+            for (const key of ["apiKey", "api_key"] as const) {
+              if (!(parsed as Record<string, unknown>)[key] && (prior as Record<string, unknown>)[key])
+                (parsed as Record<string, unknown>)[key] = (prior as Record<string, unknown>)[key];
+            }
+          }
+          let probe: { ok: boolean; message: string } | undefined;
+          if (step.probeChoice) {
+            probe = await step.probeChoice(parsed, options.pickerDeps);
+            detected = { ...(detected && typeof detected === "object" ? detected : {}), probe };
+          }
+          if (probe?.ok === false) return json(view());
+          choices.set(step.id, parsed);
+          draft = createDraft((choices.get("system") as SetupDraft["deployment"] | undefined) ?? system.recommendedTier, draft.web_voice.token);
+          for (const item of SETUP_STEPS) {
+            if (!choices.has(item.id)) continue;
+            draft = mergeDraft(draft, item.contribute({ system, draft }, choices.get(item.id))) as SetupDraft;
+          }
           draftRevision += 1;
           checks = null;
           checksRevision = null;
@@ -234,7 +320,7 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
         return json(view());
       } catch (error) {
         const status = error instanceof RequestBodyTooLargeError ? 413 : error instanceof RequestBodyTimeoutError ? 408 : 400;
-        return json({ error: redactSnapshotSecrets(error instanceof Error ? error.message : "Setup request failed") }, status);
+        return json({ error: redactStateValue(redactSnapshotSecrets(error instanceof Error ? error.message : "Setup request failed"), draftSecrets(draft)) }, status);
       }
     },
   });
