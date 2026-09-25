@@ -4,8 +4,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { clearAcpSession, readAcpSession, writeAcpSession, type StoredAcpSession } from "./acp-session-store";
 import { dashBus } from "../dashboard/bus";
 import { redactSnapshotSecrets } from "../operational-state";
+import { TOOL_START_NOTICE } from "../speaker/thinking-filler";
 import { BrainTurnContext } from "./turn-context";
-import { confirmationDecision, createConfirmationNonce } from "./approval";
+import { confirmationDecision, createConfirmationNonce, permissionNotice } from "./approval";
 import {
   spawnOwnedProcess,
   terminateOwnedProcessTree,
@@ -655,6 +656,8 @@ interface ActiveAcpTurn {
   cancellation: Promise<void> | null;
   notifyCancel: () => Promise<void>;
   cancel: (error?: Error) => void;
+  onNotice?: BrainTurnOptions["onNotice"];
+  toolNoticeSent: boolean;
 }
 
 interface AcpRuntime {
@@ -985,6 +988,8 @@ export class AcpBrain implements Brain {
           settled: false,
           cancellation: null,
           notifyCancel,
+          onNotice: options.onNotice,
+          toolNoticeSent: false,
           cancel: (error?: Error): void => {
             active.cancelled = true;
             // Discard already-buffered speech on abort/overflow/stop. A prompt
@@ -1147,11 +1152,11 @@ export class AcpBrain implements Brain {
         until: Date.now() + CONFIRM_GRANT_MS,
         operationKey: pending.operationKey,
       };
-      log("ok", `acp: spoken confirmation received for: ${this.redactAgentText(pending.summary)}`);
+      log("ok", "acp: spoken confirmation received");
       if (this.config.confirmRetry !== false) this.nudgeAfterApproval(pending.summary);
     } else {
       this.confirmationGrant = null;
-      log("info", `acp: spoken confirmation cancelled for: ${this.redactAgentText(pending.summary)}`);
+      log("info", "acp: spoken confirmation cancelled");
     }
     return true;
   }
@@ -1221,8 +1226,16 @@ export class AcpBrain implements Brain {
         try {
           if (runtime && (this.runtime !== runtime || runtime.stopping || runtime.sessionId !== params.sessionId)) return;
           const update = params.update;
+          const active = runtime?.activeTurn;
+          if (
+            update.sessionUpdate === "tool_call"
+            && active && !active.cancellation && !active.settled && !active.toolNoticeSent
+          ) {
+            active.toolNoticeSent = true;
+            try { active.onNotice?.({ type: "tool", text: TOOL_START_NOTICE }); } catch { /* optional notice */ }
+          }
           if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
-            runtime?.activeTurn?.queue.push(update.content.text);
+            active?.queue.push(update.content.text);
           } else if (runtime) {
             this.recordStructured(runtime, update);
           }
@@ -1277,7 +1290,7 @@ export class AcpBrain implements Brain {
     if (grant && Date.now() >= grant.until) this.confirmationGrant = null;
     else if (grant && grant.operationKey === operationKey) {
       this.confirmationGrant = null; // one approval = this exact tool call once
-      log("ok", `acp: spoken-confirmed tool allowed: ${title}`);
+      log("ok", "acp: spoken-confirmed tool allowed");
       const allow = pick(["allow_once", "allow_always"]);
       if (!allow) return { outcome: { outcome: "cancelled" } };
       return { outcome: { outcome: "selected", optionId: allow.optionId } };
@@ -1293,7 +1306,12 @@ export class AcpBrain implements Brain {
       nonce: createConfirmationNonce(),
       operationKey,
     };
-    log("info", `acp: tool needs spoken confirmation, denied for now: ${title}`);
+    log("info", "acp: tool needs spoken confirmation, denied for now");
+    const active = this.runtime?.activeTurn;
+    if (active && !active.cancellation && !active.settled) {
+      try { active.onNotice?.({ type: "confirmation", text: permissionNotice(params.toolCall?.kind) }); }
+      catch { /* optional notice */ }
+    }
     try {
       const notification = this.config.onConfirmationPending?.(title, this.pendingConfirmation.nonce);
       void Promise.resolve(notification).catch((err: unknown) => {

@@ -93,6 +93,17 @@ program
     process.exit(await runDoctor());
   });
 
+program
+  .command("setup")
+  .description("Start the guided first-run setup preview")
+  .option("--home <dir>", "Use this Cicero home for the whole setup run")
+  .option("--lan", "Serve setup over TLS on the local network")
+  .option("--port <n>", "Setup port (default: random available port)")
+  .action(async (opts) => {
+    const { runSetup } = await import("./cli/setup");
+    await runSetup(opts);
+  });
+
 const hookCmd = program
   .command("hook")
   .description("Sidecar hook mode commands");

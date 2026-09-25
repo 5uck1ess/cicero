@@ -1608,3 +1608,8 @@ describe("Config — dictation", () => {
     expect(loadYaml('wake_word_enabled: false\nwispr_hotkey: "option+space"')).not.toThrow();
   });
 });
+
+test("brain.tool_start_notice accepts a boolean and rejects invalid values", () => {
+  expect(loadYaml("brain:\n  tool_start_notice: false")().brain.tool_start_notice).toBe(false);
+  expect(loadYaml("brain:\n  tool_start_notice: sometimes")).toThrow(/brain.tool_start_notice/);
+});

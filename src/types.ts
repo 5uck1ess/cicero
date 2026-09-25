@@ -376,6 +376,8 @@ export interface BrainConfig {
   // including bounded reassurances until content arrives. Default on; false
   // disables both the initial filler and its reassurances.
   thinking_filler?: boolean;
+  // Speak one short notice when an ACP turn first uses a tool. Default on.
+  tool_start_notice?: boolean;
 }
 
 export interface AcpMcpServerConfig {
@@ -486,6 +488,8 @@ export interface BrainTurnOptions {
   systemContext?: string;
   /** Sanitized ACP plan/tool metadata for this turn; never spoken automatically. */
   onStructuredUpdate?: (update: BrainStructuredUpdate) => void;
+  /** Turn-owned, sanitized ACP activity. Never retain beyond this turn. */
+  onNotice?: (notice: { type: "tool" | "confirmation"; text: string }) => void;
 }
 
 export interface BrainStructuredUpdate {
