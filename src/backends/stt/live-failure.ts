@@ -1,6 +1,6 @@
 import { redactSecrets } from "../../redact";
 
-export const LIVE_STT_FAILURES = ["never_opened", "open_failed", "push_rejected", "server_error", "deadline", "aborted", "empty_final", "superseded"] as const;
+export const LIVE_STT_FAILURES = ["never_opened", "open_failed", "push_rejected", "server_error", "deadline", "aborted", "empty_final", "missing_terminal", "superseded"] as const;
 export type LiveSttFailure = typeof LIVE_STT_FAILURES[number];
 
 export class LiveSttError extends Error {
@@ -15,7 +15,7 @@ export function liveSttFailure(error: unknown): LiveSttFailure {
   const message = error instanceof Error ? error.message : String(error);
   if (error instanceof DOMException && error.name === "AbortError" || /\babort(?:ed)?\b/i.test(message)) return "aborted";
   if (/\bdeadline\b|\btimeout\b/i.test(message)) return "deadline";
-  if (/\bempty\b|\bmissing terminal\b/i.test(message)) return "empty_final";
+  if (/\bmissing terminal\b/i.test(message)) return "missing_terminal";
   return "server_error";
 }
 

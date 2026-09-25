@@ -2232,7 +2232,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             ? capture.failed
               ? Promise.reject(capture.failure ?? new LiveSttError("never_opened", new Error("live stream never opened")))
               : capture.waitingForSeat ? capture.waitingForSeat.then(endSession) : endSession()
-            : resolveSttStream?.() ? Promise.reject(new LiveSttError("never_opened", new Error("no live PCM arrived before the final WAV"))) : undefined;
+            : undefined; // No CVS2 capture was negotiated for this turn; use batch STT directly.
           if (streamFinal) {
             endedCaptureFinals.add(streamFinal);
             void streamFinal.finally(() => { endedCaptureFinals.delete(streamFinal); }).catch(() => {});

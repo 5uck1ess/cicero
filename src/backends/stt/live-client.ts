@@ -768,7 +768,7 @@ export function openLivePcm(options: OpenLivePcmOptions): LivePcmSession {
   if (options.signal?.aborted) onAbort();
   const maybeFinish = (): void => {
     if (!requestEnded || !reader.complete || closed) return;
-    if (finalText === null) fail(new LiveSttError("empty_final", new Error("live transcription missing terminal event")));
+    if (finalText === null) fail(new LiveSttError("missing_terminal", new Error("live transcription missing terminal event")));
     else stop(); // An empty terminal transcript means no speech, just like batch STT.
   };
   const consumeEvent = (block: string): void => {

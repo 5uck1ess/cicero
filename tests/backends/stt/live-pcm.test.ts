@@ -59,6 +59,16 @@ test("a terminal whitespace transcript is a successful no-speech result even aft
   expect(peer.terminated).toBe(1);
 });
 
+test("a clean response without a terminal transcript fails as missing_terminal", async () => {
+  const peer = fakeEndpoint([delta("tentative")], "data: [DONE]\n\n");
+  const stream = openLivePcm({ host: "127.0.0.1", port: 8092, model: "nemotron", sampleRate: 16000, connect: peer.connect });
+  stream.push(new Uint8Array([1, 0]));
+  const failure = await stream.end().catch((error: unknown) => error);
+  expect(liveSttFailure(failure)).toBe("missing_terminal");
+  expect(failure.message).toContain("missing terminal event");
+  expect(peer.terminated).toBe(1);
+});
+
 test("queued PCM stays ordered ahead of stream end while the socket is still opening", async () => {
   const peer = fakeEndpoint();
   let open!: () => void;
