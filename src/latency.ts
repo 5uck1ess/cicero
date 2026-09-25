@@ -175,6 +175,34 @@ export class LatencyRecordOwner<T = ReturnType<typeof setTimeout>> {
   }
 }
 
+/** Register at input admission, before a pending turn can receive client metrics. */
+export function admitLatencyOwner<T = ReturnType<typeof setTimeout>>(
+  owners: Map<string, LatencyRecordOwner<T>>,
+  turn: LatencyTurn,
+  write: (snapshot: () => LatencyRecord) => Promise<void>,
+  scheduler?: LatencyScheduler<T>,
+): LatencyRecordOwner<T> {
+  if (owners.size >= 32) {
+    const oldestId = owners.keys().next().value!;
+    owners.get(oldestId)?.forceFinalize();
+    owners.delete(oldestId);
+  }
+  let owner!: LatencyRecordOwner<T>;
+  owner = new LatencyRecordOwner(turn, write, scheduler, undefined,
+    () => { if (owners.get(turn.turnId) === owner) owners.delete(turn.turnId); });
+  owners.set(turn.turnId, owner);
+  return owner;
+}
+
+/** A queued turn has no handler that can settle its record later. */
+export function dropPendingLatencyOwner<T>(owners: Map<string, LatencyRecordOwner<T>>, turnId: string, owner?: LatencyRecordOwner<T>): void {
+  if (!owner) return;
+  owner.abort();
+  owner.serverSettled();
+  owner.forceFinalize();
+  if (owners.get(turnId) === owner) owners.delete(turnId);
+}
+
 export interface Percentiles { count: number; p50: number; p95: number }
 export const METRICS = ["speechEndToReplyMs", "speechEndToFillerMs", "sttMs", "brainFirstTokenMs", "ttsFirstAudioMs", "cancellationSettlementMs"] as const;
 export function percentile(values: number[], fraction: number): number | undefined {

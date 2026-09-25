@@ -3,6 +3,7 @@ import { OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS, silenceWavLike, SPEAKER_BEAT_MS
 import { ProviderSlot, SwappableSTTProvider, SwappableTTSProvider } from "../../src/backends/hot-swap";
 import type { TTSProvider } from "../../src/backends/tts/provider";
 import type { STTProvider } from "../../src/backends/stt/provider";
+import { LatencyTurn } from "../../src/latency";
 
 async function* tokens(...parts: string[]) { for (const p of parts) yield p; }
 
@@ -33,6 +34,23 @@ function streamDeps(over: Partial<{ transcript: string; stream: string[]; reply:
       : { send: async () => over.reply ?? "One. Two." },
     tts: { generateAudio: async () => tinyWav([1]) },
   };
+}
+
+for (const [input, setup] of [
+  ["repeat that", (d: WebStreamDeps) => { d.lastReply = { pending: () => "Earlier reply.", store: () => {} }; }],
+  ["louder", (d: WebStreamDeps) => { d.voice = { state: { volume: 1, rate: 1 } }; }],
+  ["details", (d: WebStreamDeps) => { d.tldr = { cap: 4, pending: () => "More detail." }; }],
+] as const) {
+  test(`${input} direct speech records TTS first audio`, async () => {
+    const record = new LatencyTurn("s", "t", "web_text", 1, () => 0);
+    const d = streamDeps();
+    setup(d);
+    d.timingMark = (name) => record.mark(name, name === "first_sentence" ? 10 : name === "first_audio" ? 35 : 0);
+    const { sink, calls } = capturingSink();
+    await streamWebTextTurn(input, d, sink);
+    expect(calls.audio).toBeGreaterThan(0);
+    expect(record.finish().ttsFirstAudioMs).toBe(25);
+  });
 }
 
 function deps(over: Partial<{ transcript: string | null; reply: string; calls: string[] }> = {}): WebTurnDeps {
@@ -1494,6 +1512,8 @@ test("an STT swap during a long reply drains without waiting for the reply to fi
 test("ACP tool notice speaks before reply and is suppressed after reply starts", async () => {
   const { sink, calls } = capturingSink();
   const base = streamDeps({ stream: ["Done."] });
+  const record = new LatencyTurn("s", "t", "web_text", 1, () => 0);
+  base.timingMark = (name) => record.mark(name, name === "first_sentence" ? 10 : name === "first_audio" ? 35 : 0);
   base.brain = {
     send: async () => "",
     sendStream: async function* (_text, options) {
@@ -1505,6 +1525,7 @@ test("ACP tool notice speaks before reply and is suppressed after reply starts",
   };
   await streamWebTextTurn("run it", base, sink);
   expect(calls.sentence).toEqual(["Working on it now.", "Done."]);
+  expect(record.finish().ttsFirstAudioMs).toBe(25);
 });
 
 test("ACP tool notice obeys per-turn switch", async () => {

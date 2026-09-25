@@ -1,6 +1,6 @@
 import { log } from "../logger";
 import { dashBus } from "../dashboard/bus";
-import { LatencyTurn, LatencyRecordOwner, type LatencyStore, summarizeLatency } from "../latency";
+import { admitLatencyOwner, dropPendingLatencyOwner, LatencyTurn, LatencyRecordOwner, type LatencyStore, summarizeLatency } from "../latency";
 import { isConfirmationNonce } from "../brain/approval";
 import type { Brain } from "../types";
 import { presentedToken, tokenMatches } from "../http-auth";
@@ -68,6 +68,7 @@ interface PendingTurn {
   turnId: string;
   input: ArrayBuffer | string;
   lease: TurnLease;
+  latency?: LatencyRecordOwner;
   setSink: (sink: WebReplySink) => void;
 }
 
@@ -1070,8 +1071,16 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     }
     // Its current sink is immediately invalidated; late results are dropped.
     abortTurn(ws.data.current, "superseded by a newer turn");
-    ws.data.pending?.lease.abort(new Error("superseded before dispatch"));
-    ws.data.pending = { input, turnId, lease, setSink: (sink) => { outputSink = sink; } };
+    if (ws.data.pending) {
+      ws.data.pending.lease.abort(new Error("superseded before dispatch"));
+      dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
+    }
+    const latency = latencyStore && ws.data.protocol === 2
+      ? admitLatencyOwner(ws.data.latencyTurns,
+        new LatencyTurn(ws.data.sessionId, turnId, typeof input === "string" ? "web_text" : "web_voice", Date.now(), () => performance.now(), typeof input === "string" ? input.length : input.byteLength),
+        persistLatency)
+      : undefined;
+    ws.data.pending = { input, turnId, lease, latency, setSink: (sink) => { outputSink = sink; } };
     if (ws.data.busy) return; // the running drain loop will pick it up
     ws.data.busy = true;
     try {
@@ -1089,20 +1098,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           delivered: new Map(),
           played: [],
           pacing: new AudioPlaybackGate(),
+          latency: next.latency,
         };
-        if (latencyStore && ws.data.protocol === 2) {
-          if (ws.data.latencyTurns.size >= 32) {
-            const oldestId = ws.data.latencyTurns.keys().next().value!;
-            ws.data.latencyTurns.get(oldestId)?.forceFinalize();
-            ws.data.latencyTurns.delete(oldestId);
-          }
-          state.latency = new LatencyRecordOwner(
-            new LatencyTurn(ws.data.sessionId, next.turnId, typeof next.input === "string" ? "web_text" : "web_voice", Date.now(), () => performance.now(), typeof next.input === "string" ? next.input.length : next.input.byteLength),
-            persistLatency, undefined, undefined,
-            () => { if (ws.data.latencyTurns.get(next.turnId) === state.latency) ws.data.latencyTurns.delete(next.turnId); },
-          );
-          ws.data.latencyTurns.set(next.turnId, state.latency);
-        }
         const timingMark = (name: string, offsetMs: number): void => {
           state.latency?.mark(name, offsetMs);
           if (name === "filler_queued" || name === "reassurance_queued") state.nextAudioKind = "filler";
@@ -1885,6 +1882,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 if (ws.data.current?.turnId === msg.turnId) abortTurn(ws.data.current, "turn aborted by client");
                 if (ws.data.pending?.turnId === msg.turnId) {
                   ws.data.pending.lease.abort(new Error("turn aborted by client"));
+                  dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
                   ws.data.pending = null;
                 }
               } else if (ws.data.current) {
@@ -2010,6 +2008,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           sockets.delete(ws);
           const wasAttached = clients.delete(ws);
           abortTurn(ws.data.current, "voice socket closed");
+          if (ws.data.pending) dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
           for (const owner of ws.data.latencyTurns.values()) { owner.interruptOutstanding(); owner.forceFinalize(); }
           // Every connected browser reaches the same brain, switchboard and
           // active lane (docs/web-voice.md, "Deliberate multi-client
@@ -2099,6 +2098,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           ws.data.departureCloseTimer = null;
         }
         abortTurn(ws.data.current, "web voice server shutting down");
+        if (ws.data.pending) dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
         for (const owner of ws.data.latencyTurns.values()) { owner.interruptOutstanding(); owner.forceFinalize(); }
         ws.data.pending?.lease.abort(new Error("web voice server shutting down"));
         ws.data.pending = null;
