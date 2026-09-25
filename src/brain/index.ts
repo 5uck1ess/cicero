@@ -266,6 +266,7 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
       return new SwitchboardBrain(front, lanes, summarizerClassifier(config.raw.web_voice?.tldr, true), {
         intentTimeoutMs: config.raw.switchboard?.intent_timeout_ms,
         intentMinConfidence: config.raw.switchboard?.intent_min_confidence,
+        frontDeskAliases: config.raw.switchboard?.front_desk_aliases,
       });
     }
     return front;

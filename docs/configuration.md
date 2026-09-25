@@ -179,11 +179,15 @@ Top-level `switchboard` controls the model fallback for `brain.lanes`:
 
 ```yaml
 switchboard:
+  front_desk_aliases: [cicero, jarvis] # names of the main assistant
   intent_min_confidence: 0.7 # finite number, 0 through 1
   intent_timeout_ms: 1500    # integer, 1 through 300000 milliseconds
 ```
 
-These defaults apply when omitted. Exact commands bypass classification; other
+These defaults apply when omitted.
+`front_desk_aliases` replaces the default names used for return-to-front-desk commands and in the intent classifier prompt. Supply 1 to 8 names, each at most 40 characters using ASCII letters, digits, spaces, underscores, or hyphens. Names cannot match a lane name or alias (case insensitive). While a lane is pinned, asking for one of these names means release.
+
+Exact commands bypass classification; other
 foreground utterances classify before ordinary brain dispatch, adding the classifier's
 latency (about p50 330 ms on the reference local model), via `web_voice.tldr.summarizer_url` and `summarizer_model`
 (not the separate `classifier:` backend). JSON-schema output is requested when
