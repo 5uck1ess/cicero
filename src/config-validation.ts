@@ -314,7 +314,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
   if (!checkRecord(config, "config", issues)) throw new ConfigValidationError(source, issues);
 
   checkKnownKeys(config, "config", [
-    "quick_intents", "filler_lines", "tts_enabled", "tts_summary_max_tokens", "tts_local_max_tokens",
+    "switchboard", "quick_intents", "filler_lines", "tts_enabled", "tts_summary_max_tokens", "tts_local_max_tokens",
     "hotkey", "dictation", "terminal", "voice", "voice_ref_audio",
     // Retired with the Wispr Flow listener (see docs/dictation.md). Still
     // accepted so an existing config keeps starting; both are ignored.
@@ -324,6 +324,12 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     "stt_fallback", "tts", "tts_fallback", "llm", "classifier", "compute", "sidecar", "dashboard", "web_voice",
     "notify", "headless", "turn", "tone", "clap", "vad", "earcons", "tts_coalesce", "intent_judge",
   ], issues);
+
+  if (config.switchboard !== undefined && checkRecord(config.switchboard, "switchboard", issues)) {
+    checkKnownKeys(config.switchboard, "switchboard", ["intent_timeout_ms", "intent_min_confidence"], issues);
+    if (config.switchboard.intent_timeout_ms !== undefined) checkInteger(config.switchboard.intent_timeout_ms, "switchboard.intent_timeout_ms", issues, { min: 1, max: 300_000 });
+    if (config.switchboard.intent_min_confidence !== undefined) checkNumber(config.switchboard.intent_min_confidence, "switchboard.intent_min_confidence", issues, { min: 0, max: 1 });
+  }
 
   for (const key of RETIRED_TOP_LEVEL_KEYS) {
     if (config[key] !== undefined) {

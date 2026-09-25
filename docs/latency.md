@@ -16,3 +16,11 @@ cicero latency --last 100 --json
 The table reports nearest-rank p50/p95 for each available metric, grouped by surface. `speech_end→reply` is the end-to-end headline. `brain first token` begins at brain dispatch, and `TTS first audio` begins at the first reply sentence. Missing values are excluded from that metric's sample count.
 
 For a live daemon synthetic-turn bench, see [bench/README.md](../bench/README.md).
+
+Switchboard classification adds `intentMs` to classified web-turn records, shown
+as `intent` in `cicero latency` (p50/p95). This is classifier elapsed time,
+including timeout/error fallback. `intentHeldMs` (CLI: `intent output held`)
+measures how long ready output waited for the classifier, including adopted
+speculative turns. It is zero if the brain was slower or classification ran
+first on an unsafe route. Classifier time overlaps brain work on safe routes.
+Exact fast paths do not incur a classifier round trip.

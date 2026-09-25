@@ -1,3 +1,4 @@
+import { canHoldIntentOutput } from "./capabilities";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
 import { log } from "../logger";
 import { BrainTurnContext } from "./turn-context";
@@ -15,6 +16,7 @@ import { collectPendingConfirmations, hasPendingConfirmations, relayBoundConfirm
 export const DEFAULT_TRIGGERS = ["think hard", "think deeply", "think carefully", "think it through"];
 
 export class RoutingBrain implements Brain {
+  canHoldIntentOutput(): boolean { return canHoldIntentOutput(this.primary) && canHoldIntentOutput(this.escalation); }
   canDeferSpeculativePermissions(): boolean {
     return this.primary.canDeferSpeculativePermissions?.() === true
       && this.escalation.canDeferSpeculativePermissions?.() === true;

@@ -172,3 +172,23 @@ Cicero validates configuration before it starts providers, subprocesses, listene
 ### ACP turn notices
 
 `brain.tool_start_notice` defaults to `true`. On the first ACP tool call of a turn, Cicero speaks a short working line if reply audio has not started and a thinking filler is not playing. Set it to `false` to disable that line. Spoken-confirmation requests matching `brain.confirm_tools` say a short kind-based approval line on the active voice surface; the spoken line never includes command arguments or paths. Telegram approval buttons remain available when configured.
+
+## Switchboard intent settings
+
+Top-level `switchboard` controls the model fallback for `brain.lanes`:
+
+```yaml
+switchboard:
+  intent_min_confidence: 0.7 # finite number, 0 through 1
+  intent_timeout_ms: 1500    # integer, 1 through 300000 milliseconds
+```
+
+These defaults apply when omitted. Exact commands bypass classification; other
+foreground utterances use concurrent held-output classification where the brain
+is safe to hold (otherwise classification runs first), via `web_voice.tldr.summarizer_url` and `summarizer_model`
+(not the separate `classifier:` backend). JSON-schema output is requested when
+supported, with strict JSON parsing otherwise. Invalid answers or deadline/error
+fallbacks are ordinary brain turns. Only `request_now: true` with sufficient
+confidence acts. Routing depends on model quality; check it with
+`bun run bench/intent-bench.ts --runs 3 --misses`. Existing explicit 600 ms
+settings remain 600 ms; change them to 1500 to use the new budget. See [switchboard behavior](office.md#intent-routing).

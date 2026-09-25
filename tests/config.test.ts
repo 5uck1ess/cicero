@@ -1620,3 +1620,14 @@ test("brain.tool_start_notice accepts a boolean and rejects invalid values", () 
   expect(loadYaml("brain:\n  tool_start_notice: false")().brain.tool_start_notice).toBe(false);
   expect(loadYaml("brain:\n  tool_start_notice: sometimes")).toThrow(/brain.tool_start_notice/);
 });
+
+test("switchboard intent settings validate finite confidence and bounded integer deadlines", () => {
+  expect(loadYaml("switchboard: { intent_timeout_ms: 600, intent_min_confidence: 0.7 }\n")().raw.switchboard)
+    .toEqual({ intent_timeout_ms: 600, intent_min_confidence: 0.7 });
+  for (const value of [-1, 1.1, ".nan", "high"]) {
+    expect(() => loadYaml(`switchboard: { intent_min_confidence: ${value} }\n`)()).toThrow(/intent_min_confidence/);
+  }
+  for (const value of [0, -1, 0.5, 300001, ".inf", "fast"]) {
+    expect(() => loadYaml(`switchboard: { intent_timeout_ms: ${value} }\n`)()).toThrow(/intent_timeout_ms/);
+  }
+});

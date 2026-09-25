@@ -88,3 +88,34 @@ test("wrappers advertise the hold only when every reachable route supports it", 
   expect(new SwitchboardBrain(acp, { coder: { brain: acp } }).canDeferSpeculativePermissions()).toBe(true);
   expect(new SwitchboardBrain(acp, { coder: { brain: cli } }).canDeferSpeculativePermissions()).toBe(false);
 });
+
+test("intent overlap fails closed across mixed wrapper routes", async () => {
+  const { canHoldIntentOutput } = await import("../../src/brain/capabilities");
+  const text = { canHoldIntentOutput: () => true } as Brain;
+  const acp = { canDeferSpeculativePermissions: () => true } as Brain;
+  const unknown = {} as Brain;
+  expect(canHoldIntentOutput(unknown)).toBe(false);
+  expect(canHoldIntentOutput(new RoutingBrain(text, acp))).toBe(true);
+  expect(canHoldIntentOutput(new RoutingBrain(text, unknown))).toBe(false);
+  expect(canHoldIntentOutput(new FallbackBrain([text, acp], "safe"))).toBe(true);
+  expect(canHoldIntentOutput(new FallbackBrain([text, unknown], "unsafe"))).toBe(false);
+});
+
+test("an explicit unsafe intent capability overrides ACP permission support", async () => {
+  const { canHoldIntentOutput } = await import("../../src/brain/capabilities");
+  const acp = { canDeferSpeculativePermissions: () => true } as Brain;
+  const wrapper = new DialBackBrain(acp);
+  expect(canHoldIntentOutput(wrapper)).toBe(true);
+  wrapper.setCallMeHandler(async () => "dialed");
+  expect(canHoldIntentOutput(wrapper)).toBe(false);
+  expect(canHoldIntentOutput(new SwitchboardBrain(acp, {}))).toBe(false);
+});
+
+test("model adapters declare intent holding only for known model-only routes", async () => {
+  const { canHoldIntentOutput } = await import("../../src/brain/capabilities");
+  const { OllamaBrain } = await import("../../src/brain/ollama");
+  const { OpenAiCompatibleBrain } = await import("../../src/brain/openai-compatible");
+  expect(canHoldIntentOutput(new OllamaBrain())).toBe(true);
+  expect(canHoldIntentOutput(new OpenAiCompatibleBrain({ backend: "openai" }))).toBe(true);
+  expect(canHoldIntentOutput(new OpenAiCompatibleBrain({ backend: "openai", baseUrl: "http://synthetic.invalid/v1" }))).toBe(false);
+});

@@ -22,6 +22,7 @@ export interface OllamaBrainConfig {
  * (Batch only; streaming via /api/chat stream:true is a possible follow-up.)
  */
 export class OllamaBrain implements Brain {
+  canHoldIntentOutput(): boolean { return true; }
   private port: number;
   private model: string;
   private systemPrompt: string;

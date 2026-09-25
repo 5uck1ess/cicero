@@ -2,6 +2,7 @@ import type { BoardPreset } from "./notify/board-presets";
 // Core types for Cicero voice assistant
 
 export interface CiceroConfig {
+  switchboard?: { intent_timeout_ms?: number; intent_min_confidence?: number };
   /** Lexical fast-paths answered instantly without a brain turn (see src/brain/quick-intents.ts). */
   quick_intents?: Array<{ phrases?: string[]; pattern?: string; reply: string }>;
   /** Per-bucket thinking-filler overrides (task/lookup/question/default) — reword the acknowledgments without code. */
@@ -487,6 +488,9 @@ export interface BrainTurnOptions {
    * forward it unchanged and must never retain it as conversation memory.
    */
   systemContext?: string;
+  /** Switchboard classifier elapsed time for this invocation only. */
+  onIntentMs?: (durationMs: number) => void;
+  onIntentHeldMs?: (durationMs: number) => void;
   /** Sanitized ACP plan/tool metadata for this turn; never spoken automatically. */
   onStructuredUpdate?: (update: BrainStructuredUpdate) => void;
   /** Turn-owned, sanitized ACP activity. Never retain beyond this turn. */
@@ -518,6 +522,8 @@ export interface PendingConfirmation {
 }
 
 export interface Brain {
+  /** Explicit guarantee: this route can run with output held, without unheld side effects. */
+  canHoldIntentOutput?(): boolean;
   /** True only when every reachable tool-running route defers ACP permission requests. */
   canDeferSpeculativePermissions?(): boolean;
   /** Whether the front desk loaded its durable agent session at the last start. */

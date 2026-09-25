@@ -13,6 +13,8 @@ export interface LatencyRecord {
   inputBytes?: number; inputChars?: number;
   serverMarksMs?: Record<string, number>;
   speechEndToReplyMs?: number; speechEndToFillerMs?: number;
+  intentMs?: number;
+  intentHeldMs?: number;
   sttMs?: number; brainFirstTokenMs?: number; ttsFirstAudioMs?: number;
   sttFirstPartialMs?: number; sttSource?: "streaming" | "batch_fallback";
   sttLiveFailure?: LiveSttFailure;
@@ -83,6 +85,8 @@ export class LatencyTurn {
       serverMarksMs,
       ...(this.clientMarks.has("first_audio_played") ? { speechEndToReplyMs: this.clientMarks.get("first_audio_played") } : {}),
       ...(this.clientMarks.has("first_filler_played") ? { speechEndToFillerMs: this.clientMarks.get("first_filler_played") } : {}),
+      ...(this.marks.has("intent_held_duration") ? { intentHeldMs: this.marks.get("intent_held_duration") } : {}),
+      ...(this.marks.has("intent_duration") ? { intentMs: this.marks.get("intent_duration") } : {}),
       ...(stt !== undefined ? { sttMs: stt } : {}),
       ...(this.sttFirstPartialMs !== undefined ? { sttFirstPartialMs: this.sttFirstPartialMs } : {}),
       ...(this.sttSource ? { sttSource: this.sttSource } : {}),
@@ -222,7 +226,7 @@ export function dropPendingLatencyOwner<T>(owners: Map<string, LatencyRecordOwne
 }
 
 export interface Percentiles { count: number; p50: number; p95: number }
-export const METRICS = ["speechEndToReplyMs", "speechEndToFillerMs", "sttMs", "brainFirstTokenMs", "ttsFirstAudioMs", "cancellationSettlementMs"] as const;
+export const METRICS = ["speechEndToReplyMs", "speechEndToFillerMs", "sttMs", "intentMs", "intentHeldMs", "brainFirstTokenMs", "ttsFirstAudioMs", "cancellationSettlementMs"] as const;
 export function percentile(values: number[], fraction: number): number | undefined {
   if (!values.length) return undefined;
   const sorted = [...values].sort((a, b) => a - b);
@@ -243,7 +247,7 @@ export function summarizeLatency(records: readonly LatencyRecord[]): LatencySumm
   return out;
 }
 const LABELS: Record<typeof METRICS[number], string> = {
-  speechEndToReplyMs: "speech_end→reply", speechEndToFillerMs: "speech_end→filler", sttMs: "STT", brainFirstTokenMs: "brain first token", ttsFirstAudioMs: "TTS first audio", cancellationSettlementMs: "cancellation settle",
+  intentHeldMs: "intent output held", intentMs: "intent", speechEndToReplyMs: "speech_end→reply", speechEndToFillerMs: "speech_end→filler", sttMs: "STT", brainFirstTokenMs: "brain first token", ttsFirstAudioMs: "TTS first audio", cancellationSettlementMs: "cancellation settle",
 };
 export function formatLatency(summary: LatencySummary): string {
   const lines = ["surface  metric  n  p50 ms  p95 ms"];

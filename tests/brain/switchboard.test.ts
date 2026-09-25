@@ -1913,10 +1913,14 @@ test("bare 'status' stays a normal turn for whoever is pinned", async () => {
 
 // ---------- intent-classifier fallback (generic phrasings) ----------
 
+function intentJson(label: string, request_now = true, confidence = 0.9) {
+  const [intent, target] = label.split(":");
+  return JSON.stringify({ intent, target: target ?? null, request_now: intent === "none" ? false : request_now, confidence });
+}
+
 function classifierBoard(calls: string[], label: string | (() => Promise<string>)) {
-  const classify = typeof label === "string" ? async () => label : label;
   const prompts: string[] = [];
-  const wrapped = async (p: string) => { prompts.push(p); return typeof label === "string" ? label : label(); };
+  const wrapped = async (p: string) => { prompts.push(p); return typeof label === "string" ? intentJson(label) : label(); };
   const lanes: Record<string, LaneDef> = {
     coder: { brain: fakeBrain("coder", calls), aliases: ["the coder"], voice: "am_michael" },
     think: { brain: fakeBrain("think", calls), voice: "bm_george" },
@@ -1946,7 +1950,7 @@ test("classifier routes phrasings the patterns miss", async () => {
   expect(reply).toContain("Coder here.");
   expect(sb.activeLane()).toBe("coder");
   expect(prompts).toHaveLength(1);
-  expect(prompts[0]).toContain("coder (aka the coder)");
+  expect(prompts[0]).toContain('"name":"coder","aliases":["the coder"]');
 });
 
 test("classifier 'none', garbage, and failures all degrade to a normal turn", async () => {
@@ -1963,12 +1967,12 @@ test("classifier 'none', garbage, and failures all degrade to a normal turn", as
   expect(await sb.send("Please connect the dots here.")).toBe("front reply");
 });
 
-test("non-control-ish turns never pay for a classification", async () => {
+test("ordinary turns also run the classifier", async () => {
   const calls: string[] = [];
-  const { sb, prompts } = classifierBoard(calls, "standup");
+  const { sb, prompts } = classifierBoard(calls, "none");
   await sb.start();
   expect(await sb.send("Fix the login bug in the parser.")).toBe("front reply");
-  expect(prompts).toHaveLength(0);
+  expect(prompts).toHaveLength(1);
 });
 
 test("classifier can trigger rollcall and standup from fuzzy asks", async () => {
@@ -1981,7 +1985,7 @@ test("classifier can trigger rollcall and standup from fuzzy asks", async () => 
   expect(await sb2.send("Catch me up on what the team has been doing.")).toStartWith("Getting status from the team.");
 });
 
-test("classifier prompt demands a group reference for rollcall/standup", async () => {
+test("classifier prompt defines group actions by meaning", async () => {
   // Live misfire 2026-07-07: "Quick check: say ready if you can hear me."
   // hit the CONTROLISH prefilter ("check") and gemma labeled it rollcall.
   const calls: string[] = [];
@@ -1989,7 +1993,7 @@ test("classifier prompt demands a group reference for rollcall/standup", async (
   await sb.start();
   await sb.send("Quick check: say ready if you can hear me.");
   expect(prompts.length).toBe(1);
-  expect(prompts[0]).toContain("require the WHOLE GROUP");
+  expect(prompts[0]).toContain("inherently group actions");
 });
 
 test("transfer briefs the new employee on the last exchange", async () => {
@@ -2188,19 +2192,12 @@ test("transferTo briefs the lane before it picks up; a failing brief never block
   expect(await sb2.transferTo("ada", async () => { throw new Error("board down"); })).toBe("Ada");
 });
 
-test("classifier-labeled standup/rollcall without a group word is ignored", async () => {
-  const calls: string[] = [];
-  const lanes: Record<string, LaneDef> = {
-    coder: { brain: fakeBrain("coder", calls), aliases: ["ada"] },
-  };
-  // classifier hallucinates "standup" for a bare status question
-  const sb = new SwitchboardBrain(fakeBrain("front", calls), lanes, async () => "standup");
+test("model none preserves a status question for the pinned lane", async () => {
+  const sb = new SwitchboardBrain(fakeBrain("front", []), {
+    coder: { brain: fakeBrain("coder", []), aliases: ["ada"] },
+  }, async () => intentJson("none"));
   await sb.transferTo("ada");
-  expect(await sb.send("what's the status?")).toBe("coder reply"); // normal turn for the pinned lane
-  // with a real group reference the label is honored
-  const sb2 = new SwitchboardBrain(fakeBrain("front", calls), lanes, async () => "standup");
-  const out = await sb2.send("status from everyone please");
-  expect(out).toContain("Getting status from the team.");
+  expect(await sb.send("what's the status?")).toBe("coder reply");
 });
 
 test("classifier rollcall with the literal phrase but no group word is honored (2026-07-12 live miss)", async () => {
@@ -2215,16 +2212,11 @@ test("classifier rollcall with the literal phrase but no group word is honored (
   }
 });
 
-test("classifier-labeled bare group-action names are ignored (2026-07-30 live regression)", async () => {
-  for (const [utterance, label] of [
-    ["The roll call.", "rollcall"],
-    ["the standup.", "standup"],
-  ] as const) {
-    const calls: string[] = [];
-    const { sb } = classifierBoard(calls, label);
-    await sb.start();
-    expect(await sb.send(utterance)).toBe("front reply");
-    expect(sb.wasControlTurn()).toBe(false);
+test("structured requests need no keyword or group-word veto", async () => {
+  for (const utterance of ["let's do a quick roll call", "take roll call off my hands", "gather the gang", "The roll call."]) {
+    const { sb } = classifierBoard([], "rollcall");
+    expect(await sb.send(utterance)).toContain("checking in.");
+    expect(sb.wasControlTurn()).toBe(true);
   }
 });
 
@@ -2234,7 +2226,7 @@ test("a refused classifier rollcall cannot return through the front-desk reply",
     coder: { brain: fakeBrain("coder", calls) },
     think: { brain: fakeBrain("think", calls) },
   };
-  const sb = new SwitchboardBrain(magicRollcallFront(calls), lanes, async () => "rollcall");
+  const sb = new SwitchboardBrain(magicRollcallFront(calls), lanes, async () => intentJson("rollcall", false));
   await sb.start();
 
   expect(await sb.send("The roll call.")).toBe("roll call");
@@ -2248,7 +2240,7 @@ test("a refused classifier rollcall cannot return through a streamed front-desk 
     coder: { brain: fakeBrain("coder", calls) },
     think: { brain: fakeBrain("think", calls) },
   };
-  const sb = new SwitchboardBrain(magicRollcallFront(calls, true), lanes, async () => "rollcall");
+  const sb = new SwitchboardBrain(magicRollcallFront(calls, true), lanes, async () => intentJson("rollcall", false));
   await sb.start();
   let out = "";
   for await (const chunk of sb.sendStream("The roll call.")) out += chunk;
@@ -2268,7 +2260,7 @@ test("a streamed front-desk rollcall reply still promotes when nothing was refus
     coder: { brain: fakeBrain("coder", calls) },
     think: { brain: fakeBrain("think", calls) },
   };
-  const sb = new SwitchboardBrain(magicRollcallFront(calls, true), lanes, async () => "none");
+  const sb = new SwitchboardBrain(magicRollcallFront(calls, true), lanes, async () => intentJson("none"));
   await sb.start();
   let out = "";
   for await (const chunk of sb.sendStream("Check whether they should respond.")) out += chunk;
@@ -2287,7 +2279,7 @@ test("a front-desk rollcall reply still promotes when no classifier label was re
   const sb = new SwitchboardBrain(
     magicRollcallFront(calls),
     lanes,
-    async () => classifications++ === 0 ? "none" : "rollcall",
+    async () => classifications++ === 0 ? intentJson("none") : intentJson("rollcall", false),
   );
   await sb.start();
 
@@ -2297,13 +2289,13 @@ test("a front-desk rollcall reply still promotes when no classifier label was re
   expect(sb.wasControlTurn()).toBe(false);
 });
 
-test("a dial-back veto also blocks a front-desk group-action reply", async () => {
+test("a model non-request also blocks a front-desk group-action reply", async () => {
   const calls: string[] = [];
   const lanes: Record<string, LaneDef> = {
     coder: { brain: fakeBrain("coder", calls) },
     think: { brain: fakeBrain("think", calls) },
   };
-  const sb = new SwitchboardBrain(magicRollcallFront(calls), lanes, async () => "rollcall");
+  const sb = new SwitchboardBrain(magicRollcallFront(calls), lanes, async () => intentJson("rollcall", false));
   await sb.start();
 
   expect(await sb.send("Have everyone call me back.")).toBe("roll call");
@@ -2316,7 +2308,7 @@ test("a refused group action does not suppress a front-desk trigger on a later t
     coder: { brain: fakeBrain("coder", calls) },
     think: { brain: fakeBrain("think", calls) },
   };
-  const sb = new SwitchboardBrain(magicRollcallFront(calls), lanes, async () => "rollcall");
+  const sb = new SwitchboardBrain(magicRollcallFront(calls), lanes, async () => intentJson(calls.some((call) => call === "front:send:The roll call.") ? "none" : "rollcall", false));
   await sb.start();
 
   expect(await sb.send("The roll call.")).toBe("roll call");
@@ -2324,7 +2316,7 @@ test("a refused group action does not suppress a front-desk trigger on a later t
   expect(sb.wasControlTurn()).toBe(true);
 });
 
-test("classifier group-action request framing distinguishes commands from ambiguous bare verbs", async () => {
+test("structured group requests are honored across paraphrases", async () => {
   const requests = [
     ["run the roll call", "rollcall"],
     ["do the roll call", "rollcall"],
@@ -2350,35 +2342,14 @@ test("classifier group-action request framing distinguishes commands from ambigu
     expect(label === "rollcall" ? reply.includes("checking in.") : reply.startsWith("Getting status from the team.")).toBe(true);
     expect(sb.wasControlTurn()).toBe(true);
   }
-  for (const utterance of [
-    "have roll call me back",
-    "take roll call off my hands",
-  ]) {
-    const calls: string[] = [];
-    const { sb } = classifierBoard(calls, "rollcall");
-    await sb.start();
-    expect(await sb.send(utterance)).toBe("front reply");
-    expect(sb.wasControlTurn()).toBe(false);
-  }
 });
 
-test("classifier group-action evidence yields to dial-back readings and requires a named confirmation", async () => {
-  for (const utterance of [
-    "yes, check on that",
-    "right, transfer the status",
-    "yeah, check the build",
-  ]) {
-    const calls: string[] = [];
-    const { sb } = classifierBoard(calls, "rollcall");
-    await sb.start();
-    expect(await sb.send(utterance)).toBe("front reply");
-    expect(sb.wasControlTurn()).toBe(false);
-  }
-  const calls: string[] = [];
-  const { sb } = classifierBoard(calls, "rollcall");
-  await sb.start();
-  expect(await sb.send("have everyone call me back")).toBe("front reply");
-  expect(sb.wasControlTurn()).toBe(false);
+test("model callme takes precedence without a lexical group veto", async () => {
+  const { sb } = classifierBoard([], "callme:coder");
+  const rang: Array<string | undefined> = [];
+  sb.setCallMeHandler(async (who) => { rang.push(who); return "Ringing."; });
+  expect(await sb.send("get the gang's coder to reach my handset")).toBe("Ringing.");
+  expect(rang).toEqual(["coder"]);
 });
 
 test("'do another roll call' matches lexically — no classifier round-trip", async () => {
@@ -2601,7 +2572,7 @@ test("classifier fallback dials back when the lexical pattern misses", async () 
   // "I want you to call me" (live miss 2026-07-13) matches no pattern; the
   // small-model fallback must carry it, exactly like typed Telegram does.
   const prompts: string[] = [];
-  const classifier = async (prompt: string) => { prompts.push(prompt); return "callme"; };
+  const classifier = async (prompt: string) => { prompts.push(prompt); return intentJson("callme"); };
   const sb = new SwitchboardBrain(fakeBrain("front", []), {
     coder: { brain: fakeBrain("coder", []) },
   }, classifier);
@@ -2616,7 +2587,7 @@ test("classifier fallback dials back when the lexical pattern misses", async () 
 test("classifier callme:<employee> routes the named pickup", async () => {
   const sb = new SwitchboardBrain(fakeBrain("front", []), {
     coder: { brain: fakeBrain("coder", []) },
-  }, async () => "callme:coder");
+  }, async () => intentJson("callme:coder"));
   const rang: Array<string | undefined> = [];
   sb.setCallMeHandler(async (who) => { rang.push(who); return "Ringing."; });
   await sb.start();
@@ -2636,7 +2607,7 @@ test("a classifier dial-back survives its own handler pinning the lane", async (
   const calls: string[] = [];
   const sb = new SwitchboardBrain(fakeBrain("front", calls), {
     think: { brain: fakeBrain("think", calls) },
-  }, async () => "callme:think");
+  }, async () => intentJson("callme:think"));
   sb.setCallMeHandler(async (who) => {
     const name = await sb.transferTo(who ?? "think");
     return `Ringing you now — ${name} will pick up.`;
@@ -2705,18 +2676,14 @@ test("a barge-in during a dial-back still supersedes the dialing turn", async ()
   }
 });
 
-test("hallucinated callme labels are ignored without call vocabulary", async () => {
-  // Mirror of the group-word guard: the classifier alone must never be able
-  // to dial the user's phone from an utterance that mentions no call.
+test("structured callme needs no call vocabulary", async () => {
   const sb = new SwitchboardBrain(fakeBrain("front", []), {
     coder: { brain: fakeBrain("coder", []) },
-  }, async () => "callme");
+  }, async () => intentJson("callme"));
   const rang: Array<string | undefined> = [];
   sb.setCallMeHandler(async (who) => { rang.push(who); return "Ringing."; });
-  await sb.start();
-  // control-ish ("status report") so the classifier runs — but no call words
-  expect(await sb.send("give me a status report on the build")).toBe("front reply");
-  expect(rang).toEqual([]);
+  expect(await sb.send("reach me on my handset now")).toBe("Ringing.");
+  expect(rang).toEqual([undefined]);
 });
 
 test("a dial-back leaves a memo so the persona can answer 'did you call me?'", async () => {
@@ -2747,7 +2714,7 @@ test("classifier-routed dial-backs leave the same memo", async () => {
   const front = { ...fakeBrain("front", []), injectContext: (c: string) => injected.push(c) };
   const sb = new SwitchboardBrain(front, {
     coder: { brain: fakeBrain("coder", []) },
-  }, async () => "callme:coder");
+  }, async (prompt) => intentJson(prompt.endsWith('"thanks"') ? "none" : "callme:coder"));
   sb.setCallMeHandler(async () => "Ringing.");
   try {
     await sb.start();
@@ -2787,7 +2754,7 @@ test("a speculative turn refuses the classifier dial-back too", async () => {
   // the two — "phone me now" reaches it without matching any pattern.
   const sb = new SwitchboardBrain(fakeBrain("front", []), {
     coder: { brain: fakeBrain("coder", []) },
-  }, async () => "callme");
+  }, async () => intentJson("callme"));
   const rang: Array<string | undefined> = [];
   sb.setCallMeHandler(async (who) => { rang.push(who); return "Ringing."; });
   await sb.start();
@@ -2828,7 +2795,7 @@ test("both dial sites hand the handler the turn signal and nothing more", async 
 
   const classified = new SwitchboardBrain(fakeBrain("front", []), {
     coder: { brain: fakeBrain("coder", []) },
-  }, async () => "callme:coder");
+  }, async () => intentJson("callme:coder"));
   classified.setCallMeHandler(async (who, options) => {
     seen.push({ who, keys: Object.keys(options ?? {}) });
     return "Ringing.";

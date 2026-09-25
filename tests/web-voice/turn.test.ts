@@ -1663,3 +1663,23 @@ test("aborted web turn drops a notice whose TTS finishes late", async () => {
   expect(calls.sentence).not.toContain("Waiting on your OK to use a tool.");
   expect(calls.audio).toBe(0);
 });
+
+test("web text and voice carry intent durations into their latency record", async () => {
+  for (const voice of [false, true]) {
+    const record = new LatencyTurn("s", "intent", voice ? "web_voice" : "web_text", 1);
+    const d = streamDeps();
+    d.timingMark = (name, ms) => record.mark(name, ms);
+    d.brain = {
+      send: async (_message, options) => {
+        options?.onIntentMs?.(421);
+        options?.onIntentHeldMs?.(82);
+        return "Ready.";
+      },
+    };
+    const { sink } = capturingSink();
+    if (voice) await streamWebTurn(tinyWav([1]), d, sink);
+    else await streamWebTextTurn("hello", d, sink);
+    expect(record.finish().intentMs).toBe(421);
+    expect(record.finish().intentHeldMs).toBe(82);
+  }
+});

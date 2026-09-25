@@ -64,6 +64,9 @@ export interface SpeculatorDeps {
 
 /** One in-flight speculative turn, owned by a websocket connection. */
 export interface SpeculativeTurn {
+  /** Classifier duration retained for the adopting turn only. */
+  readonly intentMs?: number;
+  readonly intentHeldMs?: number;
   /**
    * Take ownership for adoption. False when the speculation already aborted
    * (timeout, replaced) — the caller then just runs the normal path.
@@ -215,6 +218,8 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
     let claimed = false;
     let adopted = false;
     let buffer: TokenBuffer | null = null;
+    let intentMs: number | undefined;
+    let intentHeldMs: number | undefined;
     let pumpDone: Promise<void> = Promise.resolve();
     let pumpSettled = true;
     const startedAt = performance.now();
@@ -287,6 +292,8 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
             // The normal streaming path installs its speech handler later.
             // ACP dashboard rows are emitted independently by recordStructured.
             onNotice: (notice) => notices.push(notice),
+            onIntentHeldMs: (ms) => { if (!aborted && Number.isFinite(ms) && ms >= 0 && ms <= 300_000) intentHeldMs = ms; },
+            onIntentMs: (ms) => { if (!aborted && Number.isFinite(ms) && ms >= 0 && ms <= 300_000) intentMs = ms; },
           })[Symbol.asyncIterator]();
           while (!aborted) {
             const next = it.next();
@@ -386,6 +393,8 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
     }, deps.claimTimeoutMs ?? CLAIM_TIMEOUT_MS);
 
     return {
+      get intentHeldMs() { return aborted ? undefined : intentHeldMs; },
+      get intentMs() { return aborted ? undefined : intentMs; },
       claim() {
         if (aborted) return false;
         claimed = true;

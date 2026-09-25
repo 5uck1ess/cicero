@@ -1,3 +1,4 @@
+import { INTENT_SCHEMA, MAX_INTENT_BYTES } from "./switchboard-intent";
 import type { RuntimeConfig } from "../config";
 import type { AcpMcpServerConfig, Brain, TerminalAdapter } from "../types";
 import type { Stdio } from "@zed-industries/agent-client-protocol";
@@ -59,30 +60,45 @@ export function resolveAcpMcpServers(
  */
 export function summarizerClassifier(
   tldrCfg?: { summarizer_url?: string; summarizer_model?: string },
+  structuredIntent = false,
 ): ((prompt: string, signal?: AbortSignal) => Promise<string>) | undefined {
   const url = tldrCfg?.summarizer_url;
   if (!url) return undefined;
+  let useSchema = structuredIntent;
   return async (prompt: string, signal?: AbortSignal): Promise<string> => {
     try {
-      const res = await fetch(`${url.replace(/\/$/, "")}/chat/completions`, {
+      const request = () => fetch(`${url.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: tldrCfg?.summarizer_model ?? "default",
           messages: [{ role: "user", content: prompt }],
-          max_tokens: 12,
+          max_tokens: structuredIntent ? 160 : 12,
+          ...(useSchema ? { response_format: { type: "json_schema", json_schema: { name: "switchboard_intent", strict: true, schema: INTENT_SCHEMA } } } : {}),
           temperature: 0,
         }),
-        signal: providerSignal(PROVIDER_TIMEOUT_MS.classifier, signal),
+        // Structured switchboard callers own the absolute deadline across retries.
+        signal: structuredIntent && signal ? signal : providerSignal(PROVIDER_TIMEOUT_MS.classifier, signal),
       });
+      let res = await request();
+      // Compatibility negotiation: some OpenAI-compatible servers reject schema
+      // requests. Retry once without it, under the caller's SAME deadline.
+      if (useSchema && [400, 422].includes(res.status)) {
+        await discardResponseBody(res);
+        signal?.throwIfAborted();
+        useSchema = false;
+        res = await request();
+      }
       if (!res.ok) {
         await discardResponseBody(res);
         throw new Error(`classifier http ${res.status}`);
       }
       const data = await readBoundedJson<{
         choices?: Array<{ message?: { content?: string } }>;
-      }>(res);
-      return data.choices?.[0]?.message?.content ?? "";
+      }>(res, structuredIntent ? 16_384 : undefined);
+      const content = data.choices?.[0]?.message?.content;
+      if (typeof content !== "string" || (structuredIntent && (content.length > MAX_INTENT_BYTES || Buffer.byteLength(content) > MAX_INTENT_BYTES))) return "";
+      return content;
     } catch (err: unknown) {
       throw err;
     }
@@ -247,7 +263,10 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
       // Intent classifier for phrasings the lexical patterns miss: the same
       // small local model the TLDR summarizer uses (already loaded, ~0.4s).
       // Without a summarizer endpoint the switchboard is lexical-only.
-      return new SwitchboardBrain(front, lanes, summarizerClassifier(config.raw.web_voice?.tldr));
+      return new SwitchboardBrain(front, lanes, summarizerClassifier(config.raw.web_voice?.tldr, true), {
+        intentTimeoutMs: config.raw.switchboard?.intent_timeout_ms,
+        intentMinConfidence: config.raw.switchboard?.intent_min_confidence,
+      });
     }
     return front;
   }

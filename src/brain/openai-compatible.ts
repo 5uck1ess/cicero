@@ -1,3 +1,4 @@
+import { brainExecutesTools } from "./capabilities";
 import type { Brain, BrainTurnOptions } from "../types";
 import { log } from "../logger";
 import { OpenAiProvider } from "../backends/llm/openai";
@@ -17,12 +18,15 @@ const DEFAULT_MAX_TOKENS = 1024;
  * conversation brain; use a CLI agent when the turn must take actions.
  */
 export class OpenAiCompatibleBrain implements Brain {
+  private readonly holdSafe: boolean;
+  canHoldIntentOutput(): boolean { return this.holdSafe; }
   private readonly provider: OpenAiProvider;
   private readonly maxTokens: number;
   private readonly label: string;
   private turnContext = new BrainTurnContext();
 
   constructor(config: LLMProviderConfig, maxTokens: number = DEFAULT_MAX_TOKENS) {
+    this.holdSafe = !brainExecutesTools({ backend: config.backend ?? "openai-compatible", mode: "subprocess", base_url: config.baseUrl });
     this.provider = new OpenAiProvider(config);
     this.maxTokens = maxTokens;
     this.label = config.backend ?? "openai-compatible";

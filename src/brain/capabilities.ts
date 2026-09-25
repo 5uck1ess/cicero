@@ -102,3 +102,10 @@ export function sendUnattended(
   }
   return brain.send(message, options);
 }
+
+/** Unknown routes fail closed; ACP supplies a real permission barrier. */
+export function canHoldIntentOutput(brain: Brain): boolean {
+  return brain.canHoldIntentOutput
+    ? brain.canHoldIntentOutput()
+    : brain.canDeferSpeculativePermissions?.() === true;
+}

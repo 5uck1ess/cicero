@@ -1,3 +1,4 @@
+import { canHoldIntentOutput } from "./capabilities";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
 import { log } from "../logger";
 import { BrainTurnContext } from "./turn-context";
@@ -16,6 +17,7 @@ import { collectPendingConfirmations, hasPendingConfirmations, relayBoundConfirm
  * employee must never get silently dumber.
  */
 export class FallbackBrain implements Brain {
+  canHoldIntentOutput(): boolean { return this.tiers.every(canHoldIntentOutput); }
   canDeferSpeculativePermissions(): boolean { return this.tiers.every((brain) => brain.canDeferSpeculativePermissions?.() === true); }
   sessionRestored(): boolean { return this.tiers[0]?.sessionRestored?.() ?? false; }
   private started = new Set<number>();

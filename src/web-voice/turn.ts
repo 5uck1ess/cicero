@@ -1339,9 +1339,14 @@ async function streamReply(
     // total brain time instead — still the honest number for that path.
     let firstToken = false;
     const timed = async function* (src: AsyncIterable<string>): AsyncGenerator<string> {
-      for await (const t of src) {
-        if (!firstToken) { firstToken = true; timer.mark("brain_first_token"); }
-        yield t;
+      try {
+        for await (const t of src) {
+          if (!firstToken) { firstToken = true; timer.mark("brain_first_token"); }
+          yield t;
+        }
+      } finally {
+        if (speculativeTurn?.intentHeldMs !== undefined) deps.timingMark?.("intent_held_duration", speculativeTurn.intentHeldMs);
+        if (speculativeTurn?.intentMs !== undefined) deps.timingMark?.("intent_duration", speculativeTurn.intentMs);
       }
     };
     const onNotice: NonNullable<BrainTurnOptions["onNotice"]> = (notice) => {
@@ -1367,9 +1372,11 @@ async function streamReply(
       }).catch(() => { /* an optional notice cannot fail the reply */ });
     };
     speculativeTurn?.attachNotices?.(onNotice);
-    const turnOptions = turnAbort
-      ? { signal: turnAbort.signal, systemContext: systemContext ?? undefined, onNotice }
-      : undefined;
+    const turnOptions = {
+      signal: turnAbort?.signal, systemContext: systemContext ?? undefined, onNotice,
+      onIntentMs: (ms: number) => deps.timingMark?.("intent_duration", ms),
+      onIntentHeldMs: (ms: number) => deps.timingMark?.("intent_held_duration", ms),
+    };
     if (!pretokens) timer.mark("brain_start");
     const tokens: AsyncIterable<string> = pretokens
       ? timed(pretokens)
