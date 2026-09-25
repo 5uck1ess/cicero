@@ -1,6 +1,10 @@
 import { test, expect } from "bun:test";
 import { buildResumePrimer, type ResumeTurn, buildRosterNote } from "../../src/web-voice/resume";
 
+test("a restored ACP session skips the transcript recap", () => {
+  expect(buildResumePrimer([{ t: 1, user: "hello", reply: "hi" }], true)).toBeNull();
+});
+
 const turn = (user: string, reply: string): ResumeTurn => ({ t: 1, user, reply });
 
 test("no history → null (plain warmup)", () => {

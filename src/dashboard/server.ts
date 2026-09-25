@@ -512,9 +512,16 @@ toggle.addEventListener('click', async () => {
 function time(ts) {
   return new Date(ts || Date.now()).toLocaleTimeString('en-US', { hour12: false });
 }
+const toolRows = new Map();
 function addRow(e) {
-  if (!cleared) { rows.innerHTML = ''; cleared = true; }
-  const row = document.createElement('div');
+  if (!cleared) { rows.innerHTML = ''; toolRows.clear(); cleared = true; }
+  const detail = e.type === 'structured' && e.structured;
+  const toolRowKey = detail && detail.sourceId && detail.turnId && detail.toolCallId
+    ? JSON.stringify([detail.sourceId, detail.turnId, detail.toolCallId]) : null;
+  let row = toolRowKey ? toolRows.get(toolRowKey) : null;
+  if (row && !rows.contains(row)) { toolRows.delete(toolRowKey); row = null; }
+  const replacing = !!row;
+  if (!row) row = document.createElement('div');
   let cls = 'row', icon = e.icon || '•', msg = e.message || '';
   if (e.type === 'transcript') { cls += ' heard'; icon = '🎤'; msg = 'You: ' + e.text; }
   else if (e.type === 'response') { cls += ' say'; icon = '🗣'; msg = 'Cicero: ' + e.text; }
@@ -525,8 +532,15 @@ function addRow(e) {
   row.innerHTML = '<span class="t"></span><span class="m"></span>';
   row.children[0].textContent = time(e.ts);
   row.children[1].textContent = icon + '  ' + msg;
-  rows.appendChild(row);
-  while (rows.children.length > 200) rows.removeChild(rows.firstChild);
+  if (!replacing) {
+    if (toolRowKey) { row.dataset.toolRowKey = toolRowKey; toolRows.set(toolRowKey, row); }
+    rows.appendChild(row);
+  }
+  while (rows.children.length > 200) {
+    const old = rows.firstChild;
+    if (old.dataset.toolRowKey) toolRows.delete(old.dataset.toolRowKey);
+    rows.removeChild(old);
+  }
   rows.scrollTop = rows.scrollHeight;
 }
 function setConfig(c) {

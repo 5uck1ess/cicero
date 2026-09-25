@@ -42,6 +42,7 @@ function replies(reply: QuickIntent["reply"]): string[] {
 }
 
 export class QuickIntentsBrain implements Brain {
+  sessionRestored(): boolean { return this.inner.sessionRestored?.() ?? false; }
   private compiled: Array<{ phrases: Set<string>; pattern: RegExp | null; replies: string[] }>;
 
   constructor(
@@ -148,6 +149,7 @@ export class QuickIntentsBrain implements Brain {
 
   start(): Promise<void> { return this.inner.start(); }
   stop(): Promise<void> { return this.inner.stop(); }
+  discardSession(): Promise<void> { return this.inner.discardSession?.() ?? Promise.resolve(); }
   restart(): Promise<void> { return this.inner.restart(); }
   health(): Promise<boolean> { return this.inner.health(); }
   injectContext(context: string): void { this.inner.injectContext(context); }

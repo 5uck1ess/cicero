@@ -16,6 +16,23 @@ function loadYaml(yaml: string) {
   return () => loadConfigRaw({}, { home });
 }
 
+test("ACP session resume settings validate on every ACP brain", () => {
+  const valid = loadYaml([
+    "brain:", "  backend: acp", "  session_resume: false", "  session_resume_max_age_hours: 0.5",
+    "  escalate: { binary: hermes, session_resume: true, session_resume_max_age_hours: 720 }",
+    "  lanes:", "    coder:", "      session_resume: false", "      session_resume_max_age_hours: 24",
+    "      fallbacks: [{ backend: acp, session_resume_max_age_hours: 1 }]",
+  ].join("\n"))();
+  expect(valid.brain.session_resume).toBe(false);
+  for (const bad of [0, -1, 721, "twelve", ".nan"]) {
+    expect(() => loadYaml(`brain:\n  backend: acp\n  session_resume_max_age_hours: ${bad}\n`)())
+      .toThrow(/session_resume_max_age_hours/);
+  }
+  expect(() => loadYaml("brain:\n  backend: acp\n  session_resume: yes\n")()).toThrow(/session_resume/);
+  expect(() => loadYaml("brain:\n  backend: codex\n  session_resume: true\n")()).toThrow(/require the acp backend/);
+  expect(() => loadYaml("brain:\n  backend: acp\n  lanes:\n    coder: { backend: codex, session_resume: true }\n")()).toThrow(/require an acp lane/);
+});
+
 describe("Config — default values", () => {
   const config = loadConfig();
 
@@ -1128,6 +1145,26 @@ describe("Config — fail-fast validation", () => {
     ].join("\n"))).toThrow(
       /brain\.max_queue_bytes must be an integer[\s\S]*brain\.max_response_bytes must be an integer[\s\S]*brain\.max_pending_turns must be an integer/,
     );
+  });
+
+  test("validates bounded stdio MCP servers with environment names on ACP brains and lanes", () => {
+    const valid = loadYaml([
+      "brain:", "  backend: acp", "  mcp_servers:", "    - name: search", "      command: search-mcp",
+      "      args: [--stdio]", "      env: [SEARCH_TOKEN]",
+      "  lanes:", "    coder:", "      mcp_servers: []", "",
+    ].join("\n"))();
+    expect(valid.brain.mcp_servers?.[0]?.env).toEqual(["SEARCH_TOKEN"]);
+    expect(() => loadYaml([
+      "brain:", "  backend: acp", "  mcp_servers:", "    - name: search", "      command: search-mcp",
+      "      args: []", "      env: [INVALID-NAME]", "",
+    ].join("\n"))()).toThrow(/brain\.mcp_servers\.0\.env/);
+    try {
+      loadYaml("brain:\n  backend: acp\n  mcp_servers:\n    - { name: x, command: x, args: [], env: [{ name: BAD-NAME, value: synthetic-secret }] }\n")();
+    } catch (error) {
+      expect(String(error)).not.toContain("synthetic-secret");
+    }
+    expect(() => loadYaml("brain:\n  backend: codex\n  mcp_servers: []\n")()).toThrow(/brain\.mcp_servers requires the acp backend/);
+    expect(() => loadYaml("brain:\n  backend: acp\n  lanes:\n    coder: { backend: codex, mcp_servers: [] }\n")()).toThrow(/brain\.lanes\.coder\.mcp_servers requires an acp lane/);
   });
 
   test("rejects a non-string inline provider API key before doctor can inspect it", () => {

@@ -791,7 +791,7 @@ const DEFAULT_ACTIONS: Record<string, ActionConfig> = {
     category: "local",
     command: "",
     tts_mode: "full",
-    examples: ["restart brain", "restart claude", "reboot the brain", "reset the brain"],
+    examples: ["restart brain", "restart claude", "reboot the brain", "reset the brain", "new session", "clear context"],
   },
   runtime_voice_toggle: {
     category: "local",

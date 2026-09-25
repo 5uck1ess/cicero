@@ -1,5 +1,6 @@
 import type { RuntimeConfig } from "../config";
-import type { Brain, TerminalAdapter } from "../types";
+import type { AcpMcpServerConfig, Brain, TerminalAdapter } from "../types";
+import type { Stdio } from "@zed-industries/agent-client-protocol";
 import { ClaudeCodeBrain } from "./claude-code";
 import { CodexBrain } from "./codex";
 import { GeminiBrain } from "./gemini";
@@ -8,6 +9,7 @@ import { OllamaBrain } from "./ollama";
 import { OpenAiCompatibleBrain } from "./openai-compatible";
 import { TabInjectBrain } from "./tab-inject";
 import { AcpBrain } from "./acp";
+import { acpSessionFilePath } from "./acp-session-store";
 import { FallbackBrain } from "./fallback";
 import { RoutingBrain } from "./routing";
 import { SwitchboardBrain, type LaneDef } from "./switchboard";
@@ -30,6 +32,24 @@ export interface BrainHooks {
   onConfirmationPending?: (summary: string, nonce: string) => void | Promise<void>;
   /** Daemon runtime only: install the backend-independent spoken dial-back control. */
   dialBackControl?: boolean;
+}
+
+export function resolveAcpMcpServers(
+  servers?: AcpMcpServerConfig[],
+  environment: Record<string, string | undefined> = process.env,
+): Stdio[] | undefined {
+  return servers?.map((server) => ({
+    name: server.name,
+    command: server.command,
+    args: [...server.args],
+    env: (server.env ?? []).map((name) => {
+      const value = environment[name];
+      if (value === undefined || value.length > 4096) {
+        throw new Error(`ACP MCP environment variable ${name} is unavailable or too long`);
+      }
+      return { name, value };
+    }),
+  }));
 }
 
 /**
@@ -88,7 +108,7 @@ export function createBrain(config: RuntimeConfig, terminal?: TerminalAdapter, h
 }
 
 function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: BrainHooks = {}): Brain {
-  const { backend, mode, target_tab, auto_approve_tools, confirm_tools, confirm_retry, max_queue_bytes, max_response_bytes, max_pending_turns, binary, binary_args, ollama_port, ollama_model, base_url, model, api_key, api_key_env, max_tokens, timeout_ms, unset_env, headers, session_header } = config.brain;
+  const { backend, mode, target_tab, auto_approve_tools, confirm_tools, confirm_retry, max_queue_bytes, max_response_bytes, max_pending_turns, session_resume, session_resume_max_age_hours, binary, binary_args, ollama_port, ollama_model, base_url, model, api_key, api_key_env, max_tokens, timeout_ms, unset_env, headers, session_header } = config.brain;
   const telegram = config.notify?.telegram;
   const onConfirmationPending = telegram || hooks.onConfirmationPending
     ? async (summary: string, nonce: string): Promise<void> => {
@@ -144,6 +164,10 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
       binary: binary ?? "hermes",
       args: binary_args ?? ["acp"],
       cwd: process.cwd(),
+      sessionFile: acpSessionFilePath("primary"),
+      sessionResume: session_resume,
+      sessionResumeMaxAgeHours: session_resume_max_age_hours,
+      mcpServers: resolveAcpMcpServers(config.brain.mcp_servers),
       unsetEnv: unset_env,
       autoApproveTools: auto_approve_tools ?? false,
       confirmTools: confirm_tools,
@@ -163,6 +187,10 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
         binary: esc.binary ?? binary ?? "hermes",
         args: esc.binary_args ?? ["acp"],
         cwd: process.cwd(),
+        sessionFile: acpSessionFilePath("escalation"),
+        sessionResume: esc.session_resume ?? session_resume,
+        sessionResumeMaxAgeHours: esc.session_resume_max_age_hours ?? session_resume_max_age_hours,
+        mcpServers: resolveAcpMcpServers(esc.mcp_servers),
         unsetEnv: esc.unset_env ?? unset_env,
         autoApproveTools: auto_approve_tools ?? false,
         confirmTools: confirm_tools,
@@ -182,13 +210,17 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
       const lanes: Record<string, LaneDef> = {};
       // codex lanes drive the Codex CLI directly (it has no ACP mode) and
       // resume the same codex session across turns for continuity.
-      const makeLaneBrain = (d: { backend?: "acp" | "codex"; binary?: string; binary_args?: string[]; unset_env?: string[]; env?: Record<string, string> }): Brain =>
+      const makeLaneBrain = (d: { backend?: "acp" | "codex"; binary?: string; binary_args?: string[]; unset_env?: string[]; env?: Record<string, string>; mcp_servers?: AcpMcpServerConfig[]; session_resume?: boolean; session_resume_max_age_hours?: number }, laneName: string, tier: number): Brain =>
         d.backend === "codex"
           ? new CodexBrain(d.binary ?? "codex", d.binary_args ?? [], d.unset_env ?? [], { resume: true })
           : new AcpBrain({
               binary: d.binary ?? binary ?? "hermes",
               args: d.binary_args ?? ["acp"],
               cwd: process.cwd(),
+              sessionFile: acpSessionFilePath(`lane:${laneName}:tier:${tier}`),
+              sessionResume: d.session_resume ?? session_resume,
+              sessionResumeMaxAgeHours: d.session_resume_max_age_hours ?? session_resume_max_age_hours,
+              mcpServers: resolveAcpMcpServers(d.mcp_servers),
               env: d.env,
               unsetEnv: d.unset_env ?? unset_env,
               autoApproveTools: auto_approve_tools ?? false,
@@ -202,8 +234,8 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
             });
       for (const [name, l] of Object.entries(laneDefs)) {
         const laneBrain: Brain = l.fallbacks?.length
-          ? new FallbackBrain([makeLaneBrain(l), ...l.fallbacks.map(makeLaneBrain)], name)
-          : makeLaneBrain(l);
+          ? new FallbackBrain([makeLaneBrain(l, name, 0), ...l.fallbacks.map((fallback, index) => makeLaneBrain(fallback, name, index + 1))], name)
+          : makeLaneBrain(l, name, 0);
         lanes[name] = {
           brain: laneBrain,
           aliases: l.aliases,

@@ -153,7 +153,7 @@ export function injectDeliveredBriefingContext(
 }
 
 export interface OperatorChatTurnDeps {
-  brain: Pick<Brain, "send" | "activeLane">;
+  brain: Pick<Brain, "send" | "activeLane"> & Partial<Pick<Brain, "restart">>;
   history: Pick<TurnHistory, "append">;
   operationalContext?: (signal?: AbortSignal) => Promise<string | null>;
 }
@@ -164,6 +164,15 @@ export async function runOperatorChatTurn(
   deps: OperatorChatTurnDeps,
   signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
+  const command = text.length <= 128
+    ? text.trim().toLowerCase().replace(/[.!?]+$/, "").replace(/\s+/g, " ") : "";
+  if (/^(?:restart (?:the )?(?:brain|claude)|reboot (?:the )?brain|reset (?:the )?brain|(?:start (?:a )?)?new session|clear (?:the )?context)$/.test(command)) {
+    if (!deps.brain.restart) throw new Error("brain reset is unavailable");
+    await deps.brain.restart();
+    signal?.throwIfAborted();
+    return "Brain restarted with a new session.";
+  }
   const systemContext = await captureOperationalContext(deps.operationalContext, signal);
   signal?.throwIfAborted();
   const reply = await deps.brain.send(text, {
@@ -1315,7 +1324,7 @@ export class CiceroDaemon {
       const resumeTurns = this.config.web_voice?.resume_turns ?? 10;
       if (this.config.web_voice?.enabled && resumeTurns > 0) {
         try {
-          const primer = buildResumePrimer(await history().recent(resumeTurns));
+          const primer = buildResumePrimer(await history().recent(resumeTurns), this.brain.sessionRestored?.() ?? false);
           if (primer) warmMsg = primer;
         } catch { /* no history — plain warmup */ }
       }
