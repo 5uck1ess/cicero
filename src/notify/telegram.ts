@@ -4,6 +4,7 @@ export { classifyCallIntent } from "../call-intent";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { log } from "../logger";
+import { redactSecrets } from "../redact";
 import { TELEGRAM_TEXT_MAX_CHARS } from "./briefing";
 import { confirmationDecision, isConfirmationNonce } from "../brain/approval";
 import type { Brain } from "../types";
@@ -470,7 +471,8 @@ export interface TelegramInputHandlers {
    * the handler owns lane lookup and the unknown-name reply). Returns the ack line. */
   onCallMe?: (who?: string) => Promise<string>;
   /** Any other text: a brain turn; the full reply comes back as text. */
-  onChat?: (text: string) => Promise<string>;
+  /** null means a superseded turn; nothing is sent for it. */
+  onChat?: (text: string) => Promise<string | null>;
 }
 
 const HEALTH_LOG_RE = /^log[:,]?\s+(\S+)(?:\s+([\s\S]+))?$/i;
@@ -568,9 +570,12 @@ export async function handleTelegramUpdate(
   if (handlers?.onChat) {
     let reply: string;
     try {
-      reply = (await handlers.onChat(text)).trim() || "(no reply)";
+      const result = await handlers.onChat(text);
+      if (result === null) return true;
+      reply = result.trim() || "(no reply)";
     } catch (err: unknown) {
-      reply = `(Cicero unreachable: ${err instanceof Error ? err.message : String(err)})`;
+      const detail = err instanceof Error ? err.message : String(err);
+      reply = `(Cicero unreachable: ${detail.length > 4_096 ? "request failed" : redactSecrets(detail)})`;
     }
     for (let i = 0; i < reply.length; i += 4000) {
       await sendTelegramText(cfg, reply.slice(i, i + 4000), api);

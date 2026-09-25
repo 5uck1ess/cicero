@@ -139,7 +139,9 @@ export function classifyBargeIn(transcript: string | null | undefined, speaking:
 interface TurnPin { held: GenerationPin<STTProvider> | null }
 
 export class ConversationalListener implements Listener {
-  private callback?: (text: string) => void;
+  private callback?: (text: string) => void | Promise<void>;
+  private turnSupersessionSignal?: () => AbortSignal;
+  private captureSupersessionSignal: AbortSignal | null = null;
   private bargeInCallback?: () => void;
   private stopCallback?: () => void;
   private deactivateCallback?: () => void;
@@ -298,8 +300,13 @@ export class ConversationalListener implements Listener {
     ]);
   }
 
-  onCommand(callback: (text: string) => void): void {
+  onCommand(callback: (text: string) => void | Promise<void>): void {
     this.callback = callback;
+  }
+
+  /** Cancel pre-dispatch STT/judge work when another surface admits a turn. */
+  setTurnSupersessionSignal(current: () => AbortSignal): void {
+    this.turnSupersessionSignal = current;
   }
 
   /**
@@ -698,6 +705,8 @@ export class ConversationalListener implements Listener {
         this.listening = false;
 
         if (transcript === null || !this.isCurrentActivation(epoch)) break; // cancelled/deactivated
+        const supersession = this.captureSupersessionSignal;
+        if (supersession?.aborted) continue;
         if (!transcript) continue;                       // nothing intelligible
 
         // Drop our own TTS if the mic captured it (open-speaker feedback loop).
@@ -720,6 +729,7 @@ export class ConversationalListener implements Listener {
         // check so "stop listening" always works even if the judge disagrees,
         // and after self-echo so we never spend a model call on our own voice.
         if (!(await this.addressedToMe(transcript, epoch))) continue;
+        if (supersession?.aborted) continue;
 
         // Fire callback (handleCommand logs "Heard:" — no need to duplicate here)
         if (this.callback) {
@@ -785,9 +795,9 @@ export class ConversationalListener implements Listener {
    * Any in-flight barge detector is suspended first so the confirmation capture
    * owns the mic exclusively; full-duplex detection re-arms after it settles.
    */
-  listenOnce(): Promise<string> {
+  listenOnce(signal?: AbortSignal): Promise<string> {
     if (this.oneShotCaptureInFlight) return this.oneShotCaptureInFlight;
-    const capture = this.runOneShotCapture(this.activationEpoch);
+    const capture = this.runOneShotCapture(this.activationEpoch, signal);
     const tracked = capture.finally(() => {
       if (this.oneShotCaptureInFlight === tracked) this.oneShotCaptureInFlight = null;
     });
@@ -795,7 +805,7 @@ export class ConversationalListener implements Listener {
     return tracked;
   }
 
-  private async runOneShotCapture(epoch: number): Promise<string> {
+  private async runOneShotCapture(epoch: number, signal?: AbortSignal): Promise<string> {
     try {
       this.oneShotListening = true;
       const bargeCapture = this.bargeCaptureInFlight;
@@ -812,6 +822,7 @@ export class ConversationalListener implements Listener {
           return false;
         }),
       ]);
+      if (signal?.aborted) return "";
       if (!released || !vadStopped) {
         log("warn", "Could not release barge-in capture for one-shot listening");
         return "";
@@ -823,15 +834,19 @@ export class ConversationalListener implements Listener {
       if (!this.isCurrentActivation(epoch)) return "";
 
       const result = await this.recordUntilSilence();
-      if (!this.isCurrentActivation(epoch)) {
+      if (!this.isCurrentActivation(epoch) || signal?.aborted) {
         if (result.status === "ok") { try { unlinkSync(result.path); } catch { /* stale capture cleanup */ } }
         return "";
       }
       if (result.status === "error") this.reportMicFailure(result.message);
       if (result.status !== "ok") return "";
       try {
-        const transcript = (await this.sttProvider.transcribe(result.path, this.activationAbort.signal)) ?? "";
-        return this.isCurrentActivation(epoch) ? transcript : "";
+        const sttSignal = signal
+          ? AbortSignal.any([this.activationAbort.signal, signal])
+          : this.activationAbort.signal;
+        const transcript = (await this.sttProvider.transcribe(result.path, sttSignal)) ?? "";
+        return this.isCurrentActivation(epoch) && !sttSignal.aborted && transcript.length <= 16_384
+          ? transcript : "";
       } finally {
         try { unlinkSync(result.path); } catch { /* best-effort cleanup */ }
       }
@@ -887,6 +902,7 @@ export class ConversationalListener implements Listener {
    * if the initial recording was cancelled/silent (caller exits the loop).
    */
   private async captureTurn(epoch: number = this.activationEpoch): Promise<string | null> {
+    this.captureSupersessionSignal = null;
     const segments: string[] = [];
     let attempts = 0;
     // One turn, one STT generation. A Smart-Turn turn is transcribed segment by
@@ -949,10 +965,15 @@ export class ConversationalListener implements Listener {
       // segment — and every grace window between them — will use.
       pin.held ??= pinGeneration(this.sttProvider);
       const tStt = Date.now();
-      const transcript = await this.transcribeSafe(wav, pin.held.provider);
+      const supersession = this.captureSupersessionSignal ??= this.turnSupersessionSignal?.() ?? null;
+      const transcript = await this.transcribeSafe(wav, pin.held.provider, supersession);
       if (!this.isCurrentActivation(epoch)) {
         try { unlinkSync(wav); } catch { /* stale capture cleanup */ }
         return null;
+      }
+      if (supersession?.aborted) {
+        try { unlinkSync(wav); } catch { /* stale capture cleanup */ }
+        return "";
       }
       log("info", `⏱  STT ${Date.now() - tStt}ms`);
 
@@ -961,8 +982,16 @@ export class ConversationalListener implements Listener {
       if (this.turnActive) prediction = await this.predictTurn(wav, epoch);
       try { unlinkSync(wav); } catch {}
       if (!this.isCurrentActivation(epoch)) return null;
+      if (supersession?.aborted) return "";
 
-      if (transcript) segments.push(transcript);
+      if (transcript) {
+        const retainedChars = segments.reduce((n, part) => n + part.length + 1, 0);
+        if (retainedChars + transcript.length > 16_384) {
+          log("warn", "Captured utterance exceeds turn input limit");
+          return "";
+        }
+        segments.push(transcript);
+      }
 
       // No detector, or it just went away → single-shot, legacy behavior.
       if (!this.turnActive) break;
@@ -980,9 +1009,20 @@ export class ConversationalListener implements Listener {
   }
 
   /** Transcribe a wav, swallowing errors to "" so one STT hiccup can't kill the loop. */
-  private async transcribeSafe(wav: string, stt: STTProvider = this.sttProvider): Promise<string> {
+  private async transcribeSafe(
+    wav: string, stt: STTProvider = this.sttProvider, supersession?: AbortSignal | null,
+  ): Promise<string> {
     try {
-      return (await stt.transcribe(wav, this.activationAbort.signal))?.trim() ?? "";
+      const signal = supersession
+        ? AbortSignal.any([this.activationAbort.signal, supersession])
+        : this.activationAbort.signal;
+      const transcript = (await stt.transcribe(wav, signal))?.trim() ?? "";
+      if (signal.aborted) return "";
+      if (transcript.length > 16_384) {
+        log("warn", "STT transcript exceeds turn input limit");
+        return "";
+      }
+      return transcript;
     } catch (err: unknown) {
       log("info", `Transcribe failed: ${err instanceof Error ? err.message : String(err)}`);
       return "";
@@ -1229,9 +1269,11 @@ export class ConversationalListener implements Listener {
         try { unlinkSync(winner.audio); } catch { /* stale capture cleanup */ }
         return;
       }
-      const bargeTranscript = await this.transcribeSafe(winner.audio);
+      const supersession = this.turnSupersessionSignal?.();
+      const bargeTranscript = await this.transcribeSafe(winner.audio, this.sttProvider, supersession);
       try { unlinkSync(winner.audio); } catch { /* best effort */ }
       if (!this.isCurrentActivation(epoch)) return;
+      if (supersession?.aborted) continue;
 
       if (isStopCommand(bargeTranscript)) {
         log("info", `Stop command "${bargeTranscript}" — interrupting TTS only, no new command`);
@@ -1251,6 +1293,7 @@ export class ConversationalListener implements Listener {
           this.bargeInDiscardedCallback?.();
           continue;
         }
+        if (supersession?.aborted) continue;
         // The replacement turn owns the interruption window now. Keep the mic
         // armed around its reply instead of waiting for it with no detector.
         done = this.fireCallback(bargeTranscript).then(() => "done" as const);
@@ -1305,9 +1348,11 @@ export class ConversationalListener implements Listener {
         continue;
       }
 
-      const bargeTranscript = await this.transcribeSafe(audio);
+      const supersession = this.turnSupersessionSignal?.();
+      const bargeTranscript = await this.transcribeSafe(audio, this.sttProvider, supersession);
       try { unlinkSync(audio); } catch { /* best-effort */ }
       if (!this.isCurrentActivation(epoch)) return;
+      if (supersession?.aborted) continue;
 
       const cls = classifyBargeIn(bargeTranscript, this.currentlySpeaking());
       if (cls === "empty" || cls === "echo") {
@@ -1340,6 +1385,7 @@ export class ConversationalListener implements Listener {
         epoch,
         { budgetMs: BARGE_JUDGE_BUDGET_MS, interrupting: true },
       ))) continue;
+      if (supersession?.aborted) continue;
 
       // Genuine user speech — interrupt the current reply immediately.
       log("info", "Barge-in detected — interrupting TTS");
