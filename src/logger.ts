@@ -2,9 +2,10 @@ import chalk from "chalk";
 import { redactSecrets } from "./redact";
 import { dashBus } from "./dashboard/bus";
 
-type LogIcon = "mic" | "text" | "brain" | "run" | "result" | "speak" | "error" | "warn" | "info" | "ok";
+type LogIcon = "debug" | "mic" | "text" | "brain" | "run" | "result" | "speak" | "error" | "warn" | "info" | "ok";
 
 const ICONS: Record<LogIcon, string> = {
+  debug: "·",
   mic: "🎤",
   text: "📝",
   brain: "🧠",
@@ -31,6 +32,7 @@ export function redactLogSecrets(message: string): string {
 }
 
 export function log(icon: LogIcon, message: string): void {
+  if (icon === "debug" && process.env.CICERO_DEBUG !== "1") return;
   const safeMessage = redactLogSecrets(message);
   const ts = chalk.gray(`[${timestamp()}]`);
   const ic = ICONS[icon] || "•";

@@ -1,3 +1,4 @@
+import { classifySwitchboardIntent, type SwitchboardIntent } from "./switchboard-intent";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
 import { dialBackMemo, matchCallMe, SpeculativeSideEffectError } from "../call-intent";
@@ -49,6 +50,51 @@ export interface LaneDef {
 export interface SwitchboardOptions {
   /** Absolute wall-clock budget for one started lane's standup check-in. */
   standupLaneTimeoutMs?: number;
+  intentTimeoutMs?: number;
+  intentMinConfidence?: number;
+}
+
+type IntentAction =
+  | { intent: "transfer"; target: string }
+  | { intent: "callme"; target: string | null }
+  | { intent: "release" }
+  | { intent: "rollcall" }
+  | { intent: "standup" };
+type IntentPlan =
+  | { kind: "act"; action: IntentAction }
+  | { kind: "fallthrough"; refusedGroupAction: boolean };
+
+interface IntentPlanState {
+  activeLane: string | null;
+  hasPendingTransfer: boolean;
+  lanes: readonly string[];
+  unavailableTargets: ReadonlySet<string>;
+  canCall: boolean;
+  minConfidence: number;
+}
+
+/** Pure decision: no provider calls, cancellation, context mutation, or startup. */
+export function planSwitchboardIntent(result: SwitchboardIntent, state: IntentPlanState): IntentPlan {
+  const fallthrough: IntentPlan = {
+    kind: "fallthrough",
+    refusedGroupAction: result.intent === "rollcall" || result.intent === "standup",
+  };
+  if (!result.request_now || result.confidence < state.minConfidence) return fallthrough;
+  switch (result.intent) {
+    case "none": return fallthrough;
+    case "release":
+      return state.activeLane !== null || state.hasPendingTransfer
+        ? { kind: "act", action: { intent: "release" } } : fallthrough;
+    case "rollcall":
+    case "standup":
+      return state.lanes.length > 0 ? { kind: "act", action: { intent: result.intent } } : fallthrough;
+    case "transfer":
+      return result.target !== null && state.lanes.includes(result.target)
+        && result.target !== state.activeLane && !state.unavailableTargets.has(result.target)
+        ? { kind: "act", action: { intent: "transfer", target: result.target } } : fallthrough;
+    case "callme":
+      return state.canCall ? { kind: "act", action: { intent: "callme", target: result.target } } : fallthrough;
+  }
 }
 
 const DEFAULT_STANDUP_LANE_TIMEOUT_MS = 20_000;
@@ -259,11 +305,6 @@ const STANDUP_RE = new RegExp(
     `|(?:i (?:want|need)\\s+)?(?:a\\s+|the\\s+)?status(?:\\s+(?:report|update))?\\s+(?:with|from|of|for)\\s+${GROUP_REF}` +
   `)${GROUP_TAIL}(?:\\s+please)?$`, "i");
 
-// Cheap gate for the intent classifier: only utterances containing control-ish
-// vocabulary are worth a classification round-trip; everything else goes
-// straight to the brain with zero added latency.
-const CONTROLISH_RE = /\b(?:every(?:one|body)|team|office|roll|status|check|transfer|switch|connect|talk|speak|bring|put|pass|hand|patch|line|hang|stand\s?-?up|report|back|join|agents?|all hands|assemble|conference|group|call|ring|phone|dial)\b/i;
-
 // Voicemail is matched on the RAW utterance (not normalized) so the message
 // body keeps its punctuation — it's delivered as text, not as a pattern.
 const VOICEMAIL_RE = /^(?:(?:hey|ok(?:ay)?|cicero|please)[,\s]+){0,2}(?:can you\s+|could you\s+)?(?:leave|take|pass(?: along)?)\s+(?:a\s+)?(?:message|note|word)\s+(?:for|to)\s+([^:,]{1,40}?)\s*[:,]\s*(.+)$/i;
@@ -388,6 +429,8 @@ export class SwitchboardBrain implements Brain {
   private static readonly LANE_LOG_TURNS = 5;
   private turnContext = new BrainTurnContext();
   private readonly standupLaneTimeoutMs: number;
+  private readonly intentTimeoutMs: number;
+  private readonly intentMinConfidence: number;
   private acceptedTurnSequence = 0;
   private acceptedTurn: AcceptedTurn | null = null;
   /** Carries the delegating turn to nested public calls made on the delegate's
@@ -408,6 +451,10 @@ export class SwitchboardBrain implements Brain {
     private classify?: (prompt: string, signal?: AbortSignal) => Promise<string>,
     options: SwitchboardOptions = {},
   ) {
+    this.intentTimeoutMs = options.intentTimeoutMs ?? 1500;
+    this.intentMinConfidence = options.intentMinConfidence ?? 0.7;
+    if (!Number.isSafeInteger(this.intentTimeoutMs) || this.intentTimeoutMs < 1 || this.intentTimeoutMs > 300_000) throw new RangeError("intentTimeoutMs must be an integer in 1..300000");
+    if (!Number.isFinite(this.intentMinConfidence) || this.intentMinConfidence < 0 || this.intentMinConfidence > 1) throw new RangeError("intentMinConfidence must be in 0..1");
     const configured = options.standupLaneTimeoutMs;
     if (configured !== undefined && (
       !Number.isSafeInteger(configured)
@@ -1280,130 +1327,35 @@ export class SwitchboardBrain implements Brain {
     return reply;
   }
 
-  // ---- generic intent fallback -------------------------------------------
-  // Lexical patterns catch the common phrasings instantly, but nobody can
-  // enumerate every way to ask for a transfer. Utterances that LOOK control-
-  // ish (cheap keyword gate) yet miss the patterns are classified by a small
-  // local model into a strict routing label. The label is consumed by code —
-  // the classifier cannot answer the user, so it cannot role-play; a wrong or
-  // slow answer degrades to "none" (a normal turn), never to made-up speech.
-
-  private classifyIntent(m: string, signal: AbortSignal): Promise<string | null> {
-    if (!this.classify || !CONTROLISH_RE.test(m)) return Promise.resolve(null);
-    const roster = Object.entries(this.lanes)
-      .map(([n, l]) => (l.aliases?.length ? `${n} (aka ${l.aliases.join(", ")})` : n))
-      .join("; ");
-    const prompt =
-      `You route utterances for a voice assistant's switchboard. Employees: ${roster}.\n` +
-      "Reply with EXACTLY one label and nothing else:\n" +
-      "transfer:<employee> = the user asks to talk to that ONE specific employee\n" +
-      "release = the user wants to end the transfer / go back to the assistant\n" +
-      "rollcall = the user wants everyone to check in / join / a group call\n" +
-      "standup = the user wants a status or update from everyone / each employee\n" +
-      "callme = the user wants the assistant to call/ring their phone now (a dial-back)\n" +
-      "callme:<employee> = they want that ONE employee to be the one who calls their phone\n" +
-      "none = anything else: a question, an instruction, small talk, or unclear\n" +
-      "rollcall and standup require the WHOLE GROUP to be referenced (everyone, the team, all agents). " +
-      "Words like check, status, or report about anything else are none.\n" +
-      "Questions ABOUT calls (\"did you call me?\", \"who called?\") are none, not callme.\n" +
-      "When in doubt, reply none.\n" +
-      `Utterance: "${m}"`;
-    return raceWithSignal(
-      Promise.resolve().then(() => {
-        signal.throwIfAborted();
-        return this.classify!(prompt, signal);
-      }),
-      signal,
-    )
-      .then((raw) => {
-        const label = raw.trim().toLowerCase().split(/\s/)[0] ?? "";
-        if (!/^(?:transfer:[a-z0-9 _-]+|callme(?::[a-z0-9 _-]+)?|release|rollcall|standup|none)$/.test(label)) return null;
-        if (label === "none") return null;
-        log("info", `switchboard: classifier routed "${m.slice(0, 60)}" → ${label}`);
-        return label;
-      })
-      .catch((error: unknown) => {
-        // Classifier failure degrades normally; turn cancellation does not.
-        if (signal.aborted) signal.throwIfAborted();
-        void error;
-        return null;
-      });
-  }
-
-  /** Resolve a classified intent to a spoken ack, or null for a normal turn. */
+  /** Execute a plan that has already established an action exists. Never redispatch on a no-op. */
   private async actOnIntent(
-    label: string | null,
-    utterance: string,
+    action: IntentAction,
     turn: AcceptedTurn,
     options: BrainTurnOptions,
-  ): Promise<string | "standup" | null> {
+  ): Promise<string | "standup"> {
     this.assertAcceptedTurn(turn);
-    if (!label) return null;
-    // The classifier sometimes labels a bare "what's the status?" as a team
-    // standup (seen live 2026-07-11 — the front desk hijacked a question meant
-    // for the pinned lane). Group actions demand a group word, a request frame
-    // bound to the action name, or confirmation that repeats the name. Ambiguous
-    // verbs need an article because "have roll call me back" was an STT rendering
-    // of a named dial-back, and any utterance the dial-back matcher recognizes
-    // must win even when it also contains group evidence.
-    // "hands" only counts as a group in "hands on deck". Bare, it admitted any
-    // sentence the word wandered into — "take roll call off my hands" named no
-    // group at all and still fanned out to every lane. "all hands" keeps
-    // working through the "all" branch.
-    const group = /\b(?:every(?:one|body)|team|office|all|each|agents?|staff|group|hands\s+on\s+deck)\b/i;
-    const literal = label === "rollcall" ? /\broll\s?-?calls?\b/i : /\bstand\s?-?ups?\b/i;
-    const request = new RegExp(String.raw`\b(?:(?:run|do|start|begin|initiate|hold)(?:\s+(?:a|an|the|another))?|(?:have|take|get)\s+(?:a|an|the|another)|(?:i\s+want|i(?:['’]d|\s+would)\s+like|i\s+need|can\s+you|could\s+you|would\s+you)(?:\s+(?:a|an|the|another))?|give\s+me(?:\s+(?:a|an|the|another))?|let['’]s\s+(?:do|have)(?:\s+(?:a|an|the|another))?)\s+${literal.source}`, "i");
-    const confirmation = /^\s*(?:yes|yeah|yep|correct|right)\b|\bthat['’]s\s+what\s+i\s+(?:just\s+)?said\b/i;
-    if (label === "standup" || label === "rollcall") {
-      if (matchCallMe(utterance)) {
-        this.refusedGroupAction = true;
-        log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" is a dial-back request — ignoring`);
-        return null;
-      }
-      if (!group.test(utterance) && !request.test(utterance)
-        && !(confirmation.test(utterance) && literal.test(utterance))
-      ) {
-        this.refusedGroupAction = true;
-        log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" has no group request or confirmation — ignoring`);
-        return null;
-      }
+    if (action.intent === "standup") return "standup";
+    if (action.intent === "rollcall" || action.intent === "release") {
+      const reply = action.intent === "rollcall" ? this.doRollcall(turn) : this.doRelease(turn);
+      if (reply === null) throw new Error("planned switchboard action is no longer available");
+      return reply;
     }
-    if (label === "standup") return "standup";
-    if (label === "rollcall") return this.doRollcall(turn);
-    if (label === "release") return this.doRelease(turn);
-    if (label === "callme" || label.startsWith("callme:")) {
-      // Same hallucinated-label defense as the group actions: dialing the
-      // user's phone demands call vocabulary in the actual utterance.
+    if (action.intent === "callme") {
       const dial = this.callMe;
-      if (!dial || !/\b(?:call|ring|phone|dial)\b/i.test(utterance)) {
-        if (dial) log("info", `switchboard: classifier said ${label} but "${utterance.slice(0, 50)}" mentions no call — ignoring`);
-        return null;
-      }
-      const who = label.startsWith("callme:") ? label.slice("callme:".length).trim() : "";
-      // Same refusal as the lexical path — the classifier selects a call the
-      // patterns miss ("phone me now"), so no phrase list can cover this.
+      if (!dial) throw new Error("planned dial-back is no longer available");
+      const who = action.target ?? undefined;
       if (options.speculative) throw new SpeculativeSideEffectError();
       log("info", `switchboard: dial-back requested (classifier)${who ? ` — ${who}` : ""}`);
-      // Handler args match the lexical path — see the note there. The turn
-      // signal was previously withheld here, so an aborted turn's dial-back
-      // kept doing board work; the delegation window is what stops the
-      // handler's transferTo() from superseding this turn.
-      const reply = await this.delegateWithinTurn(turn, () =>
-        dial(who || undefined, { signal: turn.signal }));
-      // Memo before the turn assert: a superseding turn still needs to know.
-      this.leaveMemo(dialBackMemo(who || undefined));
+      // Preserve the initiating turn when the handler calls transferTo().
+      const reply = await this.delegateWithinTurn(turn, () => dial(who, { signal: turn.signal }));
+      // Memo before the turn assertion: even a superseded call may have rung.
+      this.leaveMemo(dialBackMemo(who));
       this.assertAcceptedTurn(turn);
       return reply;
     }
-    if (label.startsWith("transfer:")) {
-      const lane = this.resolveLane(label.slice("transfer:".length));
-      if (lane) {
-        const reply = await this.pinLane(lane, turn);
-        this.assertAcceptedTurn(turn);
-        return reply;
-      }
-    }
-    return null;
+    const reply = await this.pinLane(action.target, turn);
+    this.assertAcceptedTurn(turn);
+    return reply;
   }
 
   private current(): Brain {
@@ -1418,6 +1370,7 @@ export class SwitchboardBrain implements Brain {
    */
   async sendBackground(message: string, options?: BackgroundTurnOptions): Promise<string> {
     if (this.stopping) throw new Error("switchboard is stopping");
+    options?.signal?.throwIfAborted();
     const lane = options?.lane;
     const turnOptions = options;
     if (lane === undefined) {
@@ -1445,6 +1398,8 @@ export class SwitchboardBrain implements Brain {
       }
       await (options?.signal ? raceWithSignal(this.startLane(lane), options.signal) : this.startLane(lane));
     }
+    if (this.stopping) throw new Error("switchboard is stopping");
+    options?.signal?.throwIfAborted();
     return def.brain.send(message, turnOptions);
   }
 
@@ -1658,7 +1613,7 @@ export class SwitchboardBrain implements Brain {
 
   /**
    * Resolve a turn against the control plane: lexical patterns first (0ms),
-   * then the intent classifier for control-ish phrasings the patterns miss.
+   * then the intent classifier for every utterance the exact patterns miss.
    * Returns "standup" (streamed by the caller), a spoken ack, or null.
    */
   private async controlPlane(
@@ -1700,9 +1655,32 @@ export class SwitchboardBrain implements Brain {
     const ack = await this.handleControl(message, turn, options);
     this.assertAcceptedTurn(turn);
     if (ack !== null) return ack;
-    const label = await this.classifyIntent(m, turn.signal);
+    const intentStart = performance.now();
+    let result: SwitchboardIntent;
+    try {
+      result = await classifySwitchboardIntent(this.classify, m, this.lanes, turn.signal, this.intentTimeoutMs);
+    } finally {
+      try { options.onIntentMs?.(performance.now() - intentStart); } catch { /* telemetry cannot fail a turn */ }
+    }
     this.assertAcceptedTurn(turn);
-    const routed = await this.actOnIntent(label, m, turn, options);
+    const plan = planSwitchboardIntent(result, {
+      activeLane: this.active,
+      hasPendingTransfer: this.pendingTransfer !== null,
+      lanes: Object.keys(this.lanes),
+      // A cold lane is available to start. Only known cleanup/retirement makes
+      // a target unavailable; future startup failures remain action failures.
+      unavailableTargets: new Set(Object.entries(this.lanes)
+        .filter(([name]) => this.laneStops.has(name) || this.laneStarts.get(name)?.retired)
+        .map(([name]) => name)),
+      canCall: this.callMe !== undefined,
+      minConfidence: this.intentMinConfidence,
+    });
+    let routed: string | null = null;
+    if (plan.kind === "act") {
+      routed = await this.actOnIntent(plan.action, turn, options);
+    } else {
+      this.refusedGroupAction = plan.refusedGroupAction;
+    }
     this.assertAcceptedTurn(turn);
     if (routed === null) {
       // Last stop before the front desk answers: if a transfer is still in

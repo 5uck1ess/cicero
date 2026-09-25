@@ -130,3 +130,52 @@ The pattern worth stealing: **subscription plans as lanes**. Agent-CLI adapters 
 The operator is **asynchronous by design**: you speak a task, the operator acks and files it on the Kanban board, and you're immediately free to keep talking, fire more tasks, or walk away. Each task runs in the background and **Cicero speaks up when it finishes** ("PR #142 is up") — and when it fails. Kanban already tracks many tasks at once, so "keep things running in the background" is native: you're driving a job queue by voice, not waiting on a chatbot.
 
 The pieces that close the loop — proactive voice-back, the kanban watch, quiet hours, and the morning briefing — live in [notifications](notifications.md). The spoken confirmation gate on destructive ops lives in [brains](brains.md).
+
+### Intent routing
+
+Exact switchboard commands still run immediately. Every other foreground
+utterance is classified by the local OpenAI-compatible model configured under
+`web_voice.tldr.summarizer_url` / `summarizer_model`, even while an employee is
+pinned. There is no keyword prefilter or keyword veto of the model's answer.
+“Let's do a quick roll call” gathers the group; “what's the gang up to” asks for
+team progress. Roll call and standup inherently refer to the group. “What's the
+status?” addresses the pinned lane unless the model understands it as a request
+about everyone. Mentions such as “that roll call was long” are normal turns.
+
+The model returns JSON containing `intent`, `target`, `request_now`, and
+`confidence`. Only a present request meeting the confidence threshold acts.
+Targets must match a lane name or alias exactly (case-insensitive); an unknown
+transfer target becomes a normal turn. An unknown dial-back target keeps its
+name, so the dial-back handler answers that it could not reach that employee and
+places no call. Supported servers receive a JSON-schema response format;
+servers rejecting it receive a strict-JSON prompt without the format parameter.
+Both paths validate and bound the output.
+
+```yaml
+switchboard:
+  intent_min_confidence: 0.7
+  intent_timeout_ms: 1500
+```
+
+After an exact-command miss, classification completes before any ordinary brain
+turn starts. An actionable plan runs the switchboard action; a fallthrough
+result dispatches the ordinary utterance exactly once. This ordering applies
+to every brain, including stateful ACP sessions, so an intent-only request never
+enters the ordinary conversation history or consumes its pending context.
+The classifier remains an injected function, independent of the reply backend.
+
+Classification adds its elapsed time before an ordinary reply (about p50 330 ms
+on the reference local model). The absolute deadline is 1500 ms by default.
+Timeouts, provider errors and malformed output fall through to a normal turn.
+Caller cancellation still cancels the turn; late classifier results cannot act
+or publish after supersession. Exact-command hits need no classifier round trip.
+Without a TLDR classifier endpoint only the exact fast paths are available.
+`cicero latency` includes `intent` duration (`intentMs` in stored records) for
+classified web turns, including adopted speculative turns. `CICERO_DEBUG=1`
+enables timeout/error duration logs without utterance text.
+
+Routing now depends on the classifier model's quality, including its confidence
+calibration. Run `bun run bench/intent-bench.ts --runs 3 --misses` against your configured model
+and inspect false-action rate, per-intent accuracy, and p95 latency before relying
+on it. See [the intent benchmark](https://github.com/5uck1ess/cicero/blob/main/bench/README.md) for its synthetic roster,
+coverage, and limitations.
