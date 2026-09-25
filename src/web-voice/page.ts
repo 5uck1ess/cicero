@@ -216,6 +216,10 @@ async function speechGateRun() {
 function speechConfirmed(thr) { return !vadSession || vadProb >= thr; }
 
 let ws = null, wsSessionId = "", activeTurnId = null, captureTurnId = null;
+let streamOn = false, streamSeq = 0, streamCaptureFailed = false, streamCaptureCommitted = false;
+let streamCaptureEnabled = false;
+let pendingBargeAbort = false;
+let streamInputCount = 0, streamOutputCount = 0, streamSum = 0, streamCount = 0;
 let micStream = null, audioCtx = null, source = null, node = null;
 let convOn = false, ready = false;
 let ptt = true, holding = false; // push-to-talk mode (default) + whether the key/orb is held
@@ -266,7 +270,54 @@ function newTurnId() {
   if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
   return "turn-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
 }
-function beginCaptureIdentity() { captureTurnId = newTurnId(); lastVoicedAt = null; }
+function beginCaptureIdentity() { captureTurnId = newTurnId(); lastVoicedAt = null; streamSeq = 0; streamCaptureFailed = false; streamCaptureCommitted = false; pendingBargeAbort = false; streamCaptureEnabled = streamOn;
+  streamInputCount = 0; streamOutputCount = 0; streamSum = 0; streamCount = 0; }
+function abortLiveCapture() {
+  if (!streamCaptureEnabled || !streamSeq || !captureTurnId || !ws || ws.readyState !== 1) return;
+  try { ws.send(JSON.stringify({ type: "capture_abort", sessionId: wsSessionId, turnId: captureTurnId })); } catch (e) { /* closed */ }
+}
+function applyStreamCapability(available) {
+  if (!available) {
+    abortLiveCapture();
+    streamOn = false; streamCaptureEnabled = false; streamCaptureFailed = true;
+  } else streamOn = true;
+}
+function sendLiveFrame(samples) {
+  if (!streamCaptureEnabled || streamCaptureFailed || !captureTurnId || !wsSessionId || !ws || ws.readyState !== 1) return;
+  if (ws.bufferedAmount > 512 * 1024 || samples.length > 32768 || streamSeq >= 0xffffffff) {
+    streamCaptureFailed = true; abortLiveCapture(); return;
+  }
+  const rate = audioCtx.sampleRate, outputRate = Math.min(rate, 16000);
+  const reduced = [];
+  for (let i = 0; i < samples.length; i++) {
+    streamSum += samples[i]; streamCount++; streamInputCount++;
+    if (streamInputCount >= Math.floor((streamOutputCount + 1) * rate / outputRate)) {
+      reduced.push(streamSum / streamCount); streamSum = 0; streamCount = 0; streamOutputCount++;
+    }
+  }
+  if (!reduced.length) return;
+  const pcm = new Uint8Array(12 + reduced.length * 2), view = new DataView(pcm.buffer);
+  pcm.set([0x43, 0x56, 0x53, 0x32]); // CVS2 inside the CVP2 turn envelope
+  view.setUint32(4, ++streamSeq, true); view.setUint32(8, outputRate, true);
+  for (let i = 0; i < reduced.length; i++) {
+    const s = Math.max(-1, Math.min(1, reduced[i]));
+    view.setInt16(12 + 2 * i, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  try { ws.send(encodeTurnFrame(pcm, captureTurnId)); } catch (e) { streamCaptureFailed = true; abortLiveCapture(); }
+}
+function commitLiveCapture() {
+  if (!audioCtx || (speechLen / audioCtx.sampleRate) * 1000 < MIN_UTTER_MS ||
+      (ptt && state !== "speech")) return;
+  if (pendingBargeAbort) {
+    pendingBargeAbort = false;
+    const turnId = activeTurnId || currentAudioItem?.turnId;
+    if (turnId) clientMetric(turnId, "barge_in");
+    abortActiveTurn(); stopPlayback();
+  }
+  if (!streamCaptureEnabled || streamCaptureCommitted) return;
+  streamCaptureCommitted = true;
+  for (const frame of speechFrames) sendLiveFrame(frame);
+}
 function encodeTurnFrame(payload, turnId) {
   const enc = new TextEncoder(), session = enc.encode(wsSessionId), turn = enc.encode(turnId);
   const src = payload instanceof ArrayBuffer
@@ -318,6 +369,8 @@ function onFrame(buf) {
     // still playing (state "speaking"), so an interrupt doesn't clip its start.
     if (holding) {
       speechFrames.push(buf); speechLen += buf.length;
+      if (streamCaptureCommitted) sendLiveFrame(buf);
+      else commitLiveCapture();
       const durMs = (speechLen / audioCtx.sampleRate) * 1000;
       if (durMs >= MAX_UTTER_MS) endPtt();      // safety cap on a very long hold
     }
@@ -341,6 +394,7 @@ function onFrame(buf) {
         speechLen = speechFrames.reduce(function (n, f) { return n + f.length; }, 0);
         silenceFrames = 0;
         setState("speech");
+        commitLiveCapture();
       }
     } else {
       onsetFrames = 0;
@@ -348,6 +402,8 @@ function onFrame(buf) {
     }
   } else { // speech
     speechFrames.push(buf); speechLen += buf.length;
+    if (streamCaptureCommitted) sendLiveFrame(buf);
+    else commitLiveCapture();
     const closeThr = Math.max(ABS_CLOSE, noiseFloor * CLOSE_FACTOR);
     if (rms < closeThr) { silenceFrames++; } else { silenceFrames = 0; probeSent = false; hangMs = HANGOVER_MS; if (speechConfirmed(VAD_POS)) lastVoicedAt = performance.now(); }
     const durMs = (speechLen / audioCtx.sampleRate) * 1000;
@@ -362,6 +418,7 @@ function onFrame(buf) {
 }
 
 function finalizeUtterance() {
+  commitLiveCapture();
   const endedAt = performance.now();
   const speechEndedAt = speechEndOrigin(lastVoicedAt, endedAt, ptt);
   const total = speechLen;
@@ -445,16 +502,19 @@ function watchBargeIn(buf) {
 }
 
 function triggerBargeIn() {
-  const turnId = activeTurnId || currentAudioItem?.turnId;
-  if (turnId) clientMetric(turnId, "barge_in");
-  abortActiveTurn();
-  stopPlayback();                                              // silence our own reply
   beginCaptureIdentity();
   lastVoicedAt = performance.now();
   speechFrames = preRoll.slice();                              // keep the pre-roll so we don't clip the interruption
   speechLen = speechFrames.reduce(function (n, f) { return n + f.length; }, 0);
+  if (streamCaptureEnabled) pendingBargeAbort = true;
+  else {
+    const turnId = activeTurnId || currentAudioItem?.turnId;
+    if (turnId) clientMetric(turnId, "barge_in");
+    abortActiveTurn(); stopPlayback();
+  }
   onsetFrames = 0; silenceFrames = 0; bargeOnset = 0;
   setState("speech"); setStatus("listening (you interrupted)…");
+  commitLiveCapture();
 }
 
 function downsample(input, inRate, outRate) {
@@ -506,11 +566,14 @@ function beginPtt() {
     pttBargeTimer = setTimeout(() => {
       pttBargeTimer = null;
       if (!holding) return;
-      const turnId = activeTurnId || currentAudioItem?.turnId;
-      if (turnId) clientMetric(turnId, "barge_in");
-      abortActiveTurn();
-      stopPlayback();
+      if (streamCaptureEnabled) pendingBargeAbort = true;
+      else {
+        const turnId = activeTurnId || currentAudioItem?.turnId;
+        if (turnId) clientMetric(turnId, "barge_in");
+        abortActiveTurn(); stopPlayback();
+      }
       setState("speech"); orbLabel.textContent = "recording"; setStatus("recording… release to send");
+      commitLiveCapture();
     }, MIN_UTTER_MS);
     return;                                     // keep the current state until the barge fires
   }
@@ -521,13 +584,14 @@ function endPtt() {
   holding = false;
   if (pttBargeTimer) {                          // released before the barge fired:
     clearTimeout(pttBargeTimer); pttBargeTimer = null;
+    abortLiveCapture();
     speechFrames = []; speechLen = 0;           // stray tap — the in-flight turn is untouched
     captureTurnId = null;
     setStatus(state === "thinking" ? "thinking…" : "speaking…");
     return;
   }
   const durMs = (speechLen / (audioCtx ? audioCtx.sampleRate : 16000)) * 1000;
-  if (durMs < MIN_UTTER_MS) { setStatus("too short — hold longer"); resumeListening(); return; }
+  if (durMs < MIN_UTTER_MS) { abortLiveCapture(); setStatus("too short — hold longer"); resumeListening(); return; }
   finalizeUtterance();                          // downsample + encode + send (shared with VAD path)
 }
 
@@ -768,6 +832,7 @@ function onWsMessage(e) {
   let msg; try { msg = JSON.parse(e.data); } catch (err) { return; }
   if (msg.type === "hello" && msg.protocol === 2 && typeof msg.sessionId === "string") {
     wsSessionId = msg.sessionId;
+    streamOn = false;
     reconnectAttempt = 0;
     setDot(true); setStatus("connected — listening… just talk");
     resumeListening();
@@ -779,6 +844,12 @@ function onWsMessage(e) {
   if (msg.type === "notify") { handleNotify(msg); return; } // arrives any time, not just mid-turn
   if (msg.type === "history") { return; } // server replay ignored: each page load starts a fresh chat
   if (msg.type === "probe_on") { probeOn = true; return; } // server has an end-of-turn model
+  if (msg.type === "stream_on") { applyStreamCapability(true); return; }
+  if (msg.type === "stream_off") { applyStreamCapability(false); return; }
+  if (msg.type === "partial_transcript" && typeof msg.text === "string" && msg.text.length <= 16384 &&
+      ((msg.turnId === captureTurnId && state === "speech") || (msg.turnId === activeTurnId && state === "thinking"))) {
+    hintEl.textContent = 'hearing: "' + msg.text + '"'; return;
+  }
   if (msg.type === "verdict") { onVerdict(msg); return; }  // arrives mid-speech, before "thinking"
   if (msg.type === "error" && msg.turnId === null) {
     setStatus("connection error: " + (msg.message || "protocol error"));
@@ -844,7 +915,7 @@ function connectWs(resume = false) {
   ws.onclose = () => {
     setDot(false);
     if (ws !== sock) return;          // superseded by a newer socket — not ours to handle
-    wsSessionId = ""; activeTurnId = null; captureTurnId = null;
+    wsSessionId = ""; activeTurnId = null; captureTurnId = null; streamOn = false;
     clearConfirmations();
     if (state === "thinking" || state === "speaking") { stopPlayback(); setState("listening"); }
     if (convOn) scheduleReconnect(); else setStatus("disconnected");
@@ -932,7 +1003,7 @@ function stopConversation() {
   // "call off anything you were still working on for me".
   if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify({ type: "bye" })); } catch (e) { /* ignore */ } }
   if (ws) { try { ws.close(); } catch (e) { /* ignore */ } ws = null; }
-  wsSessionId = ""; captureTurnId = null;
+  wsSessionId = ""; captureTurnId = null; streamOn = false;
   stopPlayback();
   setState("idle"); setStatus("stopped");
   if (audioCtx && audioCtx.state === "running") audioCtx.suspend();

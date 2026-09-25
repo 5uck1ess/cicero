@@ -106,6 +106,7 @@ test("speech options follow platform and venv/port status is informational", asy
 test("CUDA audio.cpp choices pin the Nemotron and Pocket TTS models", () => {
   const cuda = ctx("linux", true);
   expect(contributeSpeech("stt", parseSpeech("stt", { id: "audiocpp" }, cuda))).toEqual({ stt: { backend: "audiocpp", port: 8092, model: "nemotron" } });
+  expect(contributeSpeech("stt", parseSpeech("stt", { id: "audiocpp", streaming: true }, cuda))).toEqual({ stt: { backend: "audiocpp", port: 8092, model: "nemotron", streaming: true } });
   expect(contributeSpeech("tts", parseSpeech("tts", { id: "audiocpp" }, cuda))).toEqual({ tts: { backend: "audiocpp", port: 8092, model: "pocket-tts" } });
   expect(contributeSpeech("tts", parseSpeech("tts", { id: "pocket-tts" }, cuda))).toEqual({ tts: { backend: "pocket-tts" } });
   expect(() => parseSpeech("tts", { id: "audiocpp" }, ctx("darwin"))).toThrow();

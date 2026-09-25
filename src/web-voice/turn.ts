@@ -238,6 +238,8 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
 export interface WebStreamDeps {
   /** Optional bounded latency mark observer supplied by the web transport. */
   timingMark?: (name: string, offsetMs: number) => void;
+  /** Final live STT for this browser turn, when opt-in capture was active. */
+  streamFinal?: Promise<string>;
   stt: Pick<STTProvider, "transcribe">;
   brain: Pick<Brain, "send"> & { sendStream?: Brain["sendStream"]; wasControlTurn?: Brain["wasControlTurn"] };
   tts: Pick<TTSProvider, "generateAudio">;
@@ -912,6 +914,18 @@ export async function streamWebTurn(
 ): Promise<void> {
   const timer = newTurnTimer(deps.timingMark);
   if (deps.signal?.aborted || sink.aborted()) return;
+  let streamedFinal: Promise<string | null> | undefined;
+  const liveTranscript = (): Promise<string | null> => {
+    if (!deps.streamFinal) return Promise.resolve(null);
+    streamedFinal ??= deps.streamFinal.then((text) => boundedTranscript(text.trim())).catch(() => {
+      if (!deps.signal?.aborted) {
+        log("warn", "web voice: live STT failed; retrying full WAV with batch STT");
+        deps.timingMark?.("stt_batch_fallback", 0);
+      }
+      return null;
+    });
+    return streamedFinal;
+  };
 
   // A speculative turn raced ahead on the probe tail (see speculative.ts).
   // Adopt it when the final WAV's duration says nothing new was said — the
@@ -935,15 +949,19 @@ export async function streamWebTurn(
       const finalMs = wavDurationMs(wav);
       if (finalMs !== null && spec.coverageOk(finalMs)) {
         const transcript = boundedTranscript((await spec.transcript())?.trim() ?? "");
+        const finalLiveText = deps.streamFinal ? await liveTranscript() : null;
+        const sameTranscript = !deps.streamFinal || (finalLiveText !== null &&
+          finalLiveText.toLocaleLowerCase().replace(/\s+/g, " ") === transcript.toLocaleLowerCase().replace(/\s+/g, " "));
         if (deps.signal?.aborted || sink.aborted()) {
           await abortSpec();
           return;
         }
-        if (transcript) {
+        if (transcript && sameTranscript) {
+          const adoptedTranscript = finalLiveText ?? transcript;
           timer.mark("stt");
           // Same ordering as the normal path: nothing is announced, and so
           // nothing is persisted, until the turn has passed the veto.
-          if (!(await dispatchAllowed(transcript, deps))) {
+          if (!(await dispatchAllowed(adoptedTranscript, deps))) {
             await abortSpec();
             sink.done();
             return;
@@ -958,13 +976,13 @@ export async function streamWebTurn(
             await abortSpec();
             return;
           }
-          sink.transcript(transcript);
+          sink.transcript(adoptedTranscript);
           if (deps.signal?.aborted || sink.aborted()) {
             await abortSpec();
             return;
           }
           try {
-            await streamReply(transcript, deps, sink, timer, spec.tokens() ?? undefined, undefined, spec);
+            await streamReply(adoptedTranscript, deps, sink, timer, spec.tokens() ?? undefined, undefined, spec);
           } catch (err: unknown) {
             // A wrapper refused mid-flight, AFTER we adopted its stream — the
             // semantic dial-back classifier can resolve well after transcript()
@@ -975,7 +993,7 @@ export async function streamWebTurn(
             if (err instanceof SpeculativeSideEffectError) {
               log("info", "web voice: speculation refused after adoption — re-running the turn on the normal path");
               try {
-                await streamReply(transcript, deps, sink, timer);
+                await streamReply(adoptedTranscript, deps, sink, timer);
               } catch (retryErr: unknown) {
                 sink.error(retryErr instanceof Error ? retryErr.message : String(retryErr));
               }
@@ -1007,11 +1025,15 @@ export async function streamWebTurn(
   // turn onto a different STT provider than the one it started decoding with.
   const sttPin = pinGeneration(deps.stt);
   try {
-    tmpFile = await writeSecureTempAudio(wav, { prefix: "cicero-web" });
+    const liveText = await liveTranscript();
     if (deps.signal?.aborted || sink.aborted()) return;
     let transcript: string;
     try {
-      transcript = boundedTranscript((await sttPin.provider.transcribe(tmpFile, deps.signal))?.trim() ?? "");
+      if (liveText !== null) transcript = liveText;
+      else {
+        tmpFile = await writeSecureTempAudio(wav, { prefix: "cicero-web" });
+        transcript = boundedTranscript((await sttPin.provider.transcribe(tmpFile, deps.signal))?.trim() ?? "");
+      }
     } finally {
       // Release as soon as decoding is done. Holding it across the brain+TTS
       // reply would pin a retired STT generation for the whole turn, and a swap

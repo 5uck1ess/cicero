@@ -3,11 +3,73 @@ import { PAGE } from "../../src/web-voice/page";
 import { canQueueAudio } from "../../src/web-voice/playback-policy";
 import { inspectTurnAudio } from "../../src/web-voice/protocol";
 import { createRecordedWebTurn } from "../../src/daemon";
-import { CONTROL_FRAME_RESERVE_BYTES, MAX_OUTBOUND_AUDIO_BUFFER_BYTES, makeSink, sendAudioBounded } from "../../src/web-voice/server";
+import { CONTROL_FRAME_RESERVE_BYTES, MAX_OUTBOUND_AUDIO_BUFFER_BYTES, makeSink, sendAudioBounded, streamCapabilityEvent } from "../../src/web-voice/server";
+import { ProviderSlot, SwappableSTTProvider } from "../../src/backends/hot-swap";
+import type { STTProvider } from "../../src/backends/stt/provider";
 import { AudioPlaybackGate } from "../../src/web-voice/audio-pacing";
 import { streamWebTextTurn, type WebReplySink, type WebStreamDeps } from "../../src/web-voice/turn";
 
 const script = PAGE.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "";
+
+test("handshake follows the swappable STT provider on each cutover", async () => {
+  const streaming: STTProvider = {
+    name: "streaming", transcribe: async () => "hello", health: async () => true,
+    openStream: () => ({ push() {}, end: async () => "hello", abort() {}, final: Promise.resolve("hello"),
+      partials: { async *[Symbol.asyncIterator]() {} }, released: true }),
+  };
+  const batch: STTProvider = { name: "batch", transcribe: async () => "hello", health: async () => true };
+  const slot = new ProviderSlot<STTProvider>(streaming);
+  const provider = new SwappableSTTProvider(slot);
+  let prior = false;
+  const events: string[] = [];
+  const refresh = () => {
+    const available = typeof provider.openStream === "function";
+    const event = streamCapabilityEvent(prior, available);
+    if (event) events.push(event);
+    prior = available;
+  };
+  refresh();
+  await slot.swap(batch, () => {});
+  expect(provider.openStream).toBeUndefined();
+  refresh();
+  await slot.swap(streaming, () => {});
+  refresh();
+  expect(events).toEqual(["stream_on", "stream_off", "stream_on"]);
+  await slot.stop();
+});
+
+test("browser stream_off stops CVS2 immediately and the next stream_on arms the next turn", () => {
+  const context = { streamOn: true, streamCaptureEnabled: true, streamCaptureFailed: false, aborts: 0,
+    abortLiveCapture() { this.aborts++; } };
+  const apply = new Function("context", `with (context) { ${pageFunction("applyStreamCapability", "sendLiveFrame")}; return applyStreamCapability; }`)(context) as (available: boolean) => void;
+  apply(false);
+  expect(context).toMatchObject({ streamOn: false, streamCaptureEnabled: false, streamCaptureFailed: true, aborts: 1 });
+  apply(true);
+  expect(context.streamOn).toBe(true);
+  expect(context.streamCaptureEnabled).toBe(false);
+});
+test("early PCM stays in the page capture buffer until the minimum duration commits it", () => {
+  const sent: Float32Array[] = [];
+  const first = new Float32Array(2_000);
+  const second = new Float32Array(2_000);
+  const context = { streamCaptureEnabled: true, streamCaptureCommitted: false, pendingBargeAbort: false,
+    audioCtx: { sampleRate: 16_000 }, speechLen: first.length, speechFrames: [first],
+    MIN_UTTER_MS: 250, ptt: true, state: "speech", sendLiveFrame: (frame: Float32Array) => sent.push(frame) };
+  const commit = new Function("context", `with (context) { ${pageFunction("commitLiveCapture", "encodeTurnFrame")}; return commitLiveCapture; }`)(context) as () => void;
+  commit();
+  expect(sent).toEqual([]); // a stray tap never creates a CVS2 stream
+  context.speechFrames.push(second);
+  context.speechLen += second.length;
+  context.state = "thinking";
+  commit();
+  expect(sent).toEqual([]); // a hold during thinking waits for the barge threshold too
+  context.state = "speech";
+  commit();
+  expect(sent).toEqual([first, second]);
+  expect(context.streamCaptureCommitted).toBe(true);
+  commit();
+  expect(sent).toHaveLength(2);
+});
 function pageFunction(name: string, next: string): string {
   const start = script.indexOf(`function ${name}(`);
   const end = script.indexOf(`\nfunction ${next}(`, start);

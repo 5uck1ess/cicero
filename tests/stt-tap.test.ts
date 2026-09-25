@@ -36,6 +36,36 @@ async function tempWav(dir: string, bytes = 64): Promise<string> {
 }
 
 describe("stt tap", () => {
+  test("forwards live capability and records the streamed final with PCM", async () => {
+    const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
+    const tapDir = join(work, "tap");
+    const bare = wrapSTTWithTap(fakeProvider(), tapDir);
+    expect(bare.openStream).toBeUndefined();
+    let pushed = 0;
+    const final = Promise.resolve("streamed words");
+    const streaming = wrapSTTWithTap(fakeProvider({ openStream: () => ({
+      push(pcm) { pushed += pcm.length; },
+      end: () => final,
+      abort() {},
+      partials: { async *[Symbol.asyncIterator]() { yield "streamed"; } },
+      final,
+      released: true,
+    }) }), tapDir);
+    const stream = streaming.openStream!({ sampleRate: 16000 });
+    stream.push(new Uint8Array([1, 0, 2, 0]));
+    expect(await stream.end()).toBe("streamed words");
+    expect(pushed).toBe(4);
+    let names: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      names = await readdir(tapDir).catch(() => []);
+      if (names.some((name) => name.endsWith(".json"))) break;
+      await Bun.sleep(10);
+    }
+    const wav = await readFile(join(tapDir, names.find((name) => name.endsWith(".wav"))!));
+    const sidecar = JSON.parse(await readFile(join(tapDir, names.find((name) => name.endsWith(".json"))!), "utf8"));
+    expect(wav.subarray(44)).toEqual(Buffer.from([1, 0, 2, 0]));
+    expect(sidecar.transcript).toBe("streamed words");
+  });
   test("records the wav and a sidecar with engine, transcript, and timing", async () => {
     const work = await mkdtemp(join(tmpdir(), "stt-tap-"));
     const tapDir = join(work, "tap");

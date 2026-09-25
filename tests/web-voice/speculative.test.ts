@@ -61,6 +61,19 @@ async function drain(src: AsyncIterable<string>): Promise<string> {
   return out;
 }
 
+test("a live partial starts speculation without tail transcription", async () => {
+  let tailCalls = 0;
+  const { deps: d, brainCalls } = deps({ stt: { transcribe: async () => { tailCalls++; return "tail"; } } });
+  // A long utterance exceeds the probe tail. The cumulative partial still
+  // covers its beginning, so tail-coverage gating must not decline it.
+  const turn = makeSpeculator(d)(pcm(1000), 16000, 9000, 0.95, "open the project")!;
+  expect(turn.claim()).toBe(true);
+  expect(await turn.transcript()).toBe("open the project");
+  expect(brainCalls).toEqual(["open the project"]);
+  expect(tailCalls).toBe(0);
+  await turn.abort();
+});
+
 test("declines below the probability gate, on a truncated tail, and behind a pending confirmation", () => {
   const { deps: d } = deps();
   const spec = makeSpeculator(d);

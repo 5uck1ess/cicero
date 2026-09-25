@@ -12,6 +12,17 @@ function home(): string { const path = mkdtempSync(join(tmpdir(), "cicero-setup-
 afterEach(() => { for (const path of homes.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
 describe("setup draft and write", () => {
+  test("selecting live Nemotron writes streaming mode and updates an existing model entry", () => {
+    const root = home(); mkdirSync(join(root, "servers"));
+    const path = join(root, "servers", "audiocpp_server.local.json");
+    const draft = createDraft("local-cuda", "a".repeat(64));
+    draft.stt = { backend: "audiocpp", port: 8092, model: "nemotron", streaming: true };
+    writeAudioCppServerConfig(draft, root);
+    expect(JSON.parse(readFileSync(path, "utf8")).models[0].mode).toBe("streaming");
+    writeFileSync(path, JSON.stringify({ models: [{ id: "nemotron", mode: "offline", custom: "keep" }] }), { mode: 0o600 });
+    writeAudioCppServerConfig(draft, root);
+    expect(JSON.parse(readFileSync(path, "utf8")).models[0]).toEqual({ id: "nemotron", mode: "streaming", custom: "keep" });
+  });
   test("audio.cpp save creates only selected models and merges existing JSON without touching entries", () => {
     const root = home(); mkdirSync(join(root, "servers"));
     const configPath = join(root, "servers", "audiocpp_server.local.json");

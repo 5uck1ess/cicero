@@ -26,6 +26,10 @@ type FallbackStatus = "available" | "unavailable" | "unknown";
  * successful primary response automatically closes a degradation episode.
  */
 export class FallbackSTTProvider implements STTProvider {
+  get openStream(): STTProvider["openStream"] {
+    const open = this.primary.openStream;
+    return open ? (options) => open.call(this.primary, options) : undefined;
+  }
   readonly name: string;
   private readonly primaryLogName: string;
   private readonly fallbackLogName: string;

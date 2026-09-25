@@ -20,8 +20,8 @@ export const MAX_HEALTH_ROWS = 100;
  *
  *   "CVP2" | session length (u16 LE) | turn length (u16 LE) | ids | payload
  *
- * The payload is either a complete WAV utterance/reply or an existing PRB2
- * turn-detection probe. Keeping the identity in the same WebSocket message as
+ * The payload is a complete WAV utterance/reply, a PRB2 turn-detection probe,
+ * or an opt-in CVS2 PCM chunk. Keeping the identity in the same WebSocket message as
  * the bytes prevents a late binary frame from being attributed to a newer turn.
  */
 const MAGIC = new Uint8Array([0x43, 0x56, 0x50, 0x32]); // "CVP2"
@@ -29,6 +29,40 @@ const REPLY_MAGIC = new Uint8Array([0x43, 0x56, 0x41, 0x32]); // "CVA2"
 const FIXED_HEADER_BYTES = 8;
 export const MAX_PROTOCOL_ID_BYTES = 128;
 export const MAX_WS_PAYLOAD_BYTES = MAX_TURN_AUDIO_BYTES + FIXED_HEADER_BYTES + MAX_PROTOCOL_ID_BYTES * 2;
+/** CVP2 payload for opt-in continuous 16 kHz mono s16le capture. */
+export const MAX_STREAM_PCM_CHUNK_BYTES = 64 * 1024;
+const STREAM_MAGIC = new Uint8Array([0x43, 0x56, 0x53, 0x32]); // CVS2
+export function encodeStreamPcmFrame(sequence: number, sampleRate: number, pcm: Uint8Array): Uint8Array {
+  if (!Number.isSafeInteger(sequence) || sequence < 1 || sequence > 0xffffffff ||
+      !Number.isSafeInteger(sampleRate) || sampleRate < 8000 || sampleRate > 192000 ||
+      pcm.byteLength < 2 || pcm.byteLength > MAX_STREAM_PCM_CHUNK_BYTES || pcm.byteLength % 2)
+    throw new RangeError("invalid streaming PCM frame");
+  const frame = new Uint8Array(12 + pcm.byteLength);
+  frame.set(STREAM_MAGIC);
+  new DataView(frame.buffer).setUint32(4, sequence, true);
+  new DataView(frame.buffer).setUint32(8, sampleRate, true);
+  frame.set(pcm, 12);
+  return frame;
+}
+export function isStreamPcmFrame(frame: Uint8Array): boolean {
+  return frame.byteLength >= 4 && STREAM_MAGIC.every((byte, i) => frame[i] === byte);
+}
+export function decodeStreamPcmFrame(frame: Uint8Array): { sequence: number; sampleRate: number; pcm: Uint8Array } | null {
+  if (!isStreamPcmFrame(frame) || frame.byteLength < 14 || frame.byteLength > 12 + MAX_STREAM_PCM_CHUNK_BYTES || frame.byteLength % 2) return null;
+  const sequence = new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(4, true);
+  const sampleRate = new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(8, true);
+  if (!sequence || sampleRate < 8000 || sampleRate > 192000) return null;
+  return { sequence, sampleRate, pcm: frame.subarray(12) };
+}
+export function admitStreamPcmChunk(
+  frame: { sequence: number; sampleRate: number; pcm: Uint8Array },
+  expectedSequence: number,
+  sampleRate: number,
+  receivedBytes: number,
+): boolean {
+  return expectedSequence <= 0xffffffff && frame.sequence === expectedSequence &&
+    frame.sampleRate === sampleRate && receivedBytes + frame.pcm.byteLength <= MAX_TURN_AUDIO_BYTES;
+}
 
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 

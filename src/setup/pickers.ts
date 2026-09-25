@@ -276,10 +276,15 @@ export function parseSpeech(kind: "stt" | "tts", raw: unknown, ctx: StepContext)
   const id = member(c.id, allowed, kind.toUpperCase());
   if (id === "wyoming") return { id, host: host(c.host), port: port(c.port) };
   if (id === "elevenlabs") return { id, apiKey: field(c.apiKey, "ElevenLabs API key", 1024) };
+  if (kind === "stt" && id === "audiocpp") {
+    if (c.streaming !== undefined && typeof c.streaming !== "boolean") throw new Error("Streaming must be a checkbox choice");
+    return { id, streaming: c.streaming === true };
+  }
   return { id };
 }
 export function contributeSpeech(kind: "stt" | "tts", c: ReturnType<typeof parseSpeech>) {
   if (c.id === "elevenlabs") return { tts: { backend: c.id, apiKey: c.apiKey } };
-  if (c.id === "audiocpp") return { [kind]: { backend: c.id, port: AUDIOCPP_PORT, model: AUDIOCPP_MODELS[kind].id } };
+  if (c.id === "audiocpp") return { [kind]: { backend: c.id, port: AUDIOCPP_PORT, model: AUDIOCPP_MODELS[kind].id,
+    ...(kind === "stt" && "streaming" in c && c.streaming === true ? { streaming: true } : {}) } };
   return { [kind]: { backend: c.id, ...(c.id === "wyoming" ? { host: c.host, port: c.port } : {}) } };
 }

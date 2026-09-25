@@ -5,6 +5,10 @@ import {
   encodeTurnAudioFrame,
   inspectTurnAudio,
   isProtocolId,
+  encodeStreamPcmFrame,
+  decodeStreamPcmFrame,
+  MAX_STREAM_PCM_CHUNK_BYTES,
+  admitStreamPcmChunk,
 } from "../../src/web-voice/protocol";
 
 function floatWav(sample: number, dataFirst = false): ArrayBuffer {
@@ -37,6 +41,21 @@ function withHiddenSecondData(input: ArrayBuffer): ArrayBuffer {
 }
 
 describe("web-voice protocol v2 envelope", () => {
+  test("continuous PCM frame is bounded and sequenced inside the turn envelope", () => {
+    const pcm = new Uint8Array([1, 0, 2, 0]);
+    const payload = encodeStreamPcmFrame(1, 16_000, pcm);
+    const outer = decodeTurnAudioFrame(new Uint8Array(encodeTurnAudioFrame("session", "turn", payload.buffer)))!;
+    expect(decodeStreamPcmFrame(new Uint8Array(outer.payload))).toEqual({ sequence: 1, sampleRate: 16_000, pcm });
+    expect(decodeStreamPcmFrame(payload.subarray(0, 12))).toBeNull();
+    const decoded = decodeStreamPcmFrame(payload)!;
+    expect(admitStreamPcmChunk(decoded, 1, 16_000, 0)).toBe(true);
+    expect(admitStreamPcmChunk(decoded, 2, 16_000, 0)).toBe(false);
+    expect(admitStreamPcmChunk(decoded, 1, 48_000, 0)).toBe(false);
+    expect(admitStreamPcmChunk(decoded, 1, 16_000, 4 * 1024 * 1024)).toBe(false);
+    expect(() => encodeStreamPcmFrame(0, 16_000, pcm)).toThrow();
+    expect(() => encodeStreamPcmFrame(1, 16_000, new Uint8Array(MAX_STREAM_PCM_CHUNK_BYTES + 2))).toThrow();
+    expect(() => encodeStreamPcmFrame(1, 16_000, new Uint8Array([1]))).toThrow();
+  });
   test("wire WAV admission requires fmt before data and finite float samples", () => {
     expect(inspectTurnAudio(floatWav(0.25))).not.toBeNull();
     expect(inspectTurnAudio(floatWav(0.25, true))).toBeNull();

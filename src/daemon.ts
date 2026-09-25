@@ -3,6 +3,7 @@ import { join, dirname } from "path";
 import { homedir } from "node:os";
 import { createServer } from "node:net";
 import { RuntimeConfig, updateConfigFields } from "./config";
+import { validateRuntimeConfig } from "./config-validation";
 import type { Listener, Router, Brain, BrainTurnOptions, Speaker, TerminalAdapter, RouterResult } from "./types";
 import { registerKnownSecrets, clearKnownSecrets } from "./redact";
 import { log, logStep, logError } from "./logger";
@@ -494,6 +495,10 @@ export async function planVoiceProviderSwap(
   // both seats). Rotate the retiring primary into that seat instead, preserving
   // a distinct fallback and the operator's full configuration for both engines.
   const fallback = promotingFallback ? { ...currentSelection } : existingFallback;
+  // The primary's opt-in live transport does not belong to a fallback slot.
+  if (promotingFallback && request.role === "stt" && fallback) {
+    delete (fallback as STTProviderConfig).streaming;
+  }
   // A role owns BOTH of its engines: the registry wraps primary and fallback in
   // one provider, and stopping that wrapper stops both. So every managed server
   // either half of the retiring role owns goes down with the swap, and every
@@ -631,6 +636,8 @@ export class CiceroDaemon {
   private voiceInputHandoff: Promise<void> = Promise.resolve();
   private dashboard: DashboardHandle | null = null;
   private webVoice: WebVoiceHandle | null = null;
+  /** In-process opt-in retained while a non-streaming primary occupies STT. */
+  private retiredStreamingStt: STTProviderConfig | null = null;
   private webVoiceTunnelOwner: Pick<WebVoiceTunnelHandle, "stop"> | null = null;
   private webVoiceTunnel: WebVoiceTunnelHandle | null = null;
   private webVoicePairingStartedAt: string | null = null;
@@ -1877,9 +1884,10 @@ export class CiceroDaemon {
         // an employee is pinned (the wrong voice saying "one moment" is worse
         // than a beat of silence).
         latencyStore: new LatencyStore(),
+        resolveSttStream: () => this.providers.stt.openStream,
         onStreamTurn: async (wav, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), toolStartNotice: this.config.brain.tool_start_notice !== false, tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, timingMark: options?.timingMark, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { stt: this.providers.stt, streamFinal: options?.streamFinal, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), toolStartNotice: this.config.brain.tool_start_notice !== false, tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, timingMark: options?.timingMark, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTurn(wav, deps, sink, options.spec);
               return;
@@ -2446,6 +2454,13 @@ export class CiceroDaemon {
       unavailablePorts,
     );
     const selection = plan.selection;
+    const retiringStreamingStt = request.role === "stt" && this.config.sttBackend.streaming === true
+      ? { ...this.config.sttBackend } : null;
+    const remembered = this.retiredStreamingStt;
+    const restoreStreaming = request.role === "stt" && selection.backend === "audiocpp"
+      && remembered?.backend === "audiocpp"
+      && selection.host === remembered.host && selection.model === remembered.model;
+    if (restoreStreaming) (selection as STTProviderConfig).streaming = true;
     const result: SwapResult = {
       role: request.role,
       backend: selection.backend ?? request.backend,
@@ -2455,6 +2470,7 @@ export class CiceroDaemon {
     const candidateConfig = new RuntimeConfig(structuredClone(this.config.raw));
     candidateConfig.setVoiceBackend(request.role, selection);
     if (plan.fallback) candidateConfig.setVoiceFallback(request.role, plan.fallback);
+    validateRuntimeConfig(candidateConfig.raw, this.options.configPath);
 
     await withStagedManagedServerPorts(stagedManagedPorts(request.role, plan), async (guard) => {
       if (request.role === "stt") {
@@ -2470,12 +2486,19 @@ export class CiceroDaemon {
             this.options.configPath,
             {
               replaceTopLevel: plan.fallback ? ["stt", "stt_fallback"] : ["stt"],
+              validateMerged: (merged) => validateRuntimeConfig({ ...this.config.raw, ...merged }, this.options.configPath),
               validateBeforeCommit: () => guard.assertNoConflict(),
             },
           );
           this.config.setVoiceBackend("stt", selection);
           if (plan.fallback) this.config.setVoiceFallback("stt", plan.fallback);
-        }, { ...options, validatePrepared: () => guard.assertNoConflict() });
+          if (retiringStreamingStt && selection.backend !== "audiocpp") this.retiredStreamingStt = retiringStreamingStt;
+          else if (restoreStreaming) this.retiredStreamingStt = null;
+        }, {
+          ...options,
+          validatePrepared: () => guard.assertNoConflict(),
+          onCutover: () => this.webVoice?.refreshStreamingCapability(),
+        });
       } else {
         const slot = this.ttsSlot;
         if (!slot) throw new Error("TTS provider slot is unavailable");
@@ -2500,6 +2523,7 @@ export class CiceroDaemon {
               this.options.configPath,
               {
                 replaceTopLevel: plan.fallback ? ["tts", "tts_fallback"] : ["tts"],
+                validateMerged: (merged) => validateRuntimeConfig({ ...this.config.raw, ...merged }, this.options.configPath),
                 validateBeforeCommit: () => guard.assertNoConflict(),
               },
             );

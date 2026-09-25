@@ -15,6 +15,7 @@ import { TurnCoordinator, type TurnEvent, type TurnLease } from "../turn-coordin
 import { redactSecrets } from "../redact";
 import type { TlsMaterial } from "./tls";
 import type { SpeculativeTurn, Speculator } from "./speculative";
+import type { LivePcmSession } from "../backends/stt/live-client";
 import { isProbeFrame, decodeProbeFrame } from "./probe";
 import { snapshotSynthesizedWav } from "../platform/wav";
 import {
@@ -45,7 +46,34 @@ import {
   decodeClientMetric,
   inspectTurnAudio,
   isProtocolId,
+  isStreamPcmFrame,
+  decodeStreamPcmFrame,
+  admitStreamPcmChunk,
 } from "./protocol";
+
+interface LiveCapture {
+  turnId: string;
+  order: number;
+  nextSequence: number;
+  sampleRate: number;
+  bytes: number;
+  startedAt: number;
+  firstPartialMs?: number;
+  lastCaptionAt: number;
+  latestPartial: string;
+  session: LivePcmSession | null;
+  failed: boolean;
+  abort: AbortController;
+  finalizing: boolean;
+  /** PCM retained while the preceding ended stream owns the live seat. */
+  pendingPcm: Uint8Array[];
+  waitingForSeat: Promise<void> | null;
+}
+
+// A waiting seat retains copies of incoming frames. Byte admission already caps
+// them at 4 MiB; this also caps object overhead from tiny hostile frames.
+const MAX_PENDING_PCM_FRAMES = 16_384;
+const MAX_WAITING_LIVE_FINALS = 4;
 
 interface TurnState {
   turnId: string;
@@ -62,6 +90,8 @@ interface TurnState {
   doneRequested?: boolean;
   outputDone?: boolean;
   handlerSettled?: boolean;
+  streamSession?: LivePcmSession;
+  deferredClientAbort?: boolean;
 }
 
 interface PendingTurn {
@@ -70,6 +100,9 @@ interface PendingTurn {
   lease: TurnLease;
   latency?: LatencyRecordOwner;
   setSink: (sink: WebReplySink) => void;
+  streamFinal?: Promise<string>;
+  streamFirstPartialMs?: number;
+  streamSession?: LivePcmSession;
 }
 
 interface SpecState {
@@ -103,9 +136,14 @@ interface WsData {
   record: boolean;
   /** In-flight speculative turn from the last confident "complete" probe (see speculative.ts). */
   spec: SpecState | null;
+  liveCapture: LiveCapture | null;
+  /** Ended uploads retain ownership until their final settles or transport closes. */
+  finalizingSessions: Set<LivePcmSession>;
 }
 
 export interface WebVoiceServerOptions {
+  /** Injectable server factory for transport tests without binding a port. */
+  serve?: typeof Bun.serve;
   /** Shared single-operator owner supplied by the daemon. */
   coordinator?: TurnCoordinator;
   /** Bind address. Default "0.0.0.0" so a headless box is reachable from a LAN browser. */
@@ -118,7 +156,9 @@ export interface WebVoiceServerOptions {
   /** Process one captured utterance (WAV) into a spoken reply (Phase 1 POST path). */
   onTurn: (wav: ArrayBuffer, options?: { signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean }) => Promise<WebTurnResult>;
   /** Stream a captured utterance's reply over the WebSocket (Phase 2). Optional. */
-  onStreamTurn?: (wav: ArrayBuffer, sink: WebReplySink, opts?: { record?: boolean; spec?: SpeculativeTurn | null; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
+  onStreamTurn?: (wav: ArrayBuffer, sink: WebReplySink, opts?: { record?: boolean; spec?: SpeculativeTurn | null; streamFinal?: Promise<string>; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
+  /** Resolve the current wrapped STT provider's live capability for each capture. */
+  resolveSttStream?: () => ((options: { signal: AbortSignal; sampleRate: number; onPartial: (text: string, at: number) => void }) => LivePcmSession) | undefined;
   /** Stream a TYPED message's reply (same pipeline, no STT). Optional. */
   onTextTurn?: (text: string, sink: WebReplySink, opts?: { record?: boolean; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
   /** Optional private latency record store; omitted in standalone/test servers. */
@@ -249,6 +289,8 @@ export interface WebVoiceHandle {
   notify: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal }) => Promise<{ delivered: number; parked: boolean; deferred?: boolean } | null>;
   /** Broadcast a newly pending brain-owned confirmation to live clients. */
   confirmPending: (summary: string, nonce: string) => number;
+  /** Reconcile connected browser handshakes after a provider cutover. */
+  refreshStreamingCapability: () => void;
   /** Quiesce ingress, cancel owned work, close sockets, and drain handlers. */
   stop: () => Promise<void>;
 }
@@ -281,6 +323,11 @@ function withTurn(ws: import("bun").ServerWebSocket<WsData>, turnId: string, val
   return ws.data.protocol === 2
     ? { ...value, sessionId: ws.data.sessionId, turnId }
     : value;
+}
+
+/** One transition per socket; a fresh non-streaming handshake stays quiet. */
+export function streamCapabilityEvent(previous: boolean, available: boolean): "stream_on" | "stream_off" | null {
+  return previous === available ? null : available ? "stream_on" : "stream_off";
 }
 
 function protocolError(ws: import("bun").ServerWebSocket<WsData>, message: string, turnId?: string): void {
@@ -468,7 +515,7 @@ function requestedId(req: Request, url: URL, header: string, query: string): str
  */
 export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle | null {
   const coordinator = opts.coordinator ?? new TurnCoordinator();
-  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onDictate, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness, confirmations, latencyStore } = opts;
+  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onDictate, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, resolveSttStream, readiness, confirmations, latencyStore } = opts;
   const scheme: "http" | "https" = tls ? "https" : "http";
   const configuredDrainTimeout = opts.shutdownDrainTimeoutMs;
   const shutdownDrainTimeoutMs = typeof configuredDrainTimeout === "number" && Number.isFinite(configuredDrainTimeout) && configuredDrainTimeout >= 1
@@ -482,6 +529,23 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   // Transport ownership outlives conversation attachment for the brief span
   // between a goodbye frame and that socket's eventual close callback.
   const sockets = new Set<import("bun").ServerWebSocket<WsData>>();
+  /** The audio.cpp live seat is shared across browser sockets. */
+  const finalizingStreams = new Set<LivePcmSession>();
+  /** Includes ended captures still waiting to open after an earlier final. */
+  const endedCaptureFinals = new Set<Promise<string>>();
+  let nextCaptureOrder = 0;
+  const streamAvailability = new WeakMap<import("bun").ServerWebSocket<WsData>, boolean>();
+  const refreshSocketStream = (ws: import("bun").ServerWebSocket<WsData>): void => {
+    if (ws.data.protocol !== 2) return;
+    const available = typeof resolveSttStream?.() === "function";
+    const previous = streamAvailability.get(ws) ?? false;
+    const event = streamCapabilityEvent(previous, available);
+    if (event) sendJson(ws, withSession(ws, { type: event }));
+    streamAvailability.set(ws, available);
+  };
+  const refreshStreamingCapability = (): void => {
+    for (const ws of clients) refreshSocketStream(ws);
+  };
 
   /*
    * Deciding the conversation is over.
@@ -1024,12 +1088,21 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   // The latest input wins (spoken WAV or typed text): stash it as pending and
   // signal any in-flight turn to abort (barge-in). A single drain loop
   // processes pending turns so a mid-turn input is never dropped.
-  const queueTurn = async (ws: import("bun").ServerWebSocket<WsData>, input: ArrayBuffer | string, turnId: string): Promise<void> => {
+  const queueTurn = async (ws: import("bun").ServerWebSocket<WsData>, input: ArrayBuffer | string, turnId: string, streamFinal?: Promise<string>, streamFirstPartialMs?: number, streamSession?: LivePcmSession, inputOrder = ++nextCaptureOrder): Promise<void> => {
     if (!accepting) {
+      streamSession?.abort();
       protocolError(ws, "server shutting down", turnId);
       return;
     }
+    if (ws.data.liveCapture && ws.data.liveCapture.turnId !== turnId
+        && !ws.data.liveCapture.finalizing && ws.data.liveCapture.order < inputOrder) {
+      ws.data.liveCapture.abort.abort();
+      ws.data.liveCapture.session?.abort();
+      ws.data.liveCapture.pendingPcm = [];
+      ws.data.liveCapture = null;
+    }
     if (ws.data.recentTurnIds.includes(turnId) || ws.data.pending?.turnId === turnId || ws.data.current?.turnId === turnId) {
+      streamSession?.abort();
       protocolError(ws, "duplicate or replayed turn id", turnId);
       return;
     }
@@ -1037,6 +1110,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     // so transfer that charged slot instead of rejecting the confirming turn.
     const transferableSpecSlots = ws.data.spec && liveSpecs.has(ws.data.spec.turn) ? 1 : 0;
     if (!ws.data.busy && !acquireJob(transferableSpecSlots)) {
+      streamSession?.abort();
       protocolError(ws, unavailableMessage(), turnId);
       return;
     }
@@ -1068,6 +1142,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         }
       });
     } catch (error) {
+      streamSession?.abort();
       if (!ws.data.busy) releaseJob();
       throw error;
     }
@@ -1082,7 +1157,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         new LatencyTurn(ws.data.sessionId, turnId, typeof input === "string" ? "web_text" : "web_voice", Date.now(), () => performance.now(), typeof input === "string" ? input.length : input.byteLength),
         persistLatency)
       : undefined;
-    ws.data.pending = { input, turnId, lease, latency, setSink: (sink) => { outputSink = sink; } };
+    if (streamFinal && latency) latency.turn.setStreamingStt("streaming", streamFirstPartialMs);
+    ws.data.pending = { input, turnId, lease, latency, streamFinal, streamFirstPartialMs, streamSession, setSink: (sink) => { outputSink = sink; } };
     if (ws.data.busy) return; // the running drain loop will pick it up
     ws.data.busy = true;
     try {
@@ -1101,6 +1177,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           played: [],
           pacing: new AudioPlaybackGate(),
           latency: next.latency,
+          streamSession: next.streamSession,
         };
         const timingMark = (name: string, offsetMs: number): void => {
           state.latency?.mark(name, offsetMs);
@@ -1141,6 +1218,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               signal: state.signal,
               trackBackground: (task) => ownBackground(task, ws.data.sessionId, next.turnId, "web"),
               timingMark,
+              streamFinal: next.streamFinal,
             });
           }
         } catch (err: unknown) {
@@ -1166,7 +1244,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   };
 
   try {
-    const server = Bun.serve<WsData>({
+    const server = (opts.serve ?? Bun.serve)<WsData>({
       hostname: host,
       port,
       ...(tls ? { tls: { cert: tls.cert, key: tls.key } } : {}),
@@ -1292,6 +1370,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 latestProbeTurnId: null,
                 record,
                 spec: null,
+                liveCapture: null,
+                finalizingSessions: new Set(),
               },
             });
           } finally {
@@ -1709,6 +1789,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               turnId: null,
               maxAudioBytes: MAX_TURN_AUDIO_BYTES,
             });
+            refreshSocketStream(ws);
           }
           // Tell the client whether mid-pause turn probes are worth sending —
           // without a detector they'd be dead weight on every pause.
@@ -1881,14 +1962,35 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                   protocolError(ws, "abort requires a valid turn id");
                   return;
                 }
-                if (ws.data.current?.turnId === msg.turnId) abortTurn(ws.data.current, "turn aborted by client");
+                if (ws.data.current?.turnId === msg.turnId) {
+                  const current = ws.data.current;
+                  if (current.streamSession && ws.data.finalizingSessions.has(current.streamSession)) {
+                    if (!current.deferredClientAbort) {
+                      current.deferredClientAbort = true;
+                      const finishAbort = (): void => queueMicrotask(() => {
+                        if (ws.data.current === current) abortTurn(current, "turn aborted by client");
+                      });
+                      void current.streamSession.final.then(finishAbort, finishAbort);
+                    }
+                  } else abortTurn(current, "turn aborted by client");
+                }
                 if (ws.data.pending?.turnId === msg.turnId) {
+                  if (ws.data.pending.streamSession && ws.data.finalizingSessions.has(ws.data.pending.streamSession)) return;
                   ws.data.pending.lease.abort(new Error("turn aborted by client"));
                   dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
                   ws.data.pending = null;
                 }
               } else if (ws.data.current) {
                 abortTurn(ws.data.current, "turn aborted by client");
+              }
+              return;
+            }
+            if (msg.type === "capture_abort" && ws.data.protocol === 2 && isProtocolId(msg.turnId)) {
+              if (ws.data.liveCapture?.turnId === msg.turnId && !ws.data.liveCapture.finalizing) {
+                ws.data.liveCapture.abort.abort();
+                ws.data.liveCapture.session?.abort();
+                ws.data.liveCapture.pendingPcm = [];
+                ws.data.liveCapture.failed = true;
               }
               return;
             }
@@ -1935,6 +2037,104 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           }
 
           // Probe frame = "is the speaker done?" — answered inline, never a turn.
+          if (isStreamPcmFrame(u8)) {
+            refreshSocketStream(ws);
+            const openSttStream = resolveSttStream?.();
+            if (!openSttStream || ws.data.protocol !== 2) { protocolError(ws, "live PCM is disabled", turnId); return; }
+            const frame = decodeStreamPcmFrame(u8);
+            if (!frame) { protocolError(ws, "invalid live PCM frame", turnId); return; }
+            let capture = ws.data.liveCapture;
+            if (capture?.turnId !== turnId) {
+              if (endedCaptureFinals.size >= MAX_WAITING_LIVE_FINALS) {
+                protocolError(ws, "live STT final queue is full", turnId);
+                return;
+              }
+              if (frame.sequence !== 1 || ws.data.recentTurnIds.includes(turnId) ||
+                  ws.data.current?.turnId === turnId || ws.data.pending?.turnId === turnId) {
+                protocolError(ws, "duplicate turn or invalid first live PCM sequence", turnId);
+                return;
+              }
+              if (capture && !capture.finalizing) {
+                capture.abort.abort();
+                capture.session?.abort();
+                capture.pendingPcm = [];
+              }
+              const abort = new AbortController();
+              capture = {
+                turnId, order: ++nextCaptureOrder, nextSequence: 1, sampleRate: frame.sampleRate, bytes: 0,
+                startedAt: performance.now(), lastCaptionAt: -Infinity,
+                latestPartial: "", session: null, failed: false, abort, finalizing: false,
+                pendingPcm: [], waitingForSeat: null,
+              };
+              ws.data.liveCapture = capture;
+              const owner = capture;
+              const openOwner = (): void => {
+                if (owner.abort.signal.aborted || (!owner.finalizing && ws.data.liveCapture !== owner)
+                    || !accepting || !sockets.has(ws)) {
+                  owner.pendingPcm = [];
+                  return;
+                }
+                try {
+                  const currentOpen = resolveSttStream?.();
+                  if (!currentOpen) throw new Error("live STT is unavailable");
+                  owner.session = currentOpen({
+                    signal: AbortSignal.any([abort.signal, shutdownController.signal]), sampleRate: frame.sampleRate,
+                    onPartial: (text, at) => {
+                      if (ws.data.liveCapture !== owner || owner.abort.signal.aborted || owner.failed || !accepting) return;
+                      owner.latestPartial = text;
+                      owner.firstPartialMs ??= Math.max(0, at - owner.startedAt);
+                      if (owner.firstPartialMs !== undefined && owner.finalizing) {
+                        ws.data.latencyTurns.get(owner.turnId)?.turn.setStreamingStt("streaming", owner.firstPartialMs);
+                      }
+                      if (at - owner.lastCaptionAt >= 100) {
+                        owner.lastCaptionAt = at;
+                        sendJson(ws, withTurn(ws, owner.turnId, { type: "partial_transcript", text: text.slice(0, 16_384) }));
+                      }
+                    },
+                  });
+                  void owner.session.final.then(
+                    () => { if (ws.data.liveCapture === owner) ws.data.liveCapture = null; },
+                    () => { owner.failed = true; if (ws.data.liveCapture === owner && owner.finalizing) ws.data.liveCapture = null; },
+                  );
+                  for (const pcm of owner.pendingPcm) owner.session.push(pcm);
+                  owner.pendingPcm = [];
+                } catch {
+                  owner.failed = true;
+                  owner.pendingPcm = [];
+                  owner.session?.abort();
+                }
+              };
+              const priorFinals = [...endedCaptureFinals];
+              if (priorFinals.length) {
+                capture.waitingForSeat = Promise.allSettled(priorFinals).then(openOwner);
+              } else openOwner();
+            }
+            if (capture.finalizing) {
+              protocolError(ws, "live PCM arrived after its final WAV", turnId);
+              return;
+            }
+            if (!admitStreamPcmChunk(frame, capture.nextSequence, capture.sampleRate, capture.bytes)) {
+              capture.abort.abort(); capture.session?.abort(); capture.failed = true;
+              capture.pendingPcm = [];
+              protocolError(ws, "live PCM sequence, rate, or size invalid", turnId);
+              return;
+            }
+            capture.nextSequence++;
+            capture.bytes += frame.pcm.byteLength;
+            if (!capture.failed) {
+              try {
+                if (capture.session) capture.session.push(frame.pcm);
+                else if (capture.pendingPcm.length < MAX_PENDING_PCM_FRAMES) capture.pendingPcm.push(frame.pcm.slice());
+                else throw new RangeError("live PCM buffer has too many frames");
+              }
+              catch {
+                capture.failed = true;
+                capture.pendingPcm = [];
+                capture.session?.abort();
+              }
+            }
+            return;
+          }
           if (isProbeFrame(u8)) {
             if (!onTurnProbe) return;
             if (ws.data.protocol === 2) ws.data.latestProbeTurnId = turnId;
@@ -1955,7 +2155,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               // (see speculative.ts; the WAV turn adopts or aborts it).
               if (verdict?.complete && onSpeculate && frame.utterMs !== undefined && !ws.data.busy) {
                 const prev = ws.data.spec;
-                const spec = onSpeculate(frame.samples, frame.sampleRate, frame.utterMs, verdict.probability);
+                const partial = ws.data.liveCapture?.turnId === turnId ? ws.data.liveCapture.latestPartial : "";
+                const spec = onSpeculate(frame.samples, frame.sampleRate, frame.utterMs, verdict.probability, partial || undefined);
                 ws.data.spec = spec ? { turnId: ws.data.protocol === 2 ? turnId : null, turn: trackSpec(spec) } : null;
                 if (prev) {
                   void abortSpec(prev.turn).catch((error: unknown) => {
@@ -1988,7 +2189,48 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // Binary frame = a complete utterance WAV.
           const wav = new Uint8Array(u8.byteLength);
           wav.set(u8);
-          await queueTurn(ws, wav.buffer, turnId).catch((err: unknown) => {
+          const capture = ws.data.liveCapture?.turnId === turnId ? ws.data.liveCapture : null;
+          const inputOrder = capture?.order ?? ++nextCaptureOrder;
+          if (capture) { capture.finalizing = true; if (capture.failed) ws.data.liveCapture = null; }
+          else if (ws.data.liveCapture && !ws.data.liveCapture.finalizing
+                   && ws.data.liveCapture.order < inputOrder) {
+            ws.data.liveCapture.abort.abort(); ws.data.liveCapture.session?.abort();
+            ws.data.liveCapture.pendingPcm = []; ws.data.liveCapture = null;
+          }
+          const endSession = (): Promise<string> => {
+            if (!capture?.session || capture.failed) return Promise.reject(new Error("live transcription failed"));
+            const session = capture.session;
+            let result: Promise<string>;
+            try { result = session.end(); }
+            catch (error) {
+              session.abort();
+              return Promise.reject(error);
+            }
+            ws.data.finalizingSessions.add(session);
+            finalizingStreams.add(session);
+            void result.finally(() => {
+              ws.data.finalizingSessions.delete(session);
+              finalizingStreams.delete(session);
+            }).catch(() => {});
+            return result;
+          };
+          const streamFinal = capture
+            ? capture.failed
+              ? Promise.reject(new Error("live transcription failed"))
+              : capture.waitingForSeat ? capture.waitingForSeat.then(endSession) : endSession()
+            : undefined;
+          if (streamFinal) {
+            endedCaptureFinals.add(streamFinal);
+            void streamFinal.finally(() => { endedCaptureFinals.delete(streamFinal); }).catch(() => {});
+          }
+          // A newer WAV may replace the reply only after the older recognizer
+          // has delivered its final. The live socket's own deadline bounds this.
+          if (capture?.waitingForSeat) await capture.waitingForSeat;
+          else if (!capture && endedCaptureFinals.size) {
+            await Promise.allSettled([...endedCaptureFinals]);
+          }
+          if (!sockets.has(ws) || !accepting) return;
+          await queueTurn(ws, wav.buffer, turnId, streamFinal, capture?.firstPartialMs, capture?.session ?? undefined, inputOrder).catch((err: unknown) => {
             const detail = err instanceof Error ? err.message : String(err);
             log("error", `web-voice queue failed: ${detail}`);
             protocolError(ws, "turn queue failed", turnId);
@@ -2002,6 +2244,17 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           }
         },
         close(ws) {
+          ws.data.liveCapture?.abort.abort();
+          if (ws.data.liveCapture?.session && !ws.data.finalizingSessions.has(ws.data.liveCapture.session)) {
+            ws.data.liveCapture.session.abort();
+          }
+          if (ws.data.liveCapture) ws.data.liveCapture.pendingPcm = [];
+          ws.data.liveCapture = null;
+          for (const session of ws.data.finalizingSessions) {
+            session.abort();
+            finalizingStreams.delete(session);
+          }
+          ws.data.finalizingSessions.clear();
           if (ws.data.pendingClientSlot) pendingClients = Math.max(0, pendingClients - 1);
           if (ws.data.departureCloseTimer !== null) {
             clearTimeout(ws.data.departureCloseTimer);
@@ -2022,6 +2275,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // ending or start a reconnect grace for a client that already left.
           if (wasAttached && clients.size === 0) scheduleConversationEnd();
           ws.data.pending?.lease.abort(new Error("voice socket closed"));
+          ws.data.pending?.streamSession?.abort();
           ws.data.pending = null;
           ws.data.latestProbeTurnId = null;
           const spec = ws.data.spec;
@@ -2095,6 +2349,17 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       parked.length = 0;
 
       for (const ws of sockets) {
+        ws.data.liveCapture?.abort.abort();
+        if (ws.data.liveCapture?.session && !ws.data.finalizingSessions.has(ws.data.liveCapture.session)) {
+          ws.data.liveCapture.session.abort();
+        }
+        if (ws.data.liveCapture) ws.data.liveCapture.pendingPcm = [];
+        ws.data.liveCapture = null;
+        for (const session of ws.data.finalizingSessions) {
+          session.abort();
+          finalizingStreams.delete(session);
+        }
+        ws.data.finalizingSessions.clear();
         if (ws.data.departureCloseTimer !== null) {
           clearTimeout(ws.data.departureCloseTimer);
           ws.data.departureCloseTimer = null;
@@ -2158,6 +2423,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       conversationLive: () => clients.size > 0 || conversationEndTimer !== null,
       notify,
       confirmPending,
+      refreshStreamingCapability,
       stop,
     };
   } catch (err: unknown) {

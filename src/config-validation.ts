@@ -573,7 +573,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     const roleProviderKeys = name === "llm" || name === "classifier"
       ? ["apiKey", "apiKeyEnv", "baseUrl", "extraHeaders", "extra"] as const
       : name === "stt" || name === "stt_fallback"
-        ? ["compute_type", "language", "vocabulary"] as const
+        ? ["compute_type", "language", "vocabulary", ...(name === "stt" ? ["streaming"] : [])] as const
         : ["apiKey", "voice", "device", "refAudio", "refText", "responseTimeoutMs", "maxAudioBytes"] as const;
     checkKnownKeys(provider, name, [...commonProviderKeys, ...roleProviderKeys], issues);
     checkString(provider.backend, `${name}.backend`, issues);
@@ -582,6 +582,10 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       checkOptionalString(provider, key, name, issues);
     }
     if (name === "stt" || name === "stt_fallback") {
+      if (name === "stt" && provider.streaming !== undefined) {
+        if (typeof provider.streaming !== "boolean") issues.push("stt.streaming must be a boolean");
+        else if (provider.streaming && provider.backend !== "audiocpp") issues.push("stt.streaming requires stt.backend: audiocpp");
+      }
       if (provider.language !== undefined && !isSttLanguageTag(provider.language)) {
         issues.push(`${name}.language must be a language tag (2–3 letter code, optional script and region, at most 32 characters)`);
       }

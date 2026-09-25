@@ -65,6 +65,15 @@ set its own `language` and `vocabulary` keys for that provider; they are not
 inherited from `stt`. `doctor` and `status` show the language and term count,
 without printing the terms.
 
+`stt.streaming: true` opts browser voice into live audio.cpp recognition. It
+requires `stt.backend: audiocpp`; any other backend is a configuration error.
+Configure Nemotron's model entry in `servers/audiocpp_server.local.json` with
+`"mode": "streaming"`. The setup page writes that mode when its live streaming
+checkbox is selected. The browser sends bounded, ordered 16 kHz PCM during
+speech and shows partial captions. At speech end, the final live transcript
+feeds the ordinary turn pipeline. A failed live stream retries the full WAV via
+batch STT. The local microphone path continues to use batch STT.
+
 An optional `classifier:` section takes the same shape as `llm:` and holds a
 small model apart from the reply model for per-utterance decisions. It is off by
 default; absence means the features that need it stay off, never that they

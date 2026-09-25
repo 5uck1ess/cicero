@@ -198,17 +198,18 @@ export type Speculator = (
   sampleRate: number,
   utterMs: number,
   probability: number,
+  partial?: string,
 ) => SpeculativeTurn | null;
 
 export function makeSpeculator(deps: SpeculatorDeps): Speculator {
-  return (samples, sampleRate, utterMs, probability) => {
+  return (samples, sampleRate, utterMs, probability, partial) => {
     if (probability < deps.minProbability) return null;
     if (!deps.brain.sendStream) return null;
     // A pending destructive-op gate: nothing speculative may touch the brain.
     if (deps.brain.hasPendingConfirmation?.()) return null;
     const tailMs = (samples.length / sampleRate) * 1000;
     // Tail truncated by the probe window — we'd transcribe half a sentence.
-    if (tailMs < utterMs - COVERAGE_SLACK_MS) return null;
+    if (!partial?.trim() && tailMs < utterMs - COVERAGE_SLACK_MS) return null;
 
     let aborted = false;
     let claimed = false;
@@ -237,7 +238,9 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
     // Tone classifies the probe tail in parallel with its transcription — the
     // brain input waits for the verdict at most the grace window.
     const tonePending = beginOwnedTone(deps.tone, wavBytes, "speculative tone classification");
-    const transcriptPromise: Promise<string | null> = (async () => {
+    const transcriptPromise: Promise<string | null> = partial?.trim()
+      ? Promise.resolve(partial.trim())
+      : (async () => {
       let tmpFile: string | undefined;
       try {
         tmpFile = await writeSecureTempAudio(wavBytes, { prefix: "cicero-spec" });

@@ -66,6 +66,14 @@ Protocol v2 reply audio uses a `CVA2` binary envelope: magic, two little-endian 
 
 Protocol v2 also accepts bounded `client_metric` frames for end-to-end [conversation latency reporting](latency.md). The browser reports playback start by audio sequence; the server resolves whether that sequence was a reply or filler. Existing outbound frames are unchanged.
 
+With `stt.streaming: true` and audio.cpp Nemotron configured in `"mode": "streaming"`,
+the server announces `stream_on`. Each browser turn then sends ordered `CVS2`
+PCM chunks inside its `CVP2` turn envelope during speech. The server returns
+rate-limited `partial_transcript` events for live captions and replaces the
+caption with the final transcript. The complete WAV is still sent at speech
+end so a failed live stream can retry batch recognition. This opt-in applies
+to web voice only; the local microphone keeps its existing batch path.
+
 ## Restarts don't lose the thread
 
 Restarting the daemon doesn't wipe the conversation: the fresh agent session is primed with a recap of the last turns (riding the warmup ping, so it costs nothing). Turns spoken by a transferred-to colleague are attributed to that colleague in the recap, so the front desk never resumes someone else's personality. Tune with `web_voice.resume_turns` (default 10, `0` disables).

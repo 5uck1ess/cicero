@@ -36,6 +36,31 @@ function streamDeps(over: Partial<{ transcript: string; stream: string[]; reply:
   };
 }
 
+test("live final transcript replaces batch STT for a browser turn", async () => {
+  const d = streamDeps();
+  let batchCalls = 0;
+  d.stt = { transcribe: async () => { batchCalls++; return "batch"; } };
+  d.streamFinal = Promise.resolve("live words");
+  const { sink, calls } = capturingSink();
+  await streamWebTurn(tinyWav([1]), d, sink);
+  expect(calls.transcript).toEqual(["live words"]);
+  expect(batchCalls).toBe(0);
+});
+
+test("failed live final retries the full WAV once through batch STT", async () => {
+  const d = streamDeps();
+  let batchCalls = 0;
+  d.stt = { transcribe: async () => { batchCalls++; return "batch words"; } };
+  d.streamFinal = Promise.reject(new Error("synthetic live failure"));
+  const marks: string[] = [];
+  d.timingMark = (name) => marks.push(name);
+  const { sink, calls } = capturingSink();
+  await streamWebTurn(tinyWav([1]), d, sink);
+  expect(calls.transcript).toEqual(["batch words"]);
+  expect(batchCalls).toBe(1);
+  expect(marks).toContain("stt_batch_fallback");
+});
+
 for (const [input, setup] of [
   ["repeat that", (d: WebStreamDeps) => { d.lastReply = { pending: () => "Earlier reply.", store: () => {} }; }],
   ["louder", (d: WebStreamDeps) => { d.voice = { state: { volume: 1, rate: 1 } }; }],
@@ -734,6 +759,26 @@ test("an adopted speculation is aborted when downstream reply rendering fails", 
   await streamWebTurn(tinyWav([1]), deps, sink, spec);
   expect(aborts).toBe(1);
   expect(calls.error).toContain("speaker failed");
+});
+
+test("a differing streamed final rejects partial speculation and uses the final transcript", async () => {
+  let aborts = 0;
+  let batchCalls = 0;
+  const spec = {
+    claim: () => true,
+    coverageOk: () => true,
+    transcript: () => Promise.resolve("partial guess"),
+    tokens: () => tokens("wrong reply."),
+    abort: () => { aborts++; return Promise.resolve(); },
+  };
+  const d = streamDeps();
+  d.streamFinal = Promise.resolve("correct final");
+  d.stt = { transcribe: async () => { batchCalls++; return "batch"; } };
+  const { sink, calls } = capturingSink();
+  await streamWebTurn(tinyWav([1]), d, sink, spec);
+  expect(aborts).toBe(1);
+  expect(batchCalls).toBe(0);
+  expect(calls.transcript).toEqual(["correct final"]);
 });
 
 // --- interruption recovery ("as I was saying…") ---
