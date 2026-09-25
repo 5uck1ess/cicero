@@ -24,6 +24,7 @@ import {
   type DaemonPidLease,
   type DaemonPidRecord,
 } from "../src/daemon-pid";
+import { createLinuxPidfdApi, LinuxPidfdUnavailableError } from "../src/process/linux-pidfd";
 
 const DEAD_PID = 2_147_483_647;
 
@@ -188,6 +189,246 @@ describe("daemon PID ownership", () => {
       throw new Error(`PID reuse stop test failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     } finally {
       await lease?.release().catch(() => { /* ownership mismatch intentionally leaves the fixture */ });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("pidfd stop skips a PID reused after inspection and closes the descriptor", async () => {
+    const { root, pidFile } = sandbox("pidfd-reuse");
+    let lease: DaemonPidLease | undefined;
+    try {
+      lease = await claimDaemonPidFile(pidFile);
+      const calls: string[] = [];
+      const result = await stopDaemonFromPidFile(pidFile, {
+        kill: () => { calls.push("legacy-signal"); },
+        pidfd: {
+          open: () => { calls.push("open"); return 17; },
+          signal: () => { calls.push("signal"); },
+          close: () => { calls.push("close"); },
+        },
+        processIdentity: async () => ({ kind: "identified", value: "linux:reused:999" }),
+      });
+      expect(result.kind).toBe("not-running");
+      expect(calls).toEqual(["open", "close"]);
+    } finally {
+      await lease?.release();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("pidfd stop signals the pinned instance and closes the descriptor", async () => {
+    const { root, pidFile } = sandbox("pidfd-owned");
+    let lease: DaemonPidLease | undefined;
+    try {
+      lease = await claimDaemonPidFile(pidFile);
+      const calls: string[] = [];
+      const result = await stopDaemonFromPidFile(pidFile, {
+        kill: () => { calls.push("legacy-signal"); },
+        pidfd: {
+          open: () => { calls.push("open"); return 17; },
+          signal: () => { calls.push("signal"); },
+          close: () => { calls.push("close"); },
+        },
+        processIdentity: async () => ({ kind: "identified", value: lease!.record.identity }),
+      });
+      expect(result).toEqual({ kind: "signaled", pid: process.pid });
+      expect(calls).toEqual(["open", "signal", "close"]);
+    } finally {
+      await lease?.release();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("unavailable pidfd falls back to an identity-checked numeric signal", async () => {
+    const { root, pidFile } = sandbox("pidfd-unavailable");
+    let lease: DaemonPidLease | undefined;
+    try {
+      lease = await claimDaemonPidFile(pidFile);
+      const signals: number[] = [];
+      const unavailable = () => { throw new LinuxPidfdUnavailableError(); };
+      const matched = await stopDaemonFromPidFile(pidFile, {
+        pidfdFactory: unavailable,
+        processIdentity: async () => ({ kind: "identified", value: lease!.record.identity }),
+        kill: (pid) => { signals.push(pid); },
+      });
+      expect(matched).toEqual({ kind: "signaled", pid: process.pid });
+      expect(signals).toEqual([process.pid]);
+
+      const reused = await stopDaemonFromPidFile(pidFile, {
+        pidfdFactory: unavailable,
+        processIdentity: async () => ({ kind: "identified", value: "linux:reused" }),
+        kill: (pid) => { signals.push(pid); },
+      });
+      expect(reused.kind).toBe("not-running");
+      expect(signals).toEqual([process.pid]);
+    } finally {
+      await lease?.release();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("pidfd_open ENOSYS falls back after checking daemon identity", async () => {
+    const { root, pidFile } = sandbox("pidfd-open-enosys");
+    let lease: DaemonPidLease | undefined;
+    try {
+      lease = await claimDaemonPidFile(pidFile);
+      const calls: string[] = [];
+      const result = await stopDaemonFromPidFile(pidFile, {
+        pidfd: {
+          open: () => { calls.push("open"); throw new LinuxPidfdUnavailableError(); },
+          signal: () => { calls.push("signal"); },
+          close: () => { calls.push("close"); },
+        },
+        processIdentity: async () => { calls.push("identity"); return { kind: "identified", value: lease!.record.identity }; },
+        kill: () => { calls.push("numeric"); },
+      });
+      expect(result).toEqual({ kind: "signaled", pid: process.pid });
+      expect(calls).toEqual(["open", "identity", "numeric"]);
+    } finally {
+      await lease?.release();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  for (const [name, errorNumber] of [["EPERM", 1], ["EACCES", 13], ["EINVAL", 22], ["EMFILE", 24], ["unknown errno", 9_999]] as const) {
+    test(`pidfd_open ${name} falls back to numeric SIGTERM after identity check`, async () => {
+      const { root, pidFile } = sandbox(`pidfd-open-${name.toLowerCase()}`);
+      let lease: DaemonPidLease | undefined;
+      try {
+        lease = await claimDaemonPidFile(pidFile);
+        const calls: string[] = [];
+        const pidfd = createLinuxPidfdApi({
+          syscall: () => { calls.push("open"); return -1n; },
+          errno: () => errorNumber,
+          close: () => { calls.push("close"); return 0; },
+        });
+        const result = await stopDaemonFromPidFile(pidFile, {
+          pidfd,
+          processIdentity: async () => { calls.push("identity"); return { kind: "identified", value: lease!.record.identity }; },
+          kill: (pid, signal) => { calls.push(`numeric:${pid}:${signal}`); },
+        });
+        expect(result).toEqual({ kind: "signaled", pid: process.pid });
+        expect(calls).toEqual(["open", "identity", `numeric:${process.pid}:SIGTERM`]);
+      } finally {
+        await lease?.release();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  for (const [name, errorNumber] of [["EPERM", 1], ["EACCES", 13], ["ENOSYS", 38]] as const) {
+    test(`pidfd_send_signal ${name} falls back after a second identity check`, async () => {
+      const { root, pidFile } = sandbox(`pidfd-signal-${name.toLowerCase()}`);
+      let lease: DaemonPidLease | undefined;
+      try {
+        lease = await claimDaemonPidFile(pidFile);
+        const calls: string[] = [];
+        const pidfd = createLinuxPidfdApi({
+          syscall: (number) => {
+            calls.push(number === 434 ? "open" : "signal");
+            return number === 434 ? 17n : -1n;
+          },
+          errno: () => errorNumber,
+          close: () => { calls.push("close"); return 0; },
+        });
+        const result = await stopDaemonFromPidFile(pidFile, {
+          pidfd,
+          processIdentity: async () => { calls.push("identity"); return { kind: "identified", value: lease!.record.identity }; },
+          kill: (pid, signal) => { calls.push(`numeric:${pid}:${signal}`); },
+        });
+        expect(result).toEqual({ kind: "signaled", pid: process.pid });
+        expect(calls).toEqual(["open", "identity", "signal", "close", "identity", `numeric:${process.pid}:SIGTERM`]);
+      } finally {
+        await lease?.release();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("pidfd signal refusal skips numeric SIGTERM if identity changed", async () => {
+    const { root, pidFile } = sandbox("pidfd-signal-reused");
+    let lease: DaemonPidLease | undefined;
+    try {
+      lease = await claimDaemonPidFile(pidFile);
+      let identityReads = 0;
+      let numericSignals = 0;
+      const result = await stopDaemonFromPidFile(pidFile, {
+        pidfd: createLinuxPidfdApi({
+          syscall: (number) => number === 434 ? 17n : -1n,
+          errno: () => 1,
+          close: () => 0,
+        }),
+        processIdentity: async () => ({
+          kind: "identified",
+          value: ++identityReads === 1 ? lease!.record.identity : "linux:reused",
+        }),
+        kill: () => { numericSignals++; },
+      });
+      expect(result.kind).toBe("not-running");
+      expect(identityReads).toBe(2);
+      expect(numericSignals).toBe(0);
+    } finally {
+      await lease?.release();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("numeric SIGTERM failure after pidfd refusal keeps the original unsafe result", async () => {
+    const { root, pidFile } = sandbox("pidfd-numeric-failure");
+    let lease: DaemonPidLease | undefined;
+    try {
+      lease = await claimDaemonPidFile(pidFile);
+      const result = await stopDaemonFromPidFile(pidFile, {
+        pidfd: createLinuxPidfdApi({ syscall: () => -1n, errno: () => 1, close: () => 0 }),
+        processIdentity: async () => ({ kind: "identified", value: lease!.record.identity }),
+        kill: () => { throw new Error("numeric SIGTERM denied"); },
+      });
+      expect(result).toEqual({ kind: "unsafe", reason: "numeric SIGTERM denied" });
+    } finally {
+      await lease?.release();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("ESRCH while opening a pidfd reports a daemon that exited", async () => {
+    const { root, pidFile } = sandbox("pidfd-open-esrch");
+    let lease: DaemonPidLease | undefined;
+    try {
+      lease = await claimDaemonPidFile(pidFile);
+      const result = await stopDaemonFromPidFile(pidFile, {
+        kill: () => { throw new Error("numeric signal must not run"); },
+        pidfd: {
+          open: () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); },
+          signal: () => {},
+          close: () => {},
+        },
+      });
+      expect(result.kind).toBe("not-running");
+    } finally {
+      await lease?.release();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("ESRCH while signaling a pidfd reports exit and closes it", async () => {
+    const { root, pidFile } = sandbox("pidfd-signal-esrch");
+    let lease: DaemonPidLease | undefined;
+    try {
+      lease = await claimDaemonPidFile(pidFile);
+      const calls: string[] = [];
+      const result = await stopDaemonFromPidFile(pidFile, {
+        kill: () => { calls.push("numeric"); },
+        pidfd: {
+          open: () => { calls.push("open"); return 17; },
+          signal: () => { calls.push("signal"); throw Object.assign(new Error("gone"), { code: "ESRCH" }); },
+          close: () => { calls.push("close"); },
+        },
+        processIdentity: async () => ({ kind: "identified", value: lease!.record.identity }),
+      });
+      expect(result.kind).toBe("not-running");
+      expect(calls).toEqual(["open", "signal", "close"]);
+    } finally {
+      await lease?.release();
       rmSync(root, { recursive: true, force: true });
     }
   });

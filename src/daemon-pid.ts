@@ -3,6 +3,7 @@ import { link, lstat, open, readFile, unlink } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { ensurePrivateDirectorySync, PRIVATE_FILE_MODE } from "./platform/secure-storage";
+import { linuxPidfdApi, type LinuxPidfdApi } from "./process/linux-pidfd";
 
 const PID_RECORD_VERSION = 1 as const;
 const MAX_PID_RECORD_BYTES = 4_096;
@@ -42,6 +43,10 @@ export interface DaemonPidLease {
 
 interface StopDependencies {
   kill?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Injected kernel-handle seam; takes precedence over kill. */
+  pidfd?: LinuxPidfdApi;
+  pidfdFactory?: () => LinuxPidfdApi;
+  processIdentity?: (pid: number) => Promise<ProcessIdentity>;
 }
 
 function errno(error: unknown): NodeJS.ErrnoException {
@@ -517,6 +522,36 @@ export async function stopDaemonFromPidFile(
         : { kind: "not-running", reason: "daemon identity changed before it could be stopped" };
     }
     try {
+      const readIdentity = dependencies.processIdentity ?? processIdentity;
+      const identityStillMatches = async (): Promise<DaemonStopResult | null> => {
+        const current = await readIdentity(second.record.pid);
+        if (current.kind === "identified" && current.value === second.record.identity) return null;
+        return current.kind === "unsupported"
+          ? { kind: "unsafe", reason: current.reason }
+          : { kind: "not-running", reason: "daemon identity changed before it could be stopped" };
+      };
+      if (dependencies.pidfd || dependencies.pidfdFactory || (process.platform === "linux" && !dependencies.kill)) {
+        try {
+          const pidfd = dependencies.pidfd ?? dependencies.pidfdFactory?.() ?? linuxPidfdApi();
+          const fd = pidfd.open(second.record.pid);
+          try {
+            // Opening pins one instance; this check rejects reuse before open.
+            const mismatch = await identityStillMatches();
+            if (mismatch) return mismatch;
+            pidfd.signal(fd);
+            return { kind: "signaled", pid: second.record.pid };
+          } finally {
+            pidfd.close(fd);
+          }
+        } catch (error) {
+          if (errno(error).code === "ESRCH") throw error;
+          // A pidfd failure must not prevent the previous identity-checked
+          // numeric stop path. Recheck after any failed open or send, including
+          // policy refusal and transient resource errors.
+        }
+      }
+      const mismatch = await identityStillMatches();
+      if (mismatch) return mismatch;
       (dependencies.kill ?? process.kill)(second.record.pid, "SIGTERM");
       return { kind: "signaled", pid: second.record.pid };
     } catch (error) {

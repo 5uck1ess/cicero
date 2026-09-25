@@ -71,11 +71,15 @@ backpressure when an agent floods requests or stops reading responses.
 
 On POSIX, Cicero launches each ACP harness in an owned process group. Stop and
 restart send ACP cancellation, then TERM→KILL the group and wait for both the
-leader and descendants to disappear. On Windows, Cicero attempts bounded
-`taskkill /T` tree cleanup and reaps the direct ACP child. Without a Windows Job
-Object it cannot guarantee ownership of escaped or reparented descendants, so
-Windows harnesses must still shut down their own children when the launcher
-exits.
+leader and group to disappear. On Linux, a process group's ID remains allocated
+while any member uses it as a process group or session ID, even after its leader
+exits. Cicero can therefore signal surviving descendants by group ID. An empty
+group yields `ESRCH`; a new leader could take the number only after the old
+group empties. On Windows, Cicero best-effort
+assigns the spawned harness to a kill-on-close Job Object, which retains
+descendants after the root exits. If assignment is unavailable, bounded
+`taskkill /T` is used while the root is
+still observable. This fallback cannot recover descendants after the root exits.
 
 ## Spoken confirmation gate (acp backend)
 
@@ -148,11 +152,12 @@ Tab-inject's response deadline is a hard failure boundary: if Claude Code does n
 
 Cancellation follows the adapter boundary. Fresh subprocess-mode CLI turns are
 spawned as process groups on POSIX; an abort sends `SIGTERM`, waits briefly,
-then escalates to `SIGKILL` and reaps the leader. Windows attempts bounded
-`taskkill /T` tree cleanup, but without Job Objects it cannot guarantee ownership
-of every escaped or reparented descendant. ACP turns receive the caller's signal, issue protocol
-cancellation, return the interrupted consumer promptly, and keep the session
-lock closed until cancellation settles or the session is restarted fail-closed.
+then escalates to `SIGKILL` and reaps the leader. Windows closes an assigned Job
+Object on cleanup; when assignment failed it attempts bounded `taskkill /T`.
+The latter cannot guarantee cleanup after the root exits. ACP turns receive the
+caller's signal, issue protocol cancellation, return the interrupted consumer
+promptly, and keep the session lock closed until cancellation settles or the
+session is restarted fail-closed.
 
 ## Background history compaction
 

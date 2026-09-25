@@ -6,7 +6,6 @@ import {
   type BoundedCommandResult,
 } from "../process/bounded-command";
 import {
-  processExitWithin,
   spawnOwnedProcess,
   terminateOwnedProcessTree,
 } from "../process/owned-process";
@@ -680,17 +679,6 @@ function releaseManagedProcess(mp: ManagedProcess, proc: ManagedSubprocess): voi
  */
 async function terminateAndReap(proc: ManagedSubprocess): Promise<void> {
   try {
-    // Once a Windows root has already exited, taskkill can no longer enumerate
-    // its descendants. Preserve the existing exact-leader proof for that race;
-    // live roots use the shared fail-closed tree fallback below.
-    if (process.platform === "win32" && (proc.exitCode !== null || proc.signalCode !== null)) {
-      const observed = await processExitWithin(proc.exited, PROCESS_REAP_TIMEOUT_MS);
-      if (observed.kind === "exited") return;
-      if (observed.kind === "rejected") {
-        throw new Error(`managed process ${proc.pid} exit observation failed`, { cause: observed.error });
-      }
-      throw new Error(`could not confirm that managed process ${proc.pid} was reaped`);
-    }
     await terminateOwnedProcessTree(proc, {
       terminateGraceMs: PROCESS_TERMINATE_GRACE_MS,
       reapTimeoutMs: PROCESS_REAP_TIMEOUT_MS,

@@ -7,6 +7,7 @@ import {
   spawnOwnedProcess,
   terminateOwnedDirectProcess,
   terminateOwnedProcessTree,
+  terminateWindowsTree,
 } from "../../src/process/owned-process";
 
 function processExists(pid: number): boolean {
@@ -202,9 +203,75 @@ test("unconfirmed leader exit is a typed ownership failure", async () => {
   })).rejects.toBeInstanceOf(OwnedProcessReapError);
 });
 
-// terminateWindowsTree itself is unreachable off win32 (the platform check is
-// inline), so this covers the decision; real taskkill behavior is covered by the
-// Windows CI job.
+test("Windows early root-exit path converts a rejected exit to a typed ownership failure", async () => {
+  const failure = new Error("waitpid failed");
+  const fake = {
+    pid: 987_654_322,
+    exitCode: 0,
+    signalCode: null,
+    exited: Promise.reject(failure),
+    kill() {},
+  };
+  await expect(terminateWindowsTree(fake, 0, 5, {
+    closeJob: () => false,
+    taskkill: async () => { throw new Error("must not target a reaped PID"); },
+  })).rejects.toMatchObject({ name: "OwnedProcessReapError", cause: failure });
+});
+
+test("Windows fallback converts a rejected exit before another PID-targeted pass", async () => {
+  const failure = new Error("waitpid failed");
+  let rootExited = false;
+  const fake = {
+    pid: 987_654_323,
+    get exitCode() { return rootExited ? 0 : null; },
+    signalCode: null,
+    exited: Promise.reject(failure),
+    kill() {},
+  };
+  const passes: string[] = [];
+  await expect(terminateWindowsTree(fake, 5, 5, {
+    closeJob: () => false,
+    taskkill: async (_pid, force) => {
+      passes.push(force ? "forced" : "graceful");
+      rootExited = true;
+      return { outcome: "failed", code: 1 };
+    },
+  })).rejects.toMatchObject({ name: "OwnedProcessReapError", cause: failure });
+  expect(passes).toEqual(["graceful"]);
+});
+
+test("Windows job close converts a rejected leader exit to a typed ownership failure", async () => {
+  const failure = new Error("waitpid failed");
+  const fake = {
+    pid: 987_654_324,
+    exited: Promise.reject(failure),
+    kill() {},
+  };
+  await expect(terminateWindowsTree(fake, 0, 5, {
+    closeJob: () => true,
+    taskkill: async () => { throw new Error("job close must not run taskkill"); },
+  })).rejects.toMatchObject({ name: "OwnedProcessReapError", cause: failure });
+});
+
+test("Windows graceful tree pass converts a rejected leader exit before forcing", async () => {
+  const failure = new Error("waitpid failed");
+  const fake = {
+    pid: 987_654_325,
+    exited: Promise.reject(failure),
+    kill() {},
+  };
+  const passes: string[] = [];
+  await expect(terminateWindowsTree(fake, 5, 5, {
+    closeJob: () => false,
+    taskkill: async (_pid, force) => {
+      passes.push(force ? "forced" : "graceful");
+      return { outcome: "targeted", code: 0 };
+    },
+  })).rejects.toMatchObject({ name: "OwnedProcessReapError", cause: failure });
+  expect(passes).toEqual(["graceful"]);
+});
+
+// Real taskkill behavior is covered by the Windows CI job.
 describe("windows forced-kill fallback", () => {
   // Separate from the accounting matrix on purpose: main gated this on taskkill's
   // exit code being non-zero, so a missing PID (128) reached the SIGKILL too. An

@@ -1,3 +1,5 @@
+import { windowsJobOwner } from "./windows-job";
+
 /** Minimum process contract required by the shared tree lifecycle. */
 export type OwnedProcess = Pick<ReturnType<typeof Bun.spawn>, "pid" | "exited" | "kill">;
 
@@ -31,9 +33,8 @@ export class OwnedProcessReapError extends Error {
 }
 
 /**
- * Spawn a child in its own POSIX session/process group. Windows tree ownership
- * is enforced at termination with taskkill /T; keeping the root attached there
- * lets taskkill enumerate descendants before the root becomes an orphan.
+ * Spawn a child in its own POSIX session/process group. On Windows, retain a
+ * kill-on-close Job Object unless this is an intentional background launcher.
  */
 export function spawnOwnedProcess<
   const In extends Bun.SpawnOptions.Writable = "ignore",
@@ -42,13 +43,24 @@ export function spawnOwnedProcess<
 >(
   command: readonly string[],
   options: Bun.SpawnOptions.SpawnOptions<In, Out, Err>,
+  windowsJob = true,
 ): Bun.Subprocess<In, Out, Err> {
   if (command.length === 0 || !command[0]) throw new TypeError("owned process command must not be empty");
-  return Bun.spawn([...command], {
+  const proc = Bun.spawn([...command], {
     ...options,
     detached: process.platform !== "win32",
     windowsHide: options.windowsHide ?? true,
   });
+  if (process.platform === "win32" && windowsJob) {
+    // An assigned job retains descendants even after the leader exits.
+    try { windowsJobOwner().attach(proc); } catch { /* bounded taskkill fallback below */ }
+  }
+  return proc;
+}
+
+export function hasWindowsJob(proc: object): boolean {
+  if (process.platform !== "win32") return false;
+  try { return windowsJobOwner().has(proc); } catch { return false; }
 }
 
 /** Observe one exact exit promise without converting rejection into success. */
@@ -218,33 +230,58 @@ async function terminatePosixTree(
   }
 }
 
-async function terminateWindowsTree(
+/** Injected Windows operations let the fallback be exercised on other platforms. */
+export async function terminateWindowsTree(
   proc: OwnedProcess,
   graceMs: number,
   reapTimeoutMs: number,
+  operations: {
+    closeJob?: (proc: OwnedProcess) => boolean;
+    taskkill?: (pid: number, force: boolean) => Promise<WindowsTaskkillResult>;
+  } = {},
 ): Promise<void> {
+  // Install the exit rejection observer before job release or any taskkill
+  // work. A zero-length poll observes without starting the reap deadline.
+  void processExitWithin(proc.exited, 0);
+  let jobClosed = false;
+  try { jobClosed = (operations.closeJob ?? ((child) => windowsJobOwner().close(child)))(proc); } catch {
+    // The job handle could not be released; do not claim its descendants were
+    // terminated. Let bounded fallback run and report any targeting failure.
+  }
+  if (jobClosed) {
+    const result = await processExitWithin(proc.exited, reapTimeoutMs);
+    if (result.kind === "exited") return;
+    throwWindowsExitFailure(proc.pid, result);
+    throw new OwnedProcessReapError(proc.pid, "leader did not reap after Windows job close");
+  }
+  if (windowsRootAlreadyExited(proc)) {
+    throwWindowsExitFailure(proc.pid, await processExitWithin(proc.exited, reapTimeoutMs));
+    throw new OwnedProcessReapError(proc.pid, "Windows root exited without an assigned job; descendants cannot be targeted safely");
+  }
   // Enumerate the tree before killing the root. Once the root disappears,
   // Windows cannot rediscover arbitrary descendants without a Job Object.
   const graceful = graceMs > 0
-    ? await runWindowsTaskkill(proc.pid, false)
+    ? await (operations.taskkill ?? runWindowsTaskkill)(proc.pid, false)
     : { outcome: "failed" as const, code: null };
   if (graceful.outcome === "targeted") {
     const gracefulExit = await processExitWithin(proc.exited, graceMs);
+    throwWindowsExitFailure(proc.pid, gracefulExit);
     if (gracefulExit.kind === "exited") return;
   }
 
-  const forced = await runWindowsTaskkill(proc.pid, true);
+  if (windowsRootAlreadyExited(proc)) {
+    const finalExit = await processExitWithin(proc.exited, reapTimeoutMs);
+    throwWindowsExitFailure(proc.pid, finalExit);
+    if (finalExit.kind === "exited" && graceful.outcome === "targeted") return;
+    throw new OwnedProcessReapError(proc.pid, "Windows root exited before forced tree targeting; descendants are unconfirmed");
+  }
+
+  const forced = await (operations.taskkill ?? runWindowsTaskkill)(proc.pid, true);
   if (windowsForcedKillNeeded(forced.outcome)) {
     try { proc.kill("SIGKILL"); } catch { /* already exited */ }
   }
   const finalExit = await processExitWithin(proc.exited, reapTimeoutMs);
-  if (finalExit.kind === "rejected") {
-    throw new OwnedProcessReapError(
-      proc.pid,
-      `leader exit observation failed: ${errorMessage(finalExit.error)}`,
-      { cause: finalExit.error },
-    );
-  }
+  throwWindowsExitFailure(proc.pid, finalExit);
   if (finalExit.kind === "timeout") {
     throw new OwnedProcessReapError(proc.pid, "leader did not reap after forced tree termination");
   }
@@ -258,6 +295,22 @@ async function terminateWindowsTree(
       + `(graceful taskkill ${describeTaskkill(graceful)}, forced ${describeTaskkill(forced)})`,
     );
   }
+}
+
+function throwWindowsExitFailure(pid: number, result: ProcessExitOutcome): void {
+  if (result.kind === "rejected") {
+    throw new OwnedProcessReapError(
+      pid,
+      `leader exit observation failed: ${errorMessage(result.error)}`,
+      { cause: result.error },
+    );
+  }
+}
+
+function windowsRootAlreadyExited(proc: OwnedProcess): boolean {
+  const child = proc as OwnedProcess & { exitCode?: number | null; signalCode?: NodeJS.Signals | null };
+  return (child.exitCode !== undefined && child.exitCode !== null)
+    || (child.signalCode !== undefined && child.signalCode !== null);
 }
 
 /**
@@ -281,10 +334,8 @@ export function windowsForcedKillNeeded(forced: WindowsTaskkillOutcome): boolean
  * Whether the tree is accounted for, given how each taskkill pass ended and a
  * leader already confirmed exited.
  *
- * Split out as a pure decision because the surrounding function only runs on
- * win32 — the platform check is inline — so this is the only part of the Windows
- * reaper a test on another OS can reach. Real taskkill behavior is covered by
- * the Windows CI job.
+ * Split out as a pure decision; real taskkill behavior is covered by the
+ * Windows CI job.
  */
 export function windowsTreeAccountedFor(
   graceful: WindowsTaskkillOutcome,
@@ -298,6 +349,7 @@ export function windowsTreeAccountedFor(
   return forced === "absent" && graceful === "targeted";
 }
 
+/** Signal the owned POSIX group, including descendants after its leader exits. */
 function signalPosixTree(proc: OwnedProcess, signal: "SIGTERM" | "SIGKILL"): void {
   // Never widen a single tree into a whole-user sweep; see groupLeaderPid.
   if (!Number.isSafeInteger(proc.pid) || proc.pid <= 1) {

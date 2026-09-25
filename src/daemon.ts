@@ -954,6 +954,7 @@ export class CiceroDaemon {
         tunnelUrl: this.webVoiceTunnel?.publicUrl ?? null,
         startedAt: this.webVoicePairingStartedAt,
         pid: process.pid,
+        ...(this.pidLease ? { identity: this.pidLease.record.identity } : {}),
       }, this.pairingStateFile());
     } catch (error: unknown) {
       log("warn", `web-voice pairing state could not be published: ${error instanceof Error ? error.message : String(error)}`);

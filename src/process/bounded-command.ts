@@ -1,5 +1,6 @@
 import {
   OwnedProcessReapError,
+  hasWindowsJob,
   posixProcessGroupExists,
   spawnOwnedProcess,
   terminateOwnedProcessTree,
@@ -363,7 +364,7 @@ export async function runBoundedCommand(
       stderr: "pipe",
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.env === undefined ? {} : { env: options.env }),
-    });
+    }, !options.allowBackgroundOnSuccess);
   } catch (error) {
     throw new CommandSpawnError(command, error);
   }
@@ -465,10 +466,8 @@ export async function runBoundedCommand(
     if (outcome.kind === "completed") {
       // A shell can report success after backgrounding a child whose stdio was
       // redirected away from our pipes. The child still belongs to the detached
-      // POSIX process group, so never let it outlive a supposedly finished
-      // command. On Windows taskkill /T cannot reliably rediscover descendants
-      // after the root PID exits; cancellation/deadline paths invoke it while
-      // the root is still present, while normal-exit parity requires Job Objects.
+      // POSIX process group or Windows Job Object, so never let it outlive a
+      // supposedly finished command.
       if (options.allowBackgroundOnSuccess && exitCode === 0) {
         // A deliberately launched GUI may inherit the launcher's stdio handles.
         // Once the root exits, stop owning those pipes as well as the process;
@@ -476,7 +475,7 @@ export async function runBoundedCommand(
         // deadline and kill the application it was meant to leave running.
         await releasePipeDrains();
       } else {
-        if (process.platform !== "win32" && posixProcessGroupExists(proc.pid)) {
+        if (process.platform === "win32" ? hasWindowsJob(proc) : posixProcessGroupExists(proc.pid)) {
           await terminateCommandTree(proc, terminateGraceMs);
         }
         // The launcher exception applies only to success. A failed launcher

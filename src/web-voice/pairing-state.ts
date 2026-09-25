@@ -10,6 +10,7 @@ import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ciceroHome } from "../platform/paths";
+import { processIdentitySync, type ProcessIdentity } from "../daemon-pid";
 import {
   PRIVATE_FILE_MODE,
   ensurePrivateDirectorySync,
@@ -29,10 +30,13 @@ export interface PairingState {
   tunnelUrl: string | null;
   startedAt: string;
   pid: number;
+  /** Process-instance identity, when the publishing platform can provide one. */
+  identity?: string;
 }
 
 export interface PairingStateReadOptions {
   pidAlive?: (pid: number) => boolean;
+  processIdentity?: (pid: number) => ProcessIdentity;
 }
 
 export function webVoicePairingStatePath(home: string = ciceroHome()): string {
@@ -82,6 +86,7 @@ function normalizedState(value: unknown): PairingState {
   const tunnelProvider = row.tunnelProvider;
   const startedAt = row.startedAt;
   const pid = row.pid;
+  const identity = row.identity;
   if (scheme !== "http" && scheme !== "https") throw new Error("invalid pairing scheme");
   if (!Number.isSafeInteger(port) || (port as number) < 1 || (port as number) > 65_535) {
     throw new Error("invalid pairing port");
@@ -104,6 +109,9 @@ function normalizedState(value: unknown): PairingState {
     throw new Error("invalid pairing start time");
   }
   if (!Number.isSafeInteger(pid) || (pid as number) < 1) throw new Error("invalid pairing PID");
+  if (identity !== undefined && (typeof identity !== "string" || identity.length < 1 || identity.length > 1_024)) {
+    throw new Error("invalid pairing process identity");
+  }
   return {
     scheme,
     port: port as number,
@@ -112,6 +120,7 @@ function normalizedState(value: unknown): PairingState {
     tunnelUrl: publicOrigin(row.tunnelUrl),
     startedAt,
     pid: pid as number,
+    ...(identity === undefined ? {} : { identity: identity as string }),
   };
 }
 
@@ -138,6 +147,10 @@ export function readPairingState(
 ): PairingState | null {
   const state = readStoredState(path);
   if (!state) return null;
+  if (state.identity) {
+    const identity = (options.processIdentity ?? processIdentitySync)(state.pid);
+    if (identity.kind !== "identified" || identity.value !== state.identity) return null;
+  }
   return (options.pidAlive ?? defaultPidAlive)(state.pid) ? state : null;
 }
 
