@@ -6,7 +6,9 @@ import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "../backends/llm
 import { isHuggingFaceGgufRepo, localGgufProblem } from "../cli/doctor";
 import { BOARD_COMMANDS, normalizeBoardList, type BoardPreset } from "../notify/board-presets";
 import { findVenvPython } from "../platform/python";
+import { audioCppLocalRuntimePaths } from "../backends/tts/audiocpp";
 import { runBoundedCommand } from "../process/bounded-command";
+import { AUDIOCPP_MODELS, AUDIOCPP_PORT, audioCppModelPath } from "./audiocpp";
 import type { StepContext } from "./steps";
 
 export interface PickerDeps {
@@ -245,22 +247,32 @@ export async function defaultPortProbe(hostname: string, number: number): Promis
 const VENV: Record<string, string> = { "faster-whisper": ".venv-stt", "mlx-whisper": ".venv", kokoro: ".venv-kokoro", "pocket-tts": ".venv-pocket", "mlx-audio": ".venv" };
 export async function detectSpeech(kind: "stt" | "tts", ctx: StepContext, deps: PickerDeps = {}) {
   const options = kind === "stt" ? ["faster-whisper", ...(mlx(ctx) ? ["mlx-whisper"] : []), "wyoming", ...(cuda(ctx) ? ["audiocpp"] : [])]
-    : ["kokoro", "pocket-tts", ...(mlx(ctx) ? ["mlx-audio"] : []), "elevenlabs", "wyoming"];
-  const recommended = kind === "stt" ? mlx(ctx) ? "mlx-whisper" : "faster-whisper" : mlx(ctx) ? "mlx-audio" : "kokoro";
+    : ["kokoro", "pocket-tts", ...(cuda(ctx) ? ["audiocpp"] : []), ...(mlx(ctx) ? ["mlx-audio"] : []), "elevenlabs", "wyoming"];
   const root = deps.checkout ?? join(import.meta.dir, "..", "..");
-  const portByBackend: Record<string, number> = { "faster-whisper": 8083, "mlx-whisper": 8083, audiocpp: 8092, kokoro: 8082, "pocket-tts": 8082, "mlx-audio": 8082 };
-  const status: Record<string, { installed: boolean; running: boolean }> = {};
+  const exists = deps.exists ?? existsSync;
+  const portByBackend: Record<string, number> = { "faster-whisper": 8083, "mlx-whisper": 8083, audiocpp: AUDIOCPP_PORT, kokoro: 8082, "pocket-tts": 8082, "mlx-audio": 8082 };
+  const status: Record<string, { installed: boolean; running: boolean; modelPresent?: boolean; modelLoaded?: boolean | null }> = {};
   await Promise.all(options.filter((id) => id in portByBackend).map(async (id) => {
-    status[id] = { installed: id in VENV ? Boolean(findVenvPython(join(root, VENV[id]!), { platform: ctx.system.platform, exists: deps.exists ?? existsSync })) : false,
-      running: await (deps.probePort ?? defaultPortProbe)("127.0.0.1", portByBackend[id]!).catch(() => false) };
+    const running = await (deps.probePort ?? defaultPortProbe)("127.0.0.1", portByBackend[id]!).catch(() => false);
+    if (id === "audiocpp") {
+      const modelPresent = exists(audioCppModelPath(root, kind));
+      const listed = running ? await fetchLimited(deps.fetcher ?? fetch, `http://127.0.0.1:${AUDIOCPP_PORT}/v1/models`, true, undefined, 700) : null;
+      status[id] = { installed: exists(audioCppLocalRuntimePaths(root).binary), running,
+        modelPresent, modelLoaded: listed?.running ? listed.models.includes(AUDIOCPP_MODELS[kind].id) : null };
+    } else {
+      status[id] = { installed: id in VENV ? Boolean(findVenvPython(join(root, VENV[id]!), { platform: ctx.system.platform, exists })) : false, running };
+    }
   }));
   status.wyoming = { installed: false, running: await (deps.probePort ?? defaultPortProbe)("127.0.0.1", kind === "stt" ? 10300 : 10200).catch(() => false) };
+  const audio = status.audiocpp;
+  const ready = ctx.draft.deployment === "local-cuda" && audio?.installed && audio.modelPresent && (!audio.running || audio.modelLoaded === true);
+  const recommended = ready ? "audiocpp" : kind === "stt" ? mlx(ctx) ? "mlx-whisper" : "faster-whisper" : mlx(ctx) ? "mlx-audio" : "kokoro";
   return { options, recommended, status, reason: ctx.draft.deployment + " tier" };
 }
 export function parseSpeech(kind: "stt" | "tts", raw: unknown, ctx: StepContext) {
   const c = choice(raw);
   const allowed = kind === "stt" ? ["faster-whisper", ...(mlx(ctx) ? ["mlx-whisper"] : []), "wyoming", ...(cuda(ctx) ? ["audiocpp"] : [])]
-    : ["kokoro", "pocket-tts", ...(mlx(ctx) ? ["mlx-audio"] : []), "elevenlabs", "wyoming"];
+    : ["kokoro", "pocket-tts", ...(cuda(ctx) ? ["audiocpp"] : []), ...(mlx(ctx) ? ["mlx-audio"] : []), "elevenlabs", "wyoming"];
   const id = member(c.id, allowed, kind.toUpperCase());
   if (id === "wyoming") return { id, host: host(c.host), port: port(c.port) };
   if (id === "elevenlabs") return { id, apiKey: field(c.apiKey, "ElevenLabs API key", 1024) };
@@ -268,5 +280,6 @@ export function parseSpeech(kind: "stt" | "tts", raw: unknown, ctx: StepContext)
 }
 export function contributeSpeech(kind: "stt" | "tts", c: ReturnType<typeof parseSpeech>) {
   if (c.id === "elevenlabs") return { tts: { backend: c.id, apiKey: c.apiKey } };
+  if (c.id === "audiocpp") return { [kind]: { backend: c.id, port: AUDIOCPP_PORT, model: AUDIOCPP_MODELS[kind].id } };
   return { [kind]: { backend: c.id, ...(c.id === "wyoming" ? { host: c.host, port: c.port } : {}) } };
 }

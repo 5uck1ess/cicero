@@ -203,13 +203,14 @@ var STEP = {
   board:    { short: 'Tasks',   title: 'Where do your tasks live?', lede: 'Optional. Cicero can announce when tasks on your board finish or get stuck.', sub: 'Optional board' },
   review:   { short: 'Save',    title: 'Review and save', lede: 'Cicero checks your choices before writing the config.', sub: 'Check and write' }
 };
-var NAMES = {'llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'OpenAI-compatible URL','claude-code':'Claude Code','codex':'Codex','gemini':'Gemini CLI','qwen':'Qwen Code','acp':'ACP agent','faster-whisper':'faster-whisper','mlx-whisper':'MLX Whisper','audiocpp':'audio.cpp','kokoro':'Kokoro','pocket-tts':'Pocket TTS','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming server','hermes':'Hermes','multica':'Multica','paperclip':'Paperclip','none':'No board','cloud':'Cloud or custom API','api':'Model API','local-cuda':'NVIDIA GPU','local-mlx':'Apple Silicon','local-cpu':'CPU only'};
+var NAMES = {'llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'OpenAI-compatible URL','claude-code':'Claude Code','codex':'Codex','gemini':'Gemini CLI','qwen':'Qwen Code','acp':'ACP agent','faster-whisper':'faster-whisper','mlx-whisper':'MLX Whisper','audiocpp':'audio.cpp','kokoro':'Kokoro','pocket-tts':'Pocket TTS (Python)','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming server','hermes':'Hermes','multica':'Multica','paperclip':'Paperclip','none':'No board','cloud':'Cloud or custom API','api':'Model API','local-cuda':'NVIDIA GPU','local-mlx':'Apple Silicon','local-cpu':'CPU only'};
+function optionName(stepId, option) { return option === 'audiocpp' ? (stepId === 'stt' ? 'Nemotron (audio.cpp)' : 'Pocket TTS (audio.cpp)') : (NAMES[option] || option); }
 var NOTES = {
   'llama-cpp':'Fast local GGUF models.', 'ollama':'Easy local model library.', 'lm-studio':'Desktop app with a local server.', 'mlx-lm':'Local models on Apple Silicon.',
   'cloud':'Any OpenAI-compatible endpoint or a cloud provider.', 'api':'An OpenAI-compatible model API instead of an agent CLI.',
   'claude-code':'Anthropic\\u2019s coding agent.', 'codex':'OpenAI\\u2019s coding agent.', 'gemini':'Google\\u2019s coding agent.', 'qwen':'Qwen\\u2019s coding agent.', 'acp':'Any Agent Client Protocol harness, such as Hermes.',
-  'faster-whisper':'Accurate, runs on GPU or CPU.', 'mlx-whisper':'Fast on Apple Silicon.', 'audiocpp':'Advanced CUDA engine. Manual setup.', 'wyoming':'Use a speech server you already run.',
-  'kokoro':'Natural preset voices.', 'pocket-tts':'Clone any voice from a short clip.', 'mlx-audio':'Local voices on Apple Silicon.', 'elevenlabs':'Cloud voices. Needs an API key.',
+  'faster-whisper':'Accurate, runs on GPU or CPU.', 'mlx-whisper':'Fast on Apple Silicon.', 'wyoming':'Use a speech server you already run.',
+  'kokoro':'Natural preset voices.', 'pocket-tts':'Python sidecar; clone a voice from a short clip.', 'mlx-audio':'Local voices on Apple Silicon.', 'elevenlabs':'Cloud voices. Needs an API key.',
   'hermes':'Live-tested.', 'multica':'Supported, not live-tested yet.', 'paperclip':'Supported, not live-tested yet.', 'none':'Skip task announcements.',
   'local-cuda':'Local speech and models on your NVIDIA card.', 'local-mlx':'Local speech and models on Apple Silicon.', 'local-cpu':'Works anywhere, slower.'
 };
@@ -222,7 +223,7 @@ var GUIDES = {
   'gemini':[['Install Gemini CLI','https://github.com/google-gemini/gemini-cli'],['Sign in','gemini']],
   'qwen':[['Install Qwen Code','https://github.com/QwenLM/qwen-code'],['Sign in','qwen']],
   'hermes':[['Install Hermes','https://hermes-agent.nousresearch.com']],
-  'audiocpp':[['Review, then run the provisioning script','scripts/provision-audiocpp.sh']],
+  'audiocpp':[['Build the CUDA audio.cpp server','scripts/provision-audiocpp.sh']],
   'elevenlabs':[['After setup, add a voice','cicero voice add']]
 };
 
@@ -278,7 +279,7 @@ function valueFor(id) {
   if (id === 'system') return NAMES[state.tier] || state.tier;
   if (id === 'review') return state.written ? 'Saved' : 'Not saved yet';
   var c = state.selectedChoices && state.selectedChoices[id];
-  return c ? (NAMES[c] || c) : 'Choose';
+  return c ? optionName(id, c) : 'Choose';
 }
 function gib(n) { return n == null ? 'unknown' : (n / 1073741824).toFixed(0) + ' GB'; }
 
@@ -388,7 +389,7 @@ function stateLabel(option, f) {
   var inst = f.installed && f.installed[option];
   if (inst !== undefined) { var ok = typeof inst === 'object' ? inst.found : inst; return ok ? ['Installed', true] : ['Not found', false]; }
   var st = f.status && f.status[option];
-  if (st) { if (st.running) return ['Running', true]; return st.installed ? ['Installed', true] : ['Not installed', false]; }
+  if (st) { if (!st.installed) return ['Not installed', false]; if (st.modelPresent === false) return ['Model missing', false]; if (st.running && st.modelLoaded !== undefined && st.modelLoaded !== true) return [st.modelLoaded === null ? 'Model not verified' : 'Model not loaded', false]; if (st.running) return ['Running', true]; return ['Installed', true]; }
   return null;
 }
 function field(label, input) { return h('label', { class: 'field' }, [h('span', { text: label }), input]); }
@@ -456,11 +457,11 @@ function renderPicker(id, step) {
       input.onchange = function () { picked = o; drawDetail(); };
       var s = stateLabel(o, f);
       var rt = f.runtimes && f.runtimes[o];
-      var note = NOTES[o] || '';
+      var note = o === 'audiocpp' ? (id === 'stt' ? 'Fast, accurate English ASR with Nemotron’s streaming model on an NVIDIA GPU; needs the audio.cpp build.' : 'Voice cloning on an NVIDIA GPU; needs the audio.cpp build.') : (NOTES[o] || '');
       if (rt && rt.running && rt.models && rt.models.length) note += ' ' + rt.models.length + ' models loaded.';
       group.append(h('label', { class: 'choice' }, [input,
         s ? h('span', { class: 'state' + (s[1] ? ' on' : '') }, [h('i'), document.createTextNode(s[0])]) : null,
-        h('span', { class: 'name', text: NAMES[o] || o }), h('span', { class: 'note', text: note }),
+        h('span', { class: 'name', text: optionName(id, o) }), h('span', { class: 'note', text: note }),
         o === f.recommended || (extra && o === extra.key && extra.items.indexOf(f.recommended) >= 0) ? h('span', { class: 'badge', text: 'Recommended' }) : null]));
     });
   }
@@ -503,9 +504,10 @@ function renderPicker(id, step) {
     if (box.childNodes.length) detail.append(box);
 
     var s = stateLabel(o, f);
-    var guide = GUIDES[o];
+    var speechStatus = f.status && f.status[o];
+    var guide = o === 'audiocpp' && speechStatus && speechStatus.installed ? null : GUIDES[o];
     if (s && !s[1] && o !== 'none') {
-      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: NAMES[o] + ' is not ' + (s[0] === 'Not running' ? 'running' : 'installed') + ' yet' })]);
+      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: optionName(id, o) + ': ' + s[0] })]);
       if (guide) {
         var list = h('ol');
         guide.forEach(function (g) {
@@ -515,8 +517,14 @@ function renderPicker(id, step) {
           list.append(li);
         });
         panel.append(list);
-      } else if (id === 'stt' || id === 'tts') {
+      } else if ((id === 'stt' || id === 'tts') && o !== 'audiocpp') {
         panel.append(h('p', { text: 'You can pick it now. Cicero lists the install command on the Save screen.' }));
+      }
+      if (o === 'audiocpp') {
+        var modelDir = id === 'stt' ? 'vendor/audio.cpp/models/nemotron-3.5-asr-streaming-0.6b' : 'vendor/audio.cpp/models/pocket-tts';
+        if (!speechStatus.modelPresent) panel.append(h('p', { text: 'Model weights are installed manually. Put the ' + (id === 'stt' ? 'Nemotron' : 'Pocket TTS') + ' model in ' + modelDir + '. The build script does not download models.' }));
+        else if (speechStatus.running && speechStatus.modelLoaded !== true) panel.append(h('p', { text: speechStatus.modelLoaded === null ? 'Port 8092 is reachable, but /v1/models could not be checked. Check the server and try again.' : 'Port 8092 is reachable, but /v1/models does not list ' + (id === 'stt' ? 'nemotron' : 'pocket-tts') + '. Check servers/audiocpp_server.local.json and restart the server.' }));
+        panel.append(h('p', {}, [h('a', { href: 'https://github.com/5uck1ess/cicero/blob/main/docs/voice-cloning.md', target: '_blank', rel: 'noopener noreferrer', text: 'Read audio.cpp setup guidance' })]));
       }
       var again = h('div', { class: 'actions' });
       again.append(button('Check again', 'small', async function () { state = await api('/api/step', { id: id }); render(); }, again));

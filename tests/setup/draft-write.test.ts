@@ -1,17 +1,54 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync, lstatSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { loadConfig } from "../../src/config";
 import { checkDraft, createDraft, renderDraft } from "../../src/setup/draft";
-import { backupInvalidConfig, inspectExistingConfig, writeDraft } from "../../src/setup/write";
+import { backupInvalidConfig, inspectExistingConfig, writeAudioCppServerConfig, writeDraft } from "../../src/setup/write";
 
 const homes: string[] = [];
 function home(): string { const path = mkdtempSync(join(tmpdir(), "cicero-setup-test-")); homes.push(path); return path; }
 afterEach(() => { for (const path of homes.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
 describe("setup draft and write", () => {
+  test("audio.cpp save creates only selected models and merges existing JSON without touching entries", () => {
+    const root = home(); mkdirSync(join(root, "servers"));
+    const configPath = join(root, "servers", "audiocpp_server.local.json");
+    const draft = createDraft("local-cuda", "a".repeat(64));
+    draft.stt = { backend: "audiocpp", port: 8092, model: "nemotron" };
+    writeDraft(home(), draft, { checkout: root });
+    const created = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(created.models).toEqual([{ id: "nemotron", family: "nemotron_asr", path: join(root, "vendor", "audio.cpp", "models", "nemotron-3.5-asr-streaming-0.6b"), task: "asr", mode: "offline", session_options: { language: "en-US" } }]);
+    expect(created).toMatchObject({ host: "127.0.0.1", port: 8092, device: 0, threads: 1 });
+    expect(lstatSync(configPath).mode & 0o777).toBe(0o600);
+    const existing = { _comment: "keep me", host: "127.0.0.1", port: 8092, custom: { unknown: true }, models: [{ id: "nemotron", family: "custom", path: "/existing", _comment: "leave this entry" }, { id: "other", task: "asr" }] };
+    writeFileSync(configPath, JSON.stringify(existing), { mode: 0o600 });
+    draft.tts = { backend: "audiocpp", port: 8092, model: "pocket-tts" };
+    writeDraft(home(), draft, { checkout: root });
+    const merged = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(merged._comment).toBe("keep me");
+    expect(merged.custom).toEqual({ unknown: true });
+    expect(merged.models.slice(0, 2)).toEqual(existing.models);
+    expect(merged.models[2]).toMatchObject({ id: "pocket-tts", family: "pocket_tts", path: join(root, "vendor", "audio.cpp", "models", "pocket-tts"), task: "tts", mode: "offline", load_options: { language: "english" }, session_options: { language: "english", "pocket_tts.voice_state_cache_slots": "16" } });
+    writeAudioCppServerConfig(draft, root);
+    expect(JSON.parse(readFileSync(configPath, "utf8")).models).toHaveLength(3);
+  });
+  test.skipIf(process.platform === "win32")("audio.cpp server config refuses symlinks", () => {
+    const root = home(); mkdirSync(join(root, "servers"));
+    const target = join(root, "target.json"); writeFileSync(target, "untouched");
+    symlinkSync(target, join(root, "servers", "audiocpp_server.local.json"));
+    const draft = createDraft("local-cuda"); draft.tts = { backend: "audiocpp", port: 8092, model: "pocket-tts" };
+    expect(() => writeAudioCppServerConfig(draft, root)).toThrow("unsafe");
+    expect(readFileSync(target, "utf8")).toBe("untouched");
+  });
+  test.skipIf(process.platform === "win32")("audio.cpp server config refuses a symlinked servers directory", () => {
+    const root = home(); const target = home();
+    symlinkSync(target, join(root, "servers"));
+    const draft = createDraft("local-cuda"); draft.stt = { backend: "audiocpp", port: 8092, model: "nemotron" };
+    expect(() => writeAudioCppServerConfig(draft, root)).toThrow("unsafe");
+    expect(existsSync(join(target, "audiocpp_server.local.json"))).toBe(false);
+  });
   test("annotated YAML parses exactly and loads through real config", () => {
     const dir = home();
     const draft = createDraft("local-cpu", "a".repeat(64));

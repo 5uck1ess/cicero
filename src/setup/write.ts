@@ -1,12 +1,14 @@
-import { linkSync, lstatSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { audioCppLocalRuntimePaths } from "../backends/tts/audiocpp";
 import { parse as parseYaml } from "yaml";
 import { acquireConfigUpdateLock, loadConfig } from "../config";
 import { redactSnapshotSecrets } from "../operational-state";
 import { PRIVATE_FILE_MODE, ensurePrivateDirectorySync, ensurePrivateFileSync } from "../platform/secure-storage";
 import { renderDraft, type SetupDraft } from "./draft";
+import { AUDIOCPP_MODELS, AUDIOCPP_PORT, audioCppModelPath } from "./audiocpp";
 
 export type ExistingConfig =
   | { status: "missing" }
@@ -18,7 +20,93 @@ export type ExistingConfig =
 function pathFor(home: string): string { return join(home, "config.yaml"); }
 
 /** Injection point for a competing non-locking writer at the commit boundary. */
-export interface SetupCommitOptions { beforeCommit?: () => void }
+export interface SetupCommitOptions { beforeCommit?: () => void; checkout?: string }
+
+const MAX_SERVER_CONFIG_BYTES = 1024 * 1024;
+type ServerModel = Record<string, unknown> & { id: string };
+
+function selectedAudioCppModels(draft: SetupDraft, root: string): ServerModel[] {
+  const selected = (kind: "stt" | "tts") => {
+    const setting = draft[kind];
+    return setting && typeof setting === "object" && !Array.isArray(setting)
+      && (setting as Record<string, unknown>).backend === "audiocpp";
+  };
+  const models: ServerModel[] = [];
+  if (selected("tts")) models.push({ id: AUDIOCPP_MODELS.tts.id, family: "pocket_tts", path: audioCppModelPath(root, "tts"), task: "tts", mode: "offline",
+    load_options: { language: "english" }, session_options: { language: "english", "pocket_tts.voice_state_cache_slots": "16" } });
+  if (selected("stt")) models.push({ id: AUDIOCPP_MODELS.stt.id, family: "nemotron_asr", path: audioCppModelPath(root, "stt"), task: "asr", mode: "offline",
+    session_options: { language: "en-US" } });
+  return models;
+}
+
+/** Add only selected model entries to the machine-local audio.cpp server config. */
+export function writeAudioCppServerConfig(draft: SetupDraft, root: string): string | null {
+  const selected = selectedAudioCppModels(draft, root);
+  if (!selected.length) return null;
+  const checkout = lstatSync(root);
+  if (!checkout.isDirectory() || checkout.isSymbolicLink()) throw new Error("Refusing unsafe checkout directory");
+  const servers = join(root, "servers");
+  const directory = lstatSync(servers);
+  if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error("Refusing unsafe servers directory");
+  const path = audioCppLocalRuntimePaths(root).serverConfig;
+  const lock = acquireConfigUpdateLock(path);
+  try {
+    let original: ReturnType<typeof lstatSync> | undefined;
+    try { original = lstatSync(path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (original && (!original.isFile() || original.isSymbolicLink())) throw new Error("Refusing unsafe audio.cpp server config path");
+    if (original && original.size > MAX_SERVER_CONFIG_BYTES) throw new Error("audio.cpp server config is too large to merge");
+    let config: Record<string, unknown>;
+    if (original) {
+      // Open without following a replacement symlink and verify the inode.
+      const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      let contents: string;
+      try {
+        const current = fstatSync(fd);
+        if (!current.isFile() || current.dev !== original.dev || current.ino !== original.ino || current.size > MAX_SERVER_CONFIG_BYTES)
+          throw new Error("audio.cpp server config changed during setup; retry");
+        const bytes = Buffer.allocUnsafe(MAX_SERVER_CONFIG_BYTES + 1);
+        let size = 0;
+        while (size < bytes.length) {
+          const count = readSync(fd, bytes, size, bytes.length - size, null);
+          if (!count) break;
+          size += count;
+        }
+        if (size > MAX_SERVER_CONFIG_BYTES) throw new Error("audio.cpp server config is too large to merge");
+        contents = bytes.toString("utf8", 0, size);
+      } finally { closeSync(fd); }
+      const parsed: unknown = JSON.parse(contents);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("audio.cpp server config must be a JSON object");
+      config = parsed as Record<string, unknown>;
+      if (!Array.isArray(config.models) || config.models.length > 200) throw new Error("audio.cpp server config must have a bounded models array");
+      if (config.models.some((entry) => !entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.id !== "string")) throw new Error("audio.cpp server config contains an invalid model entry");
+    } else config = { host: "127.0.0.1", port: AUDIOCPP_PORT, device: 0, threads: 1, models: [] };
+    const models = config.models as ServerModel[];
+    const missing = selected.filter((entry) => !models.some((existing) => existing.id === entry.id));
+    if (!missing.length) return path;
+    const updated = { ...config, models: [...models, ...missing] };
+    const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      writeFileSync(tmp, `${JSON.stringify(updated, null, 2)}\n`, { flag: "wx", mode: PRIVATE_FILE_MODE });
+      ensurePrivateFileSync(tmp);
+      lock.assertOwned();
+      if (original) {
+        const current = lstatSync(path);
+        if (!current.isFile() || current.isSymbolicLink() || current.dev !== original.dev || current.ino !== original.ino || current.size !== original.size || current.mtimeMs !== original.mtimeMs)
+          throw new Error("audio.cpp server config changed during setup; retry");
+        renameSync(tmp, path);
+      } else {
+        try { linkSync(tmp, path); }
+        catch (error) {
+          if (alreadyExists(error)) throw new Error("audio.cpp server config appeared during setup; retry", { cause: error });
+          throw error;
+        }
+      }
+      ensurePrivateFileSync(path);
+      return path;
+    } finally { try { unlinkSync(tmp); } catch { /* published or already removed */ } }
+  } finally { lock.release(); }
+}
 
 function alreadyExists(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "EEXIST";
@@ -115,6 +203,7 @@ export function writeDraft(home: string, draft: SetupDraft, options: SetupCommit
     if (state.status === "invalid") throw new Error(`config.yaml is invalid: ${state.error}. Use the explicit back up and start fresh action first`);
     if (state.status === "other-file-error") throw new Error(`Other Cicero home file is invalid: ${state.error}. Fix it before setup can write`);
     if (state.status === "unsafe") throw new Error(state.error);
+    writeAudioCppServerConfig(draft, options.checkout ?? join(import.meta.dir, "..", ".."));
     const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
     try {
       writeFileSync(tmp, text, { flag: "wx", mode: PRIVATE_FILE_MODE });

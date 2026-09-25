@@ -28,3 +28,13 @@ test("a failed choice probe keeps the operator on that step", () => {
   // Continue re-renders the same step instead of navigating on a failed probe.
   expect(page).toMatch(/state = await api\('\/api\/choice', \{ id: id, choice: c \}\);\s+if \(blockedByProbe\(state\)\) \{ render\(\); return; \}\s+await go\(next\(id\)\);/);
 });
+
+test("CUDA speech cards distinguish audio.cpp from the Python sidecar and explain model provisioning", () => {
+  const page = setupPage();
+  expect(page).toContain("Nemotron (audio.cpp)");
+  expect(page).toContain("Pocket TTS (audio.cpp)");
+  expect(page).toContain("Pocket TTS (Python)");
+  expect(page).toContain("Fast, accurate English ASR with Nemotron’s streaming model on an NVIDIA GPU; needs the audio.cpp build.");
+  expect(page).toContain("Model weights are installed manually.");
+  expect(page).toContain("scripts/provision-audiocpp.sh");
+});

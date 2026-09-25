@@ -26,7 +26,7 @@ Nothing is written until you save.
 | Part | What it does |
 | --- | --- |
 | Machine | Detects OS, CPU architecture, RAM, free disk, Apple Silicon and NVIDIA VRAM, then recommends a starting preset (NVIDIA GPU, Apple Silicon or CPU only; `local-cuda`, `local-mlx` or `local-cpu` in the config). |
-| Hear | Speech-to-text options for your platform, with whether each engine's venv is installed and its server is running. |
+| Hear | Speech-to-text options for your platform, with installed and running status for each engine. |
 | Think | Finds a running llama.cpp (`:8080`), Ollama (`:11434`) or LM Studio (`:1234`), and offers MLX on macOS or a cloud or custom OpenAI-compatible API. It lists the runtime's models to pick from. |
 | Agent | Detects the coding-agent CLIs on `PATH` (Claude Code, Codex, Gemini, Qwen, or an ACP harness), or a model API instead. A missing one gets its install and sign-in steps. |
 | Speak | Text-to-speech options, with the same installed and running status as Hear. |
@@ -49,6 +49,35 @@ Options:
 Preview limits: the Channels step (Telegram bot and calls) and the Install
 step (creating engine venvs and downloading models) are not built yet. Use the
 manual steps below for those, then run `cicero doctor`.
+
+### Speech choices on a CUDA box
+
+On Linux with a detected NVIDIA GPU, **Hear** offers **Nemotron (audio.cpp)**
+and **Speak** offers **Pocket TTS (audio.cpp)**. Both use the same CUDA server on
+port 8092. The Python **Pocket TTS (Python)** choice remains available as a
+separate sidecar. The page detects the audio.cpp binary, the selected model
+directory, port 8092, and whether a reachable server lists that model at
+`/v1/models`. It recommends audio.cpp for a `local-cuda` setup when the binary
+and model directory exist. If a server is running, it must list the model.
+When those conditions fail, the page keeps the usual faster-whisper or Kokoro
+recommendation.
+
+Build audio.cpp with `scripts/provision-audiocpp.sh`. This script builds the
+CUDA server but does **not** download model weights. Place Nemotron weights in
+`vendor/audio.cpp/models/nemotron-3.5-asr-streaming-0.6b` and Pocket TTS
+weights in `vendor/audio.cpp/models/pocket-tts` manually. The repository has no
+confirmed automated download path for these two model directories. See the
+[audio.cpp voice setup](voice-cloning.md#quickstart--local-realtime-audiocpp-pocket-tts)
+for the documented Pocket TTS path; verify the Nemotron weights and layout with
+the audio.cpp project before starting the server.
+
+Saving either audio.cpp choice writes its model ID and port into
+`~/.cicero/config.yaml` and creates or extends
+`servers/audiocpp_server.local.json` in the checkout. Setup adds only the
+selected model entries and keeps existing entries and other JSON keys. The
+server JSON is machine local and ignored by Git. If that file already uses a
+different port or model entry with the same ID, inspect and reconcile it
+manually before starting Cicero; setup preserves existing values.
 
 ## Your first conversation
 
