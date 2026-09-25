@@ -989,11 +989,18 @@ export class SwitchboardBrain implements Brain {
   private resolveLane(ref: string): string | null {
     const want = normalizeRef(ref);
     if (!want) return null;
+    // Precedence: an exact lane name/alias, then a front-desk name, then the
+    // lossy normalized lane match — "Friday" must not reach a lane aliased
+    // "Friday agent" when Friday is the front desk.
+    const exact = nameKey(ref.replace(/[.,!?'"]/g, "")).replace(/^the\s+/, "");
+    for (const [name, def] of Object.entries(this.lanes)) {
+      if ([name, ...(def.aliases ?? [])].some((a) => nameKey(a) === exact)) return name;
+    }
+    if (this.isFrontDeskName(ref)) return null;
     for (const [name, def] of Object.entries(this.lanes)) {
       if (normalizeRef(name) === want) return name;
       if (def.aliases?.some((a) => normalizeRef(a) === want)) return name;
     }
-    if (this.isFrontDeskName(ref)) return null;
     // Fuzzy pass — STT mishears names ("talk to Thank" for think). One edit
     // of slack, two for longer refs, and only when exactly ONE lane matches.
     const budget = want.length >= 7 ? 2 : 1;
@@ -1334,7 +1341,9 @@ export class SwitchboardBrain implements Brain {
     const strict = pin[1] !== undefined;
     const target = pin[2] ?? "";
     const lane = this.resolveLane(target);
-    if (!lane && this.isFrontDeskName(target)) return null;
+    // "Put me through to <front desk>" is a return, not a transfer: release a
+    // pinned lane, and with nothing pinned let the front desk simply answer.
+    if (!lane && this.isFrontDeskName(target)) return this.doRelease(turn);
     if (!lane) {
       // An unambiguous transfer verb naming nobody we know ("transfer me to my
       // manager") still reads as a transfer request — answer it with the

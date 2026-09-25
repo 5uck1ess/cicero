@@ -109,6 +109,19 @@ test("classifier targets keep distinct names that normalizeRef would merge", () 
   expect(parseIntent(json({ intent: "transfer", target: "Coder" }), lanes).target).toBe("coder");
 });
 
+test("an exact front-desk name beats a lane that only matches after normalization", async () => {
+  const sb = new SwitchboardBrain(front(), { coder: { brain: front() }, helper: { brain: front(), aliases: ["Friday agent"] } },
+    undefined, { frontDeskAliases: ["Friday"] });
+  try {
+    await sb.send("switch to coder");
+    expect(sb.activeLane()).toBe("coder");
+    await sb.send("put me through to Friday");
+    expect(sb.activeLane()).toBeNull();
+    await sb.send("switch to Friday agent");
+    expect(sb.activeLane()).toBe("helper");
+  } finally { await sb.stop(); }
+});
+
 test("switchboard passes configured aliases to its classifier", async () => {
   let prompt = "";
   const sb = new SwitchboardBrain(front(), { coder: { brain: front() } }, async (text) => {
@@ -117,7 +130,7 @@ test("switchboard passes configured aliases to its classifier", async () => {
   }, { frontDeskAliases: ["friday"] });
   try {
     await sb.send("switch to coder");
-    await sb.send("could I speak with Friday again");
+    await sb.send("we are finished here, reception please");
     expect(prompt).toContain('Front-desk names: ["friday"]');
     expect(sb.activeLane()).toBeNull();
   } finally { await sb.stop(); }
