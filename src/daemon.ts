@@ -1877,9 +1877,12 @@ export class CiceroDaemon {
         // an employee is pinned (the wrong voice saying "one moment" is worse
         // than a beat of silence).
         latencyStore: new LatencyStore(),
+        openSttStream: this.config.sttBackend.streaming
+          ? (options) => this.providers.stt.openStream!(options)
+          : undefined,
         onStreamTurn: async (wav, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), toolStartNotice: this.config.brain.tool_start_notice !== false, tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, timingMark: options?.timingMark, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { stt: this.providers.stt, streamFinal: options?.streamFinal, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), toolStartNotice: this.config.brain.tool_start_notice !== false, tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, timingMark: options?.timingMark, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTurn(wav, deps, sink, options.spec);
               return;

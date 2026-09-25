@@ -15,6 +15,7 @@ import { TurnCoordinator, type TurnEvent, type TurnLease } from "../turn-coordin
 import { redactSecrets } from "../redact";
 import type { TlsMaterial } from "./tls";
 import type { SpeculativeTurn, Speculator } from "./speculative";
+import type { LivePcmSession } from "../backends/stt/live-client";
 import { isProbeFrame, decodeProbeFrame } from "./probe";
 import { snapshotSynthesizedWav } from "../platform/wav";
 import {
@@ -45,7 +46,25 @@ import {
   decodeClientMetric,
   inspectTurnAudio,
   isProtocolId,
+  isStreamPcmFrame,
+  decodeStreamPcmFrame,
+  admitStreamPcmChunk,
 } from "./protocol";
+
+interface LiveCapture {
+  turnId: string;
+  nextSequence: number;
+  sampleRate: number;
+  bytes: number;
+  startedAt: number;
+  firstPartialMs?: number;
+  lastCaptionAt: number;
+  latestPartial: string;
+  session: LivePcmSession | null;
+  failed: boolean;
+  abort: AbortController;
+  finalizing: boolean;
+}
 
 interface TurnState {
   turnId: string;
@@ -70,6 +89,9 @@ interface PendingTurn {
   lease: TurnLease;
   latency?: LatencyRecordOwner;
   setSink: (sink: WebReplySink) => void;
+  streamFinal?: Promise<string>;
+  streamFirstPartialMs?: number;
+  streamSession?: LivePcmSession;
 }
 
 interface SpecState {
@@ -103,6 +125,7 @@ interface WsData {
   record: boolean;
   /** In-flight speculative turn from the last confident "complete" probe (see speculative.ts). */
   spec: SpecState | null;
+  liveCapture: LiveCapture | null;
 }
 
 export interface WebVoiceServerOptions {
@@ -118,7 +141,9 @@ export interface WebVoiceServerOptions {
   /** Process one captured utterance (WAV) into a spoken reply (Phase 1 POST path). */
   onTurn: (wav: ArrayBuffer, options?: { signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean }) => Promise<WebTurnResult>;
   /** Stream a captured utterance's reply over the WebSocket (Phase 2). Optional. */
-  onStreamTurn?: (wav: ArrayBuffer, sink: WebReplySink, opts?: { record?: boolean; spec?: SpeculativeTurn | null; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
+  onStreamTurn?: (wav: ArrayBuffer, sink: WebReplySink, opts?: { record?: boolean; spec?: SpeculativeTurn | null; streamFinal?: Promise<string>; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
+  /** Present only when stt.streaming is explicitly enabled. */
+  openSttStream?: (options: { signal: AbortSignal; sampleRate: number; onPartial: (text: string, at: number) => void }) => LivePcmSession;
   /** Stream a TYPED message's reply (same pipeline, no STT). Optional. */
   onTextTurn?: (text: string, sink: WebReplySink, opts?: { record?: boolean; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
   /** Optional private latency record store; omitted in standalone/test servers. */
@@ -468,7 +493,7 @@ function requestedId(req: Request, url: URL, header: string, query: string): str
  */
 export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle | null {
   const coordinator = opts.coordinator ?? new TurnCoordinator();
-  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onDictate, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness, confirmations, latencyStore } = opts;
+  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onDictate, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, openSttStream, readiness, confirmations, latencyStore } = opts;
   const scheme: "http" | "https" = tls ? "https" : "http";
   const configuredDrainTimeout = opts.shutdownDrainTimeoutMs;
   const shutdownDrainTimeoutMs = typeof configuredDrainTimeout === "number" && Number.isFinite(configuredDrainTimeout) && configuredDrainTimeout >= 1
@@ -1024,12 +1049,19 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   // The latest input wins (spoken WAV or typed text): stash it as pending and
   // signal any in-flight turn to abort (barge-in). A single drain loop
   // processes pending turns so a mid-turn input is never dropped.
-  const queueTurn = async (ws: import("bun").ServerWebSocket<WsData>, input: ArrayBuffer | string, turnId: string): Promise<void> => {
+  const queueTurn = async (ws: import("bun").ServerWebSocket<WsData>, input: ArrayBuffer | string, turnId: string, streamFinal?: Promise<string>, streamFirstPartialMs?: number, streamSession?: LivePcmSession): Promise<void> => {
     if (!accepting) {
+      streamSession?.abort();
       protocolError(ws, "server shutting down", turnId);
       return;
     }
+    if (ws.data.liveCapture && ws.data.liveCapture.turnId !== turnId) {
+      ws.data.liveCapture.abort.abort();
+      ws.data.liveCapture.session?.abort();
+      ws.data.liveCapture = null;
+    }
     if (ws.data.recentTurnIds.includes(turnId) || ws.data.pending?.turnId === turnId || ws.data.current?.turnId === turnId) {
+      streamSession?.abort();
       protocolError(ws, "duplicate or replayed turn id", turnId);
       return;
     }
@@ -1037,6 +1069,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     // so transfer that charged slot instead of rejecting the confirming turn.
     const transferableSpecSlots = ws.data.spec && liveSpecs.has(ws.data.spec.turn) ? 1 : 0;
     if (!ws.data.busy && !acquireJob(transferableSpecSlots)) {
+      streamSession?.abort();
       protocolError(ws, unavailableMessage(), turnId);
       return;
     }
@@ -1068,12 +1101,14 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         }
       });
     } catch (error) {
+      streamSession?.abort();
       if (!ws.data.busy) releaseJob();
       throw error;
     }
     // Its current sink is immediately invalidated; late results are dropped.
     abortTurn(ws.data.current, "superseded by a newer turn");
     if (ws.data.pending) {
+      ws.data.pending.streamSession?.abort();
       ws.data.pending.lease.abort(new Error("superseded before dispatch"));
       dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
     }
@@ -1082,7 +1117,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         new LatencyTurn(ws.data.sessionId, turnId, typeof input === "string" ? "web_text" : "web_voice", Date.now(), () => performance.now(), typeof input === "string" ? input.length : input.byteLength),
         persistLatency)
       : undefined;
-    ws.data.pending = { input, turnId, lease, latency, setSink: (sink) => { outputSink = sink; } };
+    if (streamFinal && latency) latency.turn.setStreamingStt("streaming", streamFirstPartialMs);
+    ws.data.pending = { input, turnId, lease, latency, streamFinal, streamFirstPartialMs, streamSession, setSink: (sink) => { outputSink = sink; } };
     if (ws.data.busy) return; // the running drain loop will pick it up
     ws.data.busy = true;
     try {
@@ -1102,6 +1138,11 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           pacing: new AudioPlaybackGate(),
           latency: next.latency,
         };
+        const abortStream = (): void => next.streamSession?.abort();
+        if (next.streamSession) {
+          state.signal.addEventListener("abort", abortStream, { once: true });
+          if (state.signal.aborted) abortStream();
+        }
         const timingMark = (name: string, offsetMs: number): void => {
           state.latency?.mark(name, offsetMs);
           if (name === "filler_queued" || name === "reassurance_queued") state.nextAudioKind = "filler";
@@ -1141,6 +1182,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               signal: state.signal,
               trackBackground: (task) => ownBackground(task, ws.data.sessionId, next.turnId, "web"),
               timingMark,
+              streamFinal: next.streamFinal,
             });
           }
         } catch (err: unknown) {
@@ -1148,6 +1190,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           log("error", `web-voice ws turn failed: ${m}`);
           if (!state.aborted) next.lease.fail(m);
         } finally {
+          state.signal.removeEventListener("abort", abortStream);
+          next.streamSession?.abort();
           next.lease.settle();
           await releaseSpec(spec);
           state.handlerSettled = true;
@@ -1292,6 +1336,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 latestProbeTurnId: null,
                 record,
                 spec: null,
+                liveCapture: null,
               },
             });
           } finally {
@@ -1709,6 +1754,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               turnId: null,
               maxAudioBytes: MAX_TURN_AUDIO_BYTES,
             });
+            if (openSttStream) sendJson(ws, withSession(ws, { type: "stream_on" }));
           }
           // Tell the client whether mid-pause turn probes are worth sending —
           // without a detector they'd be dead weight on every pause.
@@ -1892,6 +1938,14 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               }
               return;
             }
+            if (msg.type === "capture_abort" && ws.data.protocol === 2 && isProtocolId(msg.turnId)) {
+              if (ws.data.liveCapture?.turnId === msg.turnId) {
+                ws.data.liveCapture.abort.abort();
+                ws.data.liveCapture.session?.abort();
+                ws.data.liveCapture.failed = true;
+              }
+              return;
+            }
             if (msg.type === "text" && typeof msg.text === "string" && msg.text.trim()) {
               const turnId = ws.data.protocol === 2 ? msg.turnId : crypto.randomUUID();
               if (!isProtocolId(turnId)) {
@@ -1935,6 +1989,62 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           }
 
           // Probe frame = "is the speaker done?" — answered inline, never a turn.
+          if (isStreamPcmFrame(u8)) {
+            if (!openSttStream || ws.data.protocol !== 2) { protocolError(ws, "live PCM is disabled", turnId); return; }
+            const frame = decodeStreamPcmFrame(u8);
+            if (!frame) { protocolError(ws, "invalid live PCM frame", turnId); return; }
+            let capture = ws.data.liveCapture;
+            if (capture?.turnId !== turnId) {
+              if (frame.sequence !== 1 || ws.data.recentTurnIds.includes(turnId) ||
+                  ws.data.current?.turnId === turnId || ws.data.pending?.turnId === turnId) {
+                protocolError(ws, "duplicate turn or invalid first live PCM sequence", turnId);
+                return;
+              }
+              capture?.abort.abort();
+              capture?.session?.abort();
+              const abort = new AbortController();
+              capture = {
+                turnId, nextSequence: 1, sampleRate: frame.sampleRate, bytes: 0,
+                startedAt: performance.now(), lastCaptionAt: -Infinity,
+                latestPartial: "", session: null, failed: false, abort, finalizing: false,
+              };
+              ws.data.liveCapture = capture;
+              const owner = capture;
+              try {
+                capture.session = openSttStream({
+                  signal: AbortSignal.any([abort.signal, shutdownController.signal]), sampleRate: frame.sampleRate,
+                  onPartial: (text, at) => {
+                    if (ws.data.liveCapture !== owner || owner.abort.signal.aborted || owner.failed || !accepting) return;
+                    owner.latestPartial = text;
+                    owner.firstPartialMs ??= Math.max(0, at - owner.startedAt);
+                    if (owner.firstPartialMs !== undefined && owner.finalizing) {
+                      ws.data.latencyTurns.get(owner.turnId)?.turn.setStreamingStt("streaming", owner.firstPartialMs);
+                    }
+                    if (at - owner.lastCaptionAt >= 100) {
+                      owner.lastCaptionAt = at;
+                      sendJson(ws, withTurn(ws, owner.turnId, { type: "partial_transcript", text: text.slice(0, 16_384) }));
+                    }
+                  },
+                });
+                void capture.session.final.then(
+                  () => { if (ws.data.liveCapture === owner) ws.data.liveCapture = null; },
+                  () => { owner.failed = true; if (ws.data.liveCapture === owner && owner.finalizing) ws.data.liveCapture = null; },
+                );
+              } catch { capture.failed = true; }
+            }
+            if (capture.finalizing || !admitStreamPcmChunk(frame, capture.nextSequence, capture.sampleRate, capture.bytes)) {
+              capture.abort.abort(); capture.session?.abort(); capture.failed = true;
+              protocolError(ws, "live PCM sequence, rate, or size invalid", turnId);
+              return;
+            }
+            capture.nextSequence++;
+            capture.bytes += frame.pcm.byteLength;
+            if (!capture.failed) {
+              try { capture.session?.push(frame.pcm); }
+              catch { capture.failed = true; capture.session?.abort(); }
+            }
+            return;
+          }
           if (isProbeFrame(u8)) {
             if (!onTurnProbe) return;
             if (ws.data.protocol === 2) ws.data.latestProbeTurnId = turnId;
@@ -1955,7 +2065,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               // (see speculative.ts; the WAV turn adopts or aborts it).
               if (verdict?.complete && onSpeculate && frame.utterMs !== undefined && !ws.data.busy) {
                 const prev = ws.data.spec;
-                const spec = onSpeculate(frame.samples, frame.sampleRate, frame.utterMs, verdict.probability);
+                const partial = ws.data.liveCapture?.turnId === turnId ? ws.data.liveCapture.latestPartial : "";
+                const spec = onSpeculate(frame.samples, frame.sampleRate, frame.utterMs, verdict.probability, partial || undefined);
                 ws.data.spec = spec ? { turnId: ws.data.protocol === 2 ? turnId : null, turn: trackSpec(spec) } : null;
                 if (prev) {
                   void abortSpec(prev.turn).catch((error: unknown) => {
@@ -1988,7 +2099,18 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // Binary frame = a complete utterance WAV.
           const wav = new Uint8Array(u8.byteLength);
           wav.set(u8);
-          await queueTurn(ws, wav.buffer, turnId).catch((err: unknown) => {
+          const capture = ws.data.liveCapture?.turnId === turnId ? ws.data.liveCapture : null;
+          if (capture) { capture.finalizing = true; if (capture.failed) ws.data.liveCapture = null; }
+          else if (ws.data.liveCapture) {
+            ws.data.liveCapture.abort.abort(); ws.data.liveCapture.session?.abort(); ws.data.liveCapture = null;
+          }
+          const streamFinal = capture
+            ? capture.failed || !capture.session
+              ? Promise.reject(new Error("live transcription failed"))
+              : capture.session.end()
+            : undefined;
+          if (streamFinal) void streamFinal.catch(() => {});
+          await queueTurn(ws, wav.buffer, turnId, streamFinal, capture?.firstPartialMs, capture?.session ?? undefined).catch((err: unknown) => {
             const detail = err instanceof Error ? err.message : String(err);
             log("error", `web-voice queue failed: ${detail}`);
             protocolError(ws, "turn queue failed", turnId);
@@ -2002,6 +2124,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           }
         },
         close(ws) {
+          ws.data.liveCapture?.abort.abort();
+          ws.data.liveCapture?.session?.abort();
+          ws.data.liveCapture = null;
           if (ws.data.pendingClientSlot) pendingClients = Math.max(0, pendingClients - 1);
           if (ws.data.departureCloseTimer !== null) {
             clearTimeout(ws.data.departureCloseTimer);
@@ -2022,6 +2147,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // ending or start a reconnect grace for a client that already left.
           if (wasAttached && clients.size === 0) scheduleConversationEnd();
           ws.data.pending?.lease.abort(new Error("voice socket closed"));
+          ws.data.pending?.streamSession?.abort();
           ws.data.pending = null;
           ws.data.latestProbeTurnId = null;
           const spec = ws.data.spec;
@@ -2095,6 +2221,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       parked.length = 0;
 
       for (const ws of sockets) {
+        ws.data.liveCapture?.abort.abort();
+        ws.data.liveCapture?.session?.abort();
+        ws.data.liveCapture = null;
         if (ws.data.departureCloseTimer !== null) {
           clearTimeout(ws.data.departureCloseTimer);
           ws.data.departureCloseTimer = null;

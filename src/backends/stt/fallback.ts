@@ -26,6 +26,10 @@ type FallbackStatus = "available" | "unavailable" | "unknown";
  * successful primary response automatically closes a degradation episode.
  */
 export class FallbackSTTProvider implements STTProvider {
+  openStream(options: Parameters<NonNullable<STTProvider["openStream"]>>[0]): ReturnType<NonNullable<STTProvider["openStream"]>> {
+    if (!this.primary.openStream) throw new Error("primary STT backend has no live stream");
+    return this.primary.openStream(options);
+  }
   readonly name: string;
   private readonly primaryLogName: string;
   private readonly fallbackLogName: string;

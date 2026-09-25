@@ -48,6 +48,7 @@ const EXPLANATIONS: Record<string, string> = {
   "stt.host": "Host of an existing Wyoming speech-to-text server.",
   "stt.port": "Port of the speech-to-text server.",
   "stt.model": "Model ID served by the speech-to-text engine.",
+  "stt.streaming": "Streams browser microphone PCM to audio.cpp for live captions and earlier speculative turns.",
   tts: "Configures spoken responses.",
   "tts.backend": "Selects the text-to-speech engine.",
   "tts.host": "Host of an existing Wyoming text-to-speech server.",

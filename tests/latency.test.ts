@@ -5,6 +5,14 @@ import { join } from "node:path";
 import { decodeClientMetric } from "../src/web-voice/protocol";
 import { LatencyTurn, LatencyStore, percentile, summarizeLatency, formatLatency } from "../src/latency";
 
+test("live STT latency records the first delta and final source without transcript text", () => {
+  const turn = new LatencyTurn("s", "t", "web_voice", 1, () => 0);
+  turn.setStreamingStt("streaming", 983.4);
+  expect(turn.finish()).toMatchObject({ sttFirstPartialMs: 983, sttSource: "streaming" });
+  turn.mark("stt_batch_fallback", 0);
+  expect(turn.finish().sttSource).toBe("batch_fallback");
+});
+
 test("v2 metric frames admit only bounded identities and durations; unrelated v1 controls stay untouched", () => {
   expect(decodeClientMetric({ type: "client_metric", sessionId: "s", turnId: "t", event: "audio_started", sequence: 1, sinceSpeechEndMs: 123 })).toMatchObject({ sequence: 1, sinceSpeechEndMs: 123 });
   expect(decodeClientMetric({ type: "client_metric", sessionId: "s", turnId: "t", event: "speech_end", sinceSpeechEndMs: 0 }, 1)).toBeNull();

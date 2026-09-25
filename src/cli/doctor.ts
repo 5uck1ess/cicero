@@ -22,7 +22,7 @@ import {
 import { ElevenLabsProvider } from "../backends/tts/elevenlabs";
 import { audioCppLocalRuntimePaths } from "../backends/tts/audiocpp";
 import { ttsDefaultPort, type TTSProviderConfig } from "../backends/tts/provider";
-import { sttDefaultPort } from "../backends/stt/provider";
+import { sttDefaultPort, type STTProviderConfig } from "../backends/stt/provider";
 import { isSttLanguageTag, isWhisperLanguageCode, whisperLanguageCode } from "../backends/stt/language";
 import { LLM_DEFAULT_MODEL, normalizedLlmModel } from "../backends/llm/provider";
 import type { LLMProviderConfig } from "../backends/llm/provider";
@@ -297,6 +297,9 @@ async function checkEngine(
     return;
   }
   const sttRole = role.startsWith("stt");
+  if (role === "stt" && (cfg as STTProviderConfig).streaming) {
+    record({ level: "warn", detail: "live browser STT enabled; model mode was not verified", hint: "Nemotron must have mode: streaming in the audio.cpp server model entry" });
+  }
   const ttsRole = role.startsWith("tts");
   // The classifier is an LLM in every respect that matters here: same ports,
   // same defaults, same probes. Only its config key differs.

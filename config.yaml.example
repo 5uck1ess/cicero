@@ -120,6 +120,7 @@ stt:
   timeout_ms: 90000             # absolute transcription deadline
   # language: en-US              # audio.cpp gets this tag; Whisper gets "en"
   # vocabulary: [Cicero, TypeGPU] # optional recognition hints (backend-specific)
+  # streaming: false            # opt-in; requires backend: audiocpp and Nemotron mode: streaming
 # Optional hot standby. The primary is retried every turn and automatically
 # takes over again after recovery. An honestly empty transcript remains silence;
 # only a diagnosed engine error reaches the fallback, so a second recognizer
@@ -132,6 +133,7 @@ stt:
 # Alternates:
 #   stt: { backend: mlx-whisper, port: 8083 }              # macOS / Apple Silicon
 #   stt: { backend: faster-whisper, host: 192.168.1.50, port: 8083 }  # remote GPU box
+#   stt: { backend: audiocpp, port: 8092, model: nemotron, streaming: true } # live web captions
 
 # ---------------------------------------------------------------------------
 # TTS — pocket-tts (Kyutai) clones any voice from a reference WAV and runs

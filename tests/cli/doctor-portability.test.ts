@@ -65,6 +65,14 @@ afterEach(() => {
 });
 
 describe("doctor setup hints", () => {
+  test("reports the live audio.cpp model-mode requirement", async () => {
+    globalThis.fetch = (async () => new Response("{}", { status: 200 })) as typeof fetch;
+    const raw = structuredClone(DEFAULT_CONFIG);
+    raw.headless = true;
+    raw.stt = { backend: "audiocpp", host: "gpu.example.test", port: 8092, model: "nemotron", streaming: true };
+    const checks = await collectChecks(new RuntimeConfig(raw), { which: () => null, detectedTerminal: "none" });
+    expect(checks.some((check) => check.detail.includes("live browser STT enabled") && check.hint?.includes("mode: streaming"))).toBe(true);
+  });
   test("use absolute venv and manifest paths independent of cwd", () => {
     const root = join(process.cwd(), "project with spaces");
     const hint = buildVenvHint(".venv-turn", "3.11", "turn.txt", root);

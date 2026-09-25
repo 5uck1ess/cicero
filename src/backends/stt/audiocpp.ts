@@ -15,6 +15,7 @@ import { httpBase, isLocalHost } from "../net";
 import { log } from "../../logger";
 import { encodeSilentWav } from "../../platform/wav";
 import { writeSecureTempAudio } from "../../platform/secure-temp-audio";
+import { openLivePcm, type LivePcmSession, type LiveStreamConnect } from "./live-client";
 import {
   PROVIDER_TIMEOUT_MS,
   discardResponseBody,
@@ -52,6 +53,10 @@ export class AudioCppSTTProvider implements STTProvider {
   private readonly timeoutMs: number;
   private readonly language?: string;
   private readonly prompt?: string;
+  /** Injectable raw connector for port-free regressions. */
+  liveConnect?: LiveStreamConnect;
+  private activeStream: LivePcmSession | null = null;
+  private cleanupBlocked: LivePcmSession | null = null;
   /** Fresh cancellation scope for one startup; replaces any settled predecessor. */
   private beginStartup(): AbortSignal {
     const abort = new AbortController();
@@ -81,10 +86,35 @@ export class AudioCppSTTProvider implements STTProvider {
   constructor(config: STTProviderConfig) {
     this.host = config.host;
     this.port = config.port ?? STT_DEFAULT_PORTS.audiocpp!; // beside the audio.cpp TTS seat
-    this.model = config.model ?? "qwen3-asr";
+    this.model = config.model ?? (config.streaming ? "nemotron" : "qwen3-asr");
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.stt);
     this.language = config.language;
     this.prompt = sttVocabularyPrompt(config.vocabulary);
+  }
+
+  openStream(options: { signal?: AbortSignal; sampleRate: number; onPartial?: (text: string, at: number) => void }): LivePcmSession {
+    if (this.cleanupBlocked?.released) this.cleanupBlocked = null;
+    if (this.cleanupBlocked) throw new Error("prior live STT socket cleanup is unconfirmed");
+    // One live ASR seat per provider. A newer speech capture supersedes the
+    // previous socket immediately instead of contending for the same model.
+    const previous = this.activeStream;
+    previous?.abort();
+    if (previous && !previous.released) {
+      this.cleanupBlocked = previous;
+      throw new Error("prior live STT socket cleanup is unconfirmed");
+    }
+    const session = openLivePcm({
+      host: this.host ?? "127.0.0.1", port: this.port, model: this.model,
+      sampleRate: options.sampleRate, language: this.language,
+      signal: options.signal, onPartial: options.onPartial,
+      connect: this.liveConnect,
+    });
+    this.activeStream = session;
+    void session.final.finally(() => {
+      if (this.activeStream === session) this.activeStream = null;
+      if (!session.released) this.cleanupBlocked = session;
+    }).catch(() => {});
+    return session;
   }
 
   transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null> {
@@ -212,6 +242,7 @@ export class AudioCppSTTProvider implements STTProvider {
   stop(): Promise<void> {
     // Synchronous, before any await: a startup still in flight must see this.
     this.cancelStartup();
+    this.activeStream?.abort();
     // A stop() racing an in-flight start() must let the launch settle first,
     // else it returns before `managed` is assigned and orphans the server.
     return this.lifecycle.run("stop", async () => {

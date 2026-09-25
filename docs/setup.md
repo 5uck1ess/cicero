@@ -81,6 +81,11 @@ manually before starting Cicero; setup preserves existing values.
 
 ## Your first conversation
 
+The optional STT live streaming checkbox adds `stt.streaming: true` and writes
+Nemotron's model entry with `"mode": "streaming"`. When Nemotron already has an
+entry, setup updates its mode and preserves its other keys. Restart audio.cpp
+after changing the model mode. Live streaming affects browser voice only.
+
 This is the opinionated first-run path: Cicero runs on a Linux box (GPU or not),
 and you talk to it from a browser on your network. Linux is the reference path.
 

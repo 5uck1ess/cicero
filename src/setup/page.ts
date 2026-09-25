@@ -499,6 +499,7 @@ function renderPicker(id, step) {
     }
     if (id === 'board' && o === 'paperclip' && !f.paperclipEnv) fields.companyId = textInput(''), box.append(field('Paperclip company ID (blank uses your paperclipai context)', fields.companyId));
     if ((id === 'stt' || id === 'tts') && o === 'wyoming') { fields.host = textInput('127.0.0.1'); fields.port = textInput(id === 'stt' ? '10300' : '10200', 'number'); box.append(field('Server host', fields.host), field('Port', fields.port)); }
+    if (id === 'stt' && o === 'audiocpp') { fields.streaming = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.streaming, document.createTextNode('Stream browser speech for live captions (requires Nemotron mode: streaming)')])); }
     if (o === 'elevenlabs') fields.apiKey = textInput('', 'password'), box.append(field('ElevenLabs API key', fields.apiKey));
     if (fields.apiKey && state.storedSecrets && state.storedSecrets[id] && saved === o) fields.apiKey.parentNode.append(h('small', { text: 'A key is saved. Leave blank to keep it.' }));
     if (box.childNodes.length) detail.append(box);
@@ -542,6 +543,7 @@ function renderPicker(id, step) {
     for (var k in fields) {
       var el = fields[k];
       if (k === 'tab') { if (el.checked) c.mode = 'tab-inject'; }
+      else if (k === 'streaming') c.streaming = el.checked;
       else if (k === 'command') { try { c.command = JSON.parse(el.value); } catch (e) { throw new Error('The command must be a JSON list, like ["hermes","acp"].'); } }
       else if (k === 'port') c.port = Number(el.value);
       else if (k === 'apiKey' && !el.value) continue;

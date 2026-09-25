@@ -506,6 +506,18 @@ export class SwappableSTTProvider implements STTProvider, PinnableProvider<STTPr
   pinGeneration(): GenerationPin<STTProvider> {
     return pinCurrentGeneration(this.slot);
   }
+  openStream(options: Parameters<NonNullable<STTProvider["openStream"]>>[0]): ReturnType<NonNullable<STTProvider["openStream"]>> {
+    const pin = this.pinGeneration();
+    try {
+      if (!pin.provider.openStream) throw new Error("current STT backend has no live stream");
+      const stream = pin.provider.openStream(options);
+      void stream.final.finally(() => pin.release()).catch(() => {});
+      return stream;
+    } catch (error) {
+      pin.release();
+      throw error;
+    }
+  }
   async transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null> {
     signal?.throwIfAborted();
     const text = await this.slot.use((provider) => provider.transcribe(audioFile, signal));

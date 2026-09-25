@@ -1,4 +1,5 @@
 import { isLocalHost } from "../net";
+import type { LivePcmSession } from "./live-client";
 
 export interface STTProviderConfig {
   backend?: string;
@@ -10,6 +11,8 @@ export interface STTProviderConfig {
   vocabulary?: string[];
   /** Absolute per-transcription deadline in milliseconds (default 90 seconds). */
   timeout_ms?: number;
+  /** Opt-in browser live PCM transcription; audio.cpp only. */
+  streaming?: boolean;
 }
 
 /** Shared wire prompt for the HTTP recognizers. Config validation bounds its UTF-8 size. */
@@ -39,6 +42,7 @@ export interface STTProvider {
   cancelStartup?(): void;
   readonly name: string;
   transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null>;
+  openStream?(options: { signal?: AbortSignal; sampleRate: number; onPartial?: (text: string, at: number) => void }): LivePcmSession;
   /**
    * Quiet, structured form of {@link transcribe}. Direct callers retain the
    * historical null-and-log behavior; fallback composition uses this method

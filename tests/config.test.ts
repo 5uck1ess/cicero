@@ -10,6 +10,13 @@ import { loadConfig as loadConfigRaw, type CLIFlags } from "../src/config";
 const NO_CONFIG_HOME = join(tmpdir(), "cicero-test-no-config");
 const loadConfig = (flags: CLIFlags = {}) => loadConfigRaw(flags, { home: NO_CONFIG_HOME });
 
+test("live STT is off by default and only audio.cpp can enable it", () => {
+  expect(loadConfig().sttBackend.streaming).toBeUndefined();
+  expect(loadYaml("stt: { backend: audiocpp, model: nemotron, streaming: true }\n")().sttBackend.streaming).toBe(true);
+  expect(() => loadYaml("stt: { backend: faster-whisper, streaming: true }\n")()).toThrow(/requires stt.backend: audiocpp/);
+  expect(() => loadYaml("stt: { backend: audiocpp, streaming: yes }\n")()).toThrow(/stt.streaming must be a boolean/);
+});
+
 function loadYaml(yaml: string) {
   const home = mkdtempSync(join(tmpdir(), "cicero-config-test-"));
   writeFileSync(join(home, "config.yaml"), yaml);

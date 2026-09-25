@@ -34,7 +34,7 @@ function selectedAudioCppModels(draft: SetupDraft, root: string): ServerModel[] 
   const models: ServerModel[] = [];
   if (selected("tts")) models.push({ id: AUDIOCPP_MODELS.tts.id, family: "pocket_tts", path: audioCppModelPath(root, "tts"), task: "tts", mode: "offline",
     load_options: { language: "english" }, session_options: { language: "english", "pocket_tts.voice_state_cache_slots": "16" } });
-  if (selected("stt")) models.push({ id: AUDIOCPP_MODELS.stt.id, family: "nemotron_asr", path: audioCppModelPath(root, "stt"), task: "asr", mode: "offline",
+  if (selected("stt")) models.push({ id: AUDIOCPP_MODELS.stt.id, family: "nemotron_asr", path: audioCppModelPath(root, "stt"), task: "asr", mode: (draft.stt as { streaming?: boolean }).streaming === true ? "streaming" : "offline",
     session_options: { language: "en-US" } });
   return models;
 }
@@ -83,8 +83,13 @@ export function writeAudioCppServerConfig(draft: SetupDraft, root: string): stri
     } else config = { host: "127.0.0.1", port: AUDIOCPP_PORT, device: 0, threads: 1, models: [] };
     const models = config.models as ServerModel[];
     const missing = selected.filter((entry) => !models.some((existing) => existing.id === entry.id));
-    if (!missing.length) return path;
-    const updated = { ...config, models: [...models, ...missing] };
+    const streamingNemotron = (draft.stt as { streaming?: boolean } | undefined)?.streaming === true;
+    const changedMode = streamingNemotron && models.some((entry) => entry.id === AUDIOCPP_MODELS.stt.id && entry.mode !== "streaming");
+    if (!missing.length && !changedMode) return path;
+    const updated = { ...config, models: [
+      ...models.map((entry) => streamingNemotron && entry.id === AUDIOCPP_MODELS.stt.id ? { ...entry, mode: "streaming" } : entry),
+      ...missing,
+    ] };
     const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
     try {
       writeFileSync(tmp, `${JSON.stringify(updated, null, 2)}\n`, { flag: "wx", mode: PRIVATE_FILE_MODE });

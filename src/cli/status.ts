@@ -161,7 +161,7 @@ function httpEndpoint(
 
 function sttPlan(config: STTProviderConfig): EndpointPlan {
   const backend = config.backend ?? "unknown";
-  const hintSummary = `${config.language ? ` · language ${concise(config.language, 64)}` : ""} · vocabulary ${config.vocabulary?.length ?? 0} terms`;
+  const hintSummary = `${config.language ? ` · language ${concise(config.language, 64)}` : ""} · vocabulary ${config.vocabulary?.length ?? 0} terms${config.streaming ? " · live streaming" : ""}`;
   const withHints = (plan: EndpointPlan): EndpointPlan => ({ ...plan, summary: `${plan.summary}${hintSummary}` });
   if (!SUPPORTED_STT.has(backend)) {
     return withHints({

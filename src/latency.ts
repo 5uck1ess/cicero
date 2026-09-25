@@ -13,6 +13,7 @@ export interface LatencyRecord {
   serverMarksMs?: Record<string, number>;
   speechEndToReplyMs?: number; speechEndToFillerMs?: number;
   sttMs?: number; brainFirstTokenMs?: number; ttsFirstAudioMs?: number;
+  sttFirstPartialMs?: number; sttSource?: "streaming" | "batch_fallback";
   cancellationSettlementMs?: number; interrupted: boolean; parked: boolean;
   bargeInCount?: number;
 }
@@ -20,6 +21,8 @@ const MAX_MS = 300_000;
 const validMs = (n: number | undefined): number | undefined => n !== undefined && Number.isFinite(n) && n >= 0 && n <= MAX_MS ? Math.round(n) : undefined;
 
 export class LatencyTurn {
+  private sttFirstPartialMs: number | undefined;
+  private sttSource: "streaming" | "batch_fallback" | undefined;
   private marks = new Map<string, number>();
   private clientMarks = new Map<"speech_end" | "first_audio_played" | "first_filler_played", number>();
   private abortAt: number | undefined;
@@ -28,10 +31,15 @@ export class LatencyTurn {
   private bargeCount = 0;
   constructor(readonly sessionId: string, readonly turnId: string, readonly surface: LatencySurface, readonly at: number, private readonly clock: () => number = () => performance.now(), private readonly inputLength = 0) {}
   mark(name: string, offsetMs: number): void {
+    if (name === "stt_batch_fallback") this.sttSource = "batch_fallback";
     if (this.marks.size < 16 && !this.marks.has(name)) {
       const ms = validMs(offsetMs);
       if (ms !== undefined) this.marks.set(name, ms);
     }
+  }
+  setStreamingStt(source: "streaming" | "batch_fallback", firstPartialMs?: number): void {
+    this.sttSource = source;
+    this.sttFirstPartialMs = validMs(firstPartialMs);
   }
   client(metric: ClientMetric): void {
     if (metric.sessionId !== this.sessionId || metric.turnId !== this.turnId) return;
@@ -69,6 +77,8 @@ export class LatencyTurn {
       ...(this.clientMarks.has("first_audio_played") ? { speechEndToReplyMs: this.clientMarks.get("first_audio_played") } : {}),
       ...(this.clientMarks.has("first_filler_played") ? { speechEndToFillerMs: this.clientMarks.get("first_filler_played") } : {}),
       ...(stt !== undefined ? { sttMs: stt } : {}),
+      ...(this.sttFirstPartialMs !== undefined ? { sttFirstPartialMs: this.sttFirstPartialMs } : {}),
+      ...(this.sttSource ? { sttSource: this.sttSource } : {}),
       ...(token !== undefined && brainStart !== undefined ? { brainFirstTokenMs: validMs(token - brainStart) } : {}),
       ...(audio !== undefined && sentence !== undefined ? { ttsFirstAudioMs: validMs(audio - sentence) } : {}),
       ...(this.abortAt !== undefined ? { cancellationSettlementMs: validMs(this.settledAt! - this.abortAt) } : {}),

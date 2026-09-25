@@ -31,6 +31,17 @@ function healthyTerminal(titles: string[]): TerminalAdapter {
 }
 
 describe("configured CLI status", () => {
+  test("shows opt-in live STT mode", async () => {
+    const config = runtimeConfig((raw) => {
+      raw.headless = true;
+      raw.stt = { backend: "audiocpp", host: "gpu.example.test", port: 8092, model: "nemotron", streaming: true };
+    });
+    const lines = await collectStatus(config, {
+      inspectDaemon: () => Promise.resolve({ kind: "absent" }), probe: () => Promise.resolve(true),
+      readPairingState: () => null, which: () => null,
+    });
+    expect(lines.find((line) => line.name === "STT")?.detail).toContain("live streaming");
+  });
   test("renders published pairing state without ever surfacing a credential", async () => {
     const config = runtimeConfig((raw) => {
       raw.headless = true;
