@@ -216,8 +216,9 @@ async function speechGateRun() {
 function speechConfirmed(thr) { return !vadSession || vadProb >= thr; }
 
 let ws = null, wsSessionId = "", activeTurnId = null, captureTurnId = null;
-let streamOn = false, streamSeq = 0, streamCaptureFailed = false;
+let streamOn = false, streamSeq = 0, streamCaptureFailed = false, streamCaptureCommitted = false;
 let streamCaptureEnabled = false;
+let pendingBargeAbort = false;
 let streamInputCount = 0, streamOutputCount = 0, streamSum = 0, streamCount = 0;
 let micStream = null, audioCtx = null, source = null, node = null;
 let convOn = false, ready = false;
@@ -269,7 +270,7 @@ function newTurnId() {
   if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
   return "turn-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
 }
-function beginCaptureIdentity() { captureTurnId = newTurnId(); lastVoicedAt = null; streamSeq = 0; streamCaptureFailed = false; streamCaptureEnabled = streamOn;
+function beginCaptureIdentity() { captureTurnId = newTurnId(); lastVoicedAt = null; streamSeq = 0; streamCaptureFailed = false; streamCaptureCommitted = false; pendingBargeAbort = false; streamCaptureEnabled = streamOn;
   streamInputCount = 0; streamOutputCount = 0; streamSum = 0; streamCount = 0; }
 function abortLiveCapture() {
   if (!streamCaptureEnabled || !streamSeq || !captureTurnId || !ws || ws.readyState !== 1) return;
@@ -303,6 +304,19 @@ function sendLiveFrame(samples) {
     view.setInt16(12 + 2 * i, s < 0 ? s * 0x8000 : s * 0x7fff, true);
   }
   try { ws.send(encodeTurnFrame(pcm, captureTurnId)); } catch (e) { streamCaptureFailed = true; abortLiveCapture(); }
+}
+function commitLiveCapture() {
+  if (!audioCtx || (speechLen / audioCtx.sampleRate) * 1000 < MIN_UTTER_MS ||
+      (ptt && state !== "speech")) return;
+  if (pendingBargeAbort) {
+    pendingBargeAbort = false;
+    const turnId = activeTurnId || currentAudioItem?.turnId;
+    if (turnId) clientMetric(turnId, "barge_in");
+    abortActiveTurn(); stopPlayback();
+  }
+  if (!streamCaptureEnabled || streamCaptureCommitted) return;
+  streamCaptureCommitted = true;
+  for (const frame of speechFrames) sendLiveFrame(frame);
 }
 function encodeTurnFrame(payload, turnId) {
   const enc = new TextEncoder(), session = enc.encode(wsSessionId), turn = enc.encode(turnId);
@@ -355,7 +369,8 @@ function onFrame(buf) {
     // still playing (state "speaking"), so an interrupt doesn't clip its start.
     if (holding) {
       speechFrames.push(buf); speechLen += buf.length;
-      sendLiveFrame(buf);
+      if (streamCaptureCommitted) sendLiveFrame(buf);
+      else commitLiveCapture();
       const durMs = (speechLen / audioCtx.sampleRate) * 1000;
       if (durMs >= MAX_UTTER_MS) endPtt();      // safety cap on a very long hold
     }
@@ -377,9 +392,9 @@ function onFrame(buf) {
         lastVoicedAt = performance.now();
         speechFrames = preRoll.slice();           // include pre-roll so we don't clip the start
         speechLen = speechFrames.reduce(function (n, f) { return n + f.length; }, 0);
-        for (const f of speechFrames) sendLiveFrame(f);
         silenceFrames = 0;
         setState("speech");
+        commitLiveCapture();
       }
     } else {
       onsetFrames = 0;
@@ -387,7 +402,8 @@ function onFrame(buf) {
     }
   } else { // speech
     speechFrames.push(buf); speechLen += buf.length;
-    sendLiveFrame(buf);
+    if (streamCaptureCommitted) sendLiveFrame(buf);
+    else commitLiveCapture();
     const closeThr = Math.max(ABS_CLOSE, noiseFloor * CLOSE_FACTOR);
     if (rms < closeThr) { silenceFrames++; } else { silenceFrames = 0; probeSent = false; hangMs = HANGOVER_MS; if (speechConfirmed(VAD_POS)) lastVoicedAt = performance.now(); }
     const durMs = (speechLen / audioCtx.sampleRate) * 1000;
@@ -402,6 +418,7 @@ function onFrame(buf) {
 }
 
 function finalizeUtterance() {
+  commitLiveCapture();
   const endedAt = performance.now();
   const speechEndedAt = speechEndOrigin(lastVoicedAt, endedAt, ptt);
   const total = speechLen;
@@ -485,17 +502,19 @@ function watchBargeIn(buf) {
 }
 
 function triggerBargeIn() {
-  const turnId = activeTurnId || currentAudioItem?.turnId;
-  if (turnId) clientMetric(turnId, "barge_in");
-  abortActiveTurn();
-  stopPlayback();                                              // silence our own reply
   beginCaptureIdentity();
   lastVoicedAt = performance.now();
   speechFrames = preRoll.slice();                              // keep the pre-roll so we don't clip the interruption
   speechLen = speechFrames.reduce(function (n, f) { return n + f.length; }, 0);
-  for (const f of speechFrames) sendLiveFrame(f);
+  if (streamCaptureEnabled) pendingBargeAbort = true;
+  else {
+    const turnId = activeTurnId || currentAudioItem?.turnId;
+    if (turnId) clientMetric(turnId, "barge_in");
+    abortActiveTurn(); stopPlayback();
+  }
   onsetFrames = 0; silenceFrames = 0; bargeOnset = 0;
   setState("speech"); setStatus("listening (you interrupted)…");
+  commitLiveCapture();
 }
 
 function downsample(input, inRate, outRate) {
@@ -547,11 +566,14 @@ function beginPtt() {
     pttBargeTimer = setTimeout(() => {
       pttBargeTimer = null;
       if (!holding) return;
-      const turnId = activeTurnId || currentAudioItem?.turnId;
-      if (turnId) clientMetric(turnId, "barge_in");
-      abortActiveTurn();
-      stopPlayback();
+      if (streamCaptureEnabled) pendingBargeAbort = true;
+      else {
+        const turnId = activeTurnId || currentAudioItem?.turnId;
+        if (turnId) clientMetric(turnId, "barge_in");
+        abortActiveTurn(); stopPlayback();
+      }
       setState("speech"); orbLabel.textContent = "recording"; setStatus("recording… release to send");
+      commitLiveCapture();
     }, MIN_UTTER_MS);
     return;                                     // keep the current state until the barge fires
   }

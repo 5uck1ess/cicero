@@ -53,6 +53,7 @@ import {
 
 interface LiveCapture {
   turnId: string;
+  order: number;
   nextSequence: number;
   sampleRate: number;
   bytes: number;
@@ -64,7 +65,15 @@ interface LiveCapture {
   failed: boolean;
   abort: AbortController;
   finalizing: boolean;
+  /** PCM retained while the preceding ended stream owns the live seat. */
+  pendingPcm: Uint8Array[];
+  waitingForSeat: Promise<void> | null;
 }
+
+// A waiting seat retains copies of incoming frames. Byte admission already caps
+// them at 4 MiB; this also caps object overhead from tiny hostile frames.
+const MAX_PENDING_PCM_FRAMES = 16_384;
+const MAX_WAITING_LIVE_FINALS = 4;
 
 interface TurnState {
   turnId: string;
@@ -81,6 +90,8 @@ interface TurnState {
   doneRequested?: boolean;
   outputDone?: boolean;
   handlerSettled?: boolean;
+  streamSession?: LivePcmSession;
+  deferredClientAbort?: boolean;
 }
 
 interface PendingTurn {
@@ -126,9 +137,13 @@ interface WsData {
   /** In-flight speculative turn from the last confident "complete" probe (see speculative.ts). */
   spec: SpecState | null;
   liveCapture: LiveCapture | null;
+  /** Ended uploads retain ownership until their final settles or transport closes. */
+  finalizingSessions: Set<LivePcmSession>;
 }
 
 export interface WebVoiceServerOptions {
+  /** Injectable server factory for transport tests without binding a port. */
+  serve?: typeof Bun.serve;
   /** Shared single-operator owner supplied by the daemon. */
   coordinator?: TurnCoordinator;
   /** Bind address. Default "0.0.0.0" so a headless box is reachable from a LAN browser. */
@@ -514,6 +529,11 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   // Transport ownership outlives conversation attachment for the brief span
   // between a goodbye frame and that socket's eventual close callback.
   const sockets = new Set<import("bun").ServerWebSocket<WsData>>();
+  /** The audio.cpp live seat is shared across browser sockets. */
+  const finalizingStreams = new Set<LivePcmSession>();
+  /** Includes ended captures still waiting to open after an earlier final. */
+  const endedCaptureFinals = new Set<Promise<string>>();
+  let nextCaptureOrder = 0;
   const streamAvailability = new WeakMap<import("bun").ServerWebSocket<WsData>, boolean>();
   const refreshSocketStream = (ws: import("bun").ServerWebSocket<WsData>): void => {
     if (ws.data.protocol !== 2) return;
@@ -1068,15 +1088,17 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   // The latest input wins (spoken WAV or typed text): stash it as pending and
   // signal any in-flight turn to abort (barge-in). A single drain loop
   // processes pending turns so a mid-turn input is never dropped.
-  const queueTurn = async (ws: import("bun").ServerWebSocket<WsData>, input: ArrayBuffer | string, turnId: string, streamFinal?: Promise<string>, streamFirstPartialMs?: number, streamSession?: LivePcmSession): Promise<void> => {
+  const queueTurn = async (ws: import("bun").ServerWebSocket<WsData>, input: ArrayBuffer | string, turnId: string, streamFinal?: Promise<string>, streamFirstPartialMs?: number, streamSession?: LivePcmSession, inputOrder = ++nextCaptureOrder): Promise<void> => {
     if (!accepting) {
       streamSession?.abort();
       protocolError(ws, "server shutting down", turnId);
       return;
     }
-    if (ws.data.liveCapture && ws.data.liveCapture.turnId !== turnId) {
+    if (ws.data.liveCapture && ws.data.liveCapture.turnId !== turnId
+        && !ws.data.liveCapture.finalizing && ws.data.liveCapture.order < inputOrder) {
       ws.data.liveCapture.abort.abort();
       ws.data.liveCapture.session?.abort();
+      ws.data.liveCapture.pendingPcm = [];
       ws.data.liveCapture = null;
     }
     if (ws.data.recentTurnIds.includes(turnId) || ws.data.pending?.turnId === turnId || ws.data.current?.turnId === turnId) {
@@ -1127,7 +1149,6 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     // Its current sink is immediately invalidated; late results are dropped.
     abortTurn(ws.data.current, "superseded by a newer turn");
     if (ws.data.pending) {
-      ws.data.pending.streamSession?.abort();
       ws.data.pending.lease.abort(new Error("superseded before dispatch"));
       dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
     }
@@ -1156,12 +1177,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           played: [],
           pacing: new AudioPlaybackGate(),
           latency: next.latency,
+          streamSession: next.streamSession,
         };
-        const abortStream = (): void => next.streamSession?.abort();
-        if (next.streamSession) {
-          state.signal.addEventListener("abort", abortStream, { once: true });
-          if (state.signal.aborted) abortStream();
-        }
         const timingMark = (name: string, offsetMs: number): void => {
           state.latency?.mark(name, offsetMs);
           if (name === "filler_queued" || name === "reassurance_queued") state.nextAudioKind = "filler";
@@ -1209,8 +1226,6 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           log("error", `web-voice ws turn failed: ${m}`);
           if (!state.aborted) next.lease.fail(m);
         } finally {
-          state.signal.removeEventListener("abort", abortStream);
-          next.streamSession?.abort();
           next.lease.settle();
           await releaseSpec(spec);
           state.handlerSettled = true;
@@ -1229,7 +1244,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   };
 
   try {
-    const server = Bun.serve<WsData>({
+    const server = (opts.serve ?? Bun.serve)<WsData>({
       hostname: host,
       port,
       ...(tls ? { tls: { cert: tls.cert, key: tls.key } } : {}),
@@ -1356,6 +1371,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 record,
                 spec: null,
                 liveCapture: null,
+                finalizingSessions: new Set(),
               },
             });
           } finally {
@@ -1946,8 +1962,20 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                   protocolError(ws, "abort requires a valid turn id");
                   return;
                 }
-                if (ws.data.current?.turnId === msg.turnId) abortTurn(ws.data.current, "turn aborted by client");
+                if (ws.data.current?.turnId === msg.turnId) {
+                  const current = ws.data.current;
+                  if (current.streamSession && ws.data.finalizingSessions.has(current.streamSession)) {
+                    if (!current.deferredClientAbort) {
+                      current.deferredClientAbort = true;
+                      const finishAbort = (): void => queueMicrotask(() => {
+                        if (ws.data.current === current) abortTurn(current, "turn aborted by client");
+                      });
+                      void current.streamSession.final.then(finishAbort, finishAbort);
+                    }
+                  } else abortTurn(current, "turn aborted by client");
+                }
                 if (ws.data.pending?.turnId === msg.turnId) {
+                  if (ws.data.pending.streamSession && ws.data.finalizingSessions.has(ws.data.pending.streamSession)) return;
                   ws.data.pending.lease.abort(new Error("turn aborted by client"));
                   dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
                   ws.data.pending = null;
@@ -1958,9 +1986,10 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               return;
             }
             if (msg.type === "capture_abort" && ws.data.protocol === 2 && isProtocolId(msg.turnId)) {
-              if (ws.data.liveCapture?.turnId === msg.turnId) {
+              if (ws.data.liveCapture?.turnId === msg.turnId && !ws.data.liveCapture.finalizing) {
                 ws.data.liveCapture.abort.abort();
                 ws.data.liveCapture.session?.abort();
+                ws.data.liveCapture.pendingPcm = [];
                 ws.data.liveCapture.failed = true;
               }
               return;
@@ -2016,53 +2045,93 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             if (!frame) { protocolError(ws, "invalid live PCM frame", turnId); return; }
             let capture = ws.data.liveCapture;
             if (capture?.turnId !== turnId) {
+              if (endedCaptureFinals.size >= MAX_WAITING_LIVE_FINALS) {
+                protocolError(ws, "live STT final queue is full", turnId);
+                return;
+              }
               if (frame.sequence !== 1 || ws.data.recentTurnIds.includes(turnId) ||
                   ws.data.current?.turnId === turnId || ws.data.pending?.turnId === turnId) {
                 protocolError(ws, "duplicate turn or invalid first live PCM sequence", turnId);
                 return;
               }
-              capture?.abort.abort();
-              capture?.session?.abort();
+              if (capture && !capture.finalizing) {
+                capture.abort.abort();
+                capture.session?.abort();
+                capture.pendingPcm = [];
+              }
               const abort = new AbortController();
               capture = {
-                turnId, nextSequence: 1, sampleRate: frame.sampleRate, bytes: 0,
+                turnId, order: ++nextCaptureOrder, nextSequence: 1, sampleRate: frame.sampleRate, bytes: 0,
                 startedAt: performance.now(), lastCaptionAt: -Infinity,
                 latestPartial: "", session: null, failed: false, abort, finalizing: false,
+                pendingPcm: [], waitingForSeat: null,
               };
               ws.data.liveCapture = capture;
               const owner = capture;
-              try {
-                capture.session = openSttStream({
-                  signal: AbortSignal.any([abort.signal, shutdownController.signal]), sampleRate: frame.sampleRate,
-                  onPartial: (text, at) => {
-                    if (ws.data.liveCapture !== owner || owner.abort.signal.aborted || owner.failed || !accepting) return;
-                    owner.latestPartial = text;
-                    owner.firstPartialMs ??= Math.max(0, at - owner.startedAt);
-                    if (owner.firstPartialMs !== undefined && owner.finalizing) {
-                      ws.data.latencyTurns.get(owner.turnId)?.turn.setStreamingStt("streaming", owner.firstPartialMs);
-                    }
-                    if (at - owner.lastCaptionAt >= 100) {
-                      owner.lastCaptionAt = at;
-                      sendJson(ws, withTurn(ws, owner.turnId, { type: "partial_transcript", text: text.slice(0, 16_384) }));
-                    }
-                  },
-                });
-                void capture.session.final.then(
-                  () => { if (ws.data.liveCapture === owner) ws.data.liveCapture = null; },
-                  () => { owner.failed = true; if (ws.data.liveCapture === owner && owner.finalizing) ws.data.liveCapture = null; },
-                );
-              } catch { capture.failed = true; }
+              const openOwner = (): void => {
+                if (owner.abort.signal.aborted || (!owner.finalizing && ws.data.liveCapture !== owner)
+                    || !accepting || !sockets.has(ws)) {
+                  owner.pendingPcm = [];
+                  return;
+                }
+                try {
+                  const currentOpen = resolveSttStream?.();
+                  if (!currentOpen) throw new Error("live STT is unavailable");
+                  owner.session = currentOpen({
+                    signal: AbortSignal.any([abort.signal, shutdownController.signal]), sampleRate: frame.sampleRate,
+                    onPartial: (text, at) => {
+                      if (ws.data.liveCapture !== owner || owner.abort.signal.aborted || owner.failed || !accepting) return;
+                      owner.latestPartial = text;
+                      owner.firstPartialMs ??= Math.max(0, at - owner.startedAt);
+                      if (owner.firstPartialMs !== undefined && owner.finalizing) {
+                        ws.data.latencyTurns.get(owner.turnId)?.turn.setStreamingStt("streaming", owner.firstPartialMs);
+                      }
+                      if (at - owner.lastCaptionAt >= 100) {
+                        owner.lastCaptionAt = at;
+                        sendJson(ws, withTurn(ws, owner.turnId, { type: "partial_transcript", text: text.slice(0, 16_384) }));
+                      }
+                    },
+                  });
+                  void owner.session.final.then(
+                    () => { if (ws.data.liveCapture === owner) ws.data.liveCapture = null; },
+                    () => { owner.failed = true; if (ws.data.liveCapture === owner && owner.finalizing) ws.data.liveCapture = null; },
+                  );
+                  for (const pcm of owner.pendingPcm) owner.session.push(pcm);
+                  owner.pendingPcm = [];
+                } catch {
+                  owner.failed = true;
+                  owner.pendingPcm = [];
+                  owner.session?.abort();
+                }
+              };
+              const priorFinals = [...endedCaptureFinals];
+              if (priorFinals.length) {
+                capture.waitingForSeat = Promise.allSettled(priorFinals).then(openOwner);
+              } else openOwner();
             }
-            if (capture.finalizing || !admitStreamPcmChunk(frame, capture.nextSequence, capture.sampleRate, capture.bytes)) {
+            if (capture.finalizing) {
+              protocolError(ws, "live PCM arrived after its final WAV", turnId);
+              return;
+            }
+            if (!admitStreamPcmChunk(frame, capture.nextSequence, capture.sampleRate, capture.bytes)) {
               capture.abort.abort(); capture.session?.abort(); capture.failed = true;
+              capture.pendingPcm = [];
               protocolError(ws, "live PCM sequence, rate, or size invalid", turnId);
               return;
             }
             capture.nextSequence++;
             capture.bytes += frame.pcm.byteLength;
             if (!capture.failed) {
-              try { capture.session?.push(frame.pcm); }
-              catch { capture.failed = true; capture.session?.abort(); }
+              try {
+                if (capture.session) capture.session.push(frame.pcm);
+                else if (capture.pendingPcm.length < MAX_PENDING_PCM_FRAMES) capture.pendingPcm.push(frame.pcm.slice());
+                else throw new RangeError("live PCM buffer has too many frames");
+              }
+              catch {
+                capture.failed = true;
+                capture.pendingPcm = [];
+                capture.session?.abort();
+              }
             }
             return;
           }
@@ -2121,17 +2190,47 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           const wav = new Uint8Array(u8.byteLength);
           wav.set(u8);
           const capture = ws.data.liveCapture?.turnId === turnId ? ws.data.liveCapture : null;
+          const inputOrder = capture?.order ?? ++nextCaptureOrder;
           if (capture) { capture.finalizing = true; if (capture.failed) ws.data.liveCapture = null; }
-          else if (ws.data.liveCapture) {
-            ws.data.liveCapture.abort.abort(); ws.data.liveCapture.session?.abort(); ws.data.liveCapture = null;
+          else if (ws.data.liveCapture && !ws.data.liveCapture.finalizing
+                   && ws.data.liveCapture.order < inputOrder) {
+            ws.data.liveCapture.abort.abort(); ws.data.liveCapture.session?.abort();
+            ws.data.liveCapture.pendingPcm = []; ws.data.liveCapture = null;
           }
+          const endSession = (): Promise<string> => {
+            if (!capture?.session || capture.failed) return Promise.reject(new Error("live transcription failed"));
+            const session = capture.session;
+            let result: Promise<string>;
+            try { result = session.end(); }
+            catch (error) {
+              session.abort();
+              return Promise.reject(error);
+            }
+            ws.data.finalizingSessions.add(session);
+            finalizingStreams.add(session);
+            void result.finally(() => {
+              ws.data.finalizingSessions.delete(session);
+              finalizingStreams.delete(session);
+            }).catch(() => {});
+            return result;
+          };
           const streamFinal = capture
-            ? capture.failed || !capture.session
+            ? capture.failed
               ? Promise.reject(new Error("live transcription failed"))
-              : capture.session.end()
+              : capture.waitingForSeat ? capture.waitingForSeat.then(endSession) : endSession()
             : undefined;
-          if (streamFinal) void streamFinal.catch(() => {});
-          await queueTurn(ws, wav.buffer, turnId, streamFinal, capture?.firstPartialMs, capture?.session ?? undefined).catch((err: unknown) => {
+          if (streamFinal) {
+            endedCaptureFinals.add(streamFinal);
+            void streamFinal.finally(() => { endedCaptureFinals.delete(streamFinal); }).catch(() => {});
+          }
+          // A newer WAV may replace the reply only after the older recognizer
+          // has delivered its final. The live socket's own deadline bounds this.
+          if (capture?.waitingForSeat) await capture.waitingForSeat;
+          else if (!capture && endedCaptureFinals.size) {
+            await Promise.allSettled([...endedCaptureFinals]);
+          }
+          if (!sockets.has(ws) || !accepting) return;
+          await queueTurn(ws, wav.buffer, turnId, streamFinal, capture?.firstPartialMs, capture?.session ?? undefined, inputOrder).catch((err: unknown) => {
             const detail = err instanceof Error ? err.message : String(err);
             log("error", `web-voice queue failed: ${detail}`);
             protocolError(ws, "turn queue failed", turnId);
@@ -2146,8 +2245,16 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         },
         close(ws) {
           ws.data.liveCapture?.abort.abort();
-          ws.data.liveCapture?.session?.abort();
+          if (ws.data.liveCapture?.session && !ws.data.finalizingSessions.has(ws.data.liveCapture.session)) {
+            ws.data.liveCapture.session.abort();
+          }
+          if (ws.data.liveCapture) ws.data.liveCapture.pendingPcm = [];
           ws.data.liveCapture = null;
+          for (const session of ws.data.finalizingSessions) {
+            session.abort();
+            finalizingStreams.delete(session);
+          }
+          ws.data.finalizingSessions.clear();
           if (ws.data.pendingClientSlot) pendingClients = Math.max(0, pendingClients - 1);
           if (ws.data.departureCloseTimer !== null) {
             clearTimeout(ws.data.departureCloseTimer);
@@ -2243,8 +2350,16 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
 
       for (const ws of sockets) {
         ws.data.liveCapture?.abort.abort();
-        ws.data.liveCapture?.session?.abort();
+        if (ws.data.liveCapture?.session && !ws.data.finalizingSessions.has(ws.data.liveCapture.session)) {
+          ws.data.liveCapture.session.abort();
+        }
+        if (ws.data.liveCapture) ws.data.liveCapture.pendingPcm = [];
         ws.data.liveCapture = null;
+        for (const session of ws.data.finalizingSessions) {
+          session.abort();
+          finalizingStreams.delete(session);
+        }
+        ws.data.finalizingSessions.clear();
         if (ws.data.departureCloseTimer !== null) {
           clearTimeout(ws.data.departureCloseTimer);
           ws.data.departureCloseTimer = null;
