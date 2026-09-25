@@ -23,6 +23,10 @@ Options:
 
 - `--lan` serves the page over HTTPS to other devices on your network, for a
   headless box. It uses a self-signed certificate, so accept the warning once.
+  If the box runs a firewall, pick a fixed `--port` and allow it from your
+  LAN first. With ufw, for example:
+  `sudo ufw allow from 192.168.1.0/24 to any port <port> proto tcp`. Delete
+  the rule when setup is done.
 - `--home <dir>` writes to another directory instead of `~/.cicero`, so you can
   try setup without touching your real config. `cicero start` reads only the
   default home, so the hand-off shows the copy command.
