@@ -39,7 +39,7 @@ test("Multica wrapped list converts ISO timestamps and uses category only for cu
     { ...issue, id: "wontfix", status: "wontfix", status_category: "closed" },
     { ...issue, id: "builtin", status: "todo", status_category: "done" }], total: 6, limit: 50, offset: 0, has_more: false };
   const tasks = await listViaCli(["fake-multica"], { preset: "multica", runCommand: fakeCommand(payload) });
-  const base = { title: "Work", assignee: null, parent_ids: ["parent"], created_at: seconds, started_at: null, completed_at: null };
+  const base = { title: "Work", assignee: null, parent_ids: ["parent"], priority: "p2", created_at: seconds, started_at: null, completed_at: null };
   expect(tasks).toEqual([
     { id: "work", status: "in_progress", ...base },
     { id: "triage", status: "todo", ...base },
@@ -59,11 +59,21 @@ test("Paperclip camelCase timestamps, parentId, and agent/user assignee preceden
   const tasks = await listViaCli(["fake-paperclip"], { preset: "paperclip", assignees: { "agent-id": "coder", "user-id": "operator" },
     runCommand: fakeCommand([row, { ...row, id: "p2", assigneeAgentId: null, parentId: null }]) });
   expect(tasks).toEqual([
-    { id: "p1", title: "Work", status: "review", assignee: "coder", parent_ids: ["p0"], created_at: seconds, started_at: seconds, completed_at: null },
-    { id: "p2", title: "Work", status: "review", assignee: "operator", parent_ids: [], created_at: seconds, started_at: seconds, completed_at: null },
+    { id: "p1", title: "Work", status: "review", assignee: "coder", parent_ids: ["p0"], priority: "p2", created_at: seconds, started_at: seconds, completed_at: null },
+    { id: "p2", title: "Work", status: "review", assignee: "operator", parent_ids: [], priority: "p2", created_at: seconds, started_at: seconds, completed_at: null },
   ]);
   expect(normalizeBoardList([row], { preset: "paperclip" })[0]!.assignee).toBeNull();
   expect(normalizeBoardList([row], { preset: "paperclip", assignees: { "user-id": "operator" } })[0]!.assignee).toBeNull();
+});
+
+test("board priorities map to bounded P0/P1/P2 values; Hermes has no priority", () => {
+  const rows = ["urgent", "critical", "high", "medium", "low", "none", "unknown", null, undefined]
+    .map((priority, index) => ({ id: String(index), title: "Task", status: "blocked", priority }));
+  expect(normalizeBoardList({ issues: rows }, { preset: "multica" }).map((task) => task.priority))
+    .toEqual(["p0", "p2", "p1", "p2", "p2", "p2", "p2", "p2", "p2"]);
+  expect(normalizeBoardList(rows, { preset: "paperclip" }).map((task) => task.priority))
+    .toEqual(["p2", "p0", "p1", "p2", "p2", "p2", "p2", "p2", "p2"]);
+  expect(normalizeBoardList(rows, { preset: "hermes" }).every((task) => task.priority === undefined)).toBe(true);
 });
 
 for (const [preset, statuses, expected] of [
@@ -111,7 +121,7 @@ test("malformed lists throw and malformed fields are bounded or discarded", asyn
     status: "unknown".repeat(20), assigneeAgentId: "secret-id", parentId: "p".repeat(200), createdAt: "invalid", startedAt: 123,
     completedAt: "infinity" }], { preset: "paperclip" });
   expect(tasks).toEqual([{ id: "x".repeat(128), title: "x".repeat(240), status: "unknown".repeat(20).slice(0, 64), unknown_status: true,
-    assignee: null, parent_ids: ["p".repeat(128)], created_at: null, started_at: null, completed_at: null }]);
+    assignee: null, parent_ids: ["p".repeat(128)], priority: "p2", created_at: null, started_at: null, completed_at: null }]);
   expect(boundedParentIds(Array(40).fill("p".repeat(200)))).toEqual(Array(32).fill("p".repeat(128)));
   expect(boundedParentIds([null, 1, "", "p"])).toEqual(["p"]);
   expect(normalizeBoardList([{ id: "x", status: "todo", created_at: Infinity, started_at: NaN }])[0]).toMatchObject({ created_at: null, started_at: null });

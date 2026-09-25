@@ -116,6 +116,7 @@ interface SpecState {
 /** Per-connection state for a streaming voice WebSocket. */
 interface WsData {
   pendingClientSlot: boolean;
+  callClient: boolean;
   sessionId: string;
   protocol: 1 | 2;
   /** The page says this connection continues a conversation rather than starting one. */
@@ -288,7 +289,7 @@ export interface WebVoiceHandle {
    * broadcast, park when nobody's connected) — for in-process callers like the
    * kanban watcher. Resolves null when unavailable, saturated, or quiescing.
    */
-  notify: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal }) => Promise<{ delivered: number; parked: boolean; deferred?: boolean } | null>;
+  notify: (text: string, voice?: string, opts?: { urgent?: boolean; telegramMirror?: boolean; textOnly?: boolean; parkForCall?: boolean; signal?: AbortSignal }) => Promise<{ delivered: number; parked: boolean; deferred?: boolean } | null>;
   /** Broadcast a newly pending brain-owned confirmation to live clients. */
   confirmPending: (summary: string, nonce: string) => number;
   /** Reconcile connected browser handshakes after a provider cutover. */
@@ -865,13 +866,13 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       releaseJob();
     }
   };
-  // Notifications that arrived with no client connected are parked and spoken
-  // to the next client that connects ("speak when you're back"). Bounded and
-  // time-limited: stale news is worse than no news.
+  // Notifications that arrived with no client connected are parked for the
+  // next connection. A P0 callback may reserve its clip for the call client,
+  // even if a browser already heard the announcement. Bounded and time-limited.
   // audioBase64: null marks a lazily-parked item — the clip is synthesized at
   // flush time via onNotifyRender, so news nobody ever hears (parked clips die
   // of TTL more often than they get heard) never costs a GPU synthesis.
-  const parked: Array<{ text: string; voice?: string; audioBase64: string | null; at: number }> = [];
+  const parked: Array<{ text: string; voice?: string; audioBase64: string | null; at: number; callOnly?: boolean }> = [];
   const PARK_MAX = 10;
   const PARK_TTL_MS = 4 * 60 * 60 * 1000;
   // Ordering note: a live notify dispatched while an old parked item is mid-
@@ -884,7 +885,11 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     while (parked.length) {
       if (shutdownController.signal.aborted) return;
       if (clients.size === 0) return;
-      const p = parked.shift();
+      const callConnected = [...clients].some((ws) => ws.data.callClient);
+      const urgentCallIndex = callConnected ? parked.findIndex((item) => item.callOnly) : -1;
+      const index = urgentCallIndex >= 0 ? urgentCallIndex : parked.findIndex((item) => !item.callOnly);
+      if (index < 0) return;
+      const [p] = parked.splice(index, 1);
       if (!p || Date.now() - p.at > PARK_TTL_MS) continue;
       let audioBase64 = p.audioBase64;
       if (audioBase64 === null) {
@@ -913,6 +918,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       // and now must not eat the item — or strand it while others listen.
       let sent = false;
       for (const ws of clients) {
+        if (p.callOnly && !ws.data.callClient) continue;
         try {
           if (sendJson(ws, withSession(ws, { type: "notify", text: p.text, audioBase64 }))) {
             sent = true;
@@ -968,11 +974,23 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   const dispatchNotify = async (
     text: string,
     voice?: string,
-    notifyOpts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal },
+    notifyOpts?: { urgent?: boolean; telegramMirror?: boolean; textOnly?: boolean; parkForCall?: boolean; signal?: AbortSignal },
   ): Promise<{ delivered: number; parked: boolean; deferred?: boolean } | null> => {
     if (!onNotify) return null;
     const signal = notifyOpts?.signal ?? shutdownController.signal;
     if (signal.aborted) return null;
+    if (notifyOpts?.textOnly) {
+      let delivered = 0;
+      for (const ws of clients) {
+        if (sendJson(ws, withSession(ws, { type: "notify", text, audioBase64: "" }))) delivered++;
+      }
+      if (delivered === 0) {
+        parked.push({ text, voice, audioBase64: "", at: Date.now() });
+        if (parked.length > PARK_MAX) parked.shift();
+      }
+      reportNotified(text, { delivered, parked: delivered === 0 });
+      return { delivered, parked: delivered === 0 };
+    }
     // With a lazy renderer wired and nobody connected, tell the daemon to skip
     // the synthesis: quiet hours and the Telegram mirror still apply, but the
     // clip is rendered only when a client shows up to hear it.
@@ -1025,12 +1043,14 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     for (const ws of clients) {
       if (sendJson(ws, withSession(ws, { type: "notify", text, audioBase64 }))) delivered++;
     }
-    if (delivered === 0) {
+    const callAlreadyListening = [...clients].some((ws) => ws.data.callClient);
+    if (delivered === 0 || (notifyOpts?.parkForCall && !callAlreadyListening)) {
       // The daemon may render even when told it could skip (a Telegram voice
       // note needs the clip now) — an audio-bearing park keeps that work.
-      parked.push({ text, voice, audioBase64: lazy && audioBase64 === "" ? null : audioBase64, at: Date.now() });
+      parked.push({ text, voice, audioBase64: lazy && audioBase64 === "" ? null : audioBase64,
+        at: Date.now(), ...(notifyOpts?.parkForCall ? { callOnly: true } : {}) });
       if (parked.length > PARK_MAX) parked.shift();
-      log("info", `notify: "${text.substring(0, 60)}" — no client connected, parked for the next one`);
+      log("info", `notify: "${text.substring(0, 60)}" — parked for the next client`);
       reportNotified(text, { delivered, parked: true });
       return { delivered, parked: true };
     }
@@ -1054,7 +1074,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   const notify = async (
     text: string,
     voice?: string,
-    notifyOpts?: { urgent?: boolean; telegramMirror?: boolean; signal?: AbortSignal },
+    notifyOpts?: { urgent?: boolean; telegramMirror?: boolean; textOnly?: boolean; parkForCall?: boolean; signal?: AbortSignal },
   ): Promise<{ delivered: number; parked: boolean; deferred?: boolean } | null> => {
     const normalizedText = text.trim();
     const normalizedVoice = voice?.trim() || undefined;
@@ -1358,6 +1378,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             upgraded = srv.upgrade(req, {
               data: {
                 pendingClientSlot: true,
+                callClient: url.searchParams.get("client") === "call",
                 sessionId: crypto.randomUUID(),
                 protocol,
                 resume,

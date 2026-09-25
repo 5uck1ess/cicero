@@ -1216,9 +1216,12 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
     if (isRecord(config.notify.kanban)) {
       checkKnownKeys(config.notify.kanban, "notify.kanban", [
-        "enabled", "interval_seconds", "command", "task_command", "call_back", "nudge_after_minutes", "preset", "assignees",
+        "enabled", "interval_seconds", "command", "task_command", "call_back", "escalation", "nudge_after_minutes", "preset", "assignees",
       ], issues);
-      const { preset, assignees } = config.notify.kanban;
+      const { preset, assignees, escalation } = config.notify.kanban;
+      if (escalation !== undefined && escalation !== "priority") {
+        issues.push("notify.kanban.escalation must be priority");
+      }
       if (preset !== undefined && (typeof preset !== "string" || !["hermes", "multica", "paperclip"].includes(preset))) {
         issues.push("notify.kanban.preset must be hermes, multica, or paperclip");
       }

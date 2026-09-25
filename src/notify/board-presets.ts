@@ -61,6 +61,13 @@ function timestamp(value: unknown, preset: BoardPreset): number | null {
   return typeof seconds === "number" && Number.isFinite(seconds) ? seconds : null;
 }
 
+function priority(value: unknown, preset: BoardPreset): KanbanTask["priority"] {
+  if (preset === "hermes") return undefined;
+  if (value === (preset === "multica" ? "urgent" : "critical")) return "p0";
+  if (value === "high") return "p1";
+  return "p2";
+}
+
 /** Normalize only bounded CLI output; retain no board-specific payload on tasks. */
 export function normalizeBoardList(value: unknown, options: BoardNormalizationOptions = {}): KanbanTask[] {
   const preset = options.preset ?? "hermes";
@@ -94,6 +101,7 @@ export function normalizeBoardList(value: unknown, options: BoardNormalizationOp
       id: row.id.slice(0, 128),
       title: typeof row.title === "string" ? row.title.slice(0, 240) : "(untitled)",
       status,
+      ...(preset === "hermes" ? {} : { priority: priority(row.priority, preset) }),
       ...(mapped ? {} : { unknown_status: true }),
       assignee: typeof name === "string" ? name.slice(0, 128) : null,
       created_at: timestamp(preset === "paperclip" ? row.createdAt : row.created_at, preset),

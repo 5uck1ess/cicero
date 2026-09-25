@@ -34,6 +34,7 @@ export interface KanbanTask {
   id: string;
   title: string;
   status: string;
+  priority?: "p0" | "p1" | "p2";
   assignee?: string | null;
   /** Unix seconds — present in the board CLI's JSON output. */
   created_at?: number | null;
@@ -512,6 +513,7 @@ function boundedTask(task: KanbanTask): KanbanTask | null {
     id: task.id.slice(0, 128),
     title: typeof task.title === "string" ? task.title.slice(0, 240) : "(untitled)",
     status: task.status.slice(0, 64),
+    ...(task.priority === "p0" || task.priority === "p1" || task.priority === "p2" ? { priority: task.priority } : {}),
     assignee: typeof task.assignee === "string" ? task.assignee.slice(0, 128) : null,
     created_at: typeof task.created_at === "number" && Number.isFinite(task.created_at) ? task.created_at : null,
     ...(task.unknown_status ? { unknown_status: true } : {}),
