@@ -145,8 +145,9 @@ about everyone. Mentions such as “that roll call was long” are normal turns.
 The model returns JSON containing `intent`, `target`, `request_now`, and
 `confidence`. Only a present request meeting the confidence threshold acts.
 Targets must match a lane name or alias exactly (case-insensitive); an unknown
-transfer target becomes a normal turn, and an unknown dial-back target becomes
-an untargeted call. Supported servers receive a JSON-schema response format;
+transfer target becomes a normal turn. An unknown dial-back target keeps its
+name, so the dial-back handler answers that it could not reach that employee and
+places no call. Supported servers receive a JSON-schema response format;
 servers rejecting it receive a strict-JSON prompt without the format parameter.
 Both paths validate and bound the output.
 
