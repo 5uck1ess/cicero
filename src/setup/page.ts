@@ -296,6 +296,9 @@ async function goInner(id) {
   render();
   window.scrollTo(0, 0);
 }
+// A choice whose probe failed was not added to the draft: keep the operator on that step.
+function blockedByProbe(s) { var p = s && s.detected && s.detected.probe; return p && p.ok === false ? (p.message || 'The check failed.') : null; }
+var tried = {};
 function next(id) { var i = ORDER.indexOf(id); return ORDER[Math.min(i + 1, ORDER.length - 1)]; }
 
 /* ---------- Overview diagram ---------- */
@@ -438,7 +441,7 @@ function renderPicker(id, step) {
     options = f.options || [];
   }
   var saved = state.selectedChoices && state.selectedChoices[id];
-  var picked = saved || f.recommended || options[0];
+  var picked = (blockedByProbe(state) && tried[id]) || saved || f.recommended || options[0];
   if (extra && extra.items.indexOf(picked) >= 0) { extra.value = picked; picked = extra.key; }
   if (extra && !extra.value) extra.value = extra.items[0];
 
@@ -520,7 +523,8 @@ function renderPicker(id, step) {
       panel.append(again);
       detail.append(panel);
     }
-    if (f.probe && f.probe.message) detail.append(h('p', { class: 'note-line', text: f.probe.message }));
+    var failed = blockedByProbe(state);
+    if (failed && tried[id] === o) detail.append(h('div', { class: 'panel warn', role: 'alert' }, [h('h2', { text: 'That check failed' }), h('p', { text: failed }), h('p', { text: id === 'board' ? 'Fix the CLI and continue again, or choose No board.' : 'Fix it and continue again, or pick another option.' })]));
   }
   draw(); drawDetail();
   app.append(group, detail, why(step));
@@ -535,7 +539,9 @@ function renderPicker(id, step) {
       else if (k === 'apiKey' && !el.value) continue;
       else c[k] = el.value;
     }
+    tried[id] = c.id;
     state = await api('/api/choice', { id: id, choice: c });
+    if (blockedByProbe(state)) { render(); return; }
     await go(next(id));
   }, row));
   app.append(row);

@@ -17,3 +17,14 @@ test("setup page and PWA icon share the brand assets", () => {
     expect(ICON_SVG).toContain(path);
   }
 });
+
+test("a failed choice probe keeps the operator on that step", () => {
+  const page = setupPage();
+  const source = page.match(/function blockedByProbe\(s\) \{[^\n]+\}/)![0];
+  const blockedByProbe = new Function(`${source}; return blockedByProbe;`)() as (s: unknown) => string | null;
+  expect(blockedByProbe({ detected: { probe: { ok: false, message: "Board probe failed; check CLI setup and retry" } } })).toBe("Board probe failed; check CLI setup and retry");
+  expect(blockedByProbe({ detected: { probe: { ok: true, message: "Found 3 tasks" } } })).toBeNull();
+  expect(blockedByProbe({ detected: {} })).toBeNull();
+  // Continue re-renders the same step instead of navigating on a failed probe.
+  expect(page).toMatch(/state = await api\('\/api\/choice', \{ id: id, choice: c \}\);\s+if \(blockedByProbe\(state\)\) \{ render\(\); return; \}\s+await go\(next\(id\)\);/);
+});
