@@ -562,6 +562,22 @@ test("global admission returns 429 instead of spawning unbounded chat work", asy
   expect((await Promise.all(active)).every((response) => response.status === 200)).toBe(true);
 });
 
+test("HTTP chat delivers valid long replies without aborting its turn", async () => {
+  for (const length of [16_385, 50_000]) {
+    const reply = "x".repeat(length);
+    const base = start({ onChat: async () => reply });
+    const response = await fetch(base + "/api/chat", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "give me the report" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ reply });
+    await handle?.stop();
+    handle = null;
+  }
+});
+
 test("a say job re-reports a departure that arrived while its lease was active", async () => {
   // Say holds the same foreground lease as chat but has no route-specific
   // completion path. Re-reporting at the route left a stopped conversation's

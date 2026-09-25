@@ -14,6 +14,8 @@ import type { SpeculativeTurn } from "./speculative";
 import { SpeculativeSideEffectError } from "../call-intent";
 import { beginOwnedTone, settleTone, type OwnedTone, type ToneOptions } from "./tone";
 import { writeSecureTempAudio } from "../platform/secure-temp-audio";
+import type { TurnLease } from "../turn-coordinator";
+import { MAX_TURN_AUDIO_BYTES } from "./protocol";
 import {
   MAX_DECODED_WAV_BYTES,
   MAX_DECODED_WAV_DURATION_MS,
@@ -65,7 +67,14 @@ export interface WebTurnResult {
 }
 
 const EMPTY = new ArrayBuffer(0);
+const MAX_TURN_TRANSCRIPT_CHARS = 16_384;
+const MAX_PARKED_REPLY_CHARS = 64 * 1024;
 export const OPERATIONAL_CONTEXT_CAPTURE_TIMEOUT_MS = 750;
+
+function boundedTranscript(text: string): string {
+  if (text.length > MAX_TURN_TRANSCRIPT_CHARS) throw new Error("turn transcript too long");
+  return text;
+}
 
 function throwIfTurnAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return;
@@ -113,7 +122,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     const sttPin = pinGeneration(deps.stt);
     let transcript: string;
     try {
-      transcript = (await sttPin.provider.transcribe(tmpFile, deps.signal))?.trim() ?? "";
+      transcript = boundedTranscript((await sttPin.provider.transcribe(tmpFile, deps.signal))?.trim() ?? "");
     } finally {
       sttPin.release();
     }
@@ -167,11 +176,13 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     const systemContext = await captureOperationalContext(deps.operationalContext, deps.signal);
     throwIfTurnAborted(deps.signal);
     brainTurnSignal = deps.signal;
-    const reply = (await deps.brain.send(
+    const rawReply = await deps.brain.send(
       tag ? `${transcript}\n\n${tag}` : transcript,
       { signal: deps.signal, systemContext: systemContext ?? undefined },
-    )).trim();
+    );
     throwIfTurnAborted(deps.signal);
+    if (rawReply.length > 64 * 1024) throw new Error("turn reply too long");
+    const reply = rawReply.trim();
     if (!reply) return { transcript, reply: "", audio: EMPTY };
 
     // The reply text stays complete (logs, history); only the VOICE is gated.
@@ -498,6 +509,7 @@ async function gateForSpeech(reply: string, tldr?: TldrOptions): Promise<string>
 export interface WebReplySink {
   transcript(text: string): void;     // what STT heard
   sentence(text: string): void;       // a reply sentence (text), sent before its audio
+  notice?(text: string): void;        // progress spoken through the sentence transport frame
   audio(wav: ArrayBuffer, text?: string): void | Promise<void>; // text belongs to this audio chunk
   control(message: { type: "volume"; delta: number; volume: number } | { type: "rate"; rate: number }): void;
   done(): void;                        // turn complete
@@ -506,6 +518,29 @@ export interface WebReplySink {
   aborted(): boolean;
   /** null for transports without client playback acknowledgements. */
   playedText?(): string[] | null;
+}
+
+/** Bridge the transport-neutral coordinator events to an existing web sink. */
+export function coordinatedWebSink(lease: TurnLease, sink: WebReplySink): WebReplySink {
+  return {
+    transcript: (text) => { void lease.emit({ type: "transcript", text }); },
+    sentence: (text) => { void lease.emit({ type: "sentence", text }); },
+    notice: (text) => { void lease.emit({ type: "notice", text }); },
+    audio: (audio, text) => {
+      // The web sink reports invalid oversized clips and then lets the turn
+      // finish. Let it reject them before coordinator output accounting.
+      if (audio.byteLength > MAX_TURN_AUDIO_BYTES) {
+        if (lease.active && !sink.aborted()) return sink.audio(audio, text);
+        return;
+      }
+      return lease.emit({ type: "audio", audio, text });
+    },
+    control: (message) => { void lease.emit({ type: "control", message }); },
+    done: () => lease.complete(),
+    error: (message) => lease.fail(message),
+    aborted: () => lease.signal.aborted || sink.aborted(),
+    playedText: () => sink.playedText?.() ?? null,
+  };
 }
 
 async function* oneChunk(text: string): AsyncGenerator<string> {
@@ -882,7 +917,7 @@ export async function streamWebTurn(
   if (spec?.claim()) {
     const finalMs = wavDurationMs(wav);
     if (finalMs !== null && spec.coverageOk(finalMs)) {
-      const transcript = (await spec.transcript())?.trim() ?? "";
+      const transcript = boundedTranscript((await spec.transcript())?.trim() ?? "");
       if (deps.signal?.aborted || sink.aborted()) {
         await spec.abort();
         return;
@@ -946,7 +981,7 @@ export async function streamWebTurn(
     if (deps.signal?.aborted || sink.aborted()) return;
     let transcript: string;
     try {
-      transcript = (await sttPin.provider.transcribe(tmpFile, deps.signal))?.trim() ?? "";
+      transcript = boundedTranscript((await sttPin.provider.transcribe(tmpFile, deps.signal))?.trim() ?? "");
     } finally {
       // Release as soon as decoding is done. Holding it across the brain+TTS
       // reply would pin a retired STT generation for the whole turn, and a swap
@@ -1005,7 +1040,7 @@ export async function streamWebTextTurn(text: string, deps: WebStreamDeps, sink:
   const timer = newTurnTimer();
   try {
     if (deps.signal?.aborted || sink.aborted()) return;
-    const transcript = text.trim();
+    const transcript = boundedTranscript(text.trim());
     sink.transcript(transcript);
     if (!transcript) { sink.done(); return; }
     await streamReply(transcript, deps, sink, timer);
@@ -1032,6 +1067,7 @@ async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink
     for await (const chunk of chunks) {
       if (sink.aborted()) break;
       for (const part of chunk.parts) sink.sentence(part);
+      if (sink.aborted()) break;
       const audio = admitProviderAudio(
         await pin.provider.generateAudio(chunk.text, undefined, { speed: deps.voice?.state.rate, signal: deps.signal }),
       );
@@ -1177,6 +1213,7 @@ async function streamReply(
     let firstSentence = false;
     let firstAudio = false;
     let parked = false;
+    let parkedTextChars = 0;
     let noticeCount = 0;
     let toolNoticeSent = false;
 
@@ -1253,9 +1290,13 @@ async function streamReply(
       cancelFiller();
       noticeSpeech = noticeSpeech.then(async () => {
         if (noticeClosed || deps.signal?.aborted || turnAbort?.signal.aborted || sink.aborted() || parked) return;
-        const audio = admitProviderAudio(await ttsPin.provider.generateAudio(notice.text, undefined, { speed: deps.voice?.state.rate }));
+        const audio = admitProviderAudio(await ttsPin.provider.generateAudio(notice.text, undefined, {
+          speed: deps.voice?.state.rate, signal: turnAbort?.signal ?? deps.signal,
+        }));
         if (noticeClosed || deps.signal?.aborted || turnAbort?.signal.aborted || sink.aborted() || parked || !audio.byteLength) return;
-        sink.sentence(notice.text);
+        if (sink.notice) sink.notice(notice.text);
+        else sink.sentence(notice.text);
+        if (sink.aborted()) return;
         sink.audio(audio);
         firstAudio = true;
       }).catch(() => { /* an optional notice cannot fail the reply */ });
@@ -1279,7 +1320,7 @@ async function streamReply(
     const parkedTexts: string[] = [];
     const stopConsuming = () => {
       const stopped = deps.signal?.aborted === true
-        || (parked ? Date.now() > parkDeadline : sink.aborted());
+        || (parked ? Date.now() > parkDeadline || parkedTextChars >= MAX_PARKED_REPLY_CHARS : sink.aborted());
       if (stopped) cancelFiller();
       return stopped;
     };
@@ -1305,13 +1346,26 @@ async function streamReply(
       const chunks = sentenceGroups(trimmed, deps.coalesce, turnAbort?.signal);
 
       for await (const chunk of chunks) {
-        if (parked) { parkedTexts.push(...chunk.parts); continue; }
+        if (parked) {
+          for (const part of chunk.parts) {
+            if (parkedTextChars + part.length > MAX_PARKED_REPLY_CHARS) {
+              parkedTextChars = MAX_PARKED_REPLY_CHARS;
+              turnAbort?.abort(new Error("parked reply limit reached"));
+              break;
+            }
+            parkedTexts.push(part);
+            parkedTextChars += part.length;
+          }
+          if (parkedTextChars >= MAX_PARKED_REPLY_CHARS) break;
+          continue;
+        }
         if (sink.aborted()) break;
         if (!firstSentence) { firstSentence = true; timer.mark("first_sentence"); }
         control ??= deps.brain.wasControlTurn?.() ?? false;
         await noticeSpeech;
         if (deps.signal?.aborted || sink.aborted()) break;
         for (const part of chunk.parts) sink.sentence(part);
+        if (sink.aborted()) break;
 
         let stop = false;
         const render = async (call: { text: string; parts: string[] }): Promise<void> => {
@@ -1396,6 +1450,11 @@ async function streamReply(
         cancelFiller();
         const line = parkCfg.line ?? DEFAULT_PARK_LINE;
         sink.sentence(line);
+        if (sink.aborted()) {
+          turnAbort?.abort(new Error("parked hand-back cancelled"));
+          await consumption;
+          return;
+        }
         const audio = admitProviderAudio(
           await ttsPin.provider.generateAudio(line, undefined, { speed: deps.voice?.state.rate, signal: turnAbort?.signal ?? deps.signal }),
         );
@@ -1440,6 +1499,7 @@ async function streamReply(
         } catch { /* summarizer down — the generic coda still tells the user there's more */ }
       }
       sink.sentence(coda);
+      if (sink.aborted()) return;
       const audio = admitProviderAudio(
         await ttsPin.provider.generateAudio(coda, undefined, { speed: deps.voice?.state.rate, signal: turnAbort?.signal ?? deps.signal }),
       );

@@ -8,7 +8,9 @@ import { AudioPlaybackGate } from "./audio-pacing";
 import { MANIFEST, ICON_SVG } from "./pwa";
 import { VAD_ASSET_BY_NAME } from "./vad-assets";
 import { join } from "node:path";
-import type { WebTurnResult, WebReplySink } from "./turn";
+import { coordinatedWebSink, type WebTurnResult, type WebReplySink } from "./turn";
+import { TurnCoordinator, type TurnEvent, type TurnLease } from "../turn-coordinator";
+import { redactSecrets } from "../redact";
 import type { TlsMaterial } from "./tls";
 import type { SpeculativeTurn, Speculator } from "./speculative";
 import { isProbeFrame, decodeProbeFrame } from "./probe";
@@ -44,6 +46,7 @@ import {
 
 interface TurnState {
   turnId: string;
+  lease: TurnLease;
   aborted: boolean;
   controller: AbortController;
   signal: AbortSignal;
@@ -56,6 +59,8 @@ interface TurnState {
 interface PendingTurn {
   turnId: string;
   input: ArrayBuffer | string;
+  lease: TurnLease;
+  setSink: (sink: WebReplySink) => void;
 }
 
 interface SpecState {
@@ -90,6 +95,8 @@ interface WsData {
 }
 
 export interface WebVoiceServerOptions {
+  /** Shared single-operator owner supplied by the daemon. */
+  coordinator?: TurnCoordinator;
   /** Bind address. Default "0.0.0.0" so a headless box is reachable from a LAN browser. */
   host?: string;
   port: number;
@@ -362,6 +369,7 @@ export function sendAudioBounded(socket: Pick<import("bun").ServerWebSocket, "se
 function abortTurn(turn: TurnState | null, reason: string): void {
   if (!turn) return;
   turn.aborted = true;
+  turn.lease.abort(new Error(reason));
   if (!turn.controller.signal.aborted) turn.controller.abort(new Error(reason));
 }
 
@@ -440,6 +448,7 @@ function requestedId(req: Request, url: URL, header: string, query: string): str
  * because a headless box is driven from another machine's browser.
  */
 export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle | null {
+  const coordinator = opts.coordinator ?? new TurnCoordinator();
   const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onDictate, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness, confirmations } = opts;
   const scheme: "http" | "https" = tls ? "https" : "http";
   const configuredDrainTimeout = opts.shutdownDrainTimeoutMs;
@@ -723,6 +732,19 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     );
     return true;
   };
+  let nextBackgroundId = 0;
+  const ownBackground = (
+    task: Promise<void>, sessionId: string, turnId: string, source: "web" | "text",
+  ): boolean => {
+    if (!trackBackground(task)) return false;
+    const lease = coordinator.start({
+      sessionId, turnId: `${turnId}:background:${++nextBackgroundId}`,
+      source, text: "background turn work", lane: "background",
+      signal: shutdownController.signal,
+    });
+    void task.then(() => lease.settle(), () => lease.fail("background turn failed"));
+    return true;
+  };
   const unavailableMessage = (): string => accepting ? "server busy; retry later" : "server shutting down";
   const unavailableResponse = (): Response => accepting
     ? Response.json({ error: "server busy; retry later" }, { status: 429, headers: { "Retry-After": "1" } })
@@ -990,11 +1012,36 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     if (ws.data.recentTurnIds.length > 128) ws.data.recentTurnIds.shift();
     if (ws.data.latestProbeTurnId === turnId) ws.data.latestProbeTurnId = null;
 
-    // Latest input wins on this socket only. Its current sink is immediately
-    // invalidated, so even a handler that emits after observing the abort
-    // cannot leak stale text/audio into the replacement turn.
+    // Admit at ingress so a newer turn on this socket supersedes its previous
+    // handler, even while that handler winds down.
+    let outputSink: WebReplySink | null = null;
+    let lease: TurnLease;
+    try {
+      lease = coordinator.start({
+        sessionId: ws.data.sessionId, turnId,
+        source: typeof input === "string" ? "text" : "web",
+        ...(typeof input === "string" ? { text: input } : { audio: input }),
+        signal: shutdownController.signal,
+      }, (event: TurnEvent) => {
+        if (!outputSink) return;
+        switch (event.type) {
+          case "transcript": outputSink.transcript(event.text); break;
+          case "sentence": case "notice": outputSink.sentence(event.text); break;
+          case "audio": return outputSink.audio(event.audio, event.text);
+          case "control": outputSink.control(event.message as Parameters<WebReplySink["control"]>[0]); break;
+          case "done": outputSink.done(); break;
+          case "error": outputSink.error(event.message); break;
+          case "aborted": break;
+        }
+      });
+    } catch (error) {
+      if (!ws.data.busy) releaseJob();
+      throw error;
+    }
+    // Its current sink is immediately invalidated; late results are dropped.
     abortTurn(ws.data.current, "superseded by a newer turn");
-    ws.data.pending = { input, turnId };
+    ws.data.pending?.lease.abort(new Error("superseded before dispatch"));
+    ws.data.pending = { input, turnId, lease, setSink: (sink) => { outputSink = sink; } };
     if (ws.data.busy) return; // the running drain loop will pick it up
     ws.data.busy = true;
     try {
@@ -1004,9 +1051,10 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         const controller = new AbortController();
         const state: TurnState = {
           turnId: next.turnId,
+          lease: next.lease,
           aborted: false,
           controller,
-          signal: AbortSignal.any([controller.signal, shutdownController.signal]),
+          signal: AbortSignal.any([controller.signal, shutdownController.signal, next.lease.signal]),
           nextSequence: 0,
           delivered: new Map(),
           played: [],
@@ -1014,6 +1062,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         };
         if (shutdownController.signal.aborted) abortTurn(state, "web voice server shutting down");
         ws.data.current = state;
+        const rawSink = makeSink(ws, state);
+        next.setSink(rawSink);
         // Any in-flight speculation belongs to exactly one turn: a WAV turn
         // gets to adopt it; a typed turn (different input entirely) kills it.
         const specState = ws.data.spec;
@@ -1031,24 +1081,25 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         const handlerSpec = spec ? serverOwnedSpec(spec) : null;
         try {
           if (typeof next.input === "string") {
-            await onTextTurn?.(next.input, makeSink(ws, state), {
+            await onTextTurn?.(next.input, coordinatedWebSink(next.lease, rawSink), {
               record: ws.data.record,
               signal: state.signal,
-              trackBackground,
+              trackBackground: (task) => ownBackground(task, ws.data.sessionId, next.turnId, "text"),
             });
           } else {
-            await onStreamTurn?.(next.input, makeSink(ws, state), {
+            await onStreamTurn?.(next.input, coordinatedWebSink(next.lease, rawSink), {
               record: ws.data.record,
               spec: handlerSpec,
               signal: state.signal,
-              trackBackground,
+              trackBackground: (task) => ownBackground(task, ws.data.sessionId, next.turnId, "web"),
             });
           }
         } catch (err: unknown) {
           const m = err instanceof Error ? err.message : String(err);
           log("error", `web-voice ws turn failed: ${m}`);
-          if (!state.aborted) protocolError(ws, m, state.turnId);
+          if (!state.aborted) next.lease.fail(m);
         } finally {
+          next.lease.settle();
           await releaseSpec(spec);
           if (ws.data.current === state) {
             ws.data.current = null;
@@ -1343,15 +1394,36 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             }
             if (!text) return Response.json({ error: "missing text" }, { status: 400 });
             if (text.length > MAX_CHAT_TEXT_CHARS) return Response.json({ error: "text is too long" }, { status: 413 });
+            let lease: TurnLease;
             try {
-              const reply = await onChat(text, { signal });
-              if (signal.aborted) return requestAbortedResponse(signal);
+              lease = coordinator.start({
+                // HTTP chat requests have independent ownership even when a
+                // caller reuses a protocol session ID.
+                sessionId: crypto.randomUUID(),
+                turnId: requestedId(req, url, "x-cicero-turn-id", "turnId") ?? crypto.randomUUID(),
+                source: "text", text, signal,
+              });
+            } catch {
+              return Response.json({ error: "duplicate or invalid turn id" }, { status: 409 });
+            }
+            try {
+              if (!lease.active) return requestAbortedResponse(lease.signal);
+              lease.emit({ type: "transcript", text });
+              const reply = await onChat(text, { signal: lease.signal });
+              if (!lease.active) return requestAbortedResponse(lease.signal);
+              lease.emit({ type: "sentence", text: reply });
+              if (!lease.active) return requestAbortedResponse(lease.signal);
+              lease.complete();
               return Response.json({ reply });
             } catch (error) {
-              if (signal.aborted) return requestAbortedResponse(signal);
-              const message = error instanceof Error ? error.message : String(error);
+              if (lease.signal.aborted && lease.outcome !== "error") return requestAbortedResponse(lease.signal);
+              const detail = error instanceof Error ? error.message : String(error);
+              const message = detail.length > 4_096 ? "chat failed" : redactSecrets(detail);
+              lease.fail(message);
               log("error", `web-voice chat failed: ${message}`);
               return Response.json({ error: message }, { status: 500 });
+            } finally {
+              lease.settle();
             }
           }, unavailableResponse);
         }
@@ -1466,9 +1538,19 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                   { status: 415, headers },
                 );
               }
+              let lease: TurnLease;
               try {
-                const result = await onTurn(wav, { signal, trackBackground });
-                if (signal.aborted) {
+                lease = coordinator.start({ sessionId: crypto.randomUUID(), turnId, source: "web", audio: wav, signal });
+              } catch {
+                return Response.json({ error: "duplicate or invalid turn id", sessionId, turnId }, { status: 409, headers });
+              }
+              try {
+                if (!lease.active) return requestAbortedResponse(lease.signal);
+                const result = await onTurn(wav, {
+                  signal: lease.signal,
+                  trackBackground: (task) => ownBackground(task, sessionId, turnId, "web"),
+                });
+                if (!lease.active) {
                   return Response.json(
                     { error: shutdownController.signal.aborted ? "server shutting down" : "request aborted", sessionId, turnId },
                     { status: shutdownController.signal.aborted ? 503 : 499, headers: { ...headers, Connection: "close" } },
@@ -1480,6 +1562,11 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                   maxBytes: MAX_TURN_AUDIO_BYTES,
                   allowEmpty: true,
                 }).audio;
+                lease.emit({ type: "transcript", text: result.transcript });
+                lease.emit({ type: "sentence", text: result.reply });
+                lease.emit({ type: "audio", audio });
+                if (!lease.active) throw new Error("turn output limit exceeded");
+                lease.complete();
                 return Response.json({
                   sessionId,
                   turnId,
@@ -1488,15 +1575,19 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                   audioBase64: audio.byteLength > 0 ? Buffer.from(audio).toString("base64") : "",
                 }, { headers });
               } catch (error) {
-                if (signal.aborted) {
+                if (lease.signal.aborted && lease.outcome !== "error") {
                   return Response.json(
                     { error: shutdownController.signal.aborted ? "server shutting down" : "request aborted", sessionId, turnId },
                     { status: shutdownController.signal.aborted ? 503 : 499, headers: { ...headers, Connection: "close" } },
                   );
                 }
-                const message = error instanceof Error ? error.message : String(error);
+                const detail = error instanceof Error ? error.message : String(error);
+                const message = detail.length > 4_096 ? "turn failed" : redactSecrets(detail);
+                lease.fail(message);
                 log("error", `web-voice turn failed: ${message}`);
                 return Response.json({ error: message, sessionId, turnId }, { status: 500, headers });
+              } finally {
+                lease.settle();
               }
             },
             () => accepting
@@ -1728,7 +1819,10 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                   return;
                 }
                 if (ws.data.current?.turnId === msg.turnId) abortTurn(ws.data.current, "turn aborted by client");
-                if (ws.data.pending?.turnId === msg.turnId) ws.data.pending = null;
+                if (ws.data.pending?.turnId === msg.turnId) {
+                  ws.data.pending.lease.abort(new Error("turn aborted by client"));
+                  ws.data.pending = null;
+                }
               } else if (ws.data.current) {
                 abortTurn(ws.data.current, "turn aborted by client");
               }
@@ -1861,6 +1955,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // decision. Its eventual transport close must not report another
           // ending or start a reconnect grace for a client that already left.
           if (wasAttached && clients.size === 0) scheduleConversationEnd();
+          ws.data.pending?.lease.abort(new Error("voice socket closed"));
           ws.data.pending = null;
           ws.data.latestProbeTurnId = null;
           const spec = ws.data.spec;
@@ -1939,6 +2034,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           ws.data.departureCloseTimer = null;
         }
         abortTurn(ws.data.current, "web voice server shutting down");
+        ws.data.pending?.lease.abort(new Error("web voice server shutting down"));
         ws.data.pending = null;
         ws.data.latestProbeTurnId = null;
         const spec = ws.data.spec;

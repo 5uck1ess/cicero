@@ -3,6 +3,7 @@ import { log } from "./logger";
 
 export interface SummarizerOptions {
   maxTokens: number;
+  signal?: AbortSignal;
 }
 
 export async function summarizeForTTS(
@@ -10,6 +11,7 @@ export async function summarizeForTTS(
   llm: LLMProvider,
   opts: SummarizerOptions,
 ): Promise<string> {
+  opts.signal?.throwIfAborted();
   if (output.length < 200) return output;
 
   const truncated = output.length > 2000
@@ -28,12 +30,14 @@ export async function summarizeForTTS(
           content: `Summarize this response for a voice assistant to read aloud:\n\n${truncated}`,
         },
       ],
-      { temperature: 0.3, max_tokens: opts.maxTokens },
+      { temperature: 0.3, max_tokens: opts.maxTokens, signal: opts.signal },
     );
+    opts.signal?.throwIfAborted();
 
     const summary = raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
     if (summary) return summary;
   } catch (err: unknown) {
+    opts.signal?.throwIfAborted();
     const msg = err instanceof Error ? err.message : String(err);
     log("warn", `TTS summary failed: ${msg}`);
   }

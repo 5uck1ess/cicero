@@ -26,6 +26,15 @@ test("append then recent round-trips turns, oldest first", async () => {
   expect(got[1].reply).toBe("All green.");
 });
 
+test("history bounds untrusted text before retaining a record", async () => {
+  const h = fresh();
+  await h.append({ t: 1, user: "u".repeat(20_000), reply: "r".repeat(70_000), lane: "l".repeat(200) });
+  const [turn] = await h.recent(1);
+  expect(turn.user).toHaveLength(16_384);
+  expect(turn.reply).toHaveLength(64 * 1024);
+  expect(turn.lane).toHaveLength(128);
+});
+
 test("recent(n) returns only the tail", async () => {
   const h = fresh();
   for (let i = 0; i < 5; i++) await h.append({ t: i, user: "u" + i, reply: "r" + i });
