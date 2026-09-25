@@ -18,10 +18,11 @@ export function setupPage(): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cicero setup</title>
+<meta name="description" content="Set up Cicero, the self-hosted voice layer for coding agents.">
 <link rel="icon" href="${FAVICON}">
 <style>
 :root{
-  --bg:#F5F4F0; --surface:#FCFBF8; --ink:#17181C; --muted:#5E5F66; --line:#DFDBD1;
+  --bg:#F5F4F0; --surface:#FCFBF8; --ink:#17181C; --muted:#625E56; --line:#DFDBD1;
   --accent:#A9713A; --accent-text:#835525; --accent-soft:#F2E7D8; --accent-line:#D6B28B;
   --ok:#2A7A55; --ok-soft:#E4F0E8; --bad:#B23A2B; --bad-soft:#F8E6E2;
   --r-outer:14px; --r-inner:12px; --r-ctl:8px;
@@ -43,6 +44,10 @@ body{background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,-apple-system
 button,input,select{font:inherit;color:inherit}
 a{color:var(--accent-text)}
 :focus-visible{outline:3px solid var(--accent-line);outline-offset:3px}
+.skip{position:absolute;left:16px;top:-48px;z-index:10;background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:var(--r-ctl);text-decoration:none;font-weight:600;transition:top .2s var(--ease)}
+.skip:focus{top:12px}
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.035;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+.wrap{position:relative;z-index:1}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .wrap{max-width:980px;margin:0 auto;padding:36px 24px 96px}
 header.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:44px}
@@ -170,12 +175,13 @@ pre.yaml{background:var(--surface);border:1px solid var(--line);border-radius:va
 </style>
 </head>
 <body>
+<a class="skip" href="#app">Skip to setup</a>
 <div class="wrap">
   <header class="top">
     <button class="brand" id="brand" type="button" aria-label="Cicero setup overview">${brandHeader()}<span class="tag">Setup</span></button>
     <button class="overview-link" id="to-overview" type="button" hidden>Back to overview</button>
   </header>
-  <main id="app" aria-live="polite"></main>
+  <main id="app" aria-live="polite" tabindex="-1"></main>
 </div>
 <script>
 var params = new URLSearchParams(location.search);

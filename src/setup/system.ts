@@ -48,7 +48,7 @@ export function recommendTier(facts: Pick<SystemFacts, "platform" | "arch" | "ml
       tier: "local-cuda",
       reason: `${facts.gpu.name} has ${facts.gpu.totalMiB} MiB total VRAM, enough for the CUDA preset.`,
       ...(facts.gpu.freeMiB < CUDA_MIN_TOTAL_MIB
-        ? { warning: `Only ${(facts.gpu.freeMiB / 1024).toFixed(1)} GB free right now — other processes are using the GPU. Free VRAM before starting Cicero.` }
+        ? { warning: `Only ${(facts.gpu.freeMiB / 1024).toFixed(1)} GB free right now: other processes are using the GPU. Free VRAM before starting Cicero.` }
         : {}),
     };
   }
