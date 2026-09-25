@@ -204,7 +204,7 @@ export function createRecordedWebTurn(
   const recordedSink: WebReplySink = {
     transcript: (t) => { transcript = t; sink.transcript(t); },
     sentence: (t) => { sentences.push(t); sink.sentence(t); },
-    audio: (b) => sink.audio(b),
+    audio: (b, text) => sink.audio(b, text),
     control: (m) => sink.control(m),
     done: () => {
       sink.done();
@@ -226,6 +226,7 @@ export function createRecordedWebTurn(
     },
     error: (m) => sink.error(m),
     aborted: () => sink.aborted(),
+    playedText: sink.playedText ? () => sink.playedText!() : undefined,
   };
   return { sink: recordedSink, drain: () => persistence };
 }
