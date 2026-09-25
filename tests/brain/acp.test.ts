@@ -1,7 +1,7 @@
 import { test, expect, afterEach } from "bun:test";
 import { join } from "path";
 import { tmpdir } from "os";
-import { readFileSync, unlinkSync } from "fs";
+import { mkdtempSync, readFileSync, unlinkSync } from "fs";
 import {
   AcpBrain,
   AcpQueueOverflowError,
@@ -9,11 +9,118 @@ import {
   AcpTurnAdmissionError,
   type AcpBrainConfig,
 } from "../../src/brain/acp";
+import { buildResumePrimer } from "../../src/web-voice/resume";
 
 // Drive the brain against a real ACP agent (the mock fixture), spawned with this
 // same Bun runtime. Deterministic: no network, no API keys.
 const MOCK_AGENT = join(import.meta.dir, "fixtures", "mock-acp-agent.ts");
 const CANCEL_EXIT_FIXTURE = join(import.meta.dir, "fixtures", "acp-cancel-exit.ts");
+
+test("ACP reloads a stored session, suppresses load history, and passes MCP servers", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cicero-acp-resume-"));
+  const sessionFile = join(directory, "session.json");
+  const logFile = join(directory, "agent.jsonl");
+  const config: Partial<AcpBrainConfig> = {
+    sessionFile,
+    env: { CICERO_TEST_ACP_LOAD: "yes", CICERO_TEST_ACP_LOG: logFile },
+    mcpServers: [{ name: "search", command: "search-server", args: ["--stdio"], env: [{ name: "SEARCH_TOKEN", value: "synthetic-secret" }] }],
+  };
+  const first = makeBrain(false, config);
+  await first.start();
+  expect(await first.send("first")).toBe("echo:first");
+  await first.stop();
+  brain = makeBrain(false, config);
+  await brain.start();
+  expect(brain.sessionRestored()).toBe(true);
+  expect(await brain.send("second")).toBe("echo:second");
+  const calls = readFileSync(logFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  expect(calls.map((call) => call.method)).toEqual(["new", "load"]);
+  expect(calls[1].sessionId).toBe("mock-session-1");
+  expect(calls[1].mcpServers[0].name).toBe("search");
+  expect(calls[1].mcpServers[0].envNames).toEqual(["SEARCH_TOKEN"]);
+  expect(readFileSync(logFile, "utf8")).not.toContain("synthetic-secret");
+});
+
+test("explicit ACP restart after a completed turn opens a new session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cicero-acp-reset-"));
+  const sessionFile = join(directory, "session.json");
+  const logFile = join(directory, "agent.jsonl");
+  brain = makeBrain(false, { sessionFile, env: { CICERO_TEST_ACP_LOAD: "yes", CICERO_TEST_ACP_LOG: logFile } });
+  await brain.start();
+  expect(await brain.send("before reset")).toBe("echo:before reset");
+  await brain.restart();
+  expect(brain.sessionRestored()).toBe(false);
+  expect(await brain.send("after reset")).toBe("echo:after reset");
+  const calls = readFileSync(logFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  expect(calls.map((call) => call.method)).toEqual(["new", "new"]);
+});
+
+test("ACP falls back to newSession when loading is absent or refused", async () => {
+  for (const mode of ["absent", "refuse"]) {
+    const directory = mkdtempSync(join(tmpdir(), "cicero-acp-fallback-"));
+    const sessionFile = join(directory, "session.json");
+    const logFile = join(directory, "agent.jsonl");
+    const first = makeBrain(false, { sessionFile, env: { CICERO_TEST_ACP_LOAD: "yes", CICERO_TEST_ACP_LOG: logFile } });
+    await first.start();
+    await first.stop();
+    brain = makeBrain(false, { sessionFile, env: { CICERO_TEST_ACP_LOAD: mode, CICERO_TEST_ACP_LOG: logFile } });
+    await brain.start();
+    expect(brain.sessionRestored()).toBe(false);
+    expect(await brain.send("after fallback")).toBe("echo:after fallback");
+    await brain.stop();
+    brain = undefined;
+    const calls = readFileSync(logFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(calls.at(-1).method).toBe("new");
+  }
+});
+
+test("ACP resumes a fresh pointer, expires an idle pointer, and skips resume when disabled", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cicero-acp-age-"));
+  const sessionFile = join(directory, "session.json");
+  const logFile = join(directory, "agent.jsonl");
+  let clock = 1_000_000;
+  const base = { sessionFile, now: () => clock, env: { CICERO_TEST_ACP_LOAD: "yes", CICERO_TEST_ACP_LOG: logFile, CICERO_TEST_ACP_SESSION_ID: "first" } };
+  brain = makeBrain(false, base);
+  await brain.start();
+  expect(await brain.send("first turn")).toBe("echo:first turn");
+  expect(JSON.parse(readFileSync(sessionFile, "utf8")).lastUsedAt).toBe(clock);
+  await brain.stop();
+
+  clock += 11 * 3_600_000;
+  brain = makeBrain(false, base);
+  await brain.start();
+  expect(brain.sessionRestored()).toBe(true);
+  expect(buildResumePrimer([], brain.sessionRestored())).toBeNull();
+  clock += 3_600_000;
+  expect(await brain.send("refresh timestamp")).toBe("echo:refresh timestamp");
+  expect(JSON.parse(readFileSync(sessionFile, "utf8")).lastUsedAt).toBe(clock);
+  await brain.stop();
+
+  clock += 13 * 3_600_000;
+  brain = makeBrain(false, { ...base, env: { ...base.env, CICERO_TEST_ACP_SESSION_ID: "replacement" } });
+  await brain.start();
+  expect(brain.sessionRestored()).toBe(false);
+  expect(buildResumePrimer([{ user: "hello", assistant: "hi" }], brain.sessionRestored())).not.toBeNull();
+  expect(JSON.parse(readFileSync(sessionFile, "utf8")).sessionId).toBe("replacement");
+  await brain.stop();
+
+  brain = makeBrain(false, { ...base, sessionResume: false });
+  await brain.start();
+  expect(brain.sessionRestored()).toBe(false);
+  const calls = readFileSync(logFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  expect(calls.map((call) => call.method)).toEqual(["new", "load", "new", "new"]);
+});
+
+test("ACP records bounded plan and tool updates without speaking them", async () => {
+  const updates: unknown[] = [];
+  brain = makeBrain(false, { onStructuredUpdate: (update) => updates.push(update) });
+  await brain.start();
+  expect(await brain.send("structured updates")).toBe("echo:structured updates");
+  expect(updates.length).toBeGreaterThan(0);
+  expect(JSON.stringify(updates)).not.toContain("synthetic-secret");
+  expect(JSON.stringify(updates)).toContain("plan");
+  expect(JSON.stringify(updates)).toContain("tool_call");
+});
 
 function makeBrain(
   autoApproveTools = false,

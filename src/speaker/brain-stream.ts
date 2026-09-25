@@ -1,6 +1,7 @@
 import type { Brain, BrainTurnOptions } from "../types";
 import type { StreamingTTSSpeaker } from "./streaming-tts";
 import { segmentSentences } from "./sentence-stream";
+import { shouldSpeakToolStartNotice } from "./thinking-filler";
 import { newTurnTimer } from "../timing";
 
 /** True when the brain can stream its response token-by-token. */
@@ -24,10 +25,11 @@ export async function streamBrainToSpeaker(
   prompt: string,
   filler?: string,
   options?: BrainTurnOptions,
+  toolStartNotice = true,
 ): Promise<void> {
   const sendStream = brain.sendStream;
   if (!sendStream) throw new Error("brain does not support streaming");
-  await speakGuarded(speaker, () => sendStream.call(brain, prompt, options), filler);
+  await speakGuarded(speaker, (turnOptions) => sendStream.call(brain, prompt, turnOptions), filler, options, toolStartNotice);
 }
 
 /**
@@ -41,10 +43,11 @@ export async function streamAgentNarration(
   prompt: string,
   filler?: string,
   options?: BrainTurnOptions,
+  toolStartNotice = true,
 ): Promise<void> {
   const streamProgress = brain.streamProgress;
   if (!streamProgress) throw new Error("brain does not support progress narration");
-  await speakGuarded(speaker, () => streamProgress.call(brain, prompt, options), filler);
+  await speakGuarded(speaker, (turnOptions) => streamProgress.call(brain, prompt, turnOptions), filler, options, toolStartNotice);
 }
 
 /**
@@ -56,19 +59,56 @@ export async function streamAgentNarration(
  */
 async function speakGuarded(
   speaker: StreamingTTSSpeaker,
-  source: () => AsyncIterable<string>,
+  source: (options: BrainTurnOptions) => AsyncIterable<string>,
   filler?: string,
+  options: BrainTurnOptions = {},
+  toolStartNotice = true,
 ): Promise<void> {
+  // One controller per turn: aborted by the caller's signal, and handed to the
+  // speaker so an interrupt during playback also cancels in-flight inference.
+  const turnAbort = new AbortController();
+  const outerSignal = options.signal;
+  const onOuterAbort = () => turnAbort.abort(outerSignal?.reason);
+  if (outerSignal?.aborted) onOuterAbort();
+  else outerSignal?.addEventListener("abort", onOuterAbort, { once: true });
+  const turnOptions: BrainTurnOptions = { ...options, signal: turnAbort.signal };
   let streamError: unknown = null;
   const timer = newTurnTimer();
   let firstToken = false;
   let firstSentence = false;
+  let replyStarted = false;
+  let toolNoticeSent = false;
+  let closed = false;
+  const notices: string[] = [];
+  let wake: (() => void) | undefined;
+  const onNotice: NonNullable<BrainTurnOptions["onNotice"]> = (notice) => {
+    const snapshot = filler ? speaker.getSnapshot?.() : undefined;
+    const fillerActive = !!filler && (!snapshot || snapshot.pending.includes(filler) || !snapshot.spoken.includes(filler));
+    if (closed || turnAbort.signal.aborted || (notice.type === "tool" && (toolNoticeSent || !shouldSpeakToolStartNotice(toolStartNotice, replyStarted, fillerActive)))) return;
+    if (notices.length >= 32) return;
+    if (notice.type === "tool") toolNoticeSent = true;
+    notices.push(notice.text);
+    wake?.();
+  };
   const guarded = async function* (): AsyncGenerator<string> {
     try {
-      for await (const token of source()) {
+      const iterator = source({ ...turnOptions, onNotice })[Symbol.asyncIterator]();
+      let next = iterator.next();
+      while (true) {
+        while (notices.length) yield `${notices.shift()!} `;
+        let release!: () => void;
+        const notified = new Promise<"notice">((resolve) => { release = () => resolve("notice"); });
+        wake = release;
+        const result = await Promise.race([next.then((value) => ({ value })), notified]);
+        wake = undefined;
+        if (result === "notice") continue;
+        if (result.value.done) break;
+        replyStarted = true;
         if (!firstToken) { firstToken = true; timer.mark("brain_first_token"); }
-        yield token;
+        yield result.value.value;
+        next = iterator.next();
       }
+      while (notices.length) yield `${notices.shift()!} `;
     } catch (err) {
       streamError = err;
       throw err;
@@ -88,8 +128,11 @@ async function speakGuarded(
     }
   };
   try {
-    await speaker.speakStream(withFiller());
+    await speaker.speakStream(withFiller(), turnAbort);
   } finally {
+    outerSignal?.removeEventListener("abort", onOuterAbort);
+    closed = true;
+    wake?.();
     timer.report("brain-turn");
   }
   if (streamError) throw streamError;

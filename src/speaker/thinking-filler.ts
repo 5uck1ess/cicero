@@ -64,3 +64,10 @@ export function pickThinkingFiller(last?: string, transcript?: string): string {
   const choices = pool.length > 0 ? pool : lines;
   return choices[Math.floor(Math.random() * choices.length)] ?? lines[0]!;
 }
+
+/** A tool-start line takes the floor only before reply audio or a filler. */
+export function shouldSpeakToolStartNotice(enabled: boolean, replyStarted: boolean, fillerSpoken: boolean): boolean {
+  return enabled && !replyStarted && !fillerSpoken;
+}
+
+export const TOOL_START_NOTICE = "Working on it now.";

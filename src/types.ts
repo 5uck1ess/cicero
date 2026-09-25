@@ -297,6 +297,9 @@ export interface BrainConfig {
   max_queue_bytes?: number; // acp: maximum unread streamed UTF-8 text retained in memory (default 256 KiB)
   max_response_bytes?: number; // acp: maximum UTF-8 text accumulated by send(); streaming stays incremental (default 2 MiB)
   max_pending_turns?: number; // acp: maximum active + queued turns admitted to one session (default 32)
+  mcp_servers?: AcpMcpServerConfig[]; // acp: bounded stdio MCP servers for the front desk
+  session_resume?: boolean; // acp: resume a recent stored session (default true)
+  session_resume_max_age_hours?: number; // acp: maximum idle age before a new session (default 12; max 720)
   // Background history compaction: when the replayed transcript crosses its cap,
   // summarize the older half through a small local model instead of dropping it.
   // Off by default. Without a summarizer_url here it falls back to the one under
@@ -309,7 +312,7 @@ export interface BrainConfig {
   // Think lane (acp backend): a second, heavier ACP agent that handles turns
   // containing a trigger phrase ("think hard about…"). Separate conversation —
   // suits one-shot deep questions.
-  escalate?: { binary?: string; binary_args?: string[]; triggers?: string[]; unset_env?: string[] };
+  escalate?: { binary?: string; binary_args?: string[]; triggers?: string[]; unset_env?: string[]; mcp_servers?: AcpMcpServerConfig[]; session_resume?: boolean; session_resume_max_age_hours?: number };
   // Lane switchboard (acp backend): named employees you can be transferred to.
   // "Let me talk to the coder" pins the conversation to that lane until
   // "back to Cicero". Each lane is its own agent + conversation; `voice`
@@ -323,6 +326,9 @@ export interface BrainConfig {
     greeting?: string;
     unset_env?: string[];
     env?: Record<string, string>; // extra env for the lane's agent (e.g. ANTHROPIC_MODEL)
+    mcp_servers?: AcpMcpServerConfig[];
+    session_resume?: boolean;
+    session_resume_max_age_hours?: number;
     persona?: string;             // in-character speaking style, injected into the lane's first turn
     // Plan-billing insurance: ordered backup brains tried when this lane's
     // agent fails before producing output (e.g. Anthropic plan → Codex plan
@@ -333,6 +339,9 @@ export interface BrainConfig {
       binary_args?: string[];
       unset_env?: string[];
       env?: Record<string, string>;
+      mcp_servers?: AcpMcpServerConfig[];
+      session_resume?: boolean;
+      session_resume_max_age_hours?: number;
     }>;
   }>;
   // Per-brain overrides
@@ -367,6 +376,15 @@ export interface BrainConfig {
   // including bounded reassurances until content arrives. Default on; false
   // disables both the initial filler and its reassurances.
   thinking_filler?: boolean;
+  // Speak one short notice when an ACP turn first uses a tool. Default on.
+  tool_start_notice?: boolean;
+}
+
+export interface AcpMcpServerConfig {
+  name: string;
+  command: string;
+  args: string[];
+  env?: string[]; // names copied from the daemon environment; values stay out of config
 }
 
 export interface ServersConfig {
@@ -468,6 +486,23 @@ export interface BrainTurnOptions {
    * forward it unchanged and must never retain it as conversation memory.
    */
   systemContext?: string;
+  /** Sanitized ACP plan/tool metadata for this turn; never spoken automatically. */
+  onStructuredUpdate?: (update: BrainStructuredUpdate) => void;
+  /** Turn-owned, sanitized ACP activity. Never retain beyond this turn. */
+  onNotice?: (notice: { type: "tool" | "confirmation"; text: string }) => void;
+}
+
+export interface BrainStructuredUpdate {
+  kind: "plan" | "tool_call" | "tool_call_update";
+  /** In-process ACP brain identity for dashboard row correlation. */
+  sourceId?: string;
+  /** One prompt's identity within the ACP brain. */
+  turnId?: string;
+  toolCallId?: string;
+  entries?: Array<{ title: string; status: string }>;
+  title?: string;
+  toolKind?: string;
+  status?: string;
 }
 
 export interface BackgroundTurnOptions extends BrainTurnOptions {
@@ -482,6 +517,8 @@ export interface PendingConfirmation {
 }
 
 export interface Brain {
+  /** Whether the front desk loaded its durable agent session at the last start. */
+  sessionRestored?(): boolean;
   start(): Promise<void>;
   stop(): Promise<void>;
   send(message: string, options?: BrainTurnOptions): Promise<string>;
@@ -506,6 +543,8 @@ export interface Brain {
    * control replies may defer it, but adapters must not replay it indefinitely.
    */
   injectContext(context: string): void;
+  /** Discard durable conversation state for a cold brain without starting it. */
+  discardSession?(): Promise<void>;
   restart(): Promise<void>;
   health(): Promise<boolean>;
   /** Lane switchboard: name of the pinned lane, or null at the front desk. */

@@ -72,19 +72,35 @@ new AgentSideConnection((client: Client): Agent => {
       try {
         const delayMs = Number.parseInt(process.env.CICERO_TEST_ACP_INITIALIZE_DELAY_MS ?? "0", 10);
         if (Number.isFinite(delayMs) && delayMs > 0) await Bun.sleep(delayMs);
-        return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] };
+        return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: { loadSession: ["yes", "refuse"].includes(process.env.CICERO_TEST_ACP_LOAD ?? "") }, authMethods: [] };
       } catch (error: unknown) {
         throw error;
       }
     },
-    async newSession() {
-      return { sessionId: "mock-session-1" };
+    async newSession(params) {
+      const file = process.env.CICERO_TEST_ACP_LOG;
+      if (file) appendFileSync(file, JSON.stringify({ method: "new", mcpServers: params.mcpServers.map((server) => ({ name: server.name, envNames: server.type === "http" || server.type === "sse" ? [] : server.env.map((item) => item.name) })) }) + "\n");
+      return { sessionId: process.env.CICERO_TEST_ACP_SESSION_ID ?? "mock-session-1" };
+    },
+    async loadSession(params) {
+      const file = process.env.CICERO_TEST_ACP_LOG;
+      if (file) appendFileSync(file, JSON.stringify({ method: "load", sessionId: params.sessionId, mcpServers: params.mcpServers.map((server) => ({ name: server.name, envNames: server.type === "http" || server.type === "sse" ? [] : server.env.map((item) => item.name) })) }) + "\n");
+      await emit(params.sessionId, "loaded history must be silent");
+      if (process.env.CICERO_TEST_ACP_LOAD === "refuse") throw new Error("session unavailable");
+      return {};
     },
     async authenticate() {
       return null;
     },
     async prompt(params: PromptRequest) {
       const text = params.prompt.map((b) => (b.type === "text" ? b.text : "")).join("");
+
+      if (text.includes("structured updates")) {
+        await client.sessionUpdate({ sessionId: "wrong-session", update: { sessionUpdate: "tool_call", toolCallId: "stale", title: "stale", status: "failed" } });
+        await client.sessionUpdate({ sessionId: params.sessionId, update: { sessionUpdate: "plan", entries: [{ content: "Inspect state", priority: "high", status: "in_progress" }] } });
+        await client.sessionUpdate({ sessionId: params.sessionId, update: { sessionUpdate: "tool_call", toolCallId: "tool-1", title: "token=synthetic-secret", kind: "search", status: "pending", rawInput: { secret: "synthetic-secret" } } });
+        await client.sessionUpdate({ sessionId: params.sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "tool-1", status: "completed" } });
+      }
 
       if (text.includes("ignore cancellation until stopped")) {
         ignoreCancellation = true;

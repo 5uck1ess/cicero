@@ -178,3 +178,78 @@ test("a silent narrated agent turn settles when local barge-in aborts it", async
 
   await expect(speaking).resolves.toBeUndefined();
 });
+
+test("speaker interruption aborts the exact signal passed to the brain producer", async () => {
+  let brainSignal: AbortSignal | undefined;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const brain = {
+    async *sendStream(_message: string, options?: BrainTurnOptions): AsyncGenerator<string> {
+      brainSignal = options?.signal;
+      markStarted();
+      yield "First sentence.";
+      await new Promise<void>((resolve) =>
+        options?.signal?.aborted
+          ? resolve()
+          : options?.signal?.addEventListener("abort", () => resolve(), { once: true })
+      );
+    },
+  } as unknown as Brain;
+  const speaker = {
+    async speakStream(stream: AsyncIterable<string>, turnAbort: AbortController): Promise<void> {
+      const iterator = stream[Symbol.asyncIterator]();
+      const next = iterator.next();
+      await started;
+      turnAbort.abort(new Error("interrupted"));
+      await next;
+      await iterator.return?.();
+    },
+  } as unknown as StreamingTTSSpeaker;
+  await streamBrainToSpeaker(brain, speaker, "work");
+  expect(brainSignal?.aborted).toBe(true);
+});
+
+test("local stream speaks ACP confirmation before reply and keeps tool notice to one", async () => {
+  const speaker = new CapturingSpeaker();
+  const brain = {
+    async *sendStream(_message: string, options?: BrainTurnOptions): AsyncGenerator<string> {
+      options?.onNotice?.({ type: "tool", text: "Working on it now." });
+      options?.onNotice?.({ type: "tool", text: "Duplicate tool." });
+      options?.onNotice?.({ type: "confirmation", text: "Waiting on your OK to run a shell command." });
+      yield "Done.";
+      options?.onNotice?.({ type: "tool", text: "Late tool." });
+    },
+  } as unknown as Brain;
+  await streamBrainToSpeaker(brain, speaker as unknown as StreamingTTSSpeaker, "run");
+  expect(speaker.sentences).toEqual([
+    "Working on it now.", "Waiting on your OK to run a shell command.", "Done.",
+  ]);
+});
+
+test("local ACP tool notice yields to filler and obeys the switch", async () => {
+  const brain = {
+    async *sendStream(_message: string, options?: BrainTurnOptions): AsyncGenerator<string> {
+      options?.onNotice?.({ type: "tool", text: "Working on it now." });
+      yield "Done.";
+    },
+  } as unknown as Brain;
+  const withFiller = new CapturingSpeaker();
+  await streamBrainToSpeaker(brain, withFiller as unknown as StreamingTTSSpeaker, "run", "On it.");
+  expect(withFiller.sentences).toEqual(["On it.", "Done."]);
+  const disabled = new CapturingSpeaker();
+  await streamBrainToSpeaker(brain, disabled as unknown as StreamingTTSSpeaker, "run", undefined, undefined, false);
+  expect(disabled.sentences).toEqual(["Done."]);
+});
+
+test("local tool notice follows a filler that has finished playing", async () => {
+  const speaker = new CapturingSpeaker() as CapturingSpeaker & { getSnapshot: () => { spoken: string[]; pending: string[] } };
+  speaker.getSnapshot = () => ({ spoken: ["On it."], pending: [] });
+  const brain = {
+    async *sendStream(_message: string, options?: BrainTurnOptions): AsyncGenerator<string> {
+      options?.onNotice?.({ type: "tool", text: "Working on it now." });
+      yield "Done.";
+    },
+  } as unknown as Brain;
+  await streamBrainToSpeaker(brain, speaker as unknown as StreamingTTSSpeaker, "run", "On it.");
+  expect(speaker.sentences).toEqual(["On it.", "Working on it now.", "Done."]);
+});

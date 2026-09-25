@@ -41,6 +41,16 @@ function board(calls: string[], laneOpts: Partial<Record<string, Partial<LaneDef
   return new SwitchboardBrain(fakeBrain("front", calls), lanes);
 }
 
+test("explicit switchboard restart discards cold lane sessions without starting them", async () => {
+  const calls: string[] = [];
+  const cold = { ...fakeBrain("cold", calls), discardSession: async () => { calls.push("cold:discard"); } };
+  const sb = new SwitchboardBrain(fakeBrain("front", calls), { cold: { brain: cold } });
+  await sb.start();
+  await sb.restart();
+  expect(calls).toContain("cold:discard");
+  expect(calls).not.toContain("cold:start");
+});
+
 function settlesWithin<T>(promise: PromiseLike<T>, label: string, timeoutMs = 100): Promise<T> {
   return Promise.race([
     Promise.resolve(promise),

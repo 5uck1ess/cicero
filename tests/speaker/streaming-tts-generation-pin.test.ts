@@ -77,7 +77,7 @@ test("an interrupt does not release the pin while the look-ahead is still render
     yield "sentence two.";
   }
 
-  const speaking = speaker.speakStream(sentences());
+  const speaking = speaker.speakStream(sentences(), new AbortController());
   // Wait until the look-ahead for sentence two is actually rendering on the
   // pinned generation; that is the window the bug lived in.
   await secondStarted;

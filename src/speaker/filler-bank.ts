@@ -90,13 +90,13 @@ export class FillerBank {
   }
 
   /** Synthesize every phrase once. Returns how many are ready. Safe to await or fire-and-forget. */
-  prime(): Promise<number> {
+  prime(signal?: AbortSignal): Promise<number> {
     return this.enqueuePrime(async () => {
       // The candidate atomically replaces the old front-desk bank. Excluding
       // the replaced usage prevents repeated prime() calls from consuming the
       // budget cumulatively, while every per-voice bank remains in the base.
       const base = sumUsages(this.perVoiceUsage.values());
-      const candidate = await this.prepareBank(base);
+      const candidate = await this.prepareBank(base, undefined, undefined, signal);
       this.prepared = candidate.clips;
       this.preparedUsage = candidate.usage;
       return candidate.usage.clips;
@@ -109,7 +109,7 @@ export class FillerBank {
    * lanes × full bank would stretch startup and hammer the TTS seat. Serialized
    * by the caller for the same SIGABRT reason the warmup chain exists.
    */
-  primeVoice(voice: string, perBucket = 2): Promise<number> {
+  primeVoice(voice: string, perBucket = 2, signal?: AbortSignal): Promise<number> {
     return this.enqueuePrime(async () => {
       if (!Number.isSafeInteger(perBucket) || perBucket < 0) {
         throw new RangeError("filler lines per bucket must be a non-negative integer");
@@ -120,7 +120,7 @@ export class FillerBank {
         .filter(([name]) => name !== voice)
         .map(([, usage]) => usage);
       const base = addUsage(this.preparedUsage, sumUsages(otherVoices));
-      const candidate = await this.prepareBank(base, voice, perBucket);
+      const candidate = await this.prepareBank(base, voice, perBucket, signal);
       if (candidate.usage.clips === 0) {
         // Do not let repeated over-budget/failed voice primes retain an
         // unbounded collection of empty voice keys.
@@ -173,6 +173,7 @@ export class FillerBank {
     base: FillerUsage,
     voice?: string,
     perBucket?: number,
+    signal?: AbortSignal,
   ): Promise<PreparedBank> {
     const clips = new Map<FillerBucket, PreparedFiller[]>();
     const buckets = Object.keys(this.lines) as FillerBucket[];
@@ -184,12 +185,14 @@ export class FillerBank {
         ? this.lines[bucket]
         : this.lines[bucket].slice(0, perBucket);
       for (const text of lines) {
+        signal?.throwIfAborted();
         if (base.clips + usage.clips >= this.limits.maxClips) {
           log("info", `filler prime reached the ${this.limits.maxClips}-clip bank limit`);
           break bucketLoop;
         }
         try {
-          const audio = await this.tts.generateAudio(text, voice);
+          const audio = await this.tts.generateAudio(text, voice, { signal });
+          signal?.throwIfAborted();
           if (audio.byteLength === 0) continue;
           const snapshot = snapshotSynthesizedWav(audio, { maxBytes: this.limits.maxBytes });
           const metadata = snapshot.metadata;
@@ -213,6 +216,7 @@ export class FillerBank {
             durationMs: metadata.durationMs,
           });
         } catch (err: unknown) {
+          signal?.throwIfAborted();
           const owner = voice ? ` (${voice})` : "";
           log("info", `filler prime skipped${owner} "${text}": ${err instanceof Error ? err.message : String(err)}`);
         }

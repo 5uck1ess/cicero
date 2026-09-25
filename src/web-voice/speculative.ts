@@ -192,7 +192,7 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
       let tmpFile: string | undefined;
       try {
         tmpFile = await writeSecureTempAudio(wavBytes, { prefix: "cicero-spec" });
-        const text = (await deps.stt.transcribe(tmpFile))?.trim() ?? "";
+        const text = (await deps.stt.transcribe(tmpFile, turnAbort.signal))?.trim() ?? "";
         return text || null;
       } catch (err: unknown) {
         log("warn", `speculative: tail STT failed — falling back to the normal path (${err instanceof Error ? err.message : String(err)})`);

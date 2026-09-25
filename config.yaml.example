@@ -209,11 +209,20 @@ brain:
   backend: acp
   binary: hermes                # install/auth this ACP agent, or replace it; see docs/brains.md
   binary_args: [-p, voice, acp]
+  session_resume: true           # load a recent stored ACP session when supported
+  session_resume_max_age_hours: 12 # idle age limit (0 < hours <= 720)
   # Bounds unread streamed text and one-shot response aggregation. Actively
   # consumed sendStream output is incremental and has no whole-response buffer.
   max_queue_bytes: 262144
   max_response_bytes: 2097152
   max_pending_turns: 32
+  # Optional stdio MCP servers for this ACP brain. Env lists names copied from
+  # the daemon environment; values never appear in config or Cicero events.
+  # mcp_servers:
+  #   - name: search
+  #     command: /usr/local/bin/search-mcp
+  #     args: [--stdio]
+  #     env: [SEARCH_TOKEN]
 
   # Background history compaction (off by default). Cicero replays a bounded
   # transcript to the brain; past the cap the oldest turns are simply dropped and
@@ -231,6 +240,7 @@ brain:
   escalate:
     binary: hermes
     binary_args: [-p, think, acp]
+    # mcp_servers: []             # optional, separate from the front desk
 
   # Optional: the office. Each lane is another agent with its own session,
   # voice, greeting, and spoken persona. "Let me talk to the coder" transfers
@@ -239,6 +249,7 @@ brain:
     coder:
       binary: hermes
       binary_args: [-p, coder, acp]
+      # mcp_servers: []           # optional for this lane (also on fallbacks)
       aliases: [the coder, code guy]
       voice: anna                       # pocket-tts preset; or a provisioned clone
       greeting: "Coder here. What are we building?"
@@ -274,6 +285,7 @@ brain:
     - deploy
   agent_first: true
   thinking_filler: true         # pre-rendered filler covers agent latency
+  tool_start_notice: true      # say one short line when the first ACP tool starts
 
 # ---------------------------------------------------------------------------
 # Computer-use safety. File tools are confined to this root and cap the amount

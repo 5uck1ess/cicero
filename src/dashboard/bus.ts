@@ -5,11 +5,13 @@
  * big state pill is *derived* from known daemon log lines rather than threaded
  * through the daemon's hot path.
  */
+import type { BrainStructuredUpdate } from "../types";
+import { redactSnapshotSecrets } from "../operational-state";
 
 export type VoiceState = "idle" | "listening" | "thinking" | "speaking";
 
 export interface DashEvent {
-  type: "state" | "log" | "transcript" | "response" | "config" | "snapshot" | "voice";
+  type: "state" | "log" | "transcript" | "response" | "config" | "snapshot" | "voice" | "structured";
   ts: number;
   state?: VoiceState;
   icon?: string;
@@ -18,12 +20,27 @@ export interface DashEvent {
   config?: Record<string, unknown>;
   history?: DashEvent[];
   voiceActive?: boolean;
+  structured?: BrainStructuredUpdate;
 }
 
 type Sub = (e: DashEvent) => void;
 
 const HISTORY_LIMIT = 80;
 const ANSI = /\x1b\[[0-9;]*m/g;
+function boundedLabel(value: string, max: number): string {
+  return redactSnapshotSecrets(value.replace(/[\x00-\x1f\x7f]/g, " ")).slice(0, max);
+}
+
+function structuredMessage(update: BrainStructuredUpdate): string {
+  if (update.kind === "plan") {
+    const entries = update.entries ?? [];
+    const count = entries.length;
+    const active = entries.filter((entry) => entry.status === "in_progress").length;
+    const head = `plan: ${count} ${count === 1 ? "step" : "steps"}${active ? ` (${active} in progress)` : ""}`;
+    return `${head}${entries[0] ? ` · ${entries[0].title}: ${entries[0].status}` : ""}`.slice(0, 256);
+  }
+  return `tool ${update.title || "call"}: ${update.status || "pending"}`.slice(0, 256);
+}
 
 class DashBus {
   private subs = new Set<Sub>();
@@ -92,6 +109,22 @@ class DashBus {
 
   response(text: string): void {
     this.push({ type: "response", ts: Date.now(), text });
+  }
+
+  structured(update: NonNullable<DashEvent["structured"]>): void {
+    const clean: BrainStructuredUpdate = {
+      kind: update.kind,
+      ...(update.sourceId ? { sourceId: boundedLabel(update.sourceId, 48) } : {}),
+      ...(update.turnId ? { turnId: boundedLabel(update.turnId, 32) } : {}),
+      ...(update.toolCallId ? { toolCallId: boundedLabel(update.toolCallId, 128) } : {}),
+      ...(update.title ? { title: boundedLabel(update.title, 160) } : {}),
+      ...(update.toolKind ? { toolKind: boundedLabel(update.toolKind, 32) } : {}),
+      ...(update.status ? { status: boundedLabel(update.status, 32) } : {}),
+      ...(update.entries ? { entries: update.entries.slice(0, 32).map((entry) => ({
+        title: boundedLabel(entry.title, 160), status: boundedLabel(entry.status, 32),
+      })) } : {}),
+    };
+    this.push({ type: "structured", ts: Date.now(), structured: clean, message: structuredMessage(clean) });
   }
 
   private deriveState(message: string): void {

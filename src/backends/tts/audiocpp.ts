@@ -92,7 +92,10 @@ export class AudioCppProvider implements TTSProvider {
    */
   private heldReferences = new Map<string, AudioCppReferenceLease>();
 
-  constructor(config: TTSProviderConfig) {
+  constructor(
+    config: TTSProviderConfig,
+    private readonly acquireLease: typeof acquireAudioCppSafeReference = acquireAudioCppSafeReference,
+  ) {
     this.host = config.host;
     this.port = config.port ?? TTS_DEFAULT_PORTS.audiocpp!;
     this.model = config.model ?? "pocket-tts";
@@ -103,64 +106,76 @@ export class AudioCppProvider implements TTSProvider {
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.tts);
   }
 
-  /** Renders are SERIALIZED: two concurrent requests where one is a cold
+  /** This provider serializes TTS renders: two concurrent requests where one is a cold
    * voice prep make overlapping transient GPU allocations and SIGABRT the
    * server (seen live 2026-07-11: transfer greeting + filler clip → exit
-   * 134). Warm renders take ~50ms, so queueing costs nothing audible. */
+   * 134). This promise tracks all admitted work for bounded stop cleanup. */
   private queue: Promise<unknown> = Promise.resolve();
 
   generateAudio(text: string, voice?: string, options?: TTSOptions): Promise<ArrayBuffer> {
     if (!this.acceptingRenders) {
       return Promise.reject(new Error("audio.cpp provider is stopped"));
     }
+    if (options?.signal?.aborted) {
+      return Promise.reject(new DOMException("audio.cpp TTS request aborted", "AbortError"));
+    }
     const run = this.queue.then(() => this.render(text, voice, options));
-    this.queue = run.catch(() => {}); // a failed render must not poison the chain
+    this.queue = run.catch(() => {});
     return run;
   }
 
   private async render(text: string, voice?: string, options?: TTSOptions): Promise<ArrayBuffer> {
-    const payload: Record<string, unknown> = { model: this.model, input: text };
-    if (options?.speed !== undefined) payload.speed = options.speed;
-    const reference = await this.acquireReference(voice);
+    if (options?.signal?.aborted) throw new DOMException("audio.cpp TTS request aborted", "AbortError");
+    const signal = providerSignal(this.timeoutMs, options?.signal);
     try {
-      if (reference) payload.voice_ref = reference.path;
-      else if (this.voice) payload.voice = this.voice;
-
-      const url = `${httpBase(this.host, this.port)}/v1/audio/speech`;
-      const signal = providerSignal(this.timeoutMs);
-      const init: RequestInit = {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal,
-      };
-      let response: Response;
+      const payload: Record<string, unknown> = { model: this.model, input: text };
+      if (options?.speed !== undefined) payload.speed = options.speed;
+      const reference = await this.acquireReference(voice, signal);
       try {
-        response = await fetch(url, init);
-      } catch (err: unknown) {
-        // The FIRST cold prep of a brand-new reference can SIGABRT the server
-        // mid-request (reproduced 3x provisioning a new voice, 2026-07-10); the
-        // supervisor revives it within seconds and the same request then
-        // succeeds. Retry once — but only on a reset (server died talking to
-        // us). A dead server refuses the connection instead, and that must
-        // keep failing fast so the fallback engine takes the sentence.
-        if ((err as { code?: string })?.code !== "ECONNRESET") throw err;
-        await abortableDelay(10_000, signal);
-        response = await fetch(url, init);
-      }
+        signal.throwIfAborted();
+        if (reference) payload.voice_ref = reference.path;
+        else if (this.voice) payload.voice = this.voice;
 
-      if (!response.ok) {
-        const detail = await readErrorDetail(response);
-        throw new Error(`audio.cpp returned ${response.status}${detail ? `: ${detail}` : ""}`);
-      }
+        const url = `${httpBase(this.host, this.port)}/v1/audio/speech`;
+        const init: RequestInit = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal,
+        };
+        let response: Response;
+        try {
+          response = await fetch(url, init);
+        } catch (err: unknown) {
+          // The FIRST cold prep of a brand-new reference can SIGABRT the server
+          // mid-request (reproduced 3x provisioning a new voice, 2026-07-10); the
+          // supervisor revives it within seconds and the same request then
+          // succeeds. Retry once — but only on a reset (server died talking to
+          // us). A dead server refuses the connection instead, and that must
+          // keep failing fast so the fallback engine takes the sentence.
+          if ((err as { code?: string })?.code !== "ECONNRESET") throw err;
+          await abortableDelay(10_000, signal);
+          response = await fetch(url, init);
+        }
 
-      return await readBoundedArrayBuffer(response, undefined, "audio.cpp audio response");
-    } finally {
-      reference?.release();
+        if (!response.ok) {
+          const detail = await readErrorDetail(response);
+          throw new Error(`audio.cpp returned ${response.status}${detail ? `: ${detail}` : ""}`);
+        }
+
+        const audio = await readBoundedArrayBuffer(response, undefined, "audio.cpp audio response");
+        signal.throwIfAborted();
+        return audio;
+      } finally {
+        reference?.release();
+      }
+    } catch (err: unknown) {
+      if (options?.signal?.aborted) throw new DOMException("audio.cpp TTS request aborted", "AbortError");
+      throw err;
     }
   }
 
-  private async acquireReference(voice?: string): Promise<AudioCppReferenceUse | null> {
+  private async acquireReference(voice: string | undefined, signal: AbortSignal): Promise<AudioCppReferenceUse | null> {
     let input: string | null = null;
     let preferProvisionedDerivative = false;
     if (voice && voice !== this.voice) {
@@ -189,10 +204,37 @@ export class AudioCppProvider implements TTSProvider {
 
     // Never retain a rejected acquisition. A temporarily missing or malformed
     // source is retried on the next sentence after the operator repairs it.
-    const lease = await acquireAudioCppSafeReference(input, {
+    let ownedLease: AudioCppReferenceLease | undefined;
+    const acquired = this.acquireLease(input, {
       preferProvisionedDerivative,
       cacheRoot: this.referenceCacheRoot,
+    }).then((lease) => {
+      // Acquisition can finish after the request has already returned on
+      // abort. Its continuation still owns and releases that late lease.
+      if (signal.aborted) {
+        lease.release();
+        signal.throwIfAborted();
+      }
+      ownedLease = lease;
+      return lease;
     });
+    let onAbort!: () => void;
+    const cancelled = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new DOMException("Request aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+    let lease: AudioCppReferenceLease;
+    try {
+      lease = await Promise.race([acquired, cancelled]);
+      signal.throwIfAborted();
+      ownedLease = undefined; // the provider's bounded cache now owns it
+    } catch (error: unknown) {
+      ownedLease?.release();
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
     this.heldReferences.set(key, lease);
     while (this.heldReferences.size > MAX_HELD_REFERENCE_LEASES) {
       const oldestKey = this.heldReferences.keys().next().value as string | undefined;

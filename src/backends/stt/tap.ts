@@ -114,20 +114,26 @@ export function wrapSTTWithTap(provider: STTProvider, dir: string, limits?: TapL
   const tap = new SttTap(resolve(dir), provider.name, limits);
   const wrapped: STTProvider = {
     name: provider.name,
-    transcribe: async (audioFile: string) => {
+    transcribe: async (audioFile: string, signal?: AbortSignal) => {
+      signal?.throwIfAborted();
       const started = performance.now(); // monotonic: NTP/clock steps must not skew stt_ms
-      const text = await provider.transcribe(audioFile);
+      const text = await provider.transcribe(audioFile, signal);
+      signal?.throwIfAborted();
       await tap.record(audioFile, text ?? "", Math.round(performance.now() - started));
+      signal?.throwIfAborted();
       return text;
     },
     health: () => provider.health(),
   };
   if (provider.transcribeResult) {
-    wrapped.transcribeResult = async (audioFile: string): Promise<STTTranscriptionResult> => {
+    wrapped.transcribeResult = async (audioFile: string, signal?: AbortSignal): Promise<STTTranscriptionResult> => {
+      signal?.throwIfAborted();
       const started = performance.now();
-      const result = await provider.transcribeResult!(audioFile);
+      const result = await provider.transcribeResult!(audioFile, signal);
+      signal?.throwIfAborted();
       const text = result.kind === "transcript" ? result.text : `<${result.kind}>`;
       await tap.record(audioFile, text, Math.round(performance.now() - started));
+      signal?.throwIfAborted();
       return result;
     };
   }

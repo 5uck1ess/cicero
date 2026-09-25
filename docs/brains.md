@@ -35,6 +35,33 @@ non-streaming `send()` convenience path. An actively consumed `sendStream()`
 remains incremental and does not accumulate a whole response. The session also
 admits at most `max_pending_turns` active plus queued callers (default 32), so a
 stalled agent cannot accumulate an unbounded waiter list.
+Each ACP brain and lane stores its session ID and last-used time in a private file under
+`~/.cicero/acp-sessions`. The timestamp refreshes after each completed turn.
+On startup, Cicero calls `session/load` only when `session_resume` is enabled
+(default `true`), the entry is no older than `session_resume_max_age_hours`
+(default `12`, valid range `0 < hours <= 720`), and the agent advertises
+`agentCapabilities.loadSession`. Older and legacy entries without timestamps
+are replaced with a new session. If loading is unavailable or refused, Cicero
+creates a new session and uses the existing recent-turn recap. A
+successfully loaded session skips the recap, and history streamed during load is
+never spoken. An agent must persist its own session for this to restore more
+than the ID. The configured command, arguments, working directory, and MCP
+servers distinguish stored sessions, so changing them starts a new session.
+The two settings can be set on the front desk, escalation brain, ACP lanes, and
+ACP fallbacks; lane settings inherit the front desk values when omitted.
+
+`mcp_servers` is optional on the front desk, escalation brain, each ACP lane,
+and each ACP fallback. It accepts up to eight stdio servers with `name`,
+`command`, `args` (up to 16), and `env` variable names (up to 16).
+It is passed to both `session/new` and `session/load`; the default is `[]`.
+HTTP and SSE MCP servers are not accepted. Named variables must exist in the
+daemon environment; their values are copied into the ACP request and excluded
+from structured dashboard events and ACP diagnostics.
+
+ACP plan and tool-call updates appear on the dashboard event bus and an optional
+brain callback as bounded metadata (titles, kinds, and statuses). They are not
+spoken. Each turn retains at most 64 updates, with at most 32 plan entries and
+160 characters per title.
 Inbound ACP JSON-RPC is framed before protocol decoding; a newline-free or
 single-line frame over 1 MiB closes the owned session instead of growing an
 unbounded parser buffer. Invalid UTF-8 and repeated malformed records also close

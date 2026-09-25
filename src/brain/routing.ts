@@ -15,6 +15,7 @@ import { collectPendingConfirmations, hasPendingConfirmations, relayBoundConfirm
 export const DEFAULT_TRIGGERS = ["think hard", "think deeply", "think carefully", "think it through"];
 
 export class RoutingBrain implements Brain {
+  sessionRestored(): boolean { return this.primary.sessionRestored?.() ?? false; }
   /** False until the escalation lane starts cleanly — a dead lane never routes. */
   private escalationUp = false;
   private turnContext = new BrainTurnContext();
@@ -119,8 +120,13 @@ export class RoutingBrain implements Brain {
     this.turnContext.inject(context);
   }
 
+  async discardSession(): Promise<void> {
+    await Promise.all([this.primary.discardSession?.(), this.escalation.discardSession?.()]);
+  }
+
   async restart(): Promise<void> {
     this.turnContext.clear();
+    if (!this.escalationUp) await this.escalation.discardSession?.();
     await this.primary.restart();
     if (this.escalationUp) {
       await this.escalation.restart().catch((err: unknown) => {

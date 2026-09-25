@@ -143,7 +143,7 @@ export class DictationListener implements Listener {
    * dispatching a command to a stopped daemon. Work the drain DOES complete
    * still delivers; that is what the drain is for.
    */
-  private pendingToken: { abandoned: boolean } | null = null;
+  private pendingToken: { abandoned: boolean; abort: AbortController } | null = null;
   private readonly target: DictationTarget;
   private readonly maxRecordingMs: number;
   private readonly audioDir: string;
@@ -173,6 +173,10 @@ export class DictationListener implements Listener {
 
   async stop(): Promise<void> {
     this.running = false;
+    if (this.pendingToken) {
+      this.pendingToken.abandoned = true;
+      this.pendingToken.abort.abort(new Error("dictation stopped"));
+    }
     // Abandon a capture that is still RECORDING: kill the recorder, drop the
     // file, and do not transcribe. A daemon that is shutting down must not
     // start new work.
@@ -339,7 +343,7 @@ export class DictationListener implements Listener {
    * latch would never clear and stop() would keep awaiting a stale task.
    */
   private trackFinish(): Promise<void> {
-    const token = { abandoned: false };
+    const token = { abandoned: false, abort: new AbortController() };
     this.pendingToken = token;
     const tracked: Promise<void> = this.finishRecording(token).finally(() => {
       if (this.pending === tracked) {
@@ -393,7 +397,7 @@ export class DictationListener implements Listener {
     log("info", "Dictation recording — press the hotkey again to stop");
   }
 
-  private async finishRecording(token: { abandoned: boolean }): Promise<void> {
+  private async finishRecording(token: { abandoned: boolean; abort: AbortController }): Promise<void> {
     const capture = this.capture;
     if (!capture) return;
     this.capture = null;
@@ -408,13 +412,14 @@ export class DictationListener implements Listener {
         return;
       }
       await this.handBackMicrophone();
-      const transcript = (await this.deps.stt.transcribe(capture.file))?.trim() ?? "";
+      const transcript = (await this.deps.stt.transcribe(capture.file, token.abort.signal))?.trim() ?? "";
       if (!transcript) {
         log("warn", "Dictation produced no transcript");
         return;
       }
       await this.deliver(transcript, token);
     } catch (error: unknown) {
+      if (token.abort.signal.aborted) return;
       // A dictation failure must never take the daemon down with it.
       log("error", `Dictation failed: ${detail(error)}`);
     } finally {

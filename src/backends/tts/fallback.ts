@@ -17,9 +17,13 @@ export class FallbackTTSProvider implements TTSProvider {
   }
 
   async generateAudio(text: string, voice?: string, options?: TTSOptions): Promise<ArrayBuffer> {
+    options?.signal?.throwIfAborted();
     try {
-      return await this.primary.generateAudio(text, voice, options);
+      const audio = await this.primary.generateAudio(text, voice, options);
+      options?.signal?.throwIfAborted();
+      return audio;
     } catch (err: unknown) {
+      options?.signal?.throwIfAborted();
       const msg = err instanceof Error ? err.message : String(err);
       // Unknown-voice throws are the designed cross-engine hand-off (lane
       // voices are fallback-engine presets, not library clones) — log them as
@@ -30,8 +34,11 @@ export class FallbackTTSProvider implements TTSProvider {
         log("warn", `tts ${this.primary.name} failed (${msg.substring(0, 120)}) — falling back to ${this.fallback.name}`);
       }
       try {
-        return await this.fallback.generateAudio(text, voice, options);
+        const audio = await this.fallback.generateAudio(text, voice, options);
+        options?.signal?.throwIfAborted();
+        return audio;
       } catch (fallbackError: unknown) {
+        options?.signal?.throwIfAborted();
         // A lane voice can name a primary-engine clone that the fallback does
         // not provide. Preserve audible output by degrading loudly to the
         // fallback's configured default instead of dropping the sentence.
@@ -43,7 +50,9 @@ export class FallbackTTSProvider implements TTSProvider {
           "warn",
           `tts ${this.fallback.name} rejected voice '${voice}' (${fallbackMessage.substring(0, 80)}) — retrying in its default voice`,
         );
-        return await this.fallback.generateAudio(text, undefined, options);
+        const audio = await this.fallback.generateAudio(text, undefined, options);
+        options?.signal?.throwIfAborted();
+        return audio;
       }
     }
   }

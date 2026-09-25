@@ -92,6 +92,7 @@ export class PocketTtsProvider implements TTSProvider {
   }
 
   async generateAudio(text: string, voice?: string, options?: TTSOptions): Promise<ArrayBuffer> {
+    options?.signal?.throwIfAborted();
     let voiceArg = this.refAudio ?? this.voice;
     if (voice && voice !== this.voice) {
       // Per-call override (lane switchboard): names a provisioned clone in the
@@ -108,7 +109,7 @@ export class PocketTtsProvider implements TTSProvider {
         response_format: "wav",
         speed: options?.speed ?? 1.0,
       }),
-      signal: providerSignal(this.timeoutMs),
+      signal: providerSignal(this.timeoutMs, options?.signal),
     });
 
     if (!response.ok) {
@@ -116,7 +117,10 @@ export class PocketTtsProvider implements TTSProvider {
       throw new Error(`Pocket-TTS returned ${response.status}${detail ? `: ${detail}` : ""}`);
     }
 
-    return await readBoundedArrayBuffer(response, undefined, "Pocket-TTS audio response");
+    options?.signal?.throwIfAborted();
+    const audio = await readBoundedArrayBuffer(response, undefined, "Pocket-TTS audio response");
+    options?.signal?.throwIfAborted();
+    return audio;
   }
 
   async health(): Promise<boolean> {
