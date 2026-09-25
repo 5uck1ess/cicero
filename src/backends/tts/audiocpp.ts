@@ -93,7 +93,7 @@ export class AudioCppProvider implements TTSProvider {
   private heldReferences = new Map<string, AudioCppReferenceLease>();
   /**
    * Set when the served model rejects runtime style controls (pocket-tts
-   * refuses any `speed`, even 1.0). Renders then omit `speed` until stop().
+   * refuses any `speed`, even 1.0). Renders then omit `speed` until stop() drains.
    */
   private styleUnsupported = false;
 
@@ -324,7 +324,6 @@ export class AudioCppProvider implements TTSProvider {
     // Synchronous, before any await: a startup still in flight must see this.
     this.cancelStartup();
     this.acceptingRenders = false;
-    this.styleUnsupported = false;
     this.lifecycleIntent += 1;
     if (this.lifecycleTailKind === "stop" && this.stopTask) return this.stopTask;
     this.lifecycleTailKind = "stop";
@@ -341,6 +340,8 @@ export class AudioCppProvider implements TTSProvider {
     // The serialized queue owns every active external open/read window. Drain
     // it before unpinning held leases or stopping the shared server.
     await this.queue;
+    // After the drain: a queued render may have just latched it.
+    this.styleUnsupported = false;
     try {
       if (this.managed) {
         const managed = this.managed;

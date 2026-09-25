@@ -317,6 +317,40 @@ test("a model that rejects style controls gets the sentence resent without speed
   expect("speed" in bodies[2]).toBe(false);
 });
 
+test("a rejection that lands during stop's drain does not latch across restart", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  let rejectStyle = true;
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  globalThis.fetch = (async (_url: unknown, init: unknown) => {
+    const body = JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>;
+    bodies.push(body);
+    if (bodies.length === 1) await firstGate;
+    if ("speed" in body && rejectStyle) {
+      return new Response(
+        JSON.stringify({ error: { message: "PocketTTS framework session does not support runtime style controls" } }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response(new Uint8Array([0]), { status: 200, headers: { "Content-Type": "audio/wav" } });
+  }) as unknown as typeof fetch;
+
+  const provider = new AudioCppProvider({ backend: "audiocpp", host: "192.0.2.10" });
+  const inFlight = provider.generateAudio("queued", undefined, { speed: 1.2 });
+  while (bodies.length === 0) await Bun.sleep(1);
+  const stopping = provider.stop();
+  releaseFirst();
+  await inFlight;
+  await stopping;
+
+  // The restarted server now accepts speed; the old verdict must not suppress it.
+  rejectStyle = false;
+  await provider.start();
+  await provider.generateAudio("after restart", undefined, { speed: 1.2 });
+  expect(bodies.at(-1)?.speed).toBe(1.2);
+  await provider.stop();
+});
+
 test("other 500s are not retried without speed", async () => {
   const calls = captureFetch("mimi_encoder graph allocation failed", 500, "application/json");
   const p = new AudioCppProvider({ backend: "audiocpp" });
