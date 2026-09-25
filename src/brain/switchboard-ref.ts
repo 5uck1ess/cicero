@@ -11,3 +11,10 @@ export function normalizeRef(raw: string): string {
     .replace(/^the\s+/, "");
 }
 
+
+/** Identity of a configured name: case- and spacing-insensitive, nothing else.
+ * Unlike normalizeRef it never drops words, so "coder" and "coder agent" stay
+ * distinct names. Use it to compare configured names with each other. */
+export function nameKey(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, " ");
+}

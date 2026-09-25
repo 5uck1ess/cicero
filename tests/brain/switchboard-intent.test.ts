@@ -93,6 +93,22 @@ test("a default front-desk name that is a lane alias steps aside for that lane",
   } finally { await sb.stop(); }
 });
 
+test("a lane alias that only normalizes like a front-desk name keeps the default release", async () => {
+  const sb = new SwitchboardBrain(front(), { coder: { brain: front(), aliases: ["Jarvis agent"] } });
+  try {
+    await sb.send("switch to Jarvis agent");
+    expect(sb.activeLane()).toBe("coder");
+    await sb.send("back to Jarvis");
+    expect(sb.activeLane()).toBeNull();
+  } finally { await sb.stop(); }
+});
+
+test("classifier targets keep distinct names that normalizeRef would merge", () => {
+  const lanes = { coder: {}, "coder agent": {} };
+  expect(parseIntent(json({ intent: "transfer", target: "coder agent" }), lanes).target).toBe("coder agent");
+  expect(parseIntent(json({ intent: "transfer", target: "Coder" }), lanes).target).toBe("coder");
+});
+
 test("switchboard passes configured aliases to its classifier", async () => {
   let prompt = "";
   const sb = new SwitchboardBrain(front(), { coder: { brain: front() } }, async (text) => {

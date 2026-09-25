@@ -1,5 +1,5 @@
 import { classifySwitchboardIntent, DEFAULT_FRONT_DESK_ALIASES, type SwitchboardIntent } from "./switchboard-intent";
-import { normalizeRef } from "./switchboard-ref";
+import { nameKey, normalizeRef } from "./switchboard-ref";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
 import { dialBackMemo, matchCallMe, SpeculativeSideEffectError } from "../call-intent";
@@ -453,10 +453,10 @@ export class SwitchboardBrain implements Brain {
     // Explicit aliases are validated against the roster at config load. The
     // built-in defaults are not, so a default that names a lane steps aside:
     // an existing lane alias keeps routing exactly as it did before.
-    const laneRefs = new Set(Object.entries(lanes).flatMap(([name, lane]) => [name, ...(lane.aliases ?? [])]).map(normalizeRef));
+    const laneRefs = new Set(Object.entries(lanes).flatMap(([name, lane]) => [name, ...(lane.aliases ?? [])]).map(nameKey));
     this.frontDeskAliases = options.frontDeskAliases
-      ? options.frontDeskAliases.map(normalizeRef).filter(Boolean)
-      : DEFAULT_FRONT_DESK_ALIASES.map(normalizeRef).filter((name) => name && !laneRefs.has(name));
+      ? options.frontDeskAliases.map(nameKey).filter(Boolean)
+      : DEFAULT_FRONT_DESK_ALIASES.map(nameKey).filter((name) => name && !laneRefs.has(name));
     const lead = leadIn(this.frontDeskAliases);
     const names = this.frontDeskAliases.map(escapeRegex).join("|");
     this.pinRe = makePinRe(lead);
@@ -1012,7 +1012,7 @@ export class SwitchboardBrain implements Brain {
 
   private isFrontDeskName(ref: string): boolean {
     const want = normalizeRef(ref);
-    return this.frontDeskAliases.includes(want);
+    return want.length > 0 && this.frontDeskAliases.some((name) => normalizeRef(name) === want);
   }
 
   /**

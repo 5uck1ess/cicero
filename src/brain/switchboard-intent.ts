@@ -1,5 +1,5 @@
 import { log } from "../logger";
-import { normalizeRef } from "./switchboard-ref";
+import { nameKey } from "./switchboard-ref";
 
 export const INTENTS = ["transfer", "release", "rollcall", "standup", "callme", "none"] as const;
 export interface SwitchboardIntent {
@@ -32,11 +32,11 @@ export function parseIntent(raw: string, roster: IntentRoster, frontDeskAliases:
       || typeof v.confidence !== "number" || !Number.isFinite(v.confidence) || v.confidence < 0 || v.confidence > 1
       || !(v.target === null || typeof v.target === "string") || (typeof v.target === "string" && v.target.length > 128)) return NONE;
     const rawRef = v.target?.trim().toLowerCase();
-    const ref = rawRef ? normalizeRef(rawRef) : null;
+    const ref = rawRef ? nameKey(rawRef) : null;
     const matches = ref ? Object.entries(roster).filter(([name, lane]) =>
-      [name, ...(lane.aliases ?? [])].some((alias) => normalizeRef(alias) === ref)) : [];
+      [name, ...(lane.aliases ?? [])].some((alias) => nameKey(alias) === ref)) : [];
     const target = matches.length === 1 ? matches[0]![0] : null;
-    if (v.intent === "transfer" && ref && target === null && frontDeskAliases.some((name) => normalizeRef(name) === ref)) return NONE;
+    if (v.intent === "transfer" && ref && target === null && frontDeskAliases.some((name) => nameKey(name) === ref)) return NONE;
     if (v.intent === "transfer" && target === null) return NONE;
     if (v.intent === "none") return NONE;
     if (v.intent === "callme" && rawRef && target === null) {
@@ -51,7 +51,7 @@ export function parseIntent(raw: string, roster: IntentRoster, frontDeskAliases:
 }
 
 export function intentPrompt(utterance: string, roster: IntentRoster, frontDeskAliases: readonly string[] = DEFAULT_FRONT_DESK_ALIASES): string {
-  frontDeskAliases = frontDeskAliases.map(normalizeRef).filter(Boolean);
+  frontDeskAliases = frontDeskAliases.map(nameKey).filter(Boolean);
   const employees = Object.entries(roster).map(([name, lane]) => ({ name, aliases: lane.aliases ?? [] }));
   const exampleName = frontDeskAliases[0] ?? "front desk";
   return `You classify the operator's intended switchboard action, never answer them. Return only strict JSON with exactly intent, target (employee name or null), request_now (boolean), confidence (0..1).

@@ -8,7 +8,7 @@ import {
   MAX_ACTION_TIMEOUT_SECONDS,
 } from "./action-command-limits";
 import { MAX_ACP_PENDING_TURN_LIMIT, MAX_ACP_TEXT_LIMIT_BYTES } from "./brain/acp-limits";
-import { normalizeRef } from "./brain/switchboard-ref";
+import { nameKey, normalizeRef } from "./brain/switchboard-ref";
 import {
   sttDefaultPort,
   sttEndpointKey,
@@ -336,8 +336,8 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
         || aliases.some((name) => typeof name !== "string" || name.length > 40 || !/^[a-z0-9 _-]+$/i.test(name) || name.trim().length === 0)) {
         issues.push("switchboard.front_desk_aliases must contain 1 to 8 names of at most 40 characters using letters, digits, spaces, underscores, or hyphens");
       } else {
-        const normalized = aliases.map(normalizeRef);
-        if (normalized.some((name) => name.length === 0)) {
+        const normalized = aliases.map(nameKey);
+        if (aliases.some((name) => normalizeRef(name).length === 0)) {
           issues.push("switchboard.front_desk_aliases must not normalize to an empty name");
         }
         if (new Set(normalized).size !== normalized.length) {
@@ -576,11 +576,11 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       // Only explicitly configured names can collide; built-in defaults step aside at runtime.
       const frontNames = isRecord(config.switchboard) ? config.switchboard.front_desk_aliases : undefined;
       if (Array.isArray(frontNames)) {
-        const names = new Set(frontNames.filter((name): name is string => typeof name === "string").map(normalizeRef).filter(Boolean));
+        const names = new Set(frontNames.filter((name): name is string => typeof name === "string").map(nameKey).filter(Boolean));
         for (const [laneName, lane] of Object.entries(config.brain.lanes)) {
           const laneNames = [laneName, ...(isRecord(lane) && Array.isArray(lane.aliases) ? lane.aliases : [])];
           for (const name of laneNames) {
-            if (typeof name === "string" && names.has(normalizeRef(name))) {
+            if (typeof name === "string" && names.has(nameKey(name))) {
               issues.push(`switchboard.front_desk_aliases collides with brain.lanes.${laneName}: ${name}`);
             }
           }
