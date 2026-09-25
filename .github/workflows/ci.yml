@@ -53,8 +53,11 @@ jobs:
       # resolves a PID to a start-time identity through PowerShell on win32 and
       # /proc on Linux. The Linux reader runs in the `test` job; without this the
       # win32 reader had no runner and its only evidence was that it typechecked.
+      # Real PowerShell/openssl/process spawns cold-start in 3-5s on hosted
+      # Windows runners, right at Bun's 5s per-test default; that timeout was the
+      # recurring red here, not a product failure. Per-test deadline, not job.
       - name: Test brain spawning, process jobs, generated TLS, history, and config leases on Windows
-        run: bun test tests/brain-subprocess-cli.test.ts tests/process/windows-job.test.ts tests/process/owned-process.test.ts tests/web-voice/tls.test.ts tests/web-voice/history.test.ts tests/config-update.test.ts
+        run: bun test --timeout 30000 tests/brain-subprocess-cli.test.ts tests/process/windows-job.test.ts tests/process/owned-process.test.ts tests/web-voice/tls.test.ts tests/web-voice/history.test.ts tests/config-update.test.ts
 
   python-sidecars:
     name: Python sidecars (${{ matrix.python-version }}, ${{ matrix.resolution }})
