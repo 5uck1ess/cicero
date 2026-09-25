@@ -421,6 +421,11 @@ export class SwitchboardBrain implements Brain {
     this.standupLaneTimeoutMs = configured ?? DEFAULT_STANDUP_LANE_TIMEOUT_MS;
   }
 
+  canDeferSpeculativePermissions(): boolean {
+    return this.primary.canDeferSpeculativePermissions?.() === true
+      && Object.values(this.lanes).every(({ brain }) => brain.canDeferSpeculativePermissions?.() === true);
+  }
+
   /** Which lane is pinned right now (for logging/UX). */
   activeLane(): string | null {
     return this.active;

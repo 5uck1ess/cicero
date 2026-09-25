@@ -16,6 +16,7 @@ import { collectPendingConfirmations, hasPendingConfirmations, relayBoundConfirm
  * employee must never get silently dumber.
  */
 export class FallbackBrain implements Brain {
+  canDeferSpeculativePermissions(): boolean { return this.tiers.every((brain) => brain.canDeferSpeculativePermissions?.() === true); }
   sessionRestored(): boolean { return this.tiers[0]?.sessionRestored?.() ?? false; }
   private started = new Set<number>();
   /** Tier that served the previous turn (-1 = none yet) — gates the spoken notice. */

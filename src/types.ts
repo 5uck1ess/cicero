@@ -137,13 +137,9 @@ export interface WebVoiceConfig {
   speculative?: {
     enabled?: boolean;         // default false
     min_probability?: number;  // end-of-turn confidence required to speculate (default 0.85)
-    // Speculation starts a turn before the user has finished speaking. A brain
-    // that only returns text loses nothing on a wrong guess — the tokens are
-    // dropped. A brain that runs tools may already have written files or run
-    // commands by the time the guess is retracted, so it does not speculate
-    // unless this is set. See `brainExecutesTools` for the classification,
-    // which fails closed on anything it cannot prove is text-only.
-    // Default false.
+    // ACP brains defer permission-routed tools until final-audio adoption.
+    // Other tool-capable brains need this opt-in because their tools may run
+    // before the final utterance arrives. Default false.
     allow_tool_brains?: boolean;
   };
   // Long-turn parking: when a reply's FIRST sentence hasn't arrived within
@@ -483,6 +479,8 @@ export interface BrainTurnOptions {
    * to the normal path and acts on the final audio instead.
    */
   speculative?: boolean;
+  /** Turn-owned ACP permission hold; resolved only after final-audio adoption. */
+  speculativePermissionHold?: import("./brain/speculative-permissions").SpeculativePermissionHold;
   /**
    * Immutable host-produced context for this invocation only. Adapters must
    * forward it unchanged and must never retain it as conversation memory.
@@ -519,6 +517,8 @@ export interface PendingConfirmation {
 }
 
 export interface Brain {
+  /** True only when every reachable tool-running route defers ACP permission requests. */
+  canDeferSpeculativePermissions?(): boolean;
   /** Whether the front desk loaded its durable agent session at the last start. */
   sessionRestored?(): boolean;
   start(): Promise<void>;

@@ -1,11 +1,12 @@
 import { unlink } from "node:fs/promises";
 import { log } from "../logger";
 import type { STTProvider } from "../backends/stt/provider";
-import type { Brain } from "../types";
+import type { Brain, BrainTurnOptions } from "../types";
 import { beginOwnedTone, settleTone, type ToneOptions } from "./tone";
 import { captureOperationalContext } from "./turn";
 import { writeSecureTempAudio } from "../platform/secure-temp-audio";
 import { SpeculativeSideEffectError } from "../brain/dial-back";
+import { SpeculativePermissionHold } from "../brain/speculative-permissions";
 
 /**
  * Speculative turns: when a mid-pause probe comes back "complete" with high
@@ -43,6 +44,8 @@ const COVERAGE_SLACK_MS = 250;
 const CLAIM_TIMEOUT_MS = 5000;
 export const MAX_SPECULATIVE_TOKEN_ITEMS = 2_048;
 export const MAX_SPECULATIVE_TOKEN_BYTES = 256 * 1024;
+export const MAX_SPECULATIVE_NOTICE_ITEMS = 32;
+export const MAX_SPECULATIVE_NOTICE_BYTES = 16 * 1024;
 
 export interface SpeculatorDeps {
   stt: Pick<STTProvider, "transcribe">;
@@ -66,6 +69,10 @@ export interface SpeculativeTurn {
    * (timeout, replaced) — the caller then just runs the normal path.
    */
   claim(): boolean;
+  /** Release held ACP permissions only after the final recording is accepted. */
+  adopt?(): boolean;
+  /** Attach the normal turn's notice handler after adoption, replaying prior notices once. */
+  attachNotices?(listener: NonNullable<BrainTurnOptions["onNotice"]>): void;
   /** True when the final utterance's duration says the tail we transcribed was the whole thing. */
   coverageOk(finalMs: number): boolean;
   /** The tail transcript; null when STT failed or heard nothing (never rejects). */
@@ -84,6 +91,45 @@ export interface SpeculativeTurn {
 }
 
 class SpeculativeBufferLimitError extends Error {}
+
+/** Turn-owned notices wait for the adopting reply sink; discard drops them. */
+class SpeculativeNoticeRelay {
+  private buffered: Array<{ type: "tool" | "confirmation"; text: string }> = [];
+  private listener: BrainTurnOptions["onNotice"];
+  private items = 0;
+  private bytes = 0;
+  private closed = false;
+
+  push(notice: { type: "tool" | "confirmation"; text: string }): void {
+    if (this.closed || this.items >= MAX_SPECULATIVE_NOTICE_ITEMS) return;
+    if (notice.type !== "tool" && notice.type !== "confirmation") return;
+    if (typeof notice.text !== "string") return;
+    const bytes = Buffer.byteLength(notice.text);
+    if (bytes > MAX_SPECULATIVE_NOTICE_BYTES - this.bytes) return;
+    this.items++;
+    this.bytes += bytes;
+    if (this.listener) {
+      try { this.listener(notice); } catch { /* optional turn notice */ }
+    } else {
+      this.buffered.push({ type: notice.type, text: notice.text });
+    }
+  }
+
+  attach(listener: NonNullable<BrainTurnOptions["onNotice"]>): void {
+    if (this.closed || this.listener) return;
+    this.listener = listener;
+    for (const notice of this.buffered) {
+      try { listener(notice); } catch { /* optional turn notice */ }
+    }
+    this.buffered = [];
+  }
+
+  close(): void {
+    this.closed = true;
+    this.buffered = [];
+    this.listener = undefined;
+  }
+}
 
 /** Bounded token buffer retained until the final WAV adopts or aborts it. */
 class TokenBuffer {
@@ -166,11 +212,14 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
 
     let aborted = false;
     let claimed = false;
+    let adopted = false;
     let buffer: TokenBuffer | null = null;
     let pumpDone: Promise<void> = Promise.resolve();
     let pumpSettled = true;
     const startedAt = performance.now();
     const turnAbort = new AbortController();
+    const permissionHold = new SpeculativePermissionHold();
+    const notices = new SpeculativeNoticeRelay();
 
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let abortTask: Promise<void> | null = null;
@@ -231,6 +280,10 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
             // Tells every wrapper this turn may be discarded, so anything it
             // cannot take back must refuse instead of acting.
             speculative: true,
+            speculativePermissionHold: permissionHold,
+            // The normal streaming path installs its speech handler later.
+            // ACP dashboard rows are emitted independently by recordStructured.
+            onNotice: (notice) => notices.push(notice),
           })[Symbol.asyncIterator]();
           while (!aborted) {
             const next = it.next();
@@ -295,6 +348,8 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
     const doAbort = (why: string): Promise<void> => {
       if (!aborted) {
         aborted = true;
+        permissionHold.cancel();
+        notices.close();
         turnAbort.abort(new Error(`speculative turn aborted: ${why}`));
         if (buffer && !pumpSettled) log("info", `speculative: aborted (${why}) — cancelling the agent turn`);
       }
@@ -334,6 +389,15 @@ export function makeSpeculator(deps: SpeculatorDeps): Speculator {
         clearTimeout(timeout);
         log("info", `speculative: claimed ${Math.round(performance.now() - startedAt)}ms after the probe`);
         return true;
+      },
+      adopt() {
+        if (aborted || !claimed) return false;
+        adopted = true;
+        permissionHold.adopt();
+        return true;
+      },
+      attachNotices(listener) {
+        if (adopted && !aborted) notices.attach(listener);
       },
       coverageOk(finalMs: number) {
         return finalMs - utterMs <= ADOPT_SLACK_MS;
