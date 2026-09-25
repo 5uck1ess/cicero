@@ -11,6 +11,7 @@ import { MAX_ACP_PENDING_TURN_LIMIT, MAX_ACP_TEXT_LIMIT_BYTES } from "./brain/ac
 import {
   sttDefaultPort,
   sttEndpointKey,
+  sttVocabularyPrompt,
   type STTProviderConfig,
 } from "./backends/stt/provider";
 import { ttsDefaultPort } from "./backends/tts/provider";
@@ -571,13 +572,31 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     const roleProviderKeys = name === "llm" || name === "classifier"
       ? ["apiKey", "apiKeyEnv", "baseUrl", "extraHeaders", "extra"] as const
       : name === "stt" || name === "stt_fallback"
-        ? ["compute_type"] as const
+        ? ["compute_type", "language", "vocabulary"] as const
         : ["apiKey", "voice", "device", "refAudio", "refText", "responseTimeoutMs", "maxAudioBytes"] as const;
     checkKnownKeys(provider, name, [...commonProviderKeys, ...roleProviderKeys], issues);
     checkString(provider.backend, `${name}.backend`, issues);
     checkOptionalPort(provider, name, issues);
     for (const key of ["host", "model", "compute_type", "voice", "device", "refAudio", "refText", "baseUrl", "apiKey", "apiKeyEnv"] as const) {
       checkOptionalString(provider, key, name, issues);
+    }
+    if (name === "stt" || name === "stt_fallback") {
+      if (provider.language !== undefined &&
+          (typeof provider.language !== "string" || provider.language.length > 64 ||
+           provider.language.toLowerCase() === "auto" ||
+           !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(provider.language))) {
+        issues.push(`${name}.language must be a language code of at most 64 characters`);
+      }
+      if (provider.vocabulary !== undefined) {
+        const terms = provider.vocabulary;
+        if (!Array.isArray(terms) || terms.length > 100 || terms.some((term) =>
+          typeof term !== "string" || !term.trim() || term.length > 64 || /[\r\n\u0000-\u001f]/.test(term)
+        )) {
+          issues.push(`${name}.vocabulary must contain at most 100 non-empty terms of at most 64 characters each`);
+        } else if (new TextEncoder().encode(sttVocabularyPrompt(terms) ?? "").byteLength > 1024) {
+          issues.push(`${name}.vocabulary prompt must be at most 1024 UTF-8 bytes`);
+        }
+      }
     }
     if (provider.baseUrl !== undefined) checkHttpUrl(provider.baseUrl, `${name}.baseUrl`, issues);
     if (provider.extraHeaders !== undefined) checkStringRecord(provider.extraHeaders, `${name}.extraHeaders`, issues);

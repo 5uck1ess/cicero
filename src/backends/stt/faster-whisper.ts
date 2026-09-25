@@ -1,5 +1,6 @@
 import {
   STT_DEFAULT_PORTS,
+  sttVocabularyPrompt,
   type STTProvider,
   type STTProviderConfig,
   type STTTranscriptionResult,
@@ -41,6 +42,8 @@ export class FasterWhisperProvider implements STTProvider {
   private model: string;
   private computeType?: string;
   private readonly timeoutMs: number;
+  private readonly language?: string;
+  private readonly prompt?: string;
   /** Fresh cancellation scope for one startup; replaces any settled predecessor. */
   private beginStartup(): AbortSignal {
     const abort = new AbortController();
@@ -73,6 +76,8 @@ export class FasterWhisperProvider implements STTProvider {
     this.model = config.model ?? "large-v3-turbo";
     this.computeType = config.compute_type;
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.stt);
+    this.language = config.language;
+    this.prompt = sttVocabularyPrompt(config.vocabulary);
   }
 
   transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null> {
@@ -98,6 +103,8 @@ export class FasterWhisperProvider implements STTProvider {
       formData.append("file", file, "audio.wav");
       formData.append("model", this.model);
       formData.append("response_format", "json");
+      if (this.language) formData.append("language", this.language);
+      if (this.prompt) formData.append("prompt", this.prompt);
 
       const res = await fetch(`${httpBase(this.host, this.port)}/v1/audio/transcriptions`, {
         method: "POST",

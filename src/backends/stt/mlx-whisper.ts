@@ -1,5 +1,6 @@
 import {
   STT_DEFAULT_PORTS,
+  sttVocabularyPrompt,
   type STTProvider,
   type STTProviderConfig,
   type STTTranscriptionResult,
@@ -29,6 +30,8 @@ export class MlxWhisperProvider implements STTProvider {
   private port: number;
   private model: string;
   private readonly timeoutMs: number;
+  private readonly language?: string;
+  private readonly prompt?: string;
   /** Fresh cancellation scope for one startup; replaces any settled predecessor. */
   private beginStartup(): AbortSignal {
     const abort = new AbortController();
@@ -60,6 +63,8 @@ export class MlxWhisperProvider implements STTProvider {
     this.port = config.port ?? STT_DEFAULT_PORTS["mlx-whisper"]!;
     this.model = config.model ?? "mlx-community/whisper-large-v3-turbo";
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.stt);
+    this.language = config.language;
+    this.prompt = sttVocabularyPrompt(config.vocabulary);
   }
 
   transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null> {
@@ -84,6 +89,8 @@ export class MlxWhisperProvider implements STTProvider {
       const formData = new FormData();
       formData.append("file", file, "audio.wav");
       formData.append("response_format", "json");
+      if (this.language) formData.append("language", this.language);
+      if (this.prompt) formData.append("prompt", this.prompt);
 
       const res = await fetch(`${httpBase(this.host, this.port)}/inference`, {
         method: "POST",

@@ -774,6 +774,14 @@ export async function collectChecks(
   // -- engines -------------------------------------------------------------
   await checkEngine("stt", config.sttBackend, checks, options, config.raw.stt === undefined);
   await checkEngine("stt_fallback", config.sttFallbackBackend ?? undefined, checks, options);
+  for (const [name, seat] of [["STT hints", config.sttBackend], ["STT fallback hints", config.sttFallbackBackend]] as const) {
+    if (!seat) continue;
+    checks.push({
+      name,
+      level: "ok",
+      detail: `${seat.language ? `language ${seat.language}` : "language unset"} · vocabulary ${seat.vocabulary?.length ?? 0} terms`,
+    });
+  }
   await checkEngine("tts", config.ttsBackend, checks, options, config.raw.tts === undefined);
   await checkEngine("tts_fallback", config.ttsFallbackBackend ?? undefined, checks, options);
   await checkLlm(config.llmBackend, checks, options, config.raw.llm === undefined);

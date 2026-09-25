@@ -245,6 +245,8 @@ export interface BackendConfig {
 
 export interface STTBackendConfig extends BackendConfig {
   compute_type?: string; // engine quantization knob (faster-whisper/CTranslate2: float16 | int8_float16 | int8)
+  language?: string; // explicit recognition language, where supported
+  vocabulary?: string[]; // pronunciation hints; backend support varies
 }
 
 export interface TTSBackendConfig extends BackendConfig {

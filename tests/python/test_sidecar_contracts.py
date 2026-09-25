@@ -289,7 +289,7 @@ class SidecarContractTests(unittest.TestCase):
 
         faster = load_server("stt_faster_whisper_server.py")
         faster._model = object()
-        faster._transcribe_bytes = lambda data: "hello faster"
+        faster._transcribe_bytes = lambda data, *_hints: "hello faster"
         body, content_type = multipart(
             pcm_wav(),
             "audio.wav",
@@ -311,6 +311,35 @@ class SidecarContractTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(response), {"error": "requested model is not loaded"})
+
+    def test_faster_whisper_request_hints_reach_model_and_are_bounded(self) -> None:
+        faster = load_server("stt_faster_whisper_server.py")
+        observed = []
+        faster._model = SimpleNamespace(transcribe=lambda _audio, **kwargs: (observed.append(kwargs) or [SimpleNamespace(text="hello world")], None))
+        faster.sf.read = lambda _source, **_kwargs: (SimpleNamespace(ndim=1), 16000)
+        for fields, expected_status in [
+            ({"language": "es", "prompt": "Cicero, TypeGPU"}, 200),
+            ({"language": "x" * 65}, 400),
+            ({"prompt": "x" * 1025}, 400),
+        ]:
+            body, content_type = multipart(pcm_wav(), "audio.wav", fields)
+            status, _response, _headers = asyncio.run(asgi_request(
+                faster.app, "POST", "/v1/audio/transcriptions", body, content_type,
+            ))
+            self.assertEqual(status, expected_status)
+        self.assertEqual(observed[0]["language"], "es")
+        self.assertEqual(observed[0]["initial_prompt"], "Cicero, TypeGPU")
+        self.assertEqual(observed[0]["hotwords"], "Cicero, TypeGPU")
+
+    def test_mlx_whisper_request_language_reaches_model(self) -> None:
+        mlx = load_server("stt_server.py")
+        observed = []
+        mlx.mlx_whisper.transcribe = lambda _path, **kwargs: (observed.append(kwargs) or {"text": "hello world"})
+        body, content_type = multipart(pcm_wav(), "audio.wav", {"language": "es", "prompt": "Cicero"})
+        status, _response, _headers = asyncio.run(asgi_request(mlx.app, "POST", "/inference", body, content_type))
+        self.assertEqual(status, 200)
+        self.assertEqual(observed[0]["language"], "es")
+        self.assertEqual(observed[0]["initial_prompt"], "Cicero")
 
     def test_raw_multipart_and_pocket_routes_reject_ambiguous_or_nonfinite_wavs(self) -> None:
         invalid = malformed_wavs()

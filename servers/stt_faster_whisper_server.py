@@ -13,7 +13,7 @@ torch's bundled CUDA 12 / cuDNN 9 libs), same pattern as `.venv-kokoro`.
 
 Exposes the OpenAI-ish surface the TypeScript provider expects
 (src/backends/stt/faster-whisper.ts):
-    POST /v1/audio/transcriptions  (multipart file, model, response_format) -> {"text": ...}
+    POST /v1/audio/transcriptions  (multipart file, model, response_format, optional language/prompt) -> {"text": ...}
     GET  /health                                                            -> {"status": ...}
 
 CRITICAL — cuDNN preload: CTranslate2 4.x dlopens libcudnn/libcublas itself and
@@ -34,6 +34,7 @@ import argparse
 import ctypes
 import glob
 import io
+import inspect
 import os
 import site
 import sys
@@ -78,6 +79,7 @@ from sidecar_limits import (  # noqa: E402
     model_gate_pair,
     read_file_limited,
     validate_pcm_wav_bytes,
+    validate_stt_hints,
 )
 
 app = FastAPI(title="Cicero faster-whisper STT")
@@ -111,7 +113,7 @@ def bounded_transcript(segments: Iterable[object]) -> str:
     return "".join(parts).strip()
 
 
-def _transcribe_bytes(data: bytes) -> str:
+def _transcribe_bytes(data: bytes, language: str = "", prompt: str = "") -> str:
     """Decode WAV bytes to float32 mono @ 16kHz and run faster-whisper.
 
     Cicero sends one short utterance per turn, so we greedily concatenate the
@@ -127,15 +129,23 @@ def _transcribe_bytes(data: bytes) -> str:
         n = int(round(len(audio) * 16000 / sr))
         audio = np.interp(np.linspace(0, len(audio), n, endpoint=False),
                           np.arange(len(audio)), audio).astype("float32")
+    hint_kwargs = {}
+    parameters = inspect.signature(_model.transcribe).parameters
+    supports_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+    if prompt and ("initial_prompt" in parameters or supports_kwargs):
+        hint_kwargs["initial_prompt"] = prompt
+    if prompt and ("hotwords" in parameters or supports_kwargs):
+        hint_kwargs["hotwords"] = prompt.removeprefix("Vocabulary: ").removesuffix(".")
     segments, _info = _model.transcribe(
         audio,
-        language=_language,
+        language=language or _language,
         beam_size=5,
         condition_on_previous_text=False,
         # Silero VAD gate: silent/noise-only audio yields no segments instead of
         # Whisper's hallucinated "You"/"Thank you." — a mis-captured utterance
         # becomes "didn't catch that" rather than a phantom brain turn.
         vad_filter=True,
+        **hint_kwargs,
     )
     return bounded_transcript(segments)
 
@@ -161,6 +171,8 @@ def transcriptions(
     file: UploadFile = File(...),
     model: str = Form(default=""),
     response_format: str = Form(default="json"),
+    language: str = Form(default=""),
+    prompt: str = Form(default=""),
 ) -> JSONResponse:
     # Plain `def` (not async): FastAPI runs it in a threadpool, so the blocking
     # CTranslate2 inference doesn't stall the event loop (health probes stay live).
@@ -171,6 +183,10 @@ def transcriptions(
     # active, so reject the mismatch without reflecting the untrusted field.
     if model and model != _model_name:
         return JSONResponse({"error": "requested model is not loaded"}, status_code=400)
+    try:
+        validate_stt_hints(language, prompt)
+    except AdmissionError as err:
+        return JSONResponse({"error": str(err)}, status_code=400)
     try:
         data = read_file_limited(file.file, MAX_AUDIO_UPLOAD_BYTES)
         if not data:
@@ -185,7 +201,7 @@ def transcriptions(
     except Exception as err:
         return JSONResponse({"error": f"audio upload failed: {err}"}, status_code=400)
     try:
-        text = _model_gate.run(_transcribe_bytes, data)
+        text = _model_gate.run(_transcribe_bytes, data, language, prompt)
     except ModelGateError as err:
         headers = {"Retry-After": "1"} if err.status_code == 429 else None
         return JSONResponse({"error": str(err)}, status_code=err.status_code, headers=headers)

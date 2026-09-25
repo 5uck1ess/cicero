@@ -325,6 +325,15 @@ def validate_prompt(prompt: str) -> str:
     return prompt
 
 
+def validate_stt_hints(language: str, prompt: str) -> tuple[str, str]:
+    # Mirror the config wire limits for direct callers of either STT sidecar.
+    if language and (len(language) > 64 or language.lower() == "auto" or not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", language)):
+        raise AdmissionError("invalid language")
+    if len(prompt.encode("utf-8")) > 1024:
+        raise AdmissionError("prompt exceeds 1024 UTF-8 bytes")
+    return language, prompt
+
+
 _VOICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+\-]{0,127}$")
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 

@@ -755,13 +755,14 @@ describe("doctor setup hints", () => {
       ...structuredClone(DEFAULT_CONFIG),
       headless: true,
       brain: { backend: "ollama" },
-      stt: { backend: "faster-whisper", host: "gpu.internal", port: 18083 },
+      stt: { backend: "faster-whisper", host: "gpu.internal", port: 18083, language: "en", vocabulary: ["Cicero", "TypeGPU"] },
       stt_fallback: { backend: "audiocpp" },
     });
 
     try {
       const checks = await collectChecks(config, { projectRoot: root });
       const fallback = checks.find((check) => check.name === "stt_fallback (audiocpp)");
+      expect(checks.find((check) => check.name === "STT hints")?.detail).toBe("language en · vocabulary 2 terms");
       expect(fallback?.level).toBe("fail");
       expect(fallback?.detail).toContain("local audio.cpp runtime is incomplete");
       expect(fallback?.detail).not.toContain("venv");
