@@ -236,6 +236,8 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
 
 /** Dependencies for a STREAMING web turn (Phase 2): brain must be able to stream. */
 export interface WebStreamDeps {
+  /** Optional bounded latency mark observer supplied by the web transport. */
+  timingMark?: (name: string, offsetMs: number) => void;
   stt: Pick<STTProvider, "transcribe">;
   brain: Pick<Brain, "send"> & { sendStream?: Brain["sendStream"]; wasControlTurn?: Brain["wasControlTurn"] };
   tts: Pick<TTSProvider, "generateAudio">;
@@ -908,7 +910,7 @@ export async function streamWebTurn(
   sink: WebReplySink,
   spec?: SpeculativeTurn | null,
 ): Promise<void> {
-  const timer = newTurnTimer();
+  const timer = newTurnTimer(deps.timingMark);
   if (deps.signal?.aborted || sink.aborted()) return;
 
   // A speculative turn raced ahead on the probe tail (see speculative.ts).
@@ -1037,7 +1039,7 @@ async function dispatchAllowed(
  * spoken utterance.
  */
 export async function streamWebTextTurn(text: string, deps: WebStreamDeps, sink: WebReplySink): Promise<void> {
-  const timer = newTurnTimer();
+  const timer = newTurnTimer(deps.timingMark);
   try {
     if (deps.signal?.aborted || sink.aborted()) return;
     const transcript = boundedTranscript(text.trim());
@@ -1051,9 +1053,11 @@ export async function streamWebTextTurn(text: string, deps: WebStreamDeps, sink:
   }
 }
 
-async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink): Promise<string[]> {
+async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink, timer: ReturnType<typeof newTurnTimer>): Promise<string[]> {
   const spokenTexts: string[] = [];
   let completed = false;
+  let firstSentence = false;
+  let firstAudio = false;
   // The brain-free fast paths (voice-control ack, repeat, expand) render here and
   // run before streamReply pins anything, so they hold their own pin: a replayed
   // multi-sentence reply must not change provider halfway through.
@@ -1068,11 +1072,13 @@ async function speakDirect(text: string, deps: WebStreamDeps, sink: WebReplySink
       if (sink.aborted()) break;
       for (const part of chunk.parts) sink.sentence(part);
       if (sink.aborted()) break;
+      if (!firstSentence) { firstSentence = true; timer.mark("first_sentence"); }
       const audio = admitProviderAudio(
         await pin.provider.generateAudio(chunk.text, undefined, { speed: deps.voice?.state.rate, signal: deps.signal }),
       );
       if (sink.aborted()) break;
       if (audio.byteLength > 0) {
+        if (!firstAudio) { firstAudio = true; timer.mark("first_audio"); }
         await sink.audio(audio, chunk.parts.join(" "));
         spokenTexts.push(...chunk.parts);
       }
@@ -1112,7 +1118,7 @@ async function streamReply(
       } else {
         sink.control({ type: "rate", rate: control.rate });
       }
-      const spoken = await speakDirect(control.ack, deps, sink);
+      const spoken = await speakDirect(control.ack, deps, sink, timer);
       if (!sink.aborted() && spoken.length > 0) deps.lastReply?.store(spoken.join(" "));
       return;
     }
@@ -1122,7 +1128,7 @@ async function streamReply(
   // turn, so this is instant and doesn't perturb the agent's conversation state.
   if (deps.lastReply && isRepeatRequest(transcript)) {
     const replay = deps.lastReply.pending() || "I haven't said anything yet.";
-    const spoken = await speakDirect(replay, deps, sink);
+    const spoken = await speakDirect(replay, deps, sink, timer);
     if (!sink.aborted() && spoken.length > 0 && replay !== "I haven't said anything yet.") {
       deps.lastReply.store(spoken.join(" "));
     }
@@ -1134,7 +1140,7 @@ async function streamReply(
   if (deps.tldr?.pending && isExpandRequest(transcript)) {
     const detail = deps.tldr.pending();
     if (detail) {
-      const spoken = await speakDirect(detail, deps, sink);
+      const spoken = await speakDirect(detail, deps, sink, timer);
       if (!sink.aborted() && spoken.length > 0) deps.lastReply?.store(spoken.join(" "));
       return;
     }
@@ -1261,6 +1267,7 @@ async function streamReply(
           }
         };
         try {
+          timer.mark(reassurance ? "reassurance_queued" : "filler_queued");
           const sent = sink.audio(clip.audio, clip.text);
           if (sent) void sent.then(continueFiller, fail);
           else continueFiller();
@@ -1290,6 +1297,7 @@ async function streamReply(
       cancelFiller();
       noticeSpeech = noticeSpeech.then(async () => {
         if (noticeClosed || deps.signal?.aborted || turnAbort?.signal.aborted || sink.aborted() || parked) return;
+        timer.mark("first_sentence");
         const audio = admitProviderAudio(await ttsPin.provider.generateAudio(notice.text, undefined, {
           speed: deps.voice?.state.rate, signal: turnAbort?.signal ?? deps.signal,
         }));
@@ -1297,6 +1305,7 @@ async function streamReply(
         if (sink.notice) sink.notice(notice.text);
         else sink.sentence(notice.text);
         if (sink.aborted()) return;
+        timer.mark("first_audio");
         sink.audio(audio);
         firstAudio = true;
       }).catch(() => { /* an optional notice cannot fail the reply */ });
@@ -1304,6 +1313,7 @@ async function streamReply(
     const turnOptions = turnAbort
       ? { signal: turnAbort.signal, systemContext: systemContext ?? undefined, onNotice }
       : undefined;
+    if (!pretokens) timer.mark("brain_start");
     const tokens: AsyncIterable<string> = pretokens
       ? timed(pretokens)
       : deps.brain.sendStream
@@ -1455,10 +1465,11 @@ async function streamReply(
           await consumption;
           return;
         }
+        timer.mark("first_sentence");
         const audio = admitProviderAudio(
           await ttsPin.provider.generateAudio(line, undefined, { speed: deps.voice?.state.rate, signal: turnAbort?.signal ?? deps.signal }),
         );
-        if (audio.byteLength > 0) await sink.audio(audio, line);
+        if (audio.byteLength > 0) { timer.mark("first_audio"); await sink.audio(audio, line); }
         sink.done();
         timer.mark("parked");
         detached = true;
@@ -1500,10 +1511,12 @@ async function streamReply(
       }
       sink.sentence(coda);
       if (sink.aborted()) return;
+      timer.mark("first_sentence");
       const audio = admitProviderAudio(
         await ttsPin.provider.generateAudio(coda, undefined, { speed: deps.voice?.state.rate, signal: turnAbort?.signal ?? deps.signal }),
       );
       if (!sink.aborted() && audio.byteLength > 0) {
+        timer.mark("first_audio");
         await sink.audio(audio, coda);
         spokenTexts.push(coda);
       }

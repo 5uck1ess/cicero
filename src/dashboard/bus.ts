@@ -7,11 +7,12 @@
  */
 import type { BrainStructuredUpdate } from "../types";
 import { redactSnapshotSecrets } from "../operational-state";
+import type { Percentiles } from "../latency";
 
 export type VoiceState = "idle" | "listening" | "thinking" | "speaking";
 
 export interface DashEvent {
-  type: "state" | "log" | "transcript" | "response" | "config" | "snapshot" | "voice" | "structured";
+  type: "state" | "log" | "transcript" | "response" | "config" | "snapshot" | "voice" | "structured" | "latency";
   ts: number;
   state?: VoiceState;
   icon?: string;
@@ -21,6 +22,7 @@ export interface DashEvent {
   history?: DashEvent[];
   voiceActive?: boolean;
   structured?: BrainStructuredUpdate;
+  latency?: Percentiles;
 }
 
 type Sub = (e: DashEvent) => void;
@@ -51,6 +53,7 @@ class DashBus {
   // tracks activity (listening/thinking/speaking) while this tracks whether the
   // loop is on at all, so the dashboard toggle button can show the right label.
   voiceActive = false;
+  latency?: Percentiles;
 
   subscribe(sub: Sub): () => void {
     this.subs.add(sub);
@@ -69,7 +72,12 @@ class DashBus {
 
   /** Full current state — sent to a client the moment it connects. */
   snapshot(): DashEvent {
-    return { type: "snapshot", ts: Date.now(), state: this.state, voiceActive: this.voiceActive, config: this.config, history: [...this.history] };
+    return { type: "snapshot", ts: Date.now(), state: this.state, voiceActive: this.voiceActive, config: this.config, history: [...this.history], latency: this.latency };
+  }
+
+  setLatency(latency?: Percentiles): void {
+    this.latency = latency;
+    this.push({ type: "latency", ts: Date.now(), latency });
   }
 
   setState(state: VoiceState, message?: string): void {

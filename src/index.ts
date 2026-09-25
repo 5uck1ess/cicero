@@ -213,6 +213,24 @@ program
   });
 
 program
+  .command("latency")
+  .description("Report stored conversation latency p50/p95 by surface")
+  .option("--last <n>", "Most recent turns (1–1024)", "100")
+  .option("--json", "Print machine-readable summary")
+  .action(async (opts: { last: string; json?: boolean }) => {
+    try {
+      const n = Number(opts.last);
+      if (!Number.isSafeInteger(n) || n < 1 || n > 1024) throw new Error("--last must be an integer from 1 to 1024");
+      const { LatencyStore, summarizeLatency, formatLatency } = await import("./latency");
+      const summary = summarizeLatency(await new LatencyStore().read(n));
+      process.stdout.write(opts.json ? JSON.stringify(summary) + "\n" : formatLatency(summary));
+    } catch (error) {
+      console.error(`Could not read latency records: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
+  });
+
+program
   .command("swap")
   .description("Hot-swap a running STT or TTS provider; persist only after readiness succeeds")
   .argument("<role>", "stt or tts")

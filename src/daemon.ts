@@ -74,6 +74,7 @@ import {
 } from "./backends/http-transfer";
 import { startDashboard, type DashboardHandle, type VoiceControlAction } from "./dashboard/server";
 import { dashBus } from "./dashboard/bus";
+import { LatencyStore } from "./latency";
 import { startWebVoiceServer, type WebVoiceHandle } from "./web-voice/server";
 import { TurnCoordinator, type TurnLease } from "./turn-coordinator";
 import {
@@ -1872,9 +1873,10 @@ export class CiceroDaemon {
         // Fillers are pre-rendered in the front desk's voice — suppressed while
         // an employee is pinned (the wrong voice saying "one moment" is worse
         // than a beat of silence).
+        latencyStore: new LatencyStore(),
         onStreamTurn: async (wav, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), toolStartNotice: this.config.brain.tool_start_notice !== false, tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), toolStartNotice: this.config.brain.tool_start_notice !== false, tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, timingMark: options?.timingMark, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTurn(wav, deps, sink, options.spec);
               return;
@@ -1890,7 +1892,7 @@ export class CiceroDaemon {
         // Typed input (the text box next to the mic): same pipeline minus STT.
         onTextTurn: async (text, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), toolStartNotice: this.config.brain.tool_start_notice !== false, signal: options?.signal, trackBackground: options?.trackBackground, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { stt: this.providers.stt, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), toolStartNotice: this.config.brain.tool_start_notice !== false, signal: options?.signal, trackBackground: options?.trackBackground, timingMark: options?.timingMark, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTextTurn(text, deps, sink);
               return;

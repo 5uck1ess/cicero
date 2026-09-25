@@ -467,6 +467,7 @@ const PAGE = `<!doctype html>
     <div class="pill idle" id="pill">IDLE</div>
     <div class="sub" id="sub">Type <b>voice</b> in the daemon to start listening.</div>
     <button id="toggle" class="toggle" type="button">Start listening</button>
+    <div id="latency" aria-live="polite">Speech to reply: no samples yet</div>
   </main>
   <div class="log">
     <h2>Live activity</h2>
@@ -479,6 +480,8 @@ const rows = document.getElementById('rows');
 const chips = document.getElementById('chips');
 const conn = document.getElementById('conn');
 const toggle = document.getElementById('toggle');
+const latency = document.getElementById('latency');
+function setLatency(p) { latency.textContent = p ? 'Speech to reply · p50 ' + p.p50 + ' ms · p95 ' + p.p95 + ' ms (' + p.count + ' turns)' : 'Speech to reply: no samples yet'; }
 const SUBTEXT = {
   idle: 'Idle — type "voice" in the daemon to start.',
   listening: 'Listening… speak now.',
@@ -563,13 +566,14 @@ function setConfig(c) {
 }
 function handle(e) {
   if (e.type === 'snapshot') {
-    setState(e.state); setConfig(e.config); setVoiceActive(e.voiceActive);
+    setState(e.state); setConfig(e.config); setVoiceActive(e.voiceActive); setLatency(e.latency);
     (e.history || []).forEach(addRow);
     return;
   }
   if (e.type === 'state')  setState(e.state);
   else if (e.type === 'voice') setVoiceActive(e.voiceActive);
   else if (e.type === 'config') setConfig(e.config);
+  else if (e.type === 'latency') setLatency(e.latency);
   else addRow(e);
 }
 function connect() {
