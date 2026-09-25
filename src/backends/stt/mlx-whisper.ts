@@ -5,6 +5,7 @@ import {
   type STTProviderConfig,
   type STTTranscriptionResult,
 } from "./provider";
+import { whisperLanguageCode } from "./language";
 import { startManagedServer, stopManagedServer, type ManagedProcess } from "../managed-server";
 import { SerializedLifecycle } from "../serialized-lifecycle";
 import { httpBase, isLocalHost } from "../net";
@@ -63,7 +64,7 @@ export class MlxWhisperProvider implements STTProvider {
     this.port = config.port ?? STT_DEFAULT_PORTS["mlx-whisper"]!;
     this.model = config.model ?? "mlx-community/whisper-large-v3-turbo";
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.stt);
-    this.language = config.language;
+    this.language = config.language ? whisperLanguageCode(config.language) : undefined;
     this.prompt = sttVocabularyPrompt(config.vocabulary);
   }
 

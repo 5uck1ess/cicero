@@ -47,7 +47,12 @@ llm:
 
 `stt.language` is optional and sets the recognition language for audio.cpp,
 faster-whisper, and Cicero's MLX Whisper sidecar. Omit it to use each backend's
-default. It is **not supported** by the current Wyoming STT integration and is
+default. A well-formed language tag such as `en-US`, `pt-BR`, or `yue-Hant-HK`
+is accepted. Audio.cpp receives the tag **as written** (the reference Nemotron
+configuration uses `en-US`). Whisper-family providers send only the lowercased
+primary code (`en-US` → `en`). Their sidecars reject codes outside Whisper's
+supported set with HTTP 400; `doctor` warns about an unsupported primary code.
+Language is **not supported** by the current Wyoming STT integration and is
 ignored there. `stt.vocabulary` is an optional list of recognition hints: at
 most 100 non-empty terms, 64 characters per term, and a joined prompt of at
 most 1 KiB. The prompt is sent to audio.cpp, faster-whisper, and MLX Whisper;

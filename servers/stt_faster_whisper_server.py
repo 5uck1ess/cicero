@@ -80,6 +80,7 @@ from sidecar_limits import (  # noqa: E402
     read_file_limited,
     validate_pcm_wav_bytes,
     validate_stt_hints,
+    validate_whisper_language_code,
 )
 
 app = FastAPI(title="Cicero faster-whisper STT")
@@ -176,6 +177,10 @@ def transcriptions(
 ) -> JSONResponse:
     # Plain `def` (not async): FastAPI runs it in a threadpool, so the blocking
     # CTranslate2 inference doesn't stall the event loop (health probes stay live).
+    try:
+        validate_stt_hints(language, prompt)
+    except AdmissionError as err:
+        return JSONResponse({"error": str(err)}, status_code=400)
     if _model is None:
         return JSONResponse({"error": "model not loaded"}, status_code=503)
     # The process has one resident model. Silently accepting another name lets
@@ -183,10 +188,6 @@ def transcriptions(
     # active, so reject the mismatch without reflecting the untrusted field.
     if model and model != _model_name:
         return JSONResponse({"error": "requested model is not loaded"}, status_code=400)
-    try:
-        validate_stt_hints(language, prompt)
-    except AdmissionError as err:
-        return JSONResponse({"error": str(err)}, status_code=400)
     try:
         data = read_file_limited(file.file, MAX_AUDIO_UPLOAD_BYTES)
         if not data:
@@ -229,6 +230,12 @@ def main() -> None:
         help="Native inference watchdog deadline in seconds",
     )
     args = parser.parse_args()
+
+    if args.language != "auto":
+        try:
+            validate_whisper_language_code(args.language)
+        except AdmissionError as err:
+            parser.error(str(err))
 
     device = args.device
     compute_type = args.compute_type

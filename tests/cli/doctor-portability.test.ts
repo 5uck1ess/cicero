@@ -773,6 +773,24 @@ describe("doctor setup hints", () => {
     }
   });
 
+  test("warns for an unsupported Whisper primary code but leaves audio.cpp tags alone", async () => {
+    globalThis.fetch = (async () => new Response("down", { status: 503 })) as typeof fetch;
+    for (const backend of ["faster-whisper", "mlx-whisper"]) {
+      const config = new RuntimeConfig({
+        ...structuredClone(DEFAULT_CONFIG),
+        headless: true,
+        brain: { backend: "ollama" },
+        stt: { backend, host: "gpu.internal", language: "zz-US" },
+        stt_fallback: { backend: "audiocpp", host: "native.internal", language: "zz-US" },
+      });
+      const checks = await collectChecks(config);
+      const warnings = checks.filter((check) => check.name.endsWith("hints compatibility"));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatchObject({ level: "warn" });
+      expect(warnings[0]!.detail).toContain("primary language code zz");
+    }
+  });
+
   test("probes a remote MLX STT fallback on the provider's real root health route", async () => {
     const urls: string[] = [];
     globalThis.fetch = ((input: RequestInfo | URL) => {

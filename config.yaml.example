@@ -119,7 +119,7 @@ stt:
   port: 8083
   model: large-v3-turbo
   timeout_ms: 90000             # absolute transcription deadline
-  # language: en                 # explicit language; omit for backend default
+  # language: en-US              # audio.cpp gets this tag; Whisper gets "en"
   # vocabulary: [Cicero, TypeGPU] # optional recognition hints (backend-specific)
 # Optional hot standby. The primary is retried every turn and automatically
 # takes over again after recovery. An honestly empty transcript remains silence;

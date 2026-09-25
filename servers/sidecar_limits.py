@@ -327,11 +327,24 @@ def validate_prompt(prompt: str) -> str:
 
 def validate_stt_hints(language: str, prompt: str) -> tuple[str, str]:
     # Mirror the config wire limits for direct callers of either STT sidecar.
-    if language and (len(language) > 64 or language.lower() == "auto" or not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", language)):
-        raise AdmissionError("invalid language")
+    if language:
+        validate_whisper_language_code(language)
     if len(prompt.encode("utf-8")) > 1024:
         raise AdmissionError("prompt exceeds 1024 UTF-8 bytes")
     return language, prompt
+
+
+# The language tokens in OpenAI Whisper and faster-whisper's tokenizers. Shared
+# with the TypeScript doctor so a warning matches the sidecars' admission rule.
+WHISPER_LANGUAGE_CODES = frozenset(json.loads(
+    Path(__file__).with_name("whisper_language_codes.json").read_text(encoding="utf-8")
+))
+
+
+def validate_whisper_language_code(language: str) -> str:
+    if language not in WHISPER_LANGUAGE_CODES:
+        raise AdmissionError("unsupported Whisper language code")
+    return language
 
 
 _VOICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+\-]{0,127}$")

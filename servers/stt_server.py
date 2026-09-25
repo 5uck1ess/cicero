@@ -92,12 +92,15 @@ async def inference(
     - Accepts multipart form with 'file' (WAV audio)
     - Returns {"text": "transcribed text"}
     """
+    try:
+        validate_stt_hints(language, prompt)
+    except AdmissionError as err:
+        return JSONResponse({"error": str(err)}, status_code=400)
     if not _ready:
         return JSONResponse({"error": "model not warmed"}, status_code=503)
     tmp_path: str | None = None
     try:
         try:
-            validate_stt_hints(language, prompt)
             # The wire contract is WAV. Keeping a fixed suffix also prevents an
             # attacker-controlled filename from becoming an oversized suffix.
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:

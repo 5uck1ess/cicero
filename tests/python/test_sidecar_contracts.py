@@ -341,6 +341,33 @@ class SidecarContractTests(unittest.TestCase):
         self.assertEqual(observed[0]["language"], "es")
         self.assertEqual(observed[0]["initial_prompt"], "Cicero")
 
+    def test_whisper_sidecars_reject_unknown_language_before_inference(self) -> None:
+        mlx = load_server("stt_server.py")
+        mlx.mlx_whisper.transcribe = lambda *_args, **_kwargs: self.fail("unknown language reached MLX")
+        faster = load_server("stt_faster_whisper_server.py")
+        faster._model = object()
+        faster._transcribe_bytes = lambda *_args: self.fail("unknown language reached faster-whisper")
+        for module, path in [(mlx, "/inference"), (faster, "/v1/audio/transcriptions")]:
+            for language in ("zz", "en-US"):
+                body, content_type = multipart(pcm_wav(), "audio.wav", {"language": language})
+                status, response, _headers = asyncio.run(asgi_request(module.app, "POST", path, body, content_type))
+                self.assertEqual(status, 400)
+                self.assertIn("unsupported Whisper language code", json.loads(response)["error"])
+        mlx._ready = False
+        faster._model = None
+        for module, path in [(mlx, "/inference"), (faster, "/v1/audio/transcriptions")]:
+            body, content_type = multipart(pcm_wav(), "audio.wav", {"language": "zz"})
+            status, _response, _headers = asyncio.run(asgi_request(module.app, "POST", path, body, content_type))
+            self.assertEqual(status, 400)
+
+    def test_faster_whisper_startup_rejects_unknown_language_before_model_load(self) -> None:
+        faster = load_server("stt_faster_whisper_server.py")
+        for language in ("zz", "en-US"):
+            with patch.object(sys, "argv", ["stt_faster_whisper_server.py", "--language", language]):
+                with self.assertRaises(SystemExit) as error:
+                    faster.main()
+            self.assertEqual(error.exception.code, 2)
+
     def test_raw_multipart_and_pocket_routes_reject_ambiguous_or_nonfinite_wavs(self) -> None:
         invalid = malformed_wavs()
         mlx = load_server("stt_server.py")

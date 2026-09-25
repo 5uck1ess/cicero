@@ -5,6 +5,7 @@ import {
   type STTProviderConfig,
   type STTTranscriptionResult,
 } from "./provider";
+import { whisperLanguageCode } from "./language";
 import { startManagedServer, stopManagedServer, type ManagedProcess } from "../managed-server";
 import { SerializedLifecycle } from "../serialized-lifecycle";
 import { httpBase, isLocalHost } from "../net";
@@ -76,7 +77,7 @@ export class FasterWhisperProvider implements STTProvider {
     this.model = config.model ?? "large-v3-turbo";
     this.computeType = config.compute_type;
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.stt);
-    this.language = config.language;
+    this.language = config.language ? whisperLanguageCode(config.language) : undefined;
     this.prompt = sttVocabularyPrompt(config.vocabulary);
   }
 

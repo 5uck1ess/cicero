@@ -14,6 +14,7 @@ import {
   sttVocabularyPrompt,
   type STTProviderConfig,
 } from "./backends/stt/provider";
+import { isSttLanguageTag } from "./backends/stt/language";
 import { ttsDefaultPort } from "./backends/tts/provider";
 import { backendRoutesByModel, llmDefaultPort, LLM_DEFAULT_MODEL } from "./backends/llm/provider";
 import { OPENAI_COMPATIBLE_BACKENDS, OPENAI_DEFAULT_MODEL } from "./backends/llm/openai";
@@ -581,11 +582,8 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       checkOptionalString(provider, key, name, issues);
     }
     if (name === "stt" || name === "stt_fallback") {
-      if (provider.language !== undefined &&
-          (typeof provider.language !== "string" || provider.language.length > 64 ||
-           provider.language.toLowerCase() === "auto" ||
-           !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(provider.language))) {
-        issues.push(`${name}.language must be a language code of at most 64 characters`);
+      if (provider.language !== undefined && !isSttLanguageTag(provider.language)) {
+        issues.push(`${name}.language must be a language tag (2–3 letter code, optional script and region, at most 32 characters)`);
       }
       if (provider.vocabulary !== undefined) {
         const terms = provider.vocabulary;

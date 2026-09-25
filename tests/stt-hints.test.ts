@@ -17,8 +17,9 @@ test("STT hint config accepts bounded terms and rejects overlong input", () => {
       writeFileSync(join(home, "config.yaml"), `stt:\n  backend: faster-whisper\n${yaml}`);
       return loadConfig({}, { home });
     };
-    expect(read("  language: en\n  vocabulary: [Cicero, TypeGPU]\n").sttBackend)
-      .toMatchObject({ language: "en", vocabulary: ["Cicero", "TypeGPU"] });
+    expect(read("  language: en-US\n  vocabulary: [Cicero, TypeGPU]\n").sttBackend)
+      .toMatchObject({ language: "en-US", vocabulary: ["Cicero", "TypeGPU"] });
+    expect(read("  language: yue-Hant-HK\n").sttBackend.language).toBe("yue-Hant-HK");
     for (const yaml of [
       "  vocabulary: [\"\"]\n",
       `  vocabulary: ["${"x".repeat(65)}"]\n`,
@@ -26,6 +27,9 @@ test("STT hint config accepts bounded terms and rejects overlong input", () => {
       `  vocabulary: [${Array.from({ length: 9 }, () => `"${"é".repeat(64)}"`).join(", ")}]\n`,
     ]) expect(() => read(yaml)).toThrow(/stt\.vocabulary/);
     expect(() => read("  language: \"\"\n")).toThrow(/stt\.language/);
+    for (const bad of ["en--US", "abcd-US", "en-ABCDE", "en-US-Hant", "en_ US", "en-Latn-US-extra"]) {
+      expect(() => read(`  language: ${bad}\n`)).toThrow(/stt\.language/);
+    }
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -41,15 +45,20 @@ test("HTTP STT providers send supported language and vocabulary fields", async (
   const wav = join(home, "audio.wav");
   try {
     await Bun.write(wav, new Uint8Array([0x52, 0x49, 0x46, 0x46]));
-    const config = { language: "en", vocabulary: ["Cicero", "TypeGPU"] };
+    const config = { language: "en-US", vocabulary: ["Cicero", "TypeGPU"] };
     await new AudioCppSTTProvider(config).transcribe(wav);
     await new FasterWhisperProvider(config).transcribe(wav);
     await new MlxWhisperProvider(config).transcribe(wav);
+    expect(forms.map((form) => form.get("language"))).toEqual(["en-US", "en", "en"]);
     for (const form of forms) {
-      expect(form.get("language")).toBe("en");
       expect(form.get("prompt")).toContain("Cicero");
       expect(form.get("prompt")).toContain("TypeGPU");
     }
+    forms.length = 0;
+    const portuguese = { language: "PT-br" };
+    await new FasterWhisperProvider(portuguese).transcribe(wav);
+    await new MlxWhisperProvider(portuguese).transcribe(wav);
+    expect(forms.map((form) => form.get("language"))).toEqual(["pt", "pt"]);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
