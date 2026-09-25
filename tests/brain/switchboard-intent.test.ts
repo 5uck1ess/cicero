@@ -126,7 +126,7 @@ test("concurrent action discards held text and notices, aborts the brain, then a
   let closed = false;
   const notices: string[] = [];
   const brain: Brain = {
-    ...front(), canHoldIntentOutput: () => true,
+    ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
     sendStream: async function* (_m, options) {
       owned = options?.signal;
       options?.onNotice?.({ type: "tool", text: "must not be spoken" });
@@ -156,7 +156,7 @@ test("none releases held output in order without restarting the normal turn", as
   const started = deferred<void>();
   let invocations = 0;
   const chunks = ["A".repeat(45), "second", "third"];
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true,
+  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
     sendStream: async function* () { invocations++; started.resolve(); yield* chunks; },
   };
   const sb = new SwitchboardBrain(brain, {}, () => verdict.promise);
@@ -176,7 +176,7 @@ test("none releases held output in order without restarting the normal turn", as
 test("slow classifier holds fast brain output until deadline, then lets it flow", async () => {
   let classifierSignal: AbortSignal | undefined;
   const started = deferred<void>();
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true,
+  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
     send: async () => { started.resolve(); return "normal turn"; },
   };
   const sb = new SwitchboardBrain(brain, {}, (_p, s) => { classifierSignal = s; return new Promise(() => {}); }, { intentTimeoutMs: 25 });
@@ -206,7 +206,7 @@ test("a brain without a safe-hold capability classifies before executing", async
 
 test("classifier finishes before the brain: no output hold time", async () => {
   const output = deferred<string>();
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, send: () => output.promise };
+  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false, send: () => output.promise };
   const held: number[] = [];
   const sb = new SwitchboardBrain(brain, {}, async () => json({ intent: "none" }));
   const pending = sb.send("ordinary words", { onIntentHeldMs: (ms) => held.push(ms) });
@@ -227,7 +227,7 @@ test("timeout telemetry distinguishes the deadline from a provider error", async
 test("discarded uncooperative brain is quarantined, then retryable after settlement", async () => {
   const late = deferred<string>();
   let count = 0;
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true,
+  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
     send: () => { count++; return count === 1 ? late.promise : Promise.resolve("recovered"); },
   };
   let verdicts = 0;
@@ -247,7 +247,7 @@ test("caller cancellation cancels the held brain and never releases its notices"
   let owned: AbortSignal | undefined;
   const controller = new AbortController();
   const notices: string[] = [];
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true,
+  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
     send: async (_m, options) => {
       owned = options?.signal;
       options?.onNotice?.({ type: "tool", text: "held" });
@@ -265,7 +265,7 @@ test("caller cancellation cancels the held brain and never releases its notices"
 });
 
 test("held first output has a hard size bound", async () => {
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, send: async () => "x".repeat(65537) };
+  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false, send: async () => "x".repeat(65537) };
   const sb = new SwitchboardBrain(brain, {}, async () => json({ intent: "none" }));
   await expect(sb.send("ordinary words")).rejects.toThrow("held intent output exceeds limit");
 });

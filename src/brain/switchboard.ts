@@ -1,5 +1,5 @@
 import { HeldIntentTurn, type HeldTurnMode } from "./held-intent-turn";
-import { canHoldIntentOutput } from "./capabilities";
+import { canHoldIntentOutput, hasPendingOneShotContext } from "./capabilities";
 import { classifySwitchboardIntent, type SwitchboardIntent } from "./switchboard-intent";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
@@ -1703,10 +1703,13 @@ export class SwitchboardBrain implements Brain {
     const ack = await this.handleControl(message, turn, options);
     this.assertAcceptedTurn(turn);
     if (ack !== null) return ack;
-    // Pending one-shot context and transfer handoffs must reach the eventual
-    // recipient, never a speculative wrong lane.
+    // Both board-owned and destination-owned one-shot state must survive a
+    // discarded turn. Output/permission holds cannot undo prompt consumption;
+    // unknown destinations therefore classify first as well.
     const brain = this.current();
-    if (this.classify && !this.pendingTransfer && this.turnContext.pendingSize === 0 && !this.retiringIntentBrains.has(brain) && canHoldIntentOutput(brain)) {
+    if (this.classify && !this.pendingTransfer && this.turnContext.pendingSize === 0
+      && !this.retiringIntentBrains.has(brain) && canHoldIntentOutput(brain)
+      && !hasPendingOneShotContext(brain)) {
       turn.heldIntent = new HeldIntentTurn(brain, message, mode, options, (drain) => {
         this.retiringIntentBrains.set(brain, drain);
         void drain.then(() => {

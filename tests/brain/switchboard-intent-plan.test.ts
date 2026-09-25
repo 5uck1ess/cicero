@@ -65,7 +65,7 @@ for (const mode of ["send", "sendStream", "streamProgress"] as const) {
       const stream = async function* (message: string, options?: BrainTurnOptions) { yield await send(message, options); };
       const brain: Brain = {
         start: async () => {}, stop: async () => {}, restart: async () => {}, health: async () => true,
-        injectContext: () => {}, canHoldIntentOutput: () => true,
+        injectContext: () => {}, canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
         send, sendStream: stream, streamProgress: stream,
       };
       const sb = new SwitchboardBrain(brain, scenario.lanes ? { coder: { brain } } : {}, () => verdict.promise);
@@ -95,7 +95,7 @@ test("transfer to a known retiring target adopts the held front-desk output", as
   let holdOutput = false;
   const front: Brain = {
     start: async () => {}, stop: async () => {}, restart: async () => {}, health: async () => true,
-    injectContext: () => {}, canHoldIntentOutput: () => true,
+    injectContext: () => {}, canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
     send: async (_m, options) => { frontCalls++; frontSignal = options?.signal; return holdOutput ? output.promise : "front response"; },
   };
   const lane: Brain = { ...front, send: () => { laneCalls++; return new Promise(() => {}); } };
@@ -126,7 +126,7 @@ test("an available cold transfer still acts; later startup failure is not redisp
   let signal: AbortSignal | undefined;
   const front: Brain = {
     start: async () => {}, stop: async () => {}, restart: async () => {}, health: async () => true,
-    injectContext: () => {}, canHoldIntentOutput: () => true,
+    injectContext: () => {}, canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
     send: async (_m, options) => { calls++; signal = options?.signal; return "discard this draft"; },
   };
   const lane: Brain = { ...front, start: async () => { throw new Error("synthetic start failure"); } };
@@ -145,7 +145,7 @@ for (const action of ["release", "rollcall", "standup", "callme", "transfer"] as
       start: async () => {}, stop: async () => {}, restart: async () => {}, health: async () => true,
       injectContext: () => {}, send: async () => "lane response",
     };
-    const actor: Brain = { ...base, canHoldIntentOutput: () => true,
+    const actor: Brain = { ...base, canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
       send: async (_m, options) => { calls++; signal = options?.signal; return "discarded draft"; },
     };
     const sb = new SwitchboardBrain(action === "release" ? base : actor, {

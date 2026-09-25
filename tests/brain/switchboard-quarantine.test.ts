@@ -16,7 +16,7 @@ async function setup(pinned = false) {
   let options: BrainTurnOptions | undefined;
   let finish!: (text: string) => void;
   const never = new Promise<string>((resolve) => { finish = resolve; });
-  const stuck: Brain = { ...fake(), canHoldIntentOutput: () => true,
+  const stuck: Brain = { ...fake(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
     send: (_m, opts) => { calls++; options = opts; return never; },
   };
   const healthy = fake();

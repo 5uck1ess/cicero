@@ -1,4 +1,4 @@
-import { canHoldIntentOutput } from "./capabilities";
+import { canHoldIntentOutput, hasPendingOneShotContext } from "./capabilities";
 import { classifyCallIntent, dialBackMemo, matchCallMe, SpeculativeSideEffectError, type CallIntentClassifier } from "../call-intent";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions } from "../types";
 import { bindBrainCapability, sendUnattended } from "./capabilities";
@@ -18,6 +18,7 @@ export { SpeculativeSideEffectError } from "../call-intent";
  * exact underlying behavior.
  */
 export class DialBackBrain implements Brain {
+  hasPendingOneShotContext(): boolean { return hasPendingOneShotContext(this.inner); }
   canHoldIntentOutput(): boolean { return !this.handler && canHoldIntentOutput(this.inner); }
   canDeferSpeculativePermissions(): boolean { return this.inner.canDeferSpeculativePermissions?.() === true; }
   sessionRestored(): boolean { return this.inner.sessionRestored?.() ?? false; }

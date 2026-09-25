@@ -19,6 +19,7 @@ const DEFAULT_MAX_TOKENS = 1024;
  */
 export class OpenAiCompatibleBrain implements Brain {
   private readonly holdSafe: boolean;
+  hasPendingOneShotContext(): boolean { return this.turnContext.pendingSize > 0; }
   canHoldIntentOutput(): boolean { return this.holdSafe; }
   private readonly provider: OpenAiProvider;
   private readonly maxTokens: number;

@@ -1,4 +1,4 @@
-import { canHoldIntentOutput } from "./capabilities";
+import { canHoldIntentOutput, hasPendingOneShotContext } from "./capabilities";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
 import { log } from "../logger";
 import { bindBrainCapability, sendUnattended } from "./capabilities";
@@ -43,6 +43,7 @@ function replies(reply: QuickIntent["reply"]): string[] {
 }
 
 export class QuickIntentsBrain implements Brain {
+  hasPendingOneShotContext(): boolean { return hasPendingOneShotContext(this.inner); }
   canHoldIntentOutput(): boolean { return canHoldIntentOutput(this.inner); }
   canDeferSpeculativePermissions(): boolean { return this.inner.canDeferSpeculativePermissions?.() === true; }
   sessionRestored(): boolean { return this.inner.sessionRestored?.() ?? false; }
