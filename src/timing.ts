@@ -2,9 +2,9 @@
  * Per-turn latency instrumentation for the voice loop — OFF by default.
  *
  * Enable by setting `CICERO_TIMING=1` (or true/yes/on) in the environment. When
- * disabled, {@link newTurnTimer} returns a shared no-op so the hot path pays
- * nothing and behavior is byte-identical to before — nothing in a live turn
- * changes unless you opt in.
+ * disabled and no observer is supplied, {@link newTurnTimer} returns a shared
+ * no-op. The web transport supplies an observer for private latency records;
+ * log output still requires CICERO_TIMING.
  *
  * It answers the only latency question the user actually feels: where do the
  * milliseconds between "they stopped talking" and "first audio" go? Marks are
@@ -31,13 +31,16 @@ class RealTurnTimer implements TurnTimer {
   readonly enabled = true;
   private readonly t0 = performance.now();
   private readonly marks: Array<{ name: string; at: number }> = [];
+  constructor(private readonly onMark?: (name: string, offsetMs: number) => void) {}
 
   mark(name: string): void {
-    this.marks.push({ name, at: performance.now() - this.t0 });
+    const at = performance.now() - this.t0;
+    if (this.marks.length < 32) this.marks.push({ name, at });
+    this.onMark?.(name, at);
   }
 
   report(label = "turn"): void {
-    if (this.marks.length === 0) return;
+    if (!timingEnabled || this.marks.length === 0) return;
     let prev = 0;
     const parts = this.marks.map(({ name, at }) => {
       const delta = at - prev;
@@ -54,7 +57,7 @@ const NOOP: TurnTimer = {
   report() {},
 };
 
-/** A fresh timer for one turn — real when CICERO_TIMING is set, else a no-op. */
-export function newTurnTimer(): TurnTimer {
-  return timingEnabled ? new RealTurnTimer() : NOOP;
+/** A fresh timer when logging or an observer is enabled, else a no-op. */
+export function newTurnTimer(onMark?: (name: string, offsetMs: number) => void): TurnTimer {
+  return timingEnabled || onMark ? new RealTurnTimer(onMark) : NOOP;
 }

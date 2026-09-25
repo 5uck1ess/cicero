@@ -229,6 +229,15 @@ let probeOn = false, probeSent = false, hangMs = HANGOVER_MS; // semantic turn p
 let frameMs = 21; // recomputed once we know the sample rate
 let audioQueue = [], playing = false, turnDone = false, currentAudio = null, currentEnv = null;
 let queuedAudioMs = 0, currentAudioItem = null, capturePath = "pending";
+const speechEndAt = new Map(), playedMetrics = new Set();
+function clientMetric(turnId, event, at, sequence) {
+  if (!turnId || !wsSessionId || !ws || ws.readyState !== 1) return;
+  const origin = speechEndAt.get(turnId);
+  if (event !== "speech_end" && origin === undefined) return;
+  const sinceSpeechEndMs = event === "speech_end" ? 0 : Math.max(0, Math.min(300000, Math.round((at || performance.now()) - origin)));
+  try { ws.send(JSON.stringify({ type: "client_metric", sessionId: wsSessionId, turnId: turnId, event: event, sinceSpeechEndMs: sinceSpeechEndMs,
+    ...(event === "audio_started" ? { sequence: sequence } : {}) })); } catch (e) { /* closed */ }
+}
 const MAX_QUEUED_AUDIO_MS = ${MAX_QUEUED_AUDIO_MS};
 const canQueueAudio = ${canQueueAudio.toString()};
 let voiceGain = 1.0, currentAudioSource = null, currentGainNode = null;
@@ -349,6 +358,7 @@ function onFrame(buf) {
 }
 
 function finalizeUtterance() {
+  const endedAt = performance.now();
   const total = speechLen;
   const merged = new Float32Array(total);
   let o = 0; for (const f of speechFrames) { merged.set(f, o); o += f.length; }
@@ -359,9 +369,11 @@ function finalizeUtterance() {
   const turnId = captureTurnId || newTurnId();
   captureTurnId = null;
   activeTurnId = turnId;
+  speechEndAt.set(turnId, endedAt);
+  while (speechEndAt.size > 4) speechEndAt.delete(speechEndAt.keys().next().value);
   setState("thinking"); setStatus("thinking…");
   if (ws && ws.readyState === 1 && wsSessionId) {
-    try { ws.send(encodeTurnFrame(wav, turnId)); return; } catch (e) { /* reconnect below */ }
+    try { ws.send(encodeTurnFrame(wav, turnId)); clientMetric(turnId, "speech_end", endedAt); return; } catch (e) { /* reconnect below */ }
   }
   activeTurnId = null; setStatus("disconnected — restarting…"); resumeListening();
 }
@@ -428,6 +440,7 @@ function watchBargeIn(buf) {
 }
 
 function triggerBargeIn() {
+  if (activeTurnId) clientMetric(activeTurnId, "barge_in");
   abortActiveTurn();
   stopPlayback();                                              // silence our own reply
   beginCaptureIdentity();
@@ -486,6 +499,7 @@ function beginPtt() {
     pttBargeTimer = setTimeout(() => {
       pttBargeTimer = null;
       if (!holding) return;
+      if (activeTurnId) clientMetric(activeTurnId, "barge_in");
       abortActiveTurn();
       stopPlayback();
       setState("speech"); orbLabel.textContent = "recording"; setStatus("recording… release to send");
@@ -628,6 +642,11 @@ function playNext() {
     currentAudioSource = null; currentGainNode = null;
   };
   a.onended = () => { sendAudioAck(item, "played"); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } };
+  a.onplaying = () => {
+    if (!item.turnId || !item.sequence) return;
+    const key = item.turnId + ":" + item.sequence;
+    if (!playedMetrics.has(key)) { playedMetrics.add(key); while (playedMetrics.size > 64) playedMetrics.delete(playedMetrics.values().next().value); clientMetric(item.turnId, "audio_started", performance.now(), item.sequence); }
+  };
   a.onerror = () => { sendAudioAck(item, "interrupted", a.currentTime * 1000); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } };
   a.play().catch(() => { sendAudioAck(item, "interrupted", a.currentTime * 1000); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } });
 }

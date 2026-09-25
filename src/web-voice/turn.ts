@@ -225,6 +225,8 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
 
 /** Dependencies for a STREAMING web turn (Phase 2): brain must be able to stream. */
 export interface WebStreamDeps {
+  /** Optional bounded latency mark observer supplied by the web transport. */
+  timingMark?: (name: string, offsetMs: number) => void;
   stt: Pick<STTProvider, "transcribe">;
   brain: Pick<Brain, "send"> & { sendStream?: Brain["sendStream"]; wasControlTurn?: Brain["wasControlTurn"] };
   tts: Pick<TTSProvider, "generateAudio">;
@@ -873,7 +875,7 @@ export async function streamWebTurn(
   sink: WebReplySink,
   spec?: SpeculativeTurn | null,
 ): Promise<void> {
-  const timer = newTurnTimer();
+  const timer = newTurnTimer(deps.timingMark);
   if (deps.signal?.aborted || sink.aborted()) return;
 
   // A speculative turn raced ahead on the probe tail (see speculative.ts).
@@ -1002,7 +1004,7 @@ async function dispatchAllowed(
  * spoken utterance.
  */
 export async function streamWebTextTurn(text: string, deps: WebStreamDeps, sink: WebReplySink): Promise<void> {
-  const timer = newTurnTimer();
+  const timer = newTurnTimer(deps.timingMark);
   try {
     if (deps.signal?.aborted || sink.aborted()) return;
     const transcript = text.trim();
@@ -1224,6 +1226,7 @@ async function streamReply(
           }
         };
         try {
+          timer.mark(reassurance ? "reassurance_queued" : "filler_queued");
           const sent = sink.audio(clip.audio, clip.text);
           if (sent) void sent.then(continueFiller, fail);
           else continueFiller();
@@ -1263,6 +1266,7 @@ async function streamReply(
     const turnOptions = turnAbort
       ? { signal: turnAbort.signal, systemContext: systemContext ?? undefined, onNotice }
       : undefined;
+    if (!pretokens) timer.mark("brain_start");
     const tokens: AsyncIterable<string> = pretokens
       ? timed(pretokens)
       : deps.brain.sendStream

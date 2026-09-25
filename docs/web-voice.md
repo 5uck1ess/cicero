@@ -64,6 +64,8 @@ The browser captures in 128-frame AudioWorklet quanta and posts bounded 2048-fra
 
 Protocol v2 reply audio uses a `CVA2` binary envelope: magic, two little-endian u16 identity lengths, a little-endian u32 sequence, session ID, turn ID, then WAV bytes. The browser sends `{type:"audio_ack", sessionId, turnId, sequence, status:"played"}` after a clip ends, or `status:"interrupted", atMs` when it stops; `atMs` is the position within that clip. Recovery uses fully played chunks only. A partially played clip is recorded as interrupted but its text is not counted as fully heard. Protocol v1 clients, including the Telegram call sidecar, continue to receive raw WAV and have no playback acknowledgements; their recovery remains an emitted-audio estimate. Local mic/speaker playback is outside this browser transport and retains its existing recovery behavior.
 
+Protocol v2 also accepts bounded `client_metric` frames for end-to-end [conversation latency reporting](latency.md). The browser reports playback start by audio sequence; the server resolves whether that sequence was a reply or filler. Existing outbound frames are unchanged.
+
 ## Restarts don't lose the thread
 
 Restarting the daemon doesn't wipe the conversation: the fresh agent session is primed with a recap of the last turns (riding the warmup ping, so it costs nothing). Turns spoken by a transferred-to colleague are attributed to that colleague in the recap, so the front desk never resumes someone else's personality. Tune with `web_voice.resume_turns` (default 10, `0` disables).

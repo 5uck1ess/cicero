@@ -1,4 +1,6 @@
 import { log } from "../logger";
+import { dashBus } from "../dashboard/bus";
+import { LatencyTurn, recordAudioStart, type LatencyStore, summarizeLatency } from "../latency";
 import { isConfirmationNonce } from "../brain/approval";
 import type { Brain } from "../types";
 import { presentedToken, tokenMatches } from "../http-auth";
@@ -38,6 +40,7 @@ import {
   encodeTurnAudioFrame,
   encodeReplyAudioFrame,
   decodeAudioAck,
+  decodeClientMetric,
   inspectTurnAudio,
   isProtocolId,
 } from "./protocol";
@@ -51,6 +54,9 @@ interface TurnState {
   delivered: Map<number, string>;
   played: string[];
   pacing: AudioPlaybackGate;
+  latency?: LatencyTurn;
+  nextAudioKind?: "reply" | "filler";
+  audioKinds?: Map<number, "reply" | "filler">;
 }
 
 interface PendingTurn {
@@ -100,9 +106,11 @@ export interface WebVoiceServerOptions {
   /** Process one captured utterance (WAV) into a spoken reply (Phase 1 POST path). */
   onTurn: (wav: ArrayBuffer, options?: { signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean }) => Promise<WebTurnResult>;
   /** Stream a captured utterance's reply over the WebSocket (Phase 2). Optional. */
-  onStreamTurn?: (wav: ArrayBuffer, sink: WebReplySink, opts?: { record?: boolean; spec?: SpeculativeTurn | null; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean }) => Promise<void>;
+  onStreamTurn?: (wav: ArrayBuffer, sink: WebReplySink, opts?: { record?: boolean; spec?: SpeculativeTurn | null; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
   /** Stream a TYPED message's reply (same pipeline, no STT). Optional. */
-  onTextTurn?: (text: string, sink: WebReplySink, opts?: { record?: boolean; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean }) => Promise<void>;
+  onTextTurn?: (text: string, sink: WebReplySink, opts?: { record?: boolean; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
+  /** Optional private latency record store; omitted in standalone/test servers. */
+  latencyStore?: LatencyStore;
   /**
    * Render notification text to speech (proactive voice-back). When set, POST
    * /api/notify {text} renders the clip and pushes {type:"notify", text,
@@ -284,7 +292,7 @@ export function makeSink(ws: import("bun").ServerWebSocket<WsData>, turn: TurnSt
     pendingAudio = tracked;
     return tracked;
   };
-  const deliver = (audio: ArrayBuffer, durationMs: number, text: string): void => {
+  const deliver = (audio: ArrayBuffer, durationMs: number, text: string, kind: "reply" | "filler"): void => {
     if (!live()) return;
     const sequence = ++turn.nextSequence;
     const frame = ws.data.protocol === 2
@@ -292,19 +300,25 @@ export function makeSink(ws: import("bun").ServerWebSocket<WsData>, turn: TurnSt
       : audio;
     sendAudioBounded(ws, frame);
     if (ws.data.protocol === 2) {
+      if (turn.audioKinds) {
+        turn.audioKinds.set(sequence, kind);
+        while (turn.audioKinds.size > 64) turn.audioKinds.delete(turn.audioKinds.keys().next().value!);
+      }
       turn.delivered.set(sequence, text.slice(0, 16_384));
       turn.pacing.track(sequence, durationMs);
     }
   };
-  const sendSnapshot = (audio: ArrayBuffer, durationMs: number, text: string): void | Promise<void> => {
+  const sendSnapshot = (audio: ArrayBuffer, durationMs: number, text: string, kind: "reply" | "filler"): void | Promise<void> => {
     if (!live()) return;
     if (ws.data.protocol === 2 && !turn.pacing.canSend(durationMs)) {
-      return turn.pacing.waitForCapacity(durationMs, turn.signal).then(() => deliver(audio, durationMs, text));
+      return turn.pacing.waitForCapacity(durationMs, turn.signal).then(() => deliver(audio, durationMs, text, kind));
     }
-    deliver(audio, durationMs, text);
+    deliver(audio, durationMs, text, kind);
   };
   const sendAudio = (buf: ArrayBuffer, text: string): void | Promise<void> => {
     if (!live()) return;
+    const kind = turn.nextAudioKind ?? "reply";
+    turn.nextAudioKind = undefined;
     // Admission and its error frame remain synchronous for existing callers.
     let snapshot: ReturnType<typeof snapshotSynthesizedWav>;
     try {
@@ -322,9 +336,9 @@ export function makeSink(ws: import("bun").ServerWebSocket<WsData>, turn: TurnSt
     const durationMs = metadata!.durationMs;
     if (pendingAudio) {
       if (pendingCalls >= 2) throw new Error("too many pending web voice audio clips");
-      return trackPending(pendingAudio.then(() => sendSnapshot(audio, durationMs, text)));
+      return trackPending(pendingAudio.then(() => sendSnapshot(audio, durationMs, text, kind)));
     }
-    const result = sendSnapshot(audio, durationMs, text);
+    const result = sendSnapshot(audio, durationMs, text, kind);
     if (result) return trackPending(result);
   };
   return {
@@ -361,6 +375,7 @@ export function sendAudioBounded(socket: Pick<import("bun").ServerWebSocket, "se
 
 function abortTurn(turn: TurnState | null, reason: string): void {
   if (!turn) return;
+  turn.latency?.abort();
   turn.aborted = true;
   if (!turn.controller.signal.aborted) turn.controller.abort(new Error(reason));
 }
@@ -440,7 +455,7 @@ function requestedId(req: Request, url: URL, header: string, query: string): str
  * because a headless box is driven from another machine's browser.
  */
 export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle | null {
-  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onDictate, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness, confirmations } = opts;
+  const { host = "0.0.0.0", port, token, tls, onTurn, onStreamTurn, onTextTurn, onNotify, onNotifyRender, onNotified, onDictate, onSay, onChat, onHistory, onHealth, onTurnProbe, onSpeculate, readiness, confirmations, latencyStore } = opts;
   const scheme: "http" | "https" = tls ? "https" : "http";
   const configuredDrainTimeout = opts.shutdownDrainTimeoutMs;
   const shutdownDrainTimeoutMs = typeof configuredDrainTimeout === "number" && Number.isFinite(configuredDrainTimeout) && configuredDrainTimeout >= 1
@@ -966,6 +981,13 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     }
   };
 
+  const persistLatency = async (turn: TurnState): Promise<void> => {
+    if (!latencyStore || !turn.latency) return;
+    await latencyStore.append(turn.latency.finish()).then(async () => {
+      dashBus.setLatency(summarizeLatency(await latencyStore.read(256)).web_voice.speechEndToReplyMs);
+    }).catch(() => { log("warn", "latency record unavailable"); });
+  };
+
   // The latest input wins (spoken WAV or typed text): stash it as pending and
   // signal any in-flight turn to abort (barge-in). A single drain loop
   // processes pending turns so a mid-turn input is never dropped.
@@ -1011,6 +1033,13 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           delivered: new Map(),
           played: [],
           pacing: new AudioPlaybackGate(),
+          audioKinds: new Map(),
+          ...(latencyStore && ws.data.protocol === 2 ? { latency: new LatencyTurn(ws.data.sessionId, next.turnId, typeof next.input === "string" ? "web_text" : "web_voice", Date.now(), () => performance.now(), typeof next.input === "string" ? next.input.length : next.input.byteLength) } : {}),
+        };
+        const timingMark = (name: string, offsetMs: number): void => {
+          state.latency?.mark(name, offsetMs);
+          if (name === "filler_queued" || name === "reassurance_queued") state.nextAudioKind = "filler";
+          else if (name === "first_audio") state.nextAudioKind = "reply";
         };
         if (shutdownController.signal.aborted) abortTurn(state, "web voice server shutting down");
         ws.data.current = state;
@@ -1035,6 +1064,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               record: ws.data.record,
               signal: state.signal,
               trackBackground,
+              timingMark,
             });
           } else {
             await onStreamTurn?.(next.input, makeSink(ws, state), {
@@ -1042,6 +1072,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               spec: handlerSpec,
               signal: state.signal,
               trackBackground,
+              timingMark,
             });
           }
         } catch (err: unknown) {
@@ -1050,6 +1081,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           if (!state.aborted) protocolError(ws, m, state.turnId);
         } finally {
           await releaseSpec(spec);
+          state.latency?.settle();
+          await persistLatency(state);
           if (ws.data.current === state) {
             ws.data.current = null;
             ws.data.lastCompleted = state;
@@ -1626,12 +1659,26 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               sequence?: unknown;
               status?: unknown;
               atMs?: unknown;
+              event?: unknown;
+              sinceSpeechEndMs?: unknown;
             };
             try {
               msg = JSON.parse(message) as typeof msg;
             } catch {
               if (ws.data.protocol === 2) protocolError(ws, "malformed control frame");
               // Protocol v1 historically ignored malformed controls.
+              return;
+            }
+            if (msg.type === "client_metric" && ws.data.protocol === 2) {
+              const metric = decodeClientMetric(msg, ws.data.protocol);
+              if (!metric || metric.sessionId !== ws.data.sessionId) return;
+              const turn = ws.data.current?.turnId === metric.turnId ? ws.data.current
+                : ws.data.lastCompleted?.turnId === metric.turnId ? ws.data.lastCompleted : null;
+              if (!turn?.latency) return;
+              if (metric.event === "audio_started") {
+                if (!turn.audioKinds || !recordAudioStart(turn.latency, turn.audioKinds, metric.sequence!, metric.sinceSpeechEndMs)) return;
+              } else turn.latency.client(metric);
+              if (turn === ws.data.lastCompleted) await persistLatency(turn);
               return;
             }
             if (msg.type === "audio_ack" && ws.data.protocol === 2) {
@@ -1641,6 +1688,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               const text = turn.delivered.get(ack.sequence);
               if (text === undefined) return;
               turn.delivered.delete(ack.sequence);
+              turn.audioKinds?.delete(ack.sequence);
               turn.pacing.acknowledge(ack.sequence);
               if (ack.status === "played" && text) {
                 turn.played.push(text);
@@ -1980,6 +2028,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       return attempt;
     };
 
+    if (latencyStore) trackBackground(latencyStore.read(256).then((rows) => {
+      dashBus.setLatency(summarizeLatency(rows).web_voice.speechEndToReplyMs);
+    }).catch(() => { log("warn", "latency record unavailable"); }));
     return {
       scheme,
       port: server.port ?? port,

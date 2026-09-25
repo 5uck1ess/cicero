@@ -162,3 +162,25 @@ export function decodeAudioAck(value: unknown): AudioAck | null {
   if (v.status === "played" && v.atMs !== undefined) return null;
   return v as AudioAck;
 }
+
+/** Browser monotonic elapsed time, already relative to its own speech end. */
+export type ClientMetric = { type: "client_metric"; sessionId: string; turnId: string;
+  event: "speech_end" | "audio_started" | "barge_in";
+  sinceSpeechEndMs: number; sequence?: number };
+export const MAX_CLIENT_METRIC_MS = 300_000;
+export function decodeClientMetric(value: unknown, protocol: 1 | 2 = 2): ClientMetric | null {
+  if (protocol !== 2) return null;
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  if (v.type !== "client_metric" || !isProtocolId(v.sessionId) || !isProtocolId(v.turnId)
+    || !["speech_end", "audio_started", "barge_in"].includes(String(v.event))
+    || typeof v.sinceSpeechEndMs !== "number" || !Number.isFinite(v.sinceSpeechEndMs)
+    || v.sinceSpeechEndMs < 0 || v.sinceSpeechEndMs > MAX_CLIENT_METRIC_MS) return null;
+  if (v.event === "speech_end" && v.sinceSpeechEndMs !== 0) return null;
+  if (v.event === "audio_started"
+    ? !Number.isSafeInteger(v.sequence) || (v.sequence as number) < 1 || (v.sequence as number) > 0xffffffff
+    : v.sequence !== undefined) return null;
+  return { type: "client_metric", sessionId: v.sessionId, turnId: v.turnId,
+    event: v.event as ClientMetric["event"], sinceSpeechEndMs: Math.round(v.sinceSpeechEndMs),
+    ...(v.event === "audio_started" ? { sequence: v.sequence as number } : {}) };
+}
