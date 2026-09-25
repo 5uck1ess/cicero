@@ -6,8 +6,15 @@ export interface STTProviderConfig {
   port?: number;
   model?: string;
   compute_type?: string; // CTranslate2 quantization (faster-whisper): float16 | int8_float16 | int8; server default "auto"
+  language?: string;
+  vocabulary?: string[];
   /** Absolute per-transcription deadline in milliseconds (default 90 seconds). */
   timeout_ms?: number;
+}
+
+/** Shared wire prompt for the HTTP recognizers. Config validation bounds its UTF-8 size. */
+export function sttVocabularyPrompt(vocabulary: readonly string[] | undefined): string | undefined {
+  return vocabulary?.length ? `Vocabulary: ${vocabulary.join(", ")}.` : undefined;
 }
 
 /**
