@@ -12,6 +12,8 @@ import {
 } from "../../src/notify/telegram";
 import { TELEGRAM_TEXT_MAX_CHARS } from "../../src/notify/briefing";
 import type { Brain } from "../../src/types";
+import { TurnCoordinator } from "../../src/turn-coordinator";
+import { runOperatorChatTurn } from "../../src/daemon";
 
 const hasFfmpeg = Bun.which("ffmpeg") !== null;
 const AUTHORIZED_USER_ID = 42;
@@ -689,6 +691,44 @@ test("other texts are chat turns; long replies split at the Telegram cap", async
   expect(calls.length).toBe(2); // 4500 chars → two messages
   expect((calls[0].body.text as string).length).toBe(4000);
   expect((calls[1].body.text as string).length).toBe(500);
+});
+
+test("Telegram delivers valid long coordinated chat replies in message chunks", async () => {
+  const originalFetch = globalThis.fetch;
+  const sent: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    sent.push(String(jsonObject(JSON.parse(String(init?.body))).text));
+    return Response.json({ ok: true });
+  };
+  try {
+    const coordinator = new TurnCoordinator();
+    const brain = confirmationBrain();
+    brain.hasPendingConfirmation = () => false;
+    for (const [turnId, length] of [["one", 16_385], ["two", 50_000]] as const) {
+      const reply = "x".repeat(length);
+      const handled = await handleTelegramUpdate({
+        message: privateMessage(13, "give me the report"),
+      }, brain, { token: "tok", chat_id: 42 }, "https://unused.invalid", {
+        onChat: async (text) => {
+          const lease = coordinator.start({ sessionId: "telegram", turnId, source: "telegram", text });
+          const actual = await runOperatorChatTurn(text, {
+            brain: { send: async () => reply },
+            history: { append: async () => {} },
+          }, lease.signal);
+          lease.emit({ type: "sentence", text: actual });
+          if (!lease.active) return null;
+          lease.complete();
+          return actual;
+        },
+      });
+      expect(handled).toBe(true);
+      expect(sent.join("")).toBe(reply);
+      expect(sent.every((chunk) => chunk.length <= 4000)).toBe(true);
+      sent.length = 0;
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("a superseded Telegram chat turn sends no late reply", async () => {

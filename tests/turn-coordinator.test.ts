@@ -81,9 +81,109 @@ test("caller cancellation propagates and oversized input or output is refused", 
   live.complete();
   expect(() => coordinator.start({ ...request("huge"), text: "x".repeat(16_385) })).toThrow();
   const next = coordinator.start(request("next"), (event) => events.push(event.type));
-  next.emit({ type: "sentence", text: "x".repeat(16_385) });
+  next.emit({ type: "sentence", text: "x".repeat(128 * 1024 + 1) });
   expect(events.at(-1)).toBe("error");
   expect(next.signal.aborted).toBe(true);
+});
+
+test("a chat reply within the 64 KiB output bound remains one deliverable event", () => {
+  const coordinator = new TurnCoordinator();
+  const delivered: string[] = [];
+  const turn = coordinator.start(request("long"), (event) => {
+    if (event.type === "sentence") delivered.push(event.text);
+  });
+  turn.emit({ type: "transcript", text: "a".repeat(16_384) });
+  const reply = "x".repeat(64 * 1024);
+  turn.emit({ type: "sentence", text: reply });
+  expect(turn.active).toBe(true);
+  turn.complete();
+  expect(delivered).toEqual([reply]);
+});
+
+test("barge-in aborts the speaking mic lease while stdin classification continues", async () => {
+  const daemon = new CiceroDaemon({} as never) as unknown as {
+    dispatchCommand: (text: string, source?: "local-mic" | "text") => Promise<void>;
+    handleCommand: (text: string, signal: AbortSignal) => Promise<void>;
+    handleLocalBargeIn: () => void;
+    turnCoordinator: TurnCoordinator & { foreground: Map<string, { outcome: string | null }> };
+    streamingSpeaker: { getSnapshot: () => { spoken: string[]; pending: string[] }; interrupt: () => void };
+  };
+  let finishMic!: () => void;
+  let finishStdin!: () => void;
+  const micPending = new Promise<void>((resolve) => { finishMic = resolve; });
+  const stdinPending = new Promise<void>((resolve) => { finishStdin = resolve; });
+  const signals = new Map<string, AbortSignal>();
+  daemon.handleCommand = async (text, signal) => {
+    signals.set(text, signal);
+    await (text === "mic" ? micPending : stdinPending);
+  };
+  daemon.streamingSpeaker = {
+    getSnapshot: () => ({ spoken: ["mic reply"], pending: [] }),
+    interrupt: () => {},
+  };
+  const mic = daemon.dispatchCommand("mic", "local-mic");
+  const micLease = daemon.turnCoordinator.foreground.get("local-mic");
+  const stdin = daemon.dispatchCommand("stdin", "text");
+  daemon.handleLocalBargeIn();
+  expect(signals.get("mic")?.aborted).toBe(true);
+  expect(micLease?.outcome).toBe("aborted");
+  expect(signals.get("stdin")?.aborted).toBe(false);
+  finishMic();
+  finishStdin();
+  await Promise.all([mic, stdin]);
+});
+
+test("barge-in follows the speaking session when the other command is newer", async () => {
+  const daemon = new CiceroDaemon({} as never) as unknown as {
+    dispatchCommand: (text: string, source?: "local-mic" | "text") => Promise<void>;
+    handleCommand: (text: string, signal: AbortSignal) => Promise<void>;
+    withSpeakingLocalTurn: (signal: AbortSignal, work: () => Promise<void>) => Promise<void>;
+    handleLocalBargeIn: () => void;
+    turnCoordinator: TurnCoordinator & { foreground: Map<string, { outcome: string | null }> };
+    streamingSpeaker: { getSnapshot: () => { spoken: string[]; pending: string[] }; interrupt: () => void };
+  };
+  let finishSpeech!: () => void;
+  let finishClassification!: () => void;
+  const speaking = new Promise<void>((resolve) => { finishSpeech = resolve; });
+  const classifying = new Promise<void>((resolve) => { finishClassification = resolve; });
+  const signals = new Map<string, AbortSignal>();
+  daemon.handleCommand = (text, signal) => {
+    signals.set(text, signal);
+    return text === "stdin"
+      ? daemon.withSpeakingLocalTurn(signal, () => speaking)
+      : classifying;
+  };
+  daemon.streamingSpeaker = {
+    getSnapshot: () => ({ spoken: ["stdin reply"], pending: [] }),
+    interrupt: () => {},
+  };
+  const stdin = daemon.dispatchCommand("stdin", "text");
+  const stdinLease = daemon.turnCoordinator.foreground.get("stdin");
+  const mic = daemon.dispatchCommand("mic", "local-mic");
+  daemon.handleLocalBargeIn();
+  expect(signals.get("stdin")?.aborted).toBe(true);
+  expect(stdinLease?.outcome).toBe("aborted");
+  expect(signals.get("mic")?.aborted).toBe(false);
+  finishSpeech();
+  finishClassification();
+  await Promise.all([stdin, mic]);
+});
+
+test("a pending stdin command remains an active surface after a later mic turn finishes", async () => {
+  const daemon = new CiceroDaemon({} as never) as unknown as {
+    dispatchCommand: (text: string, source?: "local-mic" | "text") => Promise<void>;
+    handleCommand: (text: string) => Promise<void>;
+    anyInputSurfaceActive: () => boolean;
+  };
+  let finishStdin!: () => void;
+  const stdinPending = new Promise<void>((resolve) => { finishStdin = resolve; });
+  daemon.handleCommand = (text) => text === "stdin" ? stdinPending : Promise.resolve();
+  const stdin = daemon.dispatchCommand("stdin", "text");
+  await daemon.dispatchCommand("mic", "local-mic");
+  expect(daemon.anyInputSurfaceActive()).toBe(true);
+  finishStdin();
+  await stdin;
+  expect(daemon.anyInputSurfaceActive()).toBe(false);
 });
 
 test("supersession reaches STT and rejects its late transcript before brain dispatch", async () => {

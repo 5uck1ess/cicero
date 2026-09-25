@@ -25,8 +25,10 @@ export type TurnEventSink = (event: TurnEvent) => void | Promise<void>;
 
 const MAX_INPUT_TEXT_CHARS = 16_384;
 const MAX_INPUT_AUDIO_BYTES = 4 * 1024 * 1024;
-const MAX_EVENT_TEXT_CHARS = 16_384;
-const MAX_OUTPUT_TEXT_CHARS = 64 * 1024;
+// A chat turn may emit a 16 KiB transcript and a full 64 KiB reply. Count all
+// emitted text once, without a smaller per-event limit on a valid reply.
+const MAX_OUTPUT_TEXT_CHARS = 128 * 1024;
+const MAX_ERROR_MESSAGE_CHARS = 16_384;
 const MAX_EVENT_AUDIO_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_AUDIO_BYTES = 32 * 1024 * 1024;
 const MAX_ID_CHARS = 256;
@@ -62,11 +64,11 @@ export class TurnLease {
       }
     }
     if ("text" in event && typeof event.text === "string") {
-      this.outputTextChars += event.text.length;
-      if (event.text.length > MAX_EVENT_TEXT_CHARS || this.outputTextChars > MAX_OUTPUT_TEXT_CHARS) {
+      if (event.text.length > MAX_OUTPUT_TEXT_CHARS - this.outputTextChars) {
         this.fail("turn text output limit exceeded");
         return;
       }
+      this.outputTextChars += event.text.length;
     }
     try {
       const delivered = this.sink(event);
@@ -86,7 +88,7 @@ export class TurnLease {
   complete(): void { this.finish("done", { type: "done" }); }
   fail(message: string): void {
     if (!this.active) return;
-    const safeMessage = message.length > MAX_EVENT_TEXT_CHARS ? "turn failed" : redactSecrets(message);
+    const safeMessage = message.length > MAX_ERROR_MESSAGE_CHARS ? "turn failed" : redactSecrets(message);
     this.finish("error", { type: "error", message: safeMessage });
     // Send the terminal error while the transport sink is still live, then
     // cancel any provider continuation that might still be running.
