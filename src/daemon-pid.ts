@@ -3,7 +3,7 @@ import { link, lstat, open, readFile, unlink } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { ensurePrivateDirectorySync, PRIVATE_FILE_MODE } from "./platform/secure-storage";
-import { linuxPidfdApi, LinuxPidfdUnavailableError, type LinuxPidfdApi } from "./process/linux-pidfd";
+import { linuxPidfdApi, type LinuxPidfdApi } from "./process/linux-pidfd";
 
 const PID_RECORD_VERSION = 1 as const;
 const MAX_PID_RECORD_BYTES = 4_096;
@@ -544,9 +544,10 @@ export async function stopDaemonFromPidFile(
             pidfd.close(fd);
           }
         } catch (error) {
-          if (!(error instanceof LinuxPidfdUnavailableError)) throw error;
-          // Older kernels, missing libc symbols, and unsupported layouts keep
-          // the previous identity-checked numeric stop behavior.
+          if (errno(error).code === "ESRCH") throw error;
+          // A pidfd failure must not prevent the previous identity-checked
+          // numeric stop path. Recheck after any failed open or send, including
+          // policy refusal and transient resource errors.
         }
       }
       const mismatch = await identityStillMatches();

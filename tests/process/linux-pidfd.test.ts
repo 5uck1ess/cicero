@@ -52,3 +52,41 @@ test("ENOSYS after loading libc is cached across stop attempts", () => {
   expect(() => resolve()).toThrow(LinuxPidfdUnavailableError);
   expect(loads).toBe(1);
 });
+
+test("pidfd syscall errors expose Linux errno names", () => {
+  for (const [number, code] of [[1, "EPERM"], [13, "EACCES"], [22, "EINVAL"], [24, "EMFILE"]] as const) {
+    const api = createLinuxPidfdApi({
+      syscall: () => -1n,
+      errno: () => number,
+      close: () => 0,
+    });
+    expect(() => api.open(42)).toThrow(expect.objectContaining({ code }));
+  }
+});
+
+test("EPERM policy refusal is cached as pidfd unavailability", () => {
+  let loads = 0;
+  const resolve = createLinuxPidfdResolver(() => {
+    loads++;
+    return { syscall: () => -1n, errno: () => 1, close: () => 0 };
+  });
+  expect(() => resolve().open(42)).toThrow(expect.objectContaining({ code: "EPERM" }));
+  expect(() => resolve()).toThrow(expect.objectContaining({ code: "EPERM" }));
+  expect(loads).toBe(1);
+});
+
+test("EMFILE is transient and does not cache pidfd unavailability", () => {
+  let loads = 0;
+  let available = false;
+  const resolve = createLinuxPidfdResolver(() => {
+    loads++;
+    return { syscall: () => available ? 17n : -1n, errno: () => 24, close: () => 0 };
+  });
+  const first = resolve();
+  expect(() => first.open(42)).toThrow(expect.objectContaining({ code: "EMFILE" }));
+  available = true;
+  const second = resolve();
+  expect(second).toBe(first);
+  expect(second.open(42)).toBe(17);
+  expect(loads).toBe(1);
+});

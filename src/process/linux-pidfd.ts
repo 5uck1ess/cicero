@@ -1,4 +1,5 @@
 import { dlopen, read } from "bun:ffi";
+import { getSystemErrorName } from "node:util";
 
 /** A kernel-owned process reference; a recycled numeric PID cannot retarget it. */
 export interface LinuxPidfdApi {
@@ -15,11 +16,12 @@ export interface LinuxPidfdSyscalls {
 }
 
 export class LinuxPidfdUnavailableError extends Error {
-  readonly code = "ENOSYS";
+  readonly code: string;
 
-  constructor() {
-    super("Linux pidfd API is unavailable");
+  constructor(code = "ENOSYS") {
+    super(`Linux pidfd API is unavailable (${code})`);
     this.name = "LinuxPidfdUnavailableError";
+    this.code = code;
   }
 }
 
@@ -29,7 +31,8 @@ class LinuxPidfdCallError extends Error {
   constructor(operation: string, errno: number) {
     super(`${operation} failed (errno ${errno})`);
     this.name = "LinuxPidfdCallError";
-    this.code = errno === 3 ? "ESRCH" : `ERRNO_${errno}`;
+    const name = getSystemErrorName(-errno);
+    this.code = /^E[A-Z0-9]+$/.test(name) ? name : "EUNKNOWN";
   }
 }
 
@@ -37,6 +40,8 @@ const PIDFD_OPEN_SYSCALL = 434;
 const PIDFD_SEND_SIGNAL_SYSCALL = 424;
 const SIGTERM = 15;
 const ENOSYS = 38;
+const EPERM = 1;
+const EACCES = 13;
 const resolveLibcPidfd = createLinuxPidfdResolver(loadLibcSyscalls);
 
 export function linuxPidfdApi(): LinuxPidfdApi {
@@ -47,15 +52,15 @@ export function linuxPidfdApi(): LinuxPidfdApi {
   return resolveLibcPidfd();
 }
 
-/** Cache both symbol-resolution failure and a kernel ENOSYS response. */
+/** Cache symbol-resolution failure and permanent kernel/policy refusal. */
 export function createLinuxPidfdResolver(loader: () => LinuxPidfdSyscalls): () => LinuxPidfdApi {
   let cached: LinuxPidfdApi | LinuxPidfdUnavailableError | undefined;
   return () => {
     if (cached instanceof LinuxPidfdUnavailableError) throw cached;
     if (cached) return cached;
     try {
-      cached = createLinuxPidfdApi(loader(), () => {
-        cached = new LinuxPidfdUnavailableError();
+      cached = createLinuxPidfdApi(loader(), (code) => {
+        cached = new LinuxPidfdUnavailableError(code);
       });
       return cached;
     } catch {
@@ -68,14 +73,15 @@ export function createLinuxPidfdResolver(loader: () => LinuxPidfdSyscalls): () =
 /** libc's syscall() returns -1 and sets errno; raw negative errno is accepted by the seam too. */
 export function createLinuxPidfdApi(
   native: LinuxPidfdSyscalls,
-  onUnavailable?: () => void,
+  onUnavailable?: (code: string) => void,
 ): LinuxPidfdApi {
   const checked = (operation: string, result: bigint): number => {
     if (result >= 0n && result <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(result);
     const errno = result === -1n ? native.errno() : Number(-result);
-    if (errno === ENOSYS) {
-      onUnavailable?.();
-      throw new LinuxPidfdUnavailableError();
+    if (errno === ENOSYS || errno === EPERM || errno === EACCES) {
+      const code = getSystemErrorName(-errno);
+      onUnavailable?.(code);
+      throw new LinuxPidfdUnavailableError(code);
     }
     throw new LinuxPidfdCallError(operation, errno);
   };
