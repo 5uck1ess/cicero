@@ -871,13 +871,13 @@ export class CiceroDaemon {
    * URL strip (bare links are for the text surfaces — the audio never reads
    * one out). Shared by the eager (onNotify) and lazy (onNotifyRender)
    * paths so the two can never drift. */
-  private async renderNotifyClip(text: string, voice: string | undefined): Promise<ArrayBuffer> {
+  private async renderNotifyClip(text: string, voice: string | undefined, signal?: AbortSignal): Promise<ArrayBuffer> {
     // voice = a lane name (its configured voice is used) or a raw voice name
     // — an employee's news arrives in the employee's voice.
     const laneVoice = voice ? this.config.brain.lanes?.[voice]?.voice ?? voice : undefined;
     const spoken = text.replace(/https?:\/\/[^\s<>"')\]]+/g, "").replace(/\s{2,}/g, " ").trim()
       || "I sent you the link.";
-    return await this.providers.tts.generateAudio(speakable(spoken), laneVoice);
+    return await this.providers.tts.generateAudio(speakable(spoken), laneVoice, { signal });
   }
   private pendingRecovery: { spoken: string[] } | null = null;
   /** The addressed-to-me veto, when configured. Shared by the host mic and the browser. */
@@ -1445,7 +1445,7 @@ export class CiceroDaemon {
         this.runBackground("web voice warmup", async (signal) => {
           if (filler) {
             try {
-              const n = await filler.prime();
+              const n = await filler.prime(signal);
               log("ok", `web-voice filler bank primed (${n} clips)`);
             } catch (err: unknown) {
               log("info", `filler prime skipped: ${err instanceof Error ? err.message : String(err)}`);
@@ -1456,7 +1456,7 @@ export class CiceroDaemon {
           if (laneVoices.length) {
             for (const v of laneVoices) {
               if (signal.aborted) return;
-              try { await this.providers.tts.generateAudio("Warming up.", v); }
+              try { await this.providers.tts.generateAudio("Warming up.", v, { signal }); }
               catch (err: unknown) { log("info", `lane voice warmup skipped (${v}): ${err instanceof Error ? err.message : String(err)}`); }
             }
             log("ok", `lane voices warmed (${laneVoices.join(", ")})`);
@@ -1468,7 +1468,7 @@ export class CiceroDaemon {
             let clips = 0;
             for (const v of laneVoices) {
               if (signal.aborted) return;
-              try { clips += await filler.primeVoice(v); }
+              try { clips += await filler.primeVoice(v, 2, signal); }
               catch (err: unknown) { log("info", `lane filler prime skipped (${v}): ${err instanceof Error ? err.message : String(err)}`); }
             }
             log("ok", `lane filler clips primed (${clips} across ${laneVoices.length} voices)`);
@@ -1902,7 +1902,7 @@ export class CiceroDaemon {
               }
               return new ArrayBuffer(0);
             }
-            const audio = await this.renderNotifyClip(text, voice);
+            const audio = await this.renderNotifyClip(text, voice, opts?.signal);
             if (opts?.signal?.aborted) return null;
             const tg = this.config.notify?.telegram;
             // telegramMirror: false = the caller delivers its own Telegram
@@ -1929,7 +1929,7 @@ export class CiceroDaemon {
         onNotifyRender: async (text, voice, opts) => {
           try {
             opts?.signal?.throwIfAborted();
-            const audio = await this.renderNotifyClip(text, voice);
+            const audio = await this.renderNotifyClip(text, voice, opts?.signal);
             opts?.signal?.throwIfAborted();
             return audio;
           } catch (error) {
@@ -1941,7 +1941,7 @@ export class CiceroDaemon {
         onSay: async (text, options) => {
           try {
             options?.signal?.throwIfAborted();
-            const audio = await this.providers.tts.generateAudio(speakable(text));
+            const audio = await this.providers.tts.generateAudio(speakable(text), undefined, { signal: options?.signal });
             options?.signal?.throwIfAborted();
             return audio;
           } catch (error) {
@@ -2695,11 +2695,19 @@ export class CiceroDaemon {
       // Step 6: Streaming pipeline for local-llm in conversational mode
       if (result.category === "local-llm" && this.conversational?.isActive() && this.streamingSpeaker) {
         log("speak", `Streaming LLM → TTS pipeline... (+${Date.now() - tStart}ms to first token)`);
-        const sentences = this.executor.executeLocalLLMStreaming(result, text, {
-          signal,
-          systemContext: systemContext ?? undefined,
-        });
-        await this.streamingSpeaker.speakStream(sentences);
+        const turnAbort = new AbortController();
+        const onAbort = () => turnAbort.abort(signal.reason);
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          const sentences = this.executor.executeLocalLLMStreaming(result, text, {
+            signal: turnAbort.signal,
+            systemContext: systemContext ?? undefined,
+          });
+          await this.streamingSpeaker.speakStream(sentences, turnAbort);
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+        }
         this.finalizeStreamingTurn(expanded, result, signal);
         return;
       }
@@ -2785,7 +2793,15 @@ export class CiceroDaemon {
             // afplay path, which played quieter and un-cancelled (the "first reply is
             // quiet, the rest are loud" bug, where the first reply was a canned one).
             if (this.conversational?.isActive() && this.streamingSpeaker) {
-              await this.streamingSpeaker.speakStream(asyncOnce(textToSpeak));
+              const turnAbort = new AbortController();
+              const onAbort = () => turnAbort.abort(signal.reason);
+              if (signal.aborted) onAbort();
+              else signal.addEventListener("abort", onAbort, { once: true });
+              try {
+                await this.streamingSpeaker.speakStream(asyncOnce(textToSpeak), turnAbort);
+              } finally {
+                signal.removeEventListener("abort", onAbort);
+              }
             } else {
               await this.speaker.speak(textToSpeak, signal);
             }
@@ -3345,7 +3361,7 @@ export class CiceroDaemon {
       }
       if (signal.aborted) return;
       try {
-        const n = await filler.prime();
+        const n = await filler.prime(signal);
         if (signal.aborted) return;
         log("ok", `filler bank re-primed after swap (${n} clips)`);
       } catch (err: unknown) {
@@ -3355,7 +3371,7 @@ export class CiceroDaemon {
       }
       for (const v of laneVoices) {
         if (signal.aborted) return;
-        try { await filler.primeVoice(v); }
+        try { await filler.primeVoice(v, 2, signal); }
         catch (err: unknown) {
           if (!signal.aborted) {
             log("info", `lane filler re-prime skipped (${v}): ${err instanceof Error ? err.message : String(err)}`);
@@ -3363,7 +3379,6 @@ export class CiceroDaemon {
         }
       }
     }, {
-      // FillerBank cannot abort a synthesis already inside generateAudio().
       // Joining this best-effort cache refill would put sequential provider
       // deadlines in front of authoritative provider teardown.
       drainOnShutdown: false,

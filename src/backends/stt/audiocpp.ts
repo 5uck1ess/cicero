@@ -82,21 +82,23 @@ export class AudioCppSTTProvider implements STTProvider {
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.stt);
   }
 
-  transcribe(audioFile: string): Promise<string | null> {
-    return this.transcribeResult(audioFile).then((result) => {
+  transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null> {
+    return this.transcribeResult(audioFile, signal).then((result) => {
       if (result.kind === "failure") {
         log("warn", result.reason);
         return null;
       }
       return result.kind === "transcript" ? result.text : null;
     }).catch((err: unknown) => {
+      if (signal?.aborted) throw new DOMException("audio.cpp STT request aborted", "AbortError");
       const message = `audiocpp STT transcription failed: ${err instanceof Error ? err.message : String(err)}`;
       log("warn", message);
       return null;
     });
   }
 
-  async transcribeResult(audioFile: string): Promise<STTTranscriptionResult> {
+  async transcribeResult(audioFile: string, signal?: AbortSignal): Promise<STTTranscriptionResult> {
+    if (signal?.aborted) throw new DOMException("audio.cpp STT request aborted", "AbortError");
     try {
       const file = Bun.file(audioFile);
       const formData = new FormData();
@@ -108,19 +110,20 @@ export class AudioCppSTTProvider implements STTProvider {
       const res = await fetch(`${httpBase(this.host, this.port)}/v1/audio/transcriptions`, {
         method: "POST",
         body: formData,
-        signal: providerSignal(this.timeoutMs),
+        signal: providerSignal(this.timeoutMs, signal),
       });
-
       if (!res.ok) {
         await discardResponseBody(res);
         return { kind: "failure", reason: `audiocpp STT returned ${res.status}` };
       }
 
       const data = await readBoundedJson<{ text?: string }>(res);
+      if (signal?.aborted) throw new DOMException("audio.cpp STT request aborted", "AbortError");
       const text = (data.text ?? "").trim();
       if (!text || text.length < 2) return { kind: "empty" };
       return { kind: "transcript", text };
     } catch (err: unknown) {
+      if (signal?.aborted) throw new DOMException("audio.cpp STT request aborted", "AbortError");
       const msg = err instanceof Error ? err.message : String(err);
       return { kind: "failure", reason: `audiocpp STT transcription failed: ${msg}` };
     }

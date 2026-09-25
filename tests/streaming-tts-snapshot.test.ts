@@ -21,7 +21,7 @@ async function* fromArray(items: string[]): AsyncGenerator<string> {
 
 test("records all sentences as spoken after a full run", async () => {
   const sp = new StreamingTTSSpeaker(silentProvider, noopPlayer, noopFallback);
-  await sp.speakStream(fromArray(["First sentence.", "Second sentence.", "Third."]));
+  await sp.speakStream(fromArray(["First sentence.", "Second sentence.", "Third."]), new AbortController());
   const snap = sp.getSnapshot();
   expect(snap.spoken).toEqual(["First sentence.", "Second sentence.", "Third."]);
   expect(snap.pending).toEqual([]);
@@ -53,7 +53,7 @@ test("plays the first synthesized sentence before a delayed second sentence arri
   } as unknown as AecAudioHub;
   const sp = new StreamingTTSSpeaker(provider, noopPlayer, noopFallback, hub);
 
-  const speaking = sp.speakStream(delayedSecond());
+  const speaking = sp.speakStream(delayedSecond(), new AbortController());
   await secondRequested;
   await Bun.sleep(0); // let already-resolved synthesis/playback continuations drain
   const playedBeforeSecondArrived = playback.length;
@@ -68,8 +68,8 @@ test("plays the first synthesized sentence before a delayed second sentence arri
 
 test("speakStream resets spoken history each call", async () => {
   const sp = new StreamingTTSSpeaker(silentProvider, noopPlayer, noopFallback);
-  await sp.speakStream(fromArray(["A.", "B."]));
-  await sp.speakStream(fromArray(["C."]));
+  await sp.speakStream(fromArray(["A.", "B."]), new AbortController());
+  await sp.speakStream(fromArray(["C."]), new AbortController());
   expect(sp.getSnapshot().spoken).toEqual(["C."]);
 });
 
@@ -93,10 +93,10 @@ test("barge-in: a new turn after interrupt does not revive the interrupted one",
     await gate1;     // suspend mid-turn, as if playback were in progress
     yield "old-B.";  // must NOT be spoken once a newer turn has taken over
   }
-  const p1 = sp.speakStream(turn1());
+  const p1 = sp.speakStream(turn1(), new AbortController());
   await Bun.sleep(10);                                    // turn 1 buffers "old-A." and blocks at the gate
   sp.interrupt();                                         // barge-in halts the current reply
-  await sp.speakStream(fromArray(["new-A.", "new-B."]));  // the interrupting utterance's reply
+  await sp.speakStream(fromArray(["new-A.", "new-B."]), new AbortController());  // the interrupting utterance's reply
   release1();                                             // turn 1 tries to resume — it must stay dead
   await p1;
   expect(sp.getSnapshot().spoken).toEqual(["new-A.", "new-B."]);
@@ -126,7 +126,7 @@ test("interrupt in the sentence gap closes the still-live source", async () => {
   };
   const sp = new StreamingTTSSpeaker(silentProvider, noopPlayer, noopFallback);
 
-  const speaking = sp.speakStream(source);
+  const speaking = sp.speakStream(source, new AbortController());
   const deadline = Date.now() + 1_000;
   while (sp.getSnapshot().spoken.length === 0 && Date.now() < deadline) {
     await Bun.sleep(1);
@@ -161,7 +161,7 @@ test("falls back to the fallback voice when generation fails (no silent drop)", 
   } as unknown as Speaker;
 
   const sp = new StreamingTTSSpeaker(flakyProvider, noopPlayer, recordingFallback);
-  await sp.speakStream(fromArray(["First.", "Second.", "Third."]));
+  await sp.speakStream(fromArray(["First.", "Second.", "Third."]), new AbortController());
 
   // The failed sentence went to the fallback voice...
   expect(spokenByFallback).toEqual(["Second."]);
@@ -186,7 +186,7 @@ test("falls back when the platform player cannot be spawned", async () => {
     throw new Error("player missing");
   });
 
-  await sp.speakStream(fromArray(["Still audible."]));
+  await sp.speakStream(fromArray(["Still audible."]), new AbortController());
 
   expect(spokenByFallback).toEqual(["Still audible."]);
   expect(sp.getSnapshot().spoken).toEqual(["Still audible."]);
@@ -212,7 +212,7 @@ test("falls back only for a sentence whose player exits nonzero", async () => {
     kill() {},
   }));
 
-  await sp.speakStream(fromArray(["First.", "Second.", "Third."]));
+  await sp.speakStream(fromArray(["First.", "Second.", "Third."]), new AbortController());
 
   expect(spokenByFallback).toEqual(["Second."]);
   expect(sp.getSnapshot().spoken).toEqual(["First.", "Second.", "Third."]);
@@ -238,7 +238,7 @@ test("a configured but stopped AEC hub falls back to the platform player", async
     return { pid: 310, exited: Promise.resolve(0), kill() {} };
   });
 
-  const speaking = sp.speakStream(fromArray(["Still audible."])).catch((error: unknown) => { throw error; });
+  const speaking = sp.speakStream(fromArray(["Still audible."]), new AbortController()).catch((error: unknown) => { throw error; });
   await Bun.sleep(0);
   expect(platformPlays).toBe(0);
   confirmRelease();
@@ -272,7 +272,7 @@ test("an unreaped AEC helper blocks platform and fallback playback", async () =>
       return { pid: 311, exited: Promise.resolve(0), kill() {} };
     });
 
-    await sp.speakStream(fromArray(["Must remain quiet."]));
+    await sp.speakStream(fromArray(["Must remain quiet."]), new AbortController());
 
     expect(platformPlays).toBe(0);
     expect(fallbackSpeaks).toBe(0);
@@ -302,7 +302,7 @@ test("an unreaped AEC helper also blocks generation-error fallback speech", asyn
     } as unknown as AecAudioHub;
     const sp = new StreamingTTSSpeaker(provider, noopPlayer, fallback, blockedHub);
 
-    await sp.speakStream(fromArray(["No unsafe fallback."]));
+    await sp.speakStream(fromArray(["No unsafe fallback."]), new AbortController());
 
     expect(fallbackSpeaks).toBe(0);
     expect(sp.getSnapshot().spoken).toEqual([]);
@@ -332,7 +332,7 @@ test("an active AEC helper blocks platform fallback speech", async () => {
     } as unknown as AecAudioHub;
     const sp = new StreamingTTSSpeaker(provider, noopPlayer, fallback, runningHub);
 
-    await sp.speakStream(fromArray(["No overlapping fallback."]));
+    await sp.speakStream(fromArray(["No overlapping fallback."]), new AbortController());
 
     expect(fallbackSpeaks).toBe(0);
     expect(releaseWaits).toBe(0);
@@ -363,7 +363,7 @@ test("fallback stays blocked when AEC activates during its release wait", async 
     } as unknown as AecAudioHub;
     const sp = new StreamingTTSSpeaker(provider, noopPlayer, fallback, hub);
 
-    await sp.speakStream(fromArray(["No raced fallback."]));
+    await sp.speakStream(fromArray(["No raced fallback."]), new AbortController());
 
     expect(fallbackSpeaks).toBe(0);
     expect(sp.getSnapshot().spoken).toEqual([]);
@@ -394,7 +394,7 @@ test("interrupt during AEC release wait cannot launch stale platform playback", 
       return { pid: 312, exited: Promise.resolve(0), kill() {} };
     });
 
-    const speaking = sp.speakStream(fromArray(["Old sentence."]));
+    const speaking = sp.speakStream(fromArray(["Old sentence."]), new AbortController());
     await waitStarted;
     sp.interrupt();
     confirmRelease();
@@ -431,7 +431,7 @@ test("interrupt during AEC release wait cannot launch stale fallback speech", as
     } as unknown as AecAudioHub;
     const sp = new StreamingTTSSpeaker(provider, noopPlayer, fallback, stoppedHub);
 
-    const speaking = sp.speakStream(fromArray(["Old fallback sentence."]));
+    const speaking = sp.speakStream(fromArray(["Old fallback sentence."]), new AbortController());
     await waitStarted;
     sp.interrupt();
     confirmRelease();
@@ -498,7 +498,7 @@ test("malformed streaming provider audio is never written or played", async () =
     players++;
     return { pid: 313, exited: Promise.resolve(0), kill() {} };
   });
-  await sp.speakStream(fromArray(["Do not play this."]));
+  await sp.speakStream(fromArray(["Do not play this."]), new AbortController());
   expect(players).toBe(0);
   expect(spokenByFallback).toEqual(["Do not play this."]);
 });

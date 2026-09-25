@@ -13,7 +13,7 @@ import {
 
 /**
  * `tts_coalesce` was configurable and inert on the web path: the coalescer lives
- * inside StreamingTTSSpeaker.speakStream(), and web voice never goes through the
+ * inside StreamingTTSSpeaker.speakStream(, new AbortController()), and web voice never goes through the
  * speaker at all — it calls the provider once per sentence. A headless box
  * speaks ONLY through web voice, so the deployment with the most to gain from
  * fewer TTS calls was the one deployment the setting could not reach.

@@ -23,6 +23,8 @@ export interface TTSProviderConfig {
 export interface TTSOptions {
   /** Speech speed/rate multiplier when the backend supports OpenAI-compatible speed. */
   speed?: number;
+  /** Cancel this request, including an in-flight transport read. */
+  signal?: AbortSignal;
 }
 
 export interface TTSProvider {

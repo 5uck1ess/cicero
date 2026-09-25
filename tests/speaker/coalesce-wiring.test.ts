@@ -42,7 +42,7 @@ async function* wholeReply(): AsyncGenerator<string> {
 test("speakStream renders one call per sentence when coalescing is off", async () => {
   const { provider, rendered } = recordingProvider();
   const sp = new StreamingTTSSpeaker(provider, noopPlayer, noopFallback);
-  await sp.speakStream(wholeReply());
+  await sp.speakStream(wholeReply(), new AbortController());
   expect(rendered).toEqual(["One.", "Two.", "Three.", "Four."]);
 });
 
@@ -56,7 +56,7 @@ test("speakStream merges available sentences when coalescing is configured", asy
     undefined,
     { maxChars: 240, passthroughFirst: 1 },
   );
-  await sp.speakStream(wholeReply());
+  await sp.speakStream(wholeReply(), new AbortController());
   // First sentence alone (first audio is never held back), the rest merged.
   expect(rendered).toEqual(["One.", "Two. Three. Four."]);
 });
@@ -71,7 +71,7 @@ test("a merged chunk is recorded as one spoken entry, and still reads back verba
     undefined,
     { maxChars: 240, passthroughFirst: 1 },
   );
-  await sp.speakStream(wholeReply());
+  await sp.speakStream(wholeReply(), new AbortController());
   const snap = sp.getSnapshot();
   // Coarser than the uncoalesced ["One.","Two.","Three.","Four."], which is the
   // documented cost. What matters downstream is that the joined text — the form
@@ -87,7 +87,7 @@ function configWith(raw: Partial<CiceroConfig>): RuntimeConfig {
 test("createStreamingSpeaker leaves coalescing off unless the config enables it", async () => {
   const { provider, rendered } = recordingProvider();
   const sp = createStreamingSpeaker(configWith({}), provider, noopPlayer);
-  await sp!.speakStream(wholeReply());
+  await sp!.speakStream(wholeReply(), new AbortController());
   expect(rendered).toEqual(["One.", "Two.", "Three.", "Four."]);
 });
 
@@ -98,7 +98,7 @@ test("createStreamingSpeaker honors passthrough_first from config", async () => 
     provider,
     noopPlayer,
   );
-  await sp!.speakStream(wholeReply());
+  await sp!.speakStream(wholeReply(), new AbortController());
   // Two sentences sent alone instead of the default one — the configured value
   // reached the speaker, not just `enabled`.
   expect(rendered).toEqual(["One.", "Two.", "Three. Four."]);
@@ -117,7 +117,7 @@ test("max_chars from config splits a batch that would otherwise merge whole", as
     yield sentence("B");
     yield sentence("C");
     yield sentence("D");
-  }());
+  }(), new AbortController());
   // B+C+D is 95 chars and would arrive as one batch; the cap forces a split, and
   // no chunk exceeds it.
   expect(rendered).toEqual([sentence("A"), `${sentence("B")} ${sentence("C")}`, sentence("D")]);
@@ -151,7 +151,7 @@ test("interrupt frees a turn parked on a stalled brain", async () => {
   const { provider } = recordingProvider();
   const sp = new StreamingTTSSpeaker(provider, noopPlayer, noopFallback, null, undefined, coalescing);
 
-  const turn = sp.speakStream(stalledBrain());
+  const turn = sp.speakStream(stalledBrain(), new AbortController());
   await Bun.sleep(10);
   sp.interrupt();
   expect(await settles(turn)).toBe(true);
@@ -161,7 +161,7 @@ test("stop frees a turn parked on a stalled brain", async () => {
   const { provider } = recordingProvider();
   const sp = new StreamingTTSSpeaker(provider, noopPlayer, noopFallback, null, undefined, coalescing);
 
-  const turn = sp.speakStream(stalledBrain());
+  const turn = sp.speakStream(stalledBrain(), new AbortController());
   await Bun.sleep(10);
   await sp.stop();
   expect(await settles(turn)).toBe(true);
@@ -171,9 +171,9 @@ test("a superseding turn frees the previous turn's read-ahead", async () => {
   const { provider } = recordingProvider();
   const sp = new StreamingTTSSpeaker(provider, noopPlayer, noopFallback, null, undefined, coalescing);
 
-  const first = sp.speakStream(stalledBrain());
+  const first = sp.speakStream(stalledBrain(), new AbortController());
   await Bun.sleep(10);
-  await sp.speakStream(wholeReply());
+  await sp.speakStream(wholeReply(), new AbortController());
   expect(await settles(first)).toBe(true);
 });
 
@@ -193,7 +193,7 @@ test("a released stalled source actually closes once it can resume", async () =>
 
   const { provider } = recordingProvider();
   const sp = new StreamingTTSSpeaker(provider, noopPlayer, noopFallback, null, undefined, coalescing);
-  const turn = sp.speakStream(source);
+  const turn = sp.speakStream(source, new AbortController());
   await Bun.sleep(10);
   sp.interrupt();
   expect(await settles(turn)).toBe(true);

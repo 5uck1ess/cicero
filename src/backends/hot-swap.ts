@@ -506,15 +506,21 @@ export class SwappableSTTProvider implements STTProvider, PinnableProvider<STTPr
   pinGeneration(): GenerationPin<STTProvider> {
     return pinCurrentGeneration(this.slot);
   }
-  transcribe(audioFile: string): Promise<string | null> {
-    return this.slot.use((provider) => provider.transcribe(audioFile));
+  async transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null> {
+    signal?.throwIfAborted();
+    const text = await this.slot.use((provider) => provider.transcribe(audioFile, signal));
+    signal?.throwIfAborted();
+    return text;
   }
-  transcribeResult(audioFile: string): Promise<STTTranscriptionResult> {
-    return this.slot.use(async (provider) => {
-      if (provider.transcribeResult) return provider.transcribeResult(audioFile);
-      const text = await provider.transcribe(audioFile);
+  async transcribeResult(audioFile: string, signal?: AbortSignal): Promise<STTTranscriptionResult> {
+    signal?.throwIfAborted();
+    const result = await this.slot.use<STTTranscriptionResult>(async (provider) => {
+      if (provider.transcribeResult) return provider.transcribeResult(audioFile, signal);
+      const text = await provider.transcribe(audioFile, signal);
       return text?.trim() ? { kind: "transcript", text } : { kind: "empty" };
     });
+    signal?.throwIfAborted();
+    return result;
   }
   health(): Promise<boolean> { return this.slot.use((provider) => provider.health()); }
   requiredHealth(): Promise<boolean> {
@@ -534,8 +540,11 @@ export class SwappableTTSProvider implements TTSProvider, PinnableProvider<TTSPr
   pinGeneration(): GenerationPin<TTSProvider> {
     return pinCurrentGeneration(this.slot);
   }
-  generateAudio(text: string, voice?: string, options?: TTSOptions): Promise<ArrayBuffer> {
-    return this.slot.use((provider) => provider.generateAudio(text, voice, options));
+  async generateAudio(text: string, voice?: string, options?: TTSOptions): Promise<ArrayBuffer> {
+    options?.signal?.throwIfAborted();
+    const audio = await this.slot.use((provider) => provider.generateAudio(text, voice, options));
+    options?.signal?.throwIfAborted();
+    return audio;
   }
   health(): Promise<boolean> { return this.slot.use((provider) => provider.health()); }
   requiredHealth(): Promise<boolean> {

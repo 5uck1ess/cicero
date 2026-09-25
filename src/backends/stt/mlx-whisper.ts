@@ -62,21 +62,23 @@ export class MlxWhisperProvider implements STTProvider {
     this.timeoutMs = requestTimeout(config.timeout_ms, PROVIDER_TIMEOUT_MS.stt);
   }
 
-  transcribe(audioFile: string): Promise<string | null> {
-    return this.transcribeResult(audioFile).then((result) => {
+  transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null> {
+    return this.transcribeResult(audioFile, signal).then((result) => {
       if (result.kind === "failure") {
         log("warn", result.reason);
         return null;
       }
       return result.kind === "transcript" ? result.text : null;
     }).catch((err: unknown) => {
+      signal?.throwIfAborted();
       const message = `Transcription failed: ${err instanceof Error ? err.message : String(err)}`;
       log("warn", message);
       return null;
     });
   }
 
-  async transcribeResult(audioFile: string): Promise<STTTranscriptionResult> {
+  async transcribeResult(audioFile: string, signal?: AbortSignal): Promise<STTTranscriptionResult> {
+    signal?.throwIfAborted();
     try {
       const file = Bun.file(audioFile);
       const formData = new FormData();
@@ -86,7 +88,7 @@ export class MlxWhisperProvider implements STTProvider {
       const res = await fetch(`${httpBase(this.host, this.port)}/inference`, {
         method: "POST",
         body: formData,
-        signal: providerSignal(this.timeoutMs),
+        signal: providerSignal(this.timeoutMs, signal),
       });
 
       if (!res.ok) {
@@ -95,6 +97,7 @@ export class MlxWhisperProvider implements STTProvider {
       }
 
       const data = await readBoundedJson<{ text?: string }>(res);
+      signal?.throwIfAborted();
       const raw = data.text ?? "";
 
       const text = raw
@@ -105,6 +108,7 @@ export class MlxWhisperProvider implements STTProvider {
       if (!text || text.length < 2) return { kind: "empty" };
       return { kind: "transcript", text };
     } catch (err: unknown) {
+      signal?.throwIfAborted();
       const msg = err instanceof Error ? err.message : String(err);
       return { kind: "failure", reason: `Transcription failed: ${msg}` };
     }

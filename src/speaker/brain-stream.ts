@@ -64,6 +64,14 @@ async function speakGuarded(
   options: BrainTurnOptions = {},
   toolStartNotice = true,
 ): Promise<void> {
+  // One controller per turn: aborted by the caller's signal, and handed to the
+  // speaker so an interrupt during playback also cancels in-flight inference.
+  const turnAbort = new AbortController();
+  const outerSignal = options.signal;
+  const onOuterAbort = () => turnAbort.abort(outerSignal?.reason);
+  if (outerSignal?.aborted) onOuterAbort();
+  else outerSignal?.addEventListener("abort", onOuterAbort, { once: true });
+  const turnOptions: BrainTurnOptions = { ...options, signal: turnAbort.signal };
   let streamError: unknown = null;
   const timer = newTurnTimer();
   let firstToken = false;
@@ -76,7 +84,7 @@ async function speakGuarded(
   const onNotice: NonNullable<BrainTurnOptions["onNotice"]> = (notice) => {
     const snapshot = filler ? speaker.getSnapshot?.() : undefined;
     const fillerActive = !!filler && (!snapshot || snapshot.pending.includes(filler) || !snapshot.spoken.includes(filler));
-    if (closed || options.signal?.aborted || (notice.type === "tool" && (toolNoticeSent || !shouldSpeakToolStartNotice(toolStartNotice, replyStarted, fillerActive)))) return;
+    if (closed || turnAbort.signal.aborted || (notice.type === "tool" && (toolNoticeSent || !shouldSpeakToolStartNotice(toolStartNotice, replyStarted, fillerActive)))) return;
     if (notices.length >= 32) return;
     if (notice.type === "tool") toolNoticeSent = true;
     notices.push(notice.text);
@@ -84,7 +92,7 @@ async function speakGuarded(
   };
   const guarded = async function* (): AsyncGenerator<string> {
     try {
-      const iterator = source({ ...options, onNotice })[Symbol.asyncIterator]();
+      const iterator = source({ ...turnOptions, onNotice })[Symbol.asyncIterator]();
       let next = iterator.next();
       while (true) {
         while (notices.length) yield `${notices.shift()!} `;
@@ -120,8 +128,9 @@ async function speakGuarded(
     }
   };
   try {
-    await speaker.speakStream(withFiller());
+    await speaker.speakStream(withFiller(), turnAbort);
   } finally {
+    outerSignal?.removeEventListener("abort", onOuterAbort);
     closed = true;
     wake?.();
     timer.report("brain-turn");

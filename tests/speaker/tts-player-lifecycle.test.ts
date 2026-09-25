@@ -145,7 +145,7 @@ test("StreamingTTSSpeaker stop reaps its raw interruptible player", async () => 
     yield "streaming clip";
   }
 
-  const speaking = speaker.speakStream(sentence());
+  const speaking = speaker.speakStream(sentence(), new AbortController());
   await spawned.promise;
   await speaker.stop();
   await speaking;
@@ -217,10 +217,10 @@ test("streaming barge-in blocks replacement playback until the old player is rea
     yield text;
   }
 
-  const oldTurn = speaker.speakStream(sentence("old turn"));
+  const oldTurn = speaker.speakStream(sentence("old turn"), new AbortController());
   await firstSpawn.promise;
   speaker.interrupt();
-  const replacementTurn = speaker.speakStream(sentence("replacement turn"));
+  const replacementTurn = speaker.speakStream(sentence("replacement turn"), new AbortController());
 
   await Bun.sleep(10);
   expect(spawns).toBe(1);
@@ -327,9 +327,9 @@ test("StreamingTTSSpeaker retries and clears unconfirmed fallback ownership", as
     async *[Symbol.asyncIterator]() { yield text; },
   });
 
-  await expect(speaker.speakStream(sentence("fallback fails"))).rejects.toBe(releaseFailure);
+  await expect(speaker.speakStream(sentence("fallback fails"), new AbortController())).rejects.toBe(releaseFailure);
   generationFails = false;
-  await expect(speaker.speakStream(sentence("primary recovers"))).resolves.toBeUndefined();
+  await expect(speaker.speakStream(sentence("primary recovers"), new AbortController())).resolves.toBeUndefined();
   expect(fallbackStops).toBe(1);
   expect(playerSpawns).toBe(1);
 });
@@ -412,9 +412,9 @@ test("a replacement stream waits for live system fallback ownership", async () =
     async *[Symbol.asyncIterator]() { yield text; },
   });
 
-  const first = speaker.speakStream(sentence("system fallback"));
+  const first = speaker.speakStream(sentence("system fallback"), new AbortController());
   await fallbackSpawned.promise;
-  const replacement = speaker.speakStream(sentence("replacement"));
+  const replacement = speaker.speakStream(sentence("replacement"), new AbortController());
   await Bun.sleep(10);
   expect(playerSpawns).toBe(0);
 

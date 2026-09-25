@@ -31,14 +31,14 @@ export interface STTProvider {
    */
   cancelStartup?(): void;
   readonly name: string;
-  transcribe(audioFile: string): Promise<string | null>;
+  transcribe(audioFile: string, signal?: AbortSignal): Promise<string | null>;
   /**
    * Quiet, structured form of {@link transcribe}. Direct callers retain the
    * historical null-and-log behavior; fallback composition uses this method
    * to emit one bounded warning for an outage episode instead of one warning
    * from the concrete provider on every turn.
    */
-  transcribeResult?(audioFile: string): Promise<STTTranscriptionResult>;
+  transcribeResult?(audioFile: string, signal?: AbortSignal): Promise<STTTranscriptionResult>;
   health(): Promise<boolean>;
   /**
    * Health of the configured primary when this provider composes fallbacks.

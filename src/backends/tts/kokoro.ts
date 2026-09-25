@@ -61,6 +61,7 @@ export class KokoroProvider implements TTSProvider {
   }
 
   async generateAudio(text: string, voice?: string, options?: TTSOptions): Promise<ArrayBuffer> {
+    options?.signal?.throwIfAborted();
     const response = await fetch(`${httpBase(this.host, this.port)}/v1/audio/speech`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -70,7 +71,7 @@ export class KokoroProvider implements TTSProvider {
         response_format: "wav",
         speed: options?.speed ?? 1.0,
       }),
-      signal: providerSignal(this.timeoutMs),
+      signal: providerSignal(this.timeoutMs, options?.signal),
     });
 
     if (!response.ok) {
@@ -78,7 +79,10 @@ export class KokoroProvider implements TTSProvider {
       throw new Error(`Kokoro returned ${response.status}${detail ? `: ${detail}` : ""}`);
     }
 
-    return await readBoundedArrayBuffer(response, undefined, "Kokoro audio response");
+    options?.signal?.throwIfAborted();
+    const audio = await readBoundedArrayBuffer(response, undefined, "Kokoro audio response");
+    options?.signal?.throwIfAborted();
+    return audio;
   }
 
   async health(): Promise<boolean> {

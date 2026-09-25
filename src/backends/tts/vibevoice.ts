@@ -75,6 +75,7 @@ export class VibeVoiceProvider implements TTSProvider {
   }
 
   async generateAudio(text: string, voice?: string, options?: TTSOptions): Promise<ArrayBuffer> {
+    options?.signal?.throwIfAborted();
     let selectedVoice = this.voice;
     let reference = this.refAudio;
     if (voice && voice !== this.voice) {
@@ -101,7 +102,7 @@ export class VibeVoiceProvider implements TTSProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: providerSignal(this.timeoutMs),
+      signal: providerSignal(this.timeoutMs, options?.signal),
     });
 
     if (!response.ok) {
@@ -109,7 +110,10 @@ export class VibeVoiceProvider implements TTSProvider {
       throw new Error(`VibeVoice returned ${response.status}${detail ? `: ${detail}` : ""}`);
     }
 
-    return await readBoundedArrayBuffer(response, undefined, "VibeVoice audio response");
+    options?.signal?.throwIfAborted();
+    const audio = await readBoundedArrayBuffer(response, undefined, "VibeVoice audio response");
+    options?.signal?.throwIfAborted();
+    return audio;
   }
 
   async health(): Promise<boolean> {

@@ -4,6 +4,8 @@ import type { WyomingEvent, WyomingHeader } from "./types";
 export interface WyomingClientOptions {
   host: string;
   port: number;
+  /** Injectable socket dialer for deterministic connection lifecycle tests. */
+  connectSocket?: () => Promise<Socket>;
   timeoutMs?: number;
   /** Maximum newline-delimited JSON header size. Defaults to 64 KiB. */
   maxHeaderBytes?: number;
@@ -111,11 +113,11 @@ export class WyomingClient implements WyomingTransport {
 
   async connect(): Promise<void> {
     try {
+      if (this.intentionallyClosed) throw new Error("Wyoming client closed");
       if (this.socket) return;
       if (this.connecting) return await this.connecting;
       this.failure = null;
-      this.intentionallyClosed = false;
-      this.connecting = Bun.connect({
+      const connection = this.opts.connectSocket?.() ?? Bun.connect({
         hostname: this.opts.host,
         port: this.opts.port,
         socket: {
@@ -123,7 +125,14 @@ export class WyomingClient implements WyomingTransport {
           close: () => this.onSocketClosed(),
           error: (_sock, error) => this.fail(asError(error, "Wyoming socket failed"), false),
         },
-      }).then((sock) => {
+      });
+      this.connecting = connection.then((sock) => {
+        // close() may have won while the TCP handshake was still pending. The
+        // late socket is ours to release; it must never become sendable.
+        if (this.intentionallyClosed) {
+          sock.end();
+          throw new Error("Wyoming client closed");
+        }
         this.socket = sock;
       }).finally(() => {
         this.connecting = null;

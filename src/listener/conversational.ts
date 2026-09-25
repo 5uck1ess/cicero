@@ -150,6 +150,7 @@ export class ConversationalListener implements Listener {
   // mic. A new activation waits only for the prior capture to release the audio
   // device; an old command callback may finish independently.
   private activationEpoch = 0;
+  private activationAbort = new AbortController();
   private captureInFlight: Promise<string | null> | null = null;
   private bargeCaptureInFlight: Promise<string | null> | null = null;
   private oneShotCaptureInFlight: Promise<string> | null = null;
@@ -495,6 +496,7 @@ export class ConversationalListener implements Listener {
 
   activate(): void {
     if (this.active) return;
+    this.activationAbort = new AbortController();
     this.active = true;
     const epoch = ++this.activationEpoch;
     log("ok", "Conversational mode activated — listening...");
@@ -532,6 +534,7 @@ export class ConversationalListener implements Listener {
 
   deactivate(): void {
     if (!this.active) return;
+    this.activationAbort.abort(new Error("voice listener deactivated"));
     this.active = false;
     this.activationEpoch++;
     this.listening = false;
@@ -827,7 +830,7 @@ export class ConversationalListener implements Listener {
       if (result.status === "error") this.reportMicFailure(result.message);
       if (result.status !== "ok") return "";
       try {
-        const transcript = (await this.sttProvider.transcribe(result.path)) ?? "";
+        const transcript = (await this.sttProvider.transcribe(result.path, this.activationAbort.signal)) ?? "";
         return this.isCurrentActivation(epoch) ? transcript : "";
       } finally {
         try { unlinkSync(result.path); } catch { /* best-effort cleanup */ }
@@ -979,7 +982,7 @@ export class ConversationalListener implements Listener {
   /** Transcribe a wav, swallowing errors to "" so one STT hiccup can't kill the loop. */
   private async transcribeSafe(wav: string, stt: STTProvider = this.sttProvider): Promise<string> {
     try {
-      return (await stt.transcribe(wav))?.trim() ?? "";
+      return (await stt.transcribe(wav, this.activationAbort.signal))?.trim() ?? "";
     } catch (err: unknown) {
       log("info", `Transcribe failed: ${err instanceof Error ? err.message : String(err)}`);
       return "";

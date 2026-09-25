@@ -179,6 +179,36 @@ test("a silent narrated agent turn settles when local barge-in aborts it", async
   await expect(speaking).resolves.toBeUndefined();
 });
 
+test("speaker interruption aborts the exact signal passed to the brain producer", async () => {
+  let brainSignal: AbortSignal | undefined;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const brain = {
+    async *sendStream(_message: string, options?: BrainTurnOptions): AsyncGenerator<string> {
+      brainSignal = options?.signal;
+      markStarted();
+      yield "First sentence.";
+      await new Promise<void>((resolve) =>
+        options?.signal?.aborted
+          ? resolve()
+          : options?.signal?.addEventListener("abort", () => resolve(), { once: true })
+      );
+    },
+  } as unknown as Brain;
+  const speaker = {
+    async speakStream(stream: AsyncIterable<string>, turnAbort: AbortController): Promise<void> {
+      const iterator = stream[Symbol.asyncIterator]();
+      const next = iterator.next();
+      await started;
+      turnAbort.abort(new Error("interrupted"));
+      await next;
+      await iterator.return?.();
+    },
+  } as unknown as StreamingTTSSpeaker;
+  await streamBrainToSpeaker(brain, speaker, "work");
+  expect(brainSignal?.aborted).toBe(true);
+});
+
 test("local stream speaks ACP confirmation before reply and keeps tool notice to one", async () => {
   const speaker = new CapturingSpeaker();
   const brain = {
