@@ -156,36 +156,22 @@ switchboard:
   intent_timeout_ms: 1500
 ```
 
-After an exact-command miss, safe brains run concurrently with classification.
-Their first output is held with backpressure (at most one chunk of 65,536
-characters); text, speech, and turn notice callbacks stay private until the decision.
-ACP tool permissions use the same held-permission mechanism as speculative
-turns. An actionable result cancels those permissions and aborts/drains the
-normal brain turn before executing the switchboard action. Otherwise the held
-output is released in order. The normal-turn delay is approximately
-`max(0, classifier time - brain first output time)`, rather than the full
-classifier time. The deadline is 1500 ms by default.
+After an exact-command miss, classification completes before any ordinary brain
+turn starts. An actionable plan runs the switchboard action; a fallthrough
+result dispatches the ordinary utterance exactly once. This ordering applies
+to every brain, including stateful ACP sessions, so an intent-only request never
+enters the ordinary conversation history or consumes its pending context.
+The classifier remains an injected function, independent of the reply backend.
 
-CLI agents without a permission round-trip, unknown backends, and custom
-OpenAI-compatible URLs (which might front a tool-running agent) classify first.
-Ollama, public model-only OpenAI-compatible presets, and ACP can overlap;
-wrappers must guarantee that every reachable route is safe. Nested switchboards
-and dial-back wrappers with an installed call handler classify first. Pending transfers
-and pending one-shot context also classify first so context reaches the actual
-recipient. No model turn starts for an exact-command hit.
-
-Cancellation has a bounded 6-second drain window, allowing ACP its existing
-5-second cancellation grace. An uncooperative brain is
-quarantined until its owned turn actually settles; a later turn can retry.
-Concurrency does not roll back prompts already received by a stateful provider.
-
-Timeouts, provider errors, and malformed output release the normal brain turn. Caller cancellation still cancels the turn. Without a TLDR classifier
-endpoint only the exact fast paths are available. `cicero latency` includes
-`intent` duration and `intent output held` for classified web turns (`intentMs`
-and `intentHeldMs` in stored records), including adopted speculative turns.
-`intentHeldMs` measures the first output waiting for classification; it is zero
-when classification finishes first or the route classifies before starting.
-`CICERO_DEBUG=1` enables timeout/error duration logs without utterance text.
+Classification adds its elapsed time before an ordinary reply (about p50 330 ms
+on the reference local model). The absolute deadline is 1500 ms by default.
+Timeouts, provider errors and malformed output fall through to a normal turn.
+Caller cancellation still cancels the turn; late classifier results cannot act
+or publish after supersession. Exact-command hits need no classifier round trip.
+Without a TLDR classifier endpoint only the exact fast paths are available.
+`cicero latency` includes `intent` duration (`intentMs` in stored records) for
+classified web turns, including adopted speculative turns. `CICERO_DEBUG=1`
+enables timeout/error duration logs without utterance text.
 
 Routing now depends on the classifier model's quality, including its confidence
 calibration. Run `bun run bench/intent-bench.ts --runs 3 --misses` against your configured model

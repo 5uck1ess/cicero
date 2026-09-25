@@ -490,7 +490,6 @@ export interface BrainTurnOptions {
   systemContext?: string;
   /** Switchboard classifier elapsed time for this invocation only. */
   onIntentMs?: (durationMs: number) => void;
-  onIntentHeldMs?: (durationMs: number) => void;
   /** Sanitized ACP plan/tool metadata for this turn; never spoken automatically. */
   onStructuredUpdate?: (update: BrainStructuredUpdate) => void;
   /** Turn-owned, sanitized ACP activity. Never retain beyond this turn. */
@@ -522,8 +521,6 @@ export interface PendingConfirmation {
 }
 
 export interface Brain {
-  /** Explicit guarantee: this route can run with output held, without unheld side effects. */
-  canHoldIntentOutput?(): boolean;
   /** True only when every reachable tool-running route defers ACP permission requests. */
   canDeferSpeculativePermissions?(): boolean;
   /** Whether the front desk loaded its durable agent session at the last start. */

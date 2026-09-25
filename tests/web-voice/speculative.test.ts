@@ -829,7 +829,6 @@ test("adopted speculative classification reports its intent duration", async () 
   const brain: SpeculatorDeps["brain"] = {
     sendStream: (_message, options) => (async function* () {
       options?.onIntentMs?.(345);
-      options?.onIntentHeldMs?.(42);
       raised.resolve();
       yield "Done.";
     })(),
@@ -837,10 +836,8 @@ test("adopted speculative classification reports its intent duration", async () 
   const turn = makeSpeculator(deps({ brain, transcript: "gather the gang" }).deps)(pcm(1000), 16_000, 1000, 0.95)!;
   await raised.promise;
   const durations: number[] = [];
-  const held: number[] = [];
   const d = turnDeps([]);
-  d.timingMark = (name, ms) => { if (name === "intent_duration") durations.push(ms); if (name === "intent_held_duration") held.push(ms); };
+  d.timingMark = (name, ms) => { if (name === "intent_duration") durations.push(ms); };
   await streamWebTurn(wavOf(1000), d, capturingSink().sink, turn);
   expect(durations).toEqual([345]);
-  expect(held).toEqual([42]);
 });

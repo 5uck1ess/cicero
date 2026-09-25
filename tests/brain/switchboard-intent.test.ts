@@ -119,153 +119,90 @@ function deferred<T>() {
 
 const tick = async () => { for (let i = 0; i < 15; i++) await Promise.resolve(); };
 
-test("concurrent action discards held text and notices, aborts the brain, then acts", async () => {
-  const verdict = deferred<string>();
-  const started = deferred<void>();
-  let owned: AbortSignal | undefined;
-  let closed = false;
-  const notices: string[] = [];
-  const brain: Brain = {
-    ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
-    sendStream: async function* (_m, options) {
-      owned = options?.signal;
-      options?.onNotice?.({ type: "tool", text: "must not be spoken" });
-      started.resolve();
-      try { yield "private draft that must never reach the speaker"; }
-      finally { closed = true; }
-    },
-  };
-  const sb = new SwitchboardBrain(brain, { coder: { brain: front() } }, () => verdict.promise);
-  const iterator = sb.sendStream("gather the gang", { onNotice: (n) => notices.push(n.text) })[Symbol.asyncIterator]();
-  let delivered = false;
-  const output = iterator.next().then((value) => { delivered = true; return value; });
-  await started.promise;
-  await tick();
-  expect(delivered).toBe(false);
-  expect(notices).toEqual([]);
-  verdict.resolve(json());
-  expect((await output).value).toContain("checking in");
-  expect(owned?.aborted).toBe(true);
-  expect(closed).toBe(true);
-  expect(notices).toEqual([]);
-  await iterator.return?.();
-});
 
-test("none releases held output in order without restarting the normal turn", async () => {
-  const verdict = deferred<string>();
-  const started = deferred<void>();
-  let invocations = 0;
-  const chunks = ["A".repeat(45), "second", "third"];
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
-    sendStream: async function* () { invocations++; started.resolve(); yield* chunks; },
-  };
-  const sb = new SwitchboardBrain(brain, {}, () => verdict.promise);
-  const out: string[] = [], held: number[] = [];
-  const running = (async () => { for await (const c of sb.sendStream("ordinary words", { onIntentHeldMs: (ms) => held.push(ms) })) out.push(c); })();
-  await started.promise;
-  await tick();
-  expect(out).toEqual([]);
-  verdict.resolve(json({ intent: "none", request_now: false }));
-  await running;
-  expect(out).toEqual(chunks);
-  expect(invocations).toBe(1);
-  expect(held).toHaveLength(1);
-  expect(held[0]).toBeGreaterThanOrEqual(0);
-});
+for (const failure of ["timeout", "error"] as const) {
+  test(`${failure} dispatches one ordinary turn; a late verdict cannot act`, async () => {
+    const pending = deferred<string>();
+    let calls = 0;
+    const brain: Brain = { ...front(), send: async () => { calls++; return "normal turn"; } };
+    const sb = new SwitchboardBrain(brain, { coder: { brain: front() } },
+      failure === "error" ? async () => { throw new Error("synthetic failure"); } : () => pending.promise,
+      { intentTimeoutMs: 5 });
+    expect(await sb.send("gather the gang")).toBe("normal turn");
+    pending.resolve(json());
+    await tick();
+    expect(calls).toBe(1);
+    expect(sb.wasControlTurn()).toBe(false);
+  });
+}
 
-test("slow classifier holds fast brain output until deadline, then lets it flow", async () => {
-  let classifierSignal: AbortSignal | undefined;
-  const started = deferred<void>();
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
-    send: async () => { started.resolve(); return "normal turn"; },
-  };
-  const sb = new SwitchboardBrain(brain, {}, (_p, s) => { classifierSignal = s; return new Promise(() => {}); }, { intentTimeoutMs: 25 });
-  let delivered = false;
-  const held: number[] = [];
-  const pending = sb.send("ordinary words", { onIntentHeldMs: (ms) => held.push(ms) }).then((v) => { delivered = true; return v; });
-  await started.promise;
-  await tick();
-  expect(delivered).toBe(false);
-  expect(await pending).toBe("normal turn");
-  expect(classifierSignal?.aborted).toBe(true);
-  expect(held[0]).toBeGreaterThan(0);
-});
-
-test("a brain without a safe-hold capability classifies before executing", async () => {
-  const verdict = deferred<string>();
-  let invocations = 0;
-  const brain: Brain = { ...front(), send: async () => { invocations++; return "normal"; } };
-  const sb = new SwitchboardBrain(brain, {}, () => verdict.promise);
-  const pending = sb.send("ordinary words");
-  await tick();
-  expect(invocations).toBe(0);
-  verdict.resolve(json({ intent: "none" }));
-  expect(await pending).toBe("normal");
-  expect(invocations).toBe(1);
-});
-
-test("classifier finishes before the brain: no output hold time", async () => {
-  const output = deferred<string>();
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false, send: () => output.promise };
-  const held: number[] = [];
-  const sb = new SwitchboardBrain(brain, {}, async () => json({ intent: "none" }));
-  const pending = sb.send("ordinary words", { onIntentHeldMs: (ms) => held.push(ms) });
-  await tick();
-  expect(held).toEqual([0]);
-  output.resolve("normal");
-  expect(await pending).toBe("normal");
-});
-
-test("timeout telemetry distinguishes the deadline from a provider error", async () => {
-  const observed: any[] = [];
-  await classifySwitchboardIntent(() => new Promise(() => {}), "hi", roster, signal(), 5, (a) => observed.push(a));
-  await classifySwitchboardIntent(async () => { throw new Error("failed"); }, "hi", roster, signal(), 50, (a) => observed.push(a));
-  expect(observed[0]).toMatchObject({ timedOut: true, failed: false });
-  expect(observed[1]).toMatchObject({ timedOut: false, failed: true });
-});
-
-test("discarded uncooperative brain is quarantined, then retryable after settlement", async () => {
-  const late = deferred<string>();
-  let count = 0;
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
-    send: () => { count++; return count === 1 ? late.promise : Promise.resolve("recovered"); },
-  };
-  let verdicts = 0;
-  const sb = new SwitchboardBrain(brain, { coder: { brain: front() } }, async () => json({ intent: verdicts++ === 0 ? "rollcall" : "none" }), { intentDrainTimeoutMs: 10 });
-  expect(await sb.send("gather the gang")).toContain("checking in");
-  // The control did not dispatch to the retiring brain; ordinary work does.
-  await expect(sb.send("ordinary work while retiring")).rejects.toThrow("still settling");
-  expect(count).toBe(1);
-  late.resolve("discarded late text");
-  await tick();
-  expect(await sb.send("ordinary words")).toBe("recovered");
-  expect(count).toBe(2);
-});
-
-test("caller cancellation cancels the held brain and never releases its notices", async () => {
-  const started = deferred<void>();
-  let owned: AbortSignal | undefined;
-  const controller = new AbortController();
-  const notices: string[] = [];
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false,
-    send: async (_m, options) => {
-      owned = options?.signal;
-      options?.onNotice?.({ type: "tool", text: "held" });
-      started.resolve();
-      return "draft";
-    },
-  };
-  const sb = new SwitchboardBrain(brain, {}, () => new Promise(() => {}));
-  const result = sb.send("ordinary words", { signal: controller.signal, onNotice: (n) => notices.push(n.text) });
-  await started.promise;
-  controller.abort(new Error("cancelled by caller"));
-  await expect(result).rejects.toThrow("cancelled by caller");
-  expect(owned?.aborted).toBe(true);
-  expect(notices).toEqual([]);
-});
-
-test("held first output has a hard size bound", async () => {
-  const brain: Brain = { ...front(), canHoldIntentOutput: () => true, hasPendingOneShotContext: () => false, send: async () => "x".repeat(65537) };
-  const sb = new SwitchboardBrain(brain, {}, async () => json({ intent: "none" }));
-  await expect(sb.send("ordinary words")).rejects.toThrow("held intent output exceeds limit");
-});
+for (const mode of ["send", "sendStream", "streamProgress"] as const) {
+  for (const action of ["rollcall", "release", "transfer"] as const) {
+    test(`${mode}: superseded classification cannot execute a late actionable ${action}`, async () => {
+      const pending = deferred<string>();
+      const entered = deferred<void>();
+      const returned = deferred<string>();
+      let classifications = 0;
+      const messages: string[] = [];
+      const published: string[] = [];
+      const brain: Brain = {
+        ...front(), send: async (m) => { messages.push(m); return "fresh answer"; },
+        streamProgress: async function* (m) { messages.push(m); yield "fresh answer"; },
+      };
+      const lanes = { coder: { brain, voice: "coder-voice" }, reviewer: { brain: front(), voice: "reviewer-voice" } };
+      const sb = new SwitchboardBrain(brain, lanes, async () => {
+        if (++classifications === 1) {
+          entered.resolve();
+          const raw = await pending.promise;
+          returned.resolve(raw); // evidence that the provider actually returned the actionable verdict
+          return raw;
+        }
+        return json({ intent: "none", request_now: false });
+      });
+      await sb.transferTo("coder"); // release must have something to release; transfer must change lanes
+      const state = sb as unknown as {
+        rollcall: unknown;
+        actOnIntent: (...args: any[]) => Promise<unknown>;
+        doRollcall: (...args: any[]) => unknown;
+        doRelease: (...args: any[]) => unknown;
+        pinLane: (...args: any[]) => Promise<unknown>;
+      };
+      // Call-through spies: retain every downstream guard. Side-effect assertions
+      // alone could pass even if stale work reached these guarded action handlers.
+      const act = spyOn(state, "actOnIntent");
+      const rollcall = spyOn(state, "doRollcall");
+      const release = spyOn(state, "doRelease");
+      const transfer = spyOn(state, "pinLane");
+      try {
+        const old = (mode === "send" ? sb.send("old ordinary request").then((s) => { published.push(s); })
+          : (async () => { for await (const s of sb[mode]!("old ordinary request")) published.push(s); })())
+          .then(() => null, (error) => error);
+        await entered.promise;
+        expect(messages).toEqual([]);
+        expect(await sb.send("new ordinary request")).toBe("fresh answer");
+        // Resolve BEFORE awaiting old: otherwise disabling cancellation lets the
+        // classifier deadline win, silently testing NONE instead of this action.
+        const late = json({ intent: action, target: action === "transfer" ? "reviewer" : null });
+        pending.resolve(late);
+        expect(parseIntent(await returned.promise, lanes)).toMatchObject({
+          intent: action, target: action === "transfer" ? "reviewer" : null,
+          request_now: true, confidence: 0.9,
+        });
+        expect(await old).toBeInstanceOf(Error);
+        await tick();
+        expect(messages).toEqual(["new ordinary request"]);
+        expect(published).toEqual([]); // no stale roster reply or acknowledgment
+        expect(sb.activeLane()).toBe("coder"); // no transfer or release
+        expect(state.rollcall).toBeNull(); // inspect without consuming a queued voice
+        expect(sb.activeLaneVoice()).toBe("coder-voice");
+        expect(sb.wasControlTurn()).toBe(false);
+        expect(act).not.toHaveBeenCalled();
+        expect(rollcall).not.toHaveBeenCalled();
+        expect(release).not.toHaveBeenCalled();
+        expect(transfer).not.toHaveBeenCalled();
+      } finally {
+        act.mockRestore(); rollcall.mockRestore(); release.mockRestore(); transfer.mockRestore();
+      }
+    });
+  }
+}

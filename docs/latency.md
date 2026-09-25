@@ -19,8 +19,7 @@ For a live daemon synthetic-turn bench, see [bench/README.md](../bench/README.md
 
 Switchboard classification adds `intentMs` to classified web-turn records, shown
 as `intent` in `cicero latency` (p50/p95). This is classifier elapsed time,
-including timeout/error fallback. `intentHeldMs` (CLI: `intent output held`)
-measures how long ready output waited for the classifier, including adopted
-speculative turns. It is zero if the brain was slower or classification ran
-first on an unsafe route. Classifier time overlaps brain work on safe routes.
+including timeout/error fallback. Classification completes before ordinary
+brain dispatch and adds its latency (about p50 330 ms on the reference local
+model). Adopted speculative turns retain the classifier duration as well.
 Exact fast paths do not incur a classifier round trip.

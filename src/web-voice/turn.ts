@@ -1345,7 +1345,6 @@ async function streamReply(
           yield t;
         }
       } finally {
-        if (speculativeTurn?.intentHeldMs !== undefined) deps.timingMark?.("intent_held_duration", speculativeTurn.intentHeldMs);
         if (speculativeTurn?.intentMs !== undefined) deps.timingMark?.("intent_duration", speculativeTurn.intentMs);
       }
     };
@@ -1375,7 +1374,6 @@ async function streamReply(
     const turnOptions = {
       signal: turnAbort?.signal, systemContext: systemContext ?? undefined, onNotice,
       onIntentMs: (ms: number) => deps.timingMark?.("intent_duration", ms),
-      onIntentHeldMs: (ms: number) => deps.timingMark?.("intent_held_duration", ms),
     };
     if (!pretokens) timer.mark("brain_start");
     const tokens: AsyncIterable<string> = pretokens

@@ -96,11 +96,8 @@ test("CLI table is formatted from a private fixture file", async () => {
 test("intent duration is a bounded duration, visible in CLI percentiles", () => {
   const turn = new LatencyTurn("s", "intent", "web_text", 1);
   turn.mark("intent_duration", 432.3);
-  turn.mark("intent_held_duration", 123.2);
   const record = turn.finish();
   expect(record.intentMs).toBe(432);
-  expect(record.intentHeldMs).toBe(123);
   expect(formatLatency(summarizeLatency([record]))).toContain("web_text  intent  1  432  432");
   expect(record.serverMarksMs).not.toHaveProperty("intent_duration");
-  expect(formatLatency(summarizeLatency([record]))).toContain("intent output held  1  123  123");
 });

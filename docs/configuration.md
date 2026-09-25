@@ -184,8 +184,8 @@ switchboard:
 ```
 
 These defaults apply when omitted. Exact commands bypass classification; other
-foreground utterances use concurrent held-output classification where the brain
-is safe to hold (otherwise classification runs first), via `web_voice.tldr.summarizer_url` and `summarizer_model`
+foreground utterances classify before ordinary brain dispatch, adding the classifier's
+latency (about p50 330 ms on the reference local model), via `web_voice.tldr.summarizer_url` and `summarizer_model`
 (not the separate `classifier:` backend). JSON-schema output is requested when
 supported, with strict JSON parsing otherwise. Invalid answers or deadline/error
 fallbacks are ordinary brain turns. Only `request_now: true` with sufficient

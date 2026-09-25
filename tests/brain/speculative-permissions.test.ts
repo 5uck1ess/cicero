@@ -249,32 +249,3 @@ test("adopted ACP confirm_tools request emits its spoken notice", async () => {
     unsubscribe();
   }
 });
-
-test("switchboard action cancels real ACP held permission callbacks before any output", async () => {
-  const acp = fakeAcp();
-  const verdict = deferred<string>();
-  const sb = new SwitchboardBrain(acp.brain, { coder: { brain: front } }, () => verdict.promise);
-  const output = Array.fromAsync(sb.sendStream("gather the gang"));
-  await acp.started;
-  let allowed = false;
-  const permission = acp.permission("intent-held-tool").then((result) => { allowed = result.outcome.outcome === "selected"; return result; });
-  await Promise.resolve();
-  verdict.resolve(JSON.stringify({ intent: "rollcall", target: null, request_now: true, confidence: 0.95 }));
-  expect((await permission).outcome).toEqual({ outcome: "cancelled" });
-  acp.finish();
-  expect((await output).join("")).toContain("checking in");
-  expect(allowed).toBe(false);
-});
-
-test("nested intent and speculative permission holds require both adoptions", async () => {
-  const parent = new SpeculativePermissionHold();
-  const child = new SpeculativePermissionHold(parent);
-  const { requestPermission } = client(child);
-  let settled = false;
-  const permission = requestPermission(request("nested")).then((value) => { settled = true; return value; });
-  child.adopt();
-  await Promise.resolve();
-  expect(settled).toBe(false);
-  parent.cancel();
-  expect((await permission).outcome).toEqual({ outcome: "cancelled" });
-});

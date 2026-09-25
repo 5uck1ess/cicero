@@ -1,5 +1,3 @@
-import { HeldIntentTurn, type HeldTurnMode } from "./held-intent-turn";
-import { canHoldIntentOutput, hasPendingOneShotContext } from "./capabilities";
 import { classifySwitchboardIntent, type SwitchboardIntent } from "./switchboard-intent";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
@@ -53,8 +51,6 @@ export interface SwitchboardOptions {
   /** Absolute wall-clock budget for one started lane's standup check-in. */
   standupLaneTimeoutMs?: number;
   intentTimeoutMs?: number;
-  /** Cleanup budget; default leaves room for ACP's 5-second cancellation grace. */
-  intentDrainTimeoutMs?: number;
   intentMinConfidence?: number;
 }
 
@@ -121,7 +117,6 @@ interface RollcallVoiceQueue {
 }
 
 interface AcceptedTurn {
-  heldIntent?: HeldIntentTurn;
   /** Monotonic generation used to reject late completion from older turns. */
   readonly sequence: number;
   /** Aborted immediately when a newer public turn is accepted. */
@@ -310,7 +305,6 @@ const STANDUP_RE = new RegExp(
     `|(?:i (?:want|need)\\s+)?(?:a\\s+|the\\s+)?status(?:\\s+(?:report|update))?\\s+(?:with|from|of|for)\\s+${GROUP_REF}` +
   `)${GROUP_TAIL}(?:\\s+please)?$`, "i");
 
-
 // Voicemail is matched on the RAW utterance (not normalized) so the message
 // body keeps its punctuation — it's delivered as text, not as a pattern.
 const VOICEMAIL_RE = /^(?:(?:hey|ok(?:ay)?|cicero|please)[,\s]+){0,2}(?:can you\s+|could you\s+)?(?:leave|take|pass(?: along)?)\s+(?:a\s+)?(?:message|note|word)\s+(?:for|to)\s+([^:,]{1,40}?)\s*[:,]\s*(.+)$/i;
@@ -435,9 +429,7 @@ export class SwitchboardBrain implements Brain {
   private static readonly LANE_LOG_TURNS = 5;
   private turnContext = new BrainTurnContext();
   private readonly standupLaneTimeoutMs: number;
-  private retiringIntentBrains = new Map<Brain, Promise<void>>();
   private readonly intentTimeoutMs: number;
-  private readonly intentDrainTimeoutMs: number;
   private readonly intentMinConfidence: number;
   private acceptedTurnSequence = 0;
   private acceptedTurn: AcceptedTurn | null = null;
@@ -460,8 +452,6 @@ export class SwitchboardBrain implements Brain {
     options: SwitchboardOptions = {},
   ) {
     this.intentTimeoutMs = options.intentTimeoutMs ?? 1500;
-    this.intentDrainTimeoutMs = options.intentDrainTimeoutMs ?? 6000;
-    if (!Number.isSafeInteger(this.intentDrainTimeoutMs) || this.intentDrainTimeoutMs < 1 || this.intentDrainTimeoutMs > 300_000) throw new RangeError("intentDrainTimeoutMs must be an integer in 1..300000");
     this.intentMinConfidence = options.intentMinConfidence ?? 0.7;
     if (!Number.isSafeInteger(this.intentTimeoutMs) || this.intentTimeoutMs < 1 || this.intentTimeoutMs > 300_000) throw new RangeError("intentTimeoutMs must be an integer in 1..300000");
     if (!Number.isFinite(this.intentMinConfidence) || this.intentMinConfidence < 0 || this.intentMinConfidence > 1) throw new RangeError("intentMinConfidence must be in 0..1");
@@ -477,9 +467,6 @@ export class SwitchboardBrain implements Brain {
     }
     this.standupLaneTimeoutMs = configured ?? DEFAULT_STANDUP_LANE_TIMEOUT_MS;
   }
-
-  // A nested switchboard has its own control actions, beyond ACP permissions.
-  canHoldIntentOutput(): boolean { return false; }
 
   canDeferSpeculativePermissions(): boolean {
     return this.primary.canDeferSpeculativePermissions?.() === true
@@ -1183,12 +1170,6 @@ export class SwitchboardBrain implements Brain {
   ): Promise<string> {
     this.assertAcceptedTurn(turn);
     const def = this.lanes[lane];
-    // A warm pin with no briefing is only switchboard state and a canned ack.
-    // Starting or injecting context, however, touches this specific provider.
-    if (!this.started.has(lane) || explicitContext || (this.lastExchange && this.lastExchange.speaker !== lane)) {
-      await this.waitForIntentBrain(def.brain, turn.signal);
-      this.assertAcceptedTurn(turn);
-    }
     // A cold start outlives the moment that asked for it, and the turn signal
     // does not always die with the conversation: deactivating the microphone
     // leaves its turn running. So the drop is tracked separately, and a pin
@@ -1263,7 +1244,7 @@ export class SwitchboardBrain implements Brain {
 
   /** Voicemail: "leave a message for the coder: ship it tonight" — delivered
    * into that lane's context, spoken back to the user as a confirmation. */
-  private async takeVoicemail(message: string, turn: AcceptedTurn): Promise<string | null> {
+  private takeVoicemail(message: string, turn: AcceptedTurn): string | null {
     this.assertAcceptedTurn(turn);
     const vm = VOICEMAIL_RE.exec(message.trim());
     if (!vm) return null;
@@ -1273,8 +1254,6 @@ export class SwitchboardBrain implements Brain {
       if (!lane) return `I don't have a line to ${normalizeRef(vm[1] ?? "") || "them"}. I can take a message for: ${Object.keys(this.lanes).join(", ")}.`;
       return null;
     }
-    await this.waitForIntentBrain(this.lanes[lane].brain, turn.signal);
-    this.assertAcceptedTurn(turn);
     this.lanes[lane].brain.injectContext(
       `Voicemail from the user: "${body}". Acknowledge you got this message the next time you speak with them.`,
     );
@@ -1391,19 +1370,16 @@ export class SwitchboardBrain implements Brain {
    */
   async sendBackground(message: string, options?: BackgroundTurnOptions): Promise<string> {
     if (this.stopping) throw new Error("switchboard is stopping");
+    options?.signal?.throwIfAborted();
     const lane = options?.lane;
     const turnOptions = options;
     if (lane === undefined) {
-      await this.waitForIntentBrain(this.primary, options?.signal);
-      if (this.stopping) throw new Error("switchboard is stopping");
-      options?.signal?.throwIfAborted();
       return this.primary.sendBackground
         ? this.primary.sendBackground(message, turnOptions)
         : this.primary.send(message, turnOptions);
     }
     const def = this.lanes[lane];
     if (!def) throw new Error(`unknown lane "${lane}" for a background turn`);
-    await this.waitForIntentBrain(def.brain, options?.signal);
     while (!this.started.has(lane)) {
       if (this.stopping) throw new Error("switchboard is stopping");
       options?.signal?.throwIfAborted();
@@ -1435,10 +1411,7 @@ export class SwitchboardBrain implements Brain {
       async (turn, turnOptions) => {
         // A caller may cache this getter across a transfer. Resolve the active
         // line at invocation time instead of retaining the old line's method.
-        const brain = this.current();
-        await this.waitForIntentBrain(brain, turn.signal);
-        this.assertAcceptedTurn(turn);
-        const capability = bindBrainCapability(brain, "sendToTab");
+        const capability = bindBrainCapability(this.current(), "sendToTab");
         if (!capability) throw new Error("active switchboard lane does not support sendToTab");
         const reply = await raceWithSignal(
           capability(message, tabName, turnOptions),
@@ -1465,11 +1438,8 @@ export class SwitchboardBrain implements Brain {
   }
 
   /** Route one-shot context only to the employee who actually receives the turn. */
-  private async currentForTurn(turn: AcceptedTurn): Promise<Brain> {
-    if (turn.heldIntent) return turn.heldIntent.output;
+  private currentForTurn(): Brain {
     const brain = this.current();
-    await this.waitForIntentBrain(brain, turn.signal);
-    this.assertAcceptedTurn(turn);
     const context = this.turnContext.takePending();
     if (context) brain.injectContext(context);
     return brain;
@@ -1481,7 +1451,7 @@ export class SwitchboardBrain implements Brain {
     turn: AcceptedTurn,
   ): AsyncIterable<string> {
     this.control = false;
-    const routed = await this.controlPlane(message, turn, turnOptions, "progress");
+    const routed = await this.controlPlane(message, turn, turnOptions);
     this.assertAcceptedTurn(turn);
     if (routed === "standup") {
       this.control = true;
@@ -1496,8 +1466,7 @@ export class SwitchboardBrain implements Brain {
     }
 
     this.assertAcceptedTurn(turn);
-    const brain = await this.currentForTurn(turn);
-    this.assertAcceptedTurn(turn);
+    const brain = this.currentForTurn();
     const progress = bindBrainCapability(brain, "streamProgress");
     let full = "";
     if (progress) {
@@ -1593,8 +1562,7 @@ export class SwitchboardBrain implements Brain {
     let removeCallerAbort = (): void => {};
 
     try {
-      const reply = Promise.resolve().then(async () => {
-        await this.waitForIntentBrain(this.lanes[name]!.brain, turnSignal);
+      const reply = Promise.resolve().then(() => {
         turnSignal.throwIfAborted();
         return this.lanes[name]!.brain.send(
           "Standup check-in: in ONE short spoken sentence, what are you working on right now? Reply with only that sentence.",
@@ -1643,21 +1611,6 @@ export class SwitchboardBrain implements Brain {
     }
   }
 
-  /** Quarantine belongs to the destination, not to the whole switchboard. */
-  private async waitForIntentBrain(brain: Brain, signal?: AbortSignal): Promise<void> {
-    signal?.throwIfAborted();
-    const drain = this.retiringIntentBrains.get(brain);
-    if (!drain) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const settled = Promise.race([drain, new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("discarded brain turn still settling; retry")), this.intentDrainTimeoutMs);
-      })]);
-      await (signal ? raceWithSignal(settled, signal) : settled);
-    } finally { clearTimeout(timer); }
-    signal?.throwIfAborted();
-  }
-
   /**
    * Resolve a turn against the control plane: lexical patterns first (0ms),
    * then the intent classifier for every utterance the exact patterns miss.
@@ -1667,7 +1620,6 @@ export class SwitchboardBrain implements Brain {
     message: string,
     turn: AcceptedTurn,
     options: BrainTurnOptions,
-    mode: HeldTurnMode = "send",
   ): Promise<string | "standup" | null> {
     this.assertAcceptedTurn(turn);
     this.adoptPendingTransfer(turn);
@@ -1698,32 +1650,17 @@ export class SwitchboardBrain implements Brain {
       }
     }
     this.assertAcceptedTurn(turn);
-    const vm = await this.takeVoicemail(message, turn); // matched on the RAW text — the message body keeps its punctuation
+    const vm = this.takeVoicemail(message, turn); // matched on the RAW text — the message body keeps its punctuation
     if (vm !== null) return vm;
     const ack = await this.handleControl(message, turn, options);
     this.assertAcceptedTurn(turn);
     if (ack !== null) return ack;
-    // Both board-owned and destination-owned one-shot state must survive a
-    // discarded turn. Output/permission holds cannot undo prompt consumption;
-    // unknown destinations therefore classify first as well.
-    const brain = this.current();
-    if (this.classify && !this.pendingTransfer && this.turnContext.pendingSize === 0
-      && !this.retiringIntentBrains.has(brain) && canHoldIntentOutput(brain)
-      && !hasPendingOneShotContext(brain)) {
-      turn.heldIntent = new HeldIntentTurn(brain, message, mode, options, (drain) => {
-        this.retiringIntentBrains.set(brain, drain);
-        void drain.then(() => {
-          if (this.retiringIntentBrains.get(brain) === drain) this.retiringIntentBrains.delete(brain);
-        }, () => { /* unconfirmed cleanup remains quarantined */ });
-      });
-    }
     const intentStart = performance.now();
     let result: SwitchboardIntent;
     try {
       result = await classifySwitchboardIntent(this.classify, m, this.lanes, turn.signal, this.intentTimeoutMs);
     } finally {
       try { options.onIntentMs?.(performance.now() - intentStart); } catch { /* telemetry cannot fail a turn */ }
-      try { options.onIntentHeldMs?.(turn.heldIntent?.heldMs() ?? 0); } catch { /* telemetry */ }
     }
     this.assertAcceptedTurn(turn);
     const plan = planSwitchboardIntent(result, {
@@ -1733,24 +1670,16 @@ export class SwitchboardBrain implements Brain {
       // A cold lane is available to start. Only known cleanup/retirement makes
       // a target unavailable; future startup failures remain action failures.
       unavailableTargets: new Set(Object.entries(this.lanes)
-        .filter(([name, lane]) => this.retiringIntentBrains.has(lane.brain)
-          || this.laneStops.has(name) || this.laneStarts.get(name)?.retired)
+        .filter(([name]) => this.laneStops.has(name) || this.laneStarts.get(name)?.retired)
         .map(([name]) => name)),
       canCall: this.callMe !== undefined,
       minConfidence: this.intentMinConfidence,
     });
     let routed: string | null = null;
     if (plan.kind === "act") {
-      if (turn.heldIntent) {
-        // Only a concrete action may discard the in-flight ordinary answer.
-        // Destination dispatches retain their own quarantine/drain checks.
-        void turn.heldIntent.cancel();
-        turn.heldIntent = undefined;
-      }
       routed = await this.actOnIntent(plan.action, turn, options);
     } else {
       this.refusedGroupAction = plan.refusedGroupAction;
-      turn.heldIntent?.release();
     }
     this.assertAcceptedTurn(turn);
     if (routed === null) {
@@ -1837,10 +1766,8 @@ export class SwitchboardBrain implements Brain {
         return out;
       }
       if (routed !== null) { this.control = true; return routed; }
-      const brain = await this.currentForTurn(turn);
-      this.assertAcceptedTurn(turn);
       const reply = await raceWithSignal(
-        brain.send(message, turnOptions),
+        this.currentForTurn().send(message, turnOptions),
         turn.signal,
       );
       this.assertAcceptedTurn(turn);
@@ -1877,7 +1804,7 @@ export class SwitchboardBrain implements Brain {
   ): AsyncIterable<string> {
     this.control = false;
     this.refusedGroupAction = false;
-    const routed = await this.controlPlane(message, turn, turnOptions, "stream");
+    const routed = await this.controlPlane(message, turn, turnOptions);
     this.assertAcceptedTurn(turn);
     if (routed === "standup") {
       this.control = true;
@@ -1891,8 +1818,7 @@ export class SwitchboardBrain implements Brain {
       return;
     }
     this.assertAcceptedTurn(turn);
-    const brain = await this.currentForTurn(turn);
-    this.assertAcceptedTurn(turn);
+    const brain = this.currentForTurn();
     // Front-desk replies buffer up to a few words before speaking: a reply
     // that turns out to BE a trigger phrase must execute, not be recited.
     if (this.active === null && brain.sendStream) {

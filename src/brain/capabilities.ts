@@ -102,27 +102,3 @@ export function sendUnattended(
   }
   return brain.send(message, options);
 }
-
-/** Unknown routes fail closed; ACP supplies a real permission barrier. */
-export function canHoldIntentOutput(brain: Brain): boolean {
-  return brain.canHoldIntentOutput
-    ? brain.canHoldIntentOutput()
-    : brain.canDeferSpeculativePermissions?.() === true;
-}
-
-// Keep the optional brain contract alongside its fail-closed capability helper.
-declare module "../types" {
-  interface Brain {
-    /** Pure snapshot: true if a turn could consume context, approval or first-turn state. */
-    hasPendingOneShotContext?(): boolean;
-  }
-}
-
-/** Only an explicit false permits a held turn; missing/broken wrappers fail safe. */
-export function hasPendingOneShotContext(brain: Brain): boolean {
-  try {
-    return brain.hasPendingOneShotContext?.() !== false;
-  } catch {
-    return true;
-  }
-}

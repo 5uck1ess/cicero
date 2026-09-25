@@ -10,24 +10,18 @@ const decideSafely = (decide: () => RequestPermissionResponse): RequestPermissio
 
 /** A speculative turn owns this hold; adoption or abort settles every waiter. */
 export class SpeculativePermissionHold {
-  constructor(private readonly parent?: SpeculativePermissionHold) {}
-
-  private decide(decide: () => RequestPermissionResponse, owner?: object): Promise<RequestPermissionResponse> {
-    return this.parent ? this.parent.defer(decide, owner) : Promise.resolve(decideSafely(decide));
-  }
-
   private state: "pending" | "adopted" | "cancelled" = "pending";
   private pending = new Set<{ owner?: object; settle: (adopted: boolean) => void }>();
 
   defer(decide: () => RequestPermissionResponse, owner?: object): Promise<RequestPermissionResponse> {
     if (this.state === "cancelled") return Promise.resolve(cancelled());
-    if (this.state === "adopted") return this.decide(decide, owner);
+    if (this.state === "adopted") return Promise.resolve(decideSafely(decide));
     if (this.pending.size >= MAX_HELD_PERMISSIONS) return Promise.resolve(cancelled());
     return new Promise((resolve) => {
       const entry = { owner, settle: (_adopted: boolean): void => {} };
       const settle = (adopted: boolean): void => {
         this.pending.delete(entry);
-        resolve(adopted ? this.decide(decide, owner) : cancelled());
+        resolve(adopted ? decideSafely(decide) : cancelled());
       };
       entry.settle = settle;
       this.pending.add(entry);
@@ -39,7 +33,6 @@ export class SpeculativePermissionHold {
 
   /** An ACP child stopped; cancel only requests from that child. */
   cancelOwner(owner: object): void {
-    this.parent?.cancelOwner(owner);
     for (const entry of this.pending) {
       if (entry.owner === owner) entry.settle(false);
     }

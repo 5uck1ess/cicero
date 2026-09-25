@@ -1672,7 +1672,6 @@ test("web text and voice carry intent durations into their latency record", asyn
     d.brain = {
       send: async (_message, options) => {
         options?.onIntentMs?.(421);
-        options?.onIntentHeldMs?.(82);
         return "Ready.";
       },
     };
@@ -1680,6 +1679,5 @@ test("web text and voice carry intent durations into their latency record", asyn
     if (voice) await streamWebTurn(tinyWav([1]), d, sink);
     else await streamWebTextTurn("hello", d, sink);
     expect(record.finish().intentMs).toBe(421);
-    expect(record.finish().intentHeldMs).toBe(82);
   }
 });

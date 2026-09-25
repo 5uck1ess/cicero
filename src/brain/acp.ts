@@ -727,13 +727,6 @@ async function terminateOwnedAcpProcess(proc: OwnedAcpProcess, graceMs: number):
  * requests are auto-approved when {@link AcpBrainConfig.autoApproveTools} is set.
  */
 export class AcpBrain implements Brain {
-  hasPendingOneShotContext(): boolean {
-    // Do not expire/consume approvals while probing. A queued/active turn may
-    // still install context or a confirmation before this turn gets the lock.
-    return this.turnContext.pendingSize > 0 || this.pendingConfirmation !== null
-      || this.confirmationGrant !== null || this.pendingReservations.size > 0
-      || this.runtime?.activeTurn != null;
-  }
   canDeferSpeculativePermissions(): boolean { return true; }
   private readonly rowSourceId = (() => {
     const id = randomBytes(16).toString("hex");

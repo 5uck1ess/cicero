@@ -374,7 +374,7 @@ notify:
 
 # Model intent fallback for brain.lanes; uses web_voice.tldr's summarizer model.
 # Exact commands remain immediate. Every other utterance is classified.
-# Safe brains overlap with classification; unsafe tool routes classify first.
+# Classification precedes ordinary replies (~330ms p50 on the reference local model).
 # Routing quality depends on the model: bun run bench/intent-bench.ts
 switchboard:
   intent_min_confidence: 0.7 # finite 0..1; request_now must also be true

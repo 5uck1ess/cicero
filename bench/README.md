@@ -47,5 +47,6 @@ wrong answers. `--misses` prints JSON lines with the synthetic utterance,
 expected label, actual structured answer, latency and `timedOut`/`failed` flags.
 Timeouts/errors are printed even if their `none` fallback matches the expected
 label. Existing config files that specify 600 ms must be updated explicitly to
-use the new 1500 ms budget. The model-only bench measures classifier time, not
-brain overlap; use `cicero latency`'s `intentHeldMs` to measure output waiting.
+use the new 1500 ms budget. Classification precedes ordinary brain dispatch, adding
+its elapsed time (about p50 330 ms on the reference local model) before an
+ordinary reply. `cicero latency` reports this as `intentMs`.
