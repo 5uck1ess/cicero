@@ -804,6 +804,68 @@ test("streamWebTextTurn echoes the text as transcript and streams the reply — 
   expect(calls.done).toBe(1);
 });
 
+test("streamWebTextTurn awaits playback credit before synthesizing the next sentence", async () => {
+  let synthesized = 0;
+  let release!: () => void;
+  let firstAudio!: () => void;
+  const first = new Promise<void>((resolve) => { firstAudio = resolve; });
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const d = streamDeps({ stream: ["One. ", "Two."] });
+  d.tts = { generateAudio: async () => { synthesized++; return tinyWav([1]); } };
+  const { sink, calls } = capturingSink();
+  sink.audio = () => { calls.audio++; if (calls.audio === 1) { firstAudio(); return blocked; } };
+  const running = streamWebTextTurn("go", d, sink);
+  await first;
+  expect(synthesized).toBe(1);
+  expect(calls.done).toBe(0);
+  release();
+  await running;
+  expect(synthesized).toBe(2);
+  expect(calls.done).toBe(1);
+});
+
+test("streamWebTextTurn reports a stalled playback gate as a turn error", async () => {
+  const { sink, calls } = capturingSink();
+  sink.audio = async () => { throw new Error("web voice audio acknowledgement timed out"); };
+  await streamWebTextTurn("go", streamDeps({ stream: ["One."] }), sink);
+  expect(calls.error).toEqual(["web voice audio acknowledgement timed out"]);
+  expect(calls.done).toBe(0);
+});
+
+test("repeat fast path retains acknowledged recovery when credit wait aborts", async () => {
+  const controller = new AbortController();
+  const recovered: string[] = [];
+  const d = streamDeps();
+  d.signal = controller.signal;
+  d.lastReply = { pending: () => "Repeat.", store: () => {} };
+  d.recover = { pending: () => null, store: (text) => recovered.push(text) };
+  const { sink } = capturingSink();
+  sink.aborted = () => controller.signal.aborted;
+  sink.playedText = () => ["Heard."];
+  sink.audio = async () => { controller.abort(); throw new Error("web voice audio turn aborted"); };
+  await streamWebTextTurn("repeat that", d, sink);
+  expect(recovered).toEqual(["Heard."]);
+});
+
+test("TLDR coda credit-wait abort retains acknowledged recovery", async () => {
+  const controller = new AbortController();
+  const recovered: string[] = [];
+  const d = streamDeps({ stream: ["One. ", "Two."] });
+  d.signal = controller.signal;
+  d.tldr = { cap: 1 };
+  d.recover = { pending: () => null, store: (text) => recovered.push(text) };
+  const { sink, calls } = capturingSink();
+  sink.aborted = () => controller.signal.aborted;
+  sink.playedText = () => ["One."];
+  sink.audio = async () => {
+    calls.audio++;
+    if (calls.audio === 2) { controller.abort(); throw new Error("web voice audio turn aborted"); }
+  };
+  await streamWebTextTurn("request", d, sink);
+  expect(calls.audio).toBe(2);
+  expect(recovered).toEqual(["One."]);
+});
+
 test("streamWebTextTurn short-circuits on blank text", async () => {
   const { sink, calls } = capturingSink();
   await streamWebTextTurn("   ", streamDeps(), sink);

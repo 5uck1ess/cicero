@@ -3,6 +3,8 @@ import { isConfirmationNonce } from "../brain/approval";
 import type { Brain } from "../types";
 import { presentedToken, tokenMatches } from "../http-auth";
 import { PAGE } from "./page";
+import { CAPTURE_WORKLET } from "./capture-worklet";
+import { AudioPlaybackGate } from "./audio-pacing";
 import { MANIFEST, ICON_SVG } from "./pwa";
 import { VAD_ASSET_BY_NAME } from "./vad-assets";
 import { join } from "node:path";
@@ -34,6 +36,8 @@ import {
   MAX_HEALTH_ROWS,
   decodeTurnAudioFrame,
   encodeTurnAudioFrame,
+  encodeReplyAudioFrame,
+  decodeAudioAck,
   inspectTurnAudio,
   isProtocolId,
 } from "./protocol";
@@ -43,6 +47,10 @@ interface TurnState {
   aborted: boolean;
   controller: AbortController;
   signal: AbortSignal;
+  nextSequence: number;
+  delivered: Map<number, string>;
+  played: string[];
+  pacing: AudioPlaybackGate;
 }
 
 interface PendingTurn {
@@ -70,6 +78,7 @@ interface WsData {
   // utterance WAV, or a typed message ({type:"text"} control frame).
   pending: PendingTurn | null;
   current: TurnState | null;
+  lastCompleted: TurnState | null;
   /** Recently accepted final turn ids, bounded to reject replay/duplicates. */
   recentTurnIds: string[];
   /** Latest v2 probe; invalidated when its final WAV arrives or a newer probe wins. */
@@ -224,8 +233,22 @@ export interface WebVoiceHandle {
   stop: () => Promise<void>;
 }
 
-function sendJson(ws: import("bun").ServerWebSocket<WsData>, value: unknown): void {
-  try { ws.send(JSON.stringify(value)); } catch { /* socket closed */ }
+function sendJson(ws: import("bun").ServerWebSocket<WsData>, value: unknown): boolean {
+  const json = JSON.stringify(value);
+  const audioNotify = typeof value === "object" && value !== null
+    && (value as { type?: unknown; audioBase64?: unknown }).type === "notify"
+    && typeof (value as { audioBase64?: unknown }).audioBase64 === "string"
+    && (value as { audioBase64: string }).audioBase64.length > 0;
+  const limit = audioNotify ? MAX_OUTBOUND_AUDIO_BUFFER_BYTES - CONTROL_FRAME_RESERVE_BYTES : MAX_OUTBOUND_AUDIO_BUFFER_BYTES;
+  try {
+    if (ws.getBufferedAmount() + Buffer.byteLength(json) <= limit
+      && ws.send(json) !== 0 && ws.getBufferedAmount() <= limit) return true;
+  } catch { /* closing below for controls */ }
+  if (!audioNotify) {
+    // A terminal/control frame must never disappear while the page waits for it.
+    try { ws.close(1011, "Outbound control delivery failed"); } catch { /* already closed */ }
+  }
+  return false;
 }
 
 function withSession(ws: import("bun").ServerWebSocket<WsData>, value: Record<string, unknown>): Record<string, unknown> {
@@ -247,37 +270,93 @@ function protocolError(ws: import("bun").ServerWebSocket<WsData>, message: strin
 }
 
 /** A {@link WebReplySink} scoped to exactly one connection and one turn. */
-function makeSink(ws: import("bun").ServerWebSocket<WsData>, turn: TurnState): WebReplySink {
+export function makeSink(ws: import("bun").ServerWebSocket<WsData>, turn: TurnState): WebReplySink {
   const live = () => ws.data.current === turn && !turn.aborted && !turn.signal.aborted;
   const sendTurnJson = (o: Record<string, unknown>) => { if (live()) sendJson(ws, withTurn(ws, turn.turnId, o)); };
+  let pendingAudio: Promise<void> | null = null;
+  let pendingCalls = 0;
+  const trackPending = (work: Promise<void>): Promise<void> => {
+    pendingCalls++;
+    const tracked = work.finally(() => {
+      pendingCalls--;
+      if (pendingAudio === tracked) pendingAudio = null;
+    });
+    pendingAudio = tracked;
+    return tracked;
+  };
+  const deliver = (audio: ArrayBuffer, durationMs: number, text: string): void => {
+    if (!live()) return;
+    const sequence = ++turn.nextSequence;
+    const frame = ws.data.protocol === 2
+      ? encodeReplyAudioFrame(ws.data.sessionId, turn.turnId, sequence, audio)
+      : audio;
+    sendAudioBounded(ws, frame);
+    if (ws.data.protocol === 2) {
+      turn.delivered.set(sequence, text.slice(0, 16_384));
+      turn.pacing.track(sequence, durationMs);
+    }
+  };
+  const sendSnapshot = (audio: ArrayBuffer, durationMs: number, text: string): void | Promise<void> => {
+    if (!live()) return;
+    if (ws.data.protocol === 2 && !turn.pacing.canSend(durationMs)) {
+      return turn.pacing.waitForCapacity(durationMs, turn.signal).then(() => deliver(audio, durationMs, text));
+    }
+    deliver(audio, durationMs, text);
+  };
+  const sendAudio = (buf: ArrayBuffer, text: string): void | Promise<void> => {
+    if (!live()) return;
+    // Admission and its error frame remain synchronous for existing callers.
+    let snapshot: ReturnType<typeof snapshotSynthesizedWav>;
+    try {
+      snapshot = snapshotSynthesizedWav(buf, {
+        maxBytes: MAX_TURN_AUDIO_BYTES,
+        allowEmpty: true,
+      });
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      sendTurnJson({ type: "error", message: `invalid synthesized audio: ${detail}` });
+      return;
+    }
+    const { audio, metadata } = snapshot;
+    if (audio.byteLength === 0) return;
+    const durationMs = metadata!.durationMs;
+    if (pendingAudio) {
+      if (pendingCalls >= 2) throw new Error("too many pending web voice audio clips");
+      return trackPending(pendingAudio.then(() => sendSnapshot(audio, durationMs, text)));
+    }
+    const result = sendSnapshot(audio, durationMs, text);
+    if (result) return trackPending(result);
+  };
   return {
     transcript: (t) => sendTurnJson({ type: "transcript", text: t }),
     sentence: (t) => sendTurnJson({ type: "sentence", text: t }),
-    audio: (buf) => {
-      if (!live()) return;
-      let audio: ArrayBuffer;
-      try {
-        audio = snapshotSynthesizedWav(buf, {
-          maxBytes: MAX_TURN_AUDIO_BYTES,
-          allowEmpty: true,
-        }).audio;
-      } catch (error: unknown) {
-        const detail = error instanceof Error ? error.message : String(error);
-        sendTurnJson({ type: "error", message: `invalid synthesized audio: ${detail}` });
-        return;
-      }
-      if (audio.byteLength === 0) return;
-      try {
-        ws.send(ws.data.protocol === 2
-          ? encodeTurnAudioFrame(ws.data.sessionId, turn.turnId, audio)
-          : audio);
-      } catch { /* socket closed */ }
-    },
+    audio: (buf, text = "") => sendAudio(buf, text),
     control: (m) => sendTurnJson(m),
-    done: () => sendTurnJson({ type: "done" }),
+    done: () => {
+      if (pendingAudio) void pendingAudio.then(
+        () => sendTurnJson({ type: "done" }),
+        (error: unknown) => sendTurnJson({ type: "error", message: error instanceof Error ? error.message : String(error) }),
+      );
+      else sendTurnJson({ type: "done" });
+    },
     error: (m) => sendTurnJson({ type: "error", message: m }),
     aborted: () => !live(),
+    playedText: () => ws.data.protocol === 2 ? turn.played.slice() : null,
   };
+}
+
+export const MAX_OUTBOUND_AUDIO_BUFFER_BYTES = 8 * 1024 * 1024;
+export const CONTROL_FRAME_RESERVE_BYTES = 64 * 1024;
+export function sendAudioBounded(socket: Pick<import("bun").ServerWebSocket, "send" | "getBufferedAmount">, frame: ArrayBuffer): void {
+  const audioLimit = MAX_OUTBOUND_AUDIO_BUFFER_BYTES - CONTROL_FRAME_RESERVE_BYTES;
+  if (frame.byteLength > audioLimit
+    || socket.getBufferedAmount() + frame.byteLength > audioLimit) {
+    throw new Error("web voice audio backpressure limit exceeded");
+  }
+  const status = socket.send(frame);
+  if (status === 0 || socket.getBufferedAmount() > audioLimit) {
+    throw new Error("web voice audio delivery failed");
+  }
 }
 
 function abortTurn(turn: TurnState | null, reason: string): void {
@@ -303,7 +382,7 @@ const PAGE_HEADERS = {
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
-  "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
 } as const;
 
 async function withinShutdownDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -469,10 +548,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     if (!request) return 0;
     let delivered = 0;
     for (const ws of clients) {
-      try {
-        ws.send(JSON.stringify(withSession(ws, request)));
-        delivered += 1;
-      } catch { /* socket closed */ }
+      if (sendJson(ws, withSession(ws, request))) delivered += 1;
     }
     return delivered;
   };
@@ -727,9 +803,10 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       let sent = false;
       for (const ws of clients) {
         try {
-          sendJson(ws, withSession(ws, { type: "notify", text: p.text, audioBase64 }));
-          sent = true;
-          break;
+          if (sendJson(ws, withSession(ws, { type: "notify", text: p.text, audioBase64 }))) {
+            sent = true;
+            break;
+          }
         } catch { /* try the next client */ }
       }
       if (!sent) {
@@ -835,10 +912,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     }
     let delivered = 0;
     for (const ws of clients) {
-      try {
-        ws.send(JSON.stringify(withSession(ws, { type: "notify", text, audioBase64 })));
-        delivered++;
-      } catch { /* socket closed */ }
+      if (sendJson(ws, withSession(ws, { type: "notify", text, audioBase64 }))) delivered++;
     }
     if (delivered === 0) {
       // The daemon may render even when told it could skip (a Telegram voice
@@ -912,6 +986,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       return;
     }
     ws.data.recentTurnIds.push(turnId);
+    ws.data.lastCompleted = null;
     if (ws.data.recentTurnIds.length > 128) ws.data.recentTurnIds.shift();
     if (ws.data.latestProbeTurnId === turnId) ws.data.latestProbeTurnId = null;
 
@@ -932,6 +1007,10 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           aborted: false,
           controller,
           signal: AbortSignal.any([controller.signal, shutdownController.signal]),
+          nextSequence: 0,
+          delivered: new Map(),
+          played: [],
+          pacing: new AudioPlaybackGate(),
         };
         if (shutdownController.signal.aborted) abortTurn(state, "web voice server shutting down");
         ws.data.current = state;
@@ -971,7 +1050,10 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           if (!state.aborted) protocolError(ws, m, state.turnId);
         } finally {
           await releaseSpec(spec);
-          if (ws.data.current === state) ws.data.current = null;
+          if (ws.data.current === state) {
+            ws.data.current = null;
+            ws.data.lastCompleted = state;
+          }
         }
       }
     } finally {
@@ -1052,6 +1134,11 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             headers: { "Content-Type": asset.contentType, "Cache-Control": "public, max-age=31536000, immutable" },
           });
         }
+        if (req.method === "GET" && url.pathname === "/capture-worklet-v1.js") {
+          return new Response(CAPTURE_WORKLET, {
+            headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "public, max-age=31536000, immutable", "X-Content-Type-Options": "nosniff" },
+          });
+        }
 
         // An installed PWA starts without its original query string. This
         // public shell has no authority by itself: APIs and /ws still require
@@ -1096,6 +1183,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 busy: false,
                 pending: null,
                 current: null,
+                lastCompleted: null,
                 recentTurnIds: [],
                 latestProbeTurnId: null,
                 record,
@@ -1535,12 +1623,29 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               turnId?: unknown;
               nonce?: unknown;
               approved?: unknown;
+              sequence?: unknown;
+              status?: unknown;
+              atMs?: unknown;
             };
             try {
               msg = JSON.parse(message) as typeof msg;
             } catch {
               if (ws.data.protocol === 2) protocolError(ws, "malformed control frame");
               // Protocol v1 historically ignored malformed controls.
+              return;
+            }
+            if (msg.type === "audio_ack" && ws.data.protocol === 2) {
+              const ack = decodeAudioAck(msg);
+              const turn = ws.data.current?.turnId === ack?.turnId ? ws.data.current : ws.data.lastCompleted;
+              if (!ack || ack.sessionId !== ws.data.sessionId || turn?.turnId !== ack.turnId) return;
+              const text = turn.delivered.get(ack.sequence);
+              if (text === undefined) return;
+              turn.delivered.delete(ack.sequence);
+              turn.pacing.acknowledge(ack.sequence);
+              if (ack.status === "played" && text) {
+                turn.played.push(text);
+                if (turn.played.length > 3) turn.played.shift();
+              }
               return;
             }
             if (msg.type === "confirm") {
@@ -1657,7 +1762,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           let turnId: string;
           if (ws.data.protocol === 2) {
             const frame = decodeTurnAudioFrame(u8);
-            if (!frame) {
+            if (!frame || frame.sequence !== undefined) {
               protocolError(ws, "binary frame is not a valid protocol-v2 envelope");
               return;
             }

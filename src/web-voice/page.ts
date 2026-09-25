@@ -20,6 +20,8 @@
  * No inner template literals so the outer string stays clean. The #debug line shows
  * live VAD numbers (rms/floor/threshold/state) so thresholds can be tuned by eye.
  */
+import { MAX_QUEUED_AUDIO_MS, canQueueAudio } from "./playback-policy";
+
 export const PAGE = `<!doctype html>
 <html lang="en">
 <head>
@@ -226,6 +228,9 @@ let preRoll = [], speechFrames = [], onsetFrames = 0, silenceFrames = 0, speechL
 let probeOn = false, probeSent = false, hangMs = HANGOVER_MS; // semantic turn probe state (per-pause)
 let frameMs = 21; // recomputed once we know the sample rate
 let audioQueue = [], playing = false, turnDone = false, currentAudio = null, currentEnv = null;
+let queuedAudioMs = 0, currentAudioItem = null, capturePath = "pending";
+const MAX_QUEUED_AUDIO_MS = ${MAX_QUEUED_AUDIO_MS};
+const canQueueAudio = ${canQueueAudio.toString()};
 let voiceGain = 1.0, currentAudioSource = null, currentGainNode = null;
 let micLevel = 0; // smoothed-ish 0..1 for the orb (raw per-frame; the draw loop lerps)
 
@@ -237,7 +242,7 @@ function setState(s) { if (s === "speech") ignite(); state = s; orb.className = 
 function updateDebug() {
   const thr = Math.max(ABS_OPEN, noiseFloor * OPEN_FACTOR);
   debugEl.textContent = "state:" + state + " rms:" + rms.toFixed(4) + " floor:" + noiseFloor.toFixed(4) +
-    " open@:" + thr.toFixed(4) + " q:" + audioQueue.length + " vad:" + (vadStatus === "on" ? vadProb.toFixed(2) : vadStatus) + " secure:" + window.isSecureContext;
+    " open@:" + thr.toFixed(4) + " q:" + audioQueue.length + " capture:" + capturePath + " vad:" + (vadStatus === "on" ? vadProb.toFixed(2) : vadStatus) + " secure:" + window.isSecureContext;
 }
 function frameCount(ms) { return Math.max(1, Math.round(ms / frameMs)); }
 function rmsOf(buf) { let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i]; return Math.sqrt(s / buf.length); }
@@ -274,6 +279,16 @@ function decodeTurnFrame(payload) {
     const turnId = dec.decode(u8.subarray(8 + sl, off));
     return { sessionId: sessionId, turnId: turnId, payload: u8.slice(off).buffer };
   } catch (e) { return null; }
+}
+function decodeReplyFrame(payload) {
+  const u8 = new Uint8Array(payload);
+  if (u8.length < 12 || u8[0] !== 0x43 || u8[1] !== 0x56 || u8[2] !== 0x41 || u8[3] !== 0x32) return null;
+  const sequence = new DataView(u8.buffer, u8.byteOffset, u8.byteLength).getUint32(8, true);
+  if (!sequence) return null;
+  const old = new Uint8Array(u8.length - 4);
+  old.set([0x43, 0x56, 0x50, 0x32]); old.set(u8.subarray(4, 8), 4); old.set(u8.subarray(12), 8);
+  const frame = decodeTurnFrame(old.buffer);
+  return frame ? { ...frame, sequence: sequence } : null;
 }
 function abortActiveTurn() {
   const turnId = activeTurnId;
@@ -523,30 +538,63 @@ function resumeListening() {
 function wavEnvelope(buf) {
   try {
     const v = new DataView(buf);
-    const sr = v.getUint32(24, true);
-    let off = 12, dataOff = -1, dataLen = 0;
+    if (v.byteLength < 44 || v.getUint32(0, true) !== 0x46464952 || v.getUint32(8, true) !== 0x45564157) return null;
+    let off = 12, dataOff = -1, dataLen = 0, fmtOff = -1;
     while (off + 8 <= v.byteLength) {           // walk RIFF chunks to find "data"
       const id = String.fromCharCode(v.getUint8(off), v.getUint8(off + 1), v.getUint8(off + 2), v.getUint8(off + 3));
       const len = v.getUint32(off + 4, true);
-      if (id === "data") { dataOff = off + 8; dataLen = len; break; }
+      if (len > v.byteLength - (off + 8)) return null;
+      if (id === "fmt " && len >= 16) fmtOff = off + 8;
+      if (id === "data") { dataOff = off + 8; dataLen = len; }
       off += 8 + len + (len & 1);
     }
-    if (dataOff < 0 || !sr) return null;
-    const n = Math.min(Math.floor(dataLen / 2), Math.floor((v.byteLength - dataOff) / 2));
+    if (fmtOff < 0 || dataOff < 0) return null;
+    const format = v.getUint16(fmtOff, true), channels = v.getUint16(fmtOff + 2, true);
+    const sr = v.getUint32(fmtOff + 4, true), align = v.getUint16(fmtOff + 12, true);
+    const bits = v.getUint16(fmtOff + 14, true), bytes = bits / 8;
+    if (!sr || !channels || channels > 2 || !align || align !== channels * bytes ||
+        !((format === 3 && bits === 32) || (format === 1 && [8, 16, 24, 32].includes(bits)))) return null;
+    const n = Math.floor(Math.min(dataLen, v.byteLength - dataOff) / align);
     const win = Math.max(1, Math.round(sr * 0.05)); // 50ms RMS windows
     const env = []; let peak = 1e-6;
     for (let i = 0; i < n; i += win) {
       let s = 0; const m = Math.min(n, i + win);
-      for (let j = i; j < m; j++) { const x = v.getInt16(dataOff + j * 2, true) / 32768; s += x * x; }
+      for (let j = i; j < m; j++) {
+        let x = 0;
+        for (let c = 0; c < channels; c++) {
+          const p = dataOff + j * align + c * bytes;
+          if (format === 3) x += v.getFloat32(p, true);
+          else if (bits === 8) x += (v.getUint8(p) - 128) / 128;
+          else if (bits === 16) x += v.getInt16(p, true) / 32768;
+          else if (bits === 24) x += ((v.getUint8(p) | (v.getUint8(p + 1) << 8) | (v.getUint8(p + 2) << 16)) << 8 >> 8) / 8388608;
+          else x += v.getInt32(p, true) / 2147483648;
+        }
+        x /= channels; s += x * x;
+      }
       const r = Math.sqrt(s / (m - i));
       env.push(r); if (r > peak) peak = r;
     }
     for (let i = 0; i < env.length; i++) env[i] = Math.min(1, env[i] / peak); // normalize per clip
-    return { env: env, rate: sr / win };        // rate = envelope windows per second
+    return { env: env, rate: sr / win, durationMs: n / sr * 1000 }; // rate = windows per second
   } catch (e) { return null; }
 }
 
-function enqueueAudio(buf) { audioQueue.push({ buf: buf, env: wavEnvelope(buf) }); if (!playing) playNext(); }
+function sendAudioAck(item, status, atMs) {
+  if (!item || !item.sequence || !ws || ws.readyState !== 1) return;
+  try { ws.send(JSON.stringify({ type: "audio_ack", sessionId: item.sessionId, turnId: item.turnId,
+    sequence: item.sequence, status: status, ...(status === "interrupted" ? { atMs: Math.max(0, Math.min(120000, atMs || 0)) } : {}) })); } catch (e) { /* closed */ }
+}
+function enqueueAudio(buf, frame) {
+  const env = wavEnvelope(buf);
+  const ms = env && env.durationMs;
+  if (!canQueueAudio(queuedAudioMs, ms)) {
+    abortActiveTurn(); stopPlayback(); setStatus("audio backlog exceeded; turn interrupted"); return;
+  }
+  audioQueue.push({ buf: buf, env: env, durationMs: ms, sequence: frame && frame.sequence,
+    sessionId: frame && frame.sessionId, turnId: frame && frame.turnId });
+  queuedAudioMs += ms;
+  if (!playing) playNext();
+}
 function playNext() {
   if (audioQueue.length === 0) {
     playing = false; currentAudio = null; currentEnv = null;
@@ -555,6 +603,8 @@ function playNext() {
   }
   playing = true; setState("speaking"); setStatus("speaking…");
   const item = audioQueue.shift();
+  queuedAudioMs -= item.durationMs;
+  currentAudioItem = item;
   currentEnv = item.env;
   const a = new Audio(URL.createObjectURL(new Blob([item.buf], { type: "audio/wav" })));
   if (audioCtx) {
@@ -577,20 +627,24 @@ function playNext() {
     try { if (currentGainNode) currentGainNode.disconnect(); } catch (e) { /* ignore */ }
     currentAudioSource = null; currentGainNode = null;
   };
-  a.onended = () => { cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) currentAudio = null; playNext(); };
-  a.onerror = () => { cleanup(); if (currentAudio === a) currentAudio = null; playNext(); };
-  a.play().catch(() => { cleanup(); if (currentAudio === a) currentAudio = null; playNext(); });
+  a.onended = () => { sendAudioAck(item, "played"); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } };
+  a.onerror = () => { sendAudioAck(item, "interrupted", a.currentTime * 1000); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } };
+  a.play().catch(() => { sendAudioAck(item, "interrupted", a.currentTime * 1000); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } });
 }
 
 // Stop the reply mid-stream (barge-in or conversation stop): kill the playing clip,
 // drop anything queued, and forget the in-flight turn so a stale {done} can't resume us.
 function stopPlayback() {
+  for (const item of audioQueue) sendAudioAck(item, "interrupted", 0);
   audioQueue = [];
+  queuedAudioMs = 0;
   if (currentAudio) {
+    sendAudioAck(currentAudioItem, "interrupted", currentAudio.currentTime * 1000);
     try { currentAudio.pause(); } catch (e) { /* ignore */ }
     try { URL.revokeObjectURL(currentAudio.src); } catch (e) { /* ignore */ }
     currentAudio = null;
   }
+  currentAudioItem = null;
   try { if (currentAudioSource) currentAudioSource.disconnect(); } catch (e) { /* ignore */ }
   try { if (currentGainNode) currentGainNode.disconnect(); } catch (e) { /* ignore */ }
   currentAudioSource = null; currentGainNode = null;
@@ -679,9 +733,9 @@ function handleVolumeControl(msg) {
 
 function onWsMessage(e) {
   if (typeof e.data !== "string") {
-    const frame = decodeTurnFrame(e.data);
+    const frame = decodeReplyFrame(e.data);
     const live = state === "thinking" || state === "speaking";
-    if (frame && live && frame.sessionId === wsSessionId && frame.turnId === activeTurnId) enqueueAudio(frame.payload);
+    if (frame && live && frame.sessionId === wsSessionId && frame.turnId === activeTurnId) enqueueAudio(frame.payload, frame);
     return;
   }
   let msg; try { msg = JSON.parse(e.data); } catch (err) { return; }
@@ -796,18 +850,29 @@ async function ensureAudio() {
     });
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     source = audioCtx.createMediaStreamSource(micStream);
-    node = audioCtx.createScriptProcessor(4096, 1, 1);
-    frameMs = (4096 / audioCtx.sampleRate) * 1000;
-    // COPY the frame: getChannelData returns a view into a buffer the browser
-    // reuses across callbacks. Storing the view means every stored frame ends up
-    // holding the LAST frame's samples (near-silence at release) — the whole
-    // utterance collapses to silence and Whisper hallucinates "You".
-    node.onaudioprocess = (e) => onFrame(new Float32Array(e.inputBuffer.getChannelData(0)));
+    if (audioCtx.audioWorklet && window.AudioWorkletNode) {
+      await audioCtx.audioWorklet.addModule("/capture-worklet-v1.js");
+      node = new AudioWorkletNode(audioCtx, "cicero-capture-v1");
+      frameMs = (2048 / audioCtx.sampleRate) * 1000;
+      node.port.onmessage = (e) => { if (e.data instanceof Float32Array && e.data.length === 2048) onFrame(e.data); };
+      capturePath = "worklet";
+    } else {
+      node = audioCtx.createScriptProcessor(4096, 1, 1);
+      frameMs = (4096 / audioCtx.sampleRate) * 1000;
+      // Copy the browser-owned buffer before pre-roll or speech storage.
+      node.onaudioprocess = (e) => onFrame(new Float32Array(e.inputBuffer.getChannelData(0)));
+      capturePath = "script-processor";
+    }
     source.connect(node);
     node.connect(audioCtx.destination); // ScriptProcessor only runs while connected; we write no output (silent)
     ready = true;
     return true;
   } catch (err) {
+    try { if (node) node.disconnect(); } catch (e) { /* ignore */ }
+    try { if (source) source.disconnect(); } catch (e) { /* ignore */ }
+    if (micStream) micStream.getTracks().forEach((track) => track.stop());
+    if (audioCtx) try { await audioCtx.close(); } catch (e) { /* ignore */ }
+    node = null; source = null; micStream = null; audioCtx = null;
     setStatus("mic error: " + (err && err.message ? err.message : err));
     return false;
   }

@@ -9,3 +9,8 @@ export function buildRecoveryContext(opts: { spoken: string[]; interjection: str
   }
   return `[You were speaking and the user interrupted you. You had already said: "${said}". The user interjected: "${opts.interjection}". Respond to their interjection first. If your previous point was unfinished, briefly resume it afterward.]`;
 }
+
+/** Acknowledged playback wins; legacy transports retain their emitted-text estimate. */
+export function recoveryTail(delivered: string[], played: string[] | null): string {
+  return (played ?? delivered).slice(-3).join(" ");
+}
