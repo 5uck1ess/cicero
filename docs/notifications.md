@@ -50,7 +50,7 @@ watch always requires an explicit `command`. Cicero supplies no default CLI.
 | --- | --- | --- | --- |
 | `hermes` | `[hermes, kanban, list, --json]` | `[hermes, kanban, show]` | Live-tested board integration |
 | `multica` | `[multica, issue, list, --output, json]` | `[multica, issue, get]` | Built from upstream source, not live-tested |
-| `paperclip` | `[paperclipai, issue, list, -C, <company-id>, --json]` | `[paperclipai, issue, get]` | Built from upstream source, not live-tested |
+| `paperclip` | `[paperclipai, issue, list, --json]` (or `[paperclipai, issue, list, -C, <company-id>, --json]` when an ID is entered) | `[paperclipai, issue, get]` (append `-C, <company-id>` when an ID is entered) | Built from upstream source, not live-tested |
 
 The Paperclip CLI installs as `paperclipai` and needs a company: pass
 `-C <company-id>`, or drop it when `PAPERCLIP_COMPANY_ID` or a
