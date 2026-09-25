@@ -24,6 +24,7 @@ export class LatencyTurn {
   private clientMarks = new Map<"speech_end" | "first_audio_played" | "first_filler_played", number>();
   private abortAt: number | undefined;
   private settledAt: number | undefined;
+  private wasInterrupted = false;
   private bargeCount = 0;
   constructor(readonly sessionId: string, readonly turnId: string, readonly surface: LatencySurface, readonly at: number, private readonly clock: () => number = () => performance.now(), private readonly inputLength = 0) {}
   mark(name: string, offsetMs: number): void {
@@ -34,8 +35,8 @@ export class LatencyTurn {
   }
   client(metric: ClientMetric): void {
     if (metric.sessionId !== this.sessionId || metric.turnId !== this.turnId) return;
+    if (metric.event === "barge_in") { this.bargeCount = Math.min(16, this.bargeCount + 1); this.wasInterrupted = true; return; }
     if (metric.event !== "speech_end" && !this.clientMarks.has("speech_end")) return;
-    if (metric.event === "barge_in") { this.bargeCount = Math.min(16, this.bargeCount + 1); return; }
     if (metric.event === "audio_started") return; // resolved by sequence in the transport
     if (!this.clientMarks.has(metric.event)) this.clientMarks.set(metric.event, metric.sinceSpeechEndMs);
   }
@@ -46,7 +47,8 @@ export class LatencyTurn {
     const event = kind === "reply" ? "first_audio_played" : "first_filler_played";
     if (!this.clientMarks.has(event)) this.clientMarks.set(event, ms);
   }
-  abort(): void { this.abortAt ??= this.clock(); }
+  abort(): void { this.abortAt ??= this.clock(); this.wasInterrupted = true; }
+  interrupt(): void { this.wasInterrupted = true; }
   settle(): void { this.settledAt ??= this.clock(); }
   finish(): LatencyRecord {
     this.settle();
@@ -70,19 +72,107 @@ export class LatencyTurn {
       ...(token !== undefined && brainStart !== undefined ? { brainFirstTokenMs: validMs(token - brainStart) } : {}),
       ...(audio !== undefined && sentence !== undefined ? { ttsFirstAudioMs: validMs(audio - sentence) } : {}),
       ...(this.abortAt !== undefined ? { cancellationSettlementMs: validMs(this.settledAt! - this.abortAt) } : {}),
-      interrupted: this.abortAt !== undefined, parked: this.marks.has("parked"),
+      interrupted: this.wasInterrupted, parked: this.marks.has("parked"),
       ...(this.bargeCount ? { bargeInCount: this.bargeCount } : {}),
     };
   }
 }
 
-/** Resolve a browser playback start against the server's one-shot sequence map. */
-export function recordAudioStart(turn: LatencyTurn, kinds: Map<number, "reply" | "filler">, sequence: number, sinceSpeechEndMs: number): boolean {
-  const kind = kinds.get(sequence);
-  if (!kind) return false;
-  kinds.delete(sequence);
-  turn.started(kind, sinceSpeechEndMs);
-  return true;
+export interface LatencyScheduler<T> {
+  setTimeout(callback: () => void, ms: number): T;
+  clearTimeout(handle: T): void;
+}
+const realScheduler: LatencyScheduler<ReturnType<typeof setTimeout>> = {
+  setTimeout(callback, ms) { const timer = setTimeout(callback, ms); timer.unref?.(); return timer; },
+  clearTimeout,
+};
+const MAX_TRACKED_CLIPS = 128;
+export const LATENCY_SETTLE_WINDOW_MS = 30_000;
+
+/** One turn owns its clip acks, deadline, and exactly one final record write. */
+export class LatencyRecordOwner<T = ReturnType<typeof setTimeout>> {
+  private clips = new Map<number, { kind: "reply" | "filler"; acked: boolean }>();
+  private overflowed = false;
+  private done = false;
+  private timer: T | undefined;
+  private writeTask: Promise<void> | undefined;
+  private pendingSnapshot: (() => LatencyRecord) | undefined;
+  finalized = false;
+  constructor(
+    readonly turn: LatencyTurn,
+    private readonly write: (snapshot: () => LatencyRecord) => Promise<void>,
+    private readonly scheduler: LatencyScheduler<T> = realScheduler as LatencyScheduler<T>,
+    private readonly windowMs = LATENCY_SETTLE_WINDOW_MS,
+    private readonly onFinalized?: () => void,
+  ) {}
+  mark(name: string, offsetMs: number): void { if (!this.finalized) this.turn.mark(name, offsetMs); }
+  abort(): void { if (!this.finalized) this.turn.abort(); }
+  delivered(sequence: number, kind: "reply" | "filler"): void {
+    if (this.finalized || this.writeTask) return;
+    if (this.clips.size >= MAX_TRACKED_CLIPS) {
+      const acked = [...this.clips].find(([, clip]) => clip.acked)?.[0];
+      if (acked !== undefined) this.clips.delete(acked);
+      else { this.clips.delete(this.clips.keys().next().value!); this.overflowed = true; }
+    }
+    this.clips.set(sequence, { kind, acked: false });
+  }
+  client(metric: ClientMetric): void {
+    if (this.finalized || metric.sessionId !== this.turn.sessionId || metric.turnId !== this.turn.turnId) return;
+    if (metric.event === "audio_started") {
+      const clip = this.clips.get(metric.sequence!);
+      if (clip) this.turn.started(clip.kind, metric.sinceSpeechEndMs);
+    } else this.turn.client(metric);
+  }
+  ack(sequence: number, status: "played" | "interrupted"): void {
+    if (this.finalized) return;
+    const clip = this.clips.get(sequence);
+    if (!clip || clip.acked) return;
+    clip.acked = true;
+    if (status === "interrupted") this.turn.interrupt();
+    this.maybeWrite();
+  }
+  interruptOutstanding(): void {
+    if (this.finalized) return;
+    for (const clip of this.clips.values()) if (!clip.acked) { clip.acked = true; this.turn.interrupt(); }
+    this.overflowed = false;
+    this.maybeWrite();
+  }
+  serverSettled(): void {
+    if (this.done || this.finalized) return;
+    this.done = true;
+    this.turn.settle();
+    if (this.clips.size === 0 || (!this.overflowed && [...this.clips.values()].every((clip) => clip.acked))) this.maybeWrite();
+    else this.timer = this.scheduler.setTimeout(() => { this.timer = undefined; this.scheduleWrite(); }, this.windowMs);
+  }
+  /** Shutdown/eviction: close the ack window after server work has settled. */
+  forceFinalize(): void {
+    if (this.done) { this.scheduleWrite(); this.pendingSnapshot?.(); }
+    else this.interruptOutstanding();
+  }
+  flush(): Promise<void> { return this.writeTask ?? Promise.resolve(); }
+  private maybeWrite(): void {
+    if (this.done && !this.overflowed && [...this.clips.values()].every((clip) => clip.acked)) this.scheduleWrite();
+  }
+  private scheduleWrite(): void {
+    if (this.writeTask || this.finalized || !this.done) return;
+    if (this.timer !== undefined) { this.scheduler.clearTimeout(this.timer); this.timer = undefined; }
+    let snapshotValue: LatencyRecord | undefined;
+    const snapshot = (): LatencyRecord => {
+      if (!snapshotValue) {
+        this.finalized = true;
+        snapshotValue = this.turn.finish();
+        this.onFinalized?.();
+      }
+      return snapshotValue;
+    };
+    this.pendingSnapshot = snapshot;
+    try {
+      this.writeTask = Promise.resolve(this.write(snapshot)).finally(() => { snapshot(); });
+    } catch (error) {
+      snapshot();
+      this.writeTask = Promise.reject(error);
+    }
+  }
 }
 
 export interface Percentiles { count: number; p50: number; p95: number }
@@ -125,7 +215,11 @@ export class LatencyStore {
   }
   private path(index: number): string { return join(this.dir, `turns.${index}.jsonl`); }
   async append(record: LatencyRecord): Promise<void> {
-    const task = this.pending.catch(() => {}).then(() => this.write(record));
+    return this.appendLazy(() => record);
+  }
+  /** Snapshot only when this write reaches the head of the serialized ring. */
+  async appendLazy(snapshot: () => LatencyRecord): Promise<void> {
+    const task = this.pending.catch(() => {}).then(() => this.write(snapshot));
     this.pending = task;
     return task;
   }
@@ -152,11 +246,11 @@ export class LatencyStore {
       return buf.subarray(0, offset).toString("utf8");
     } finally { await file.close(); }
   }
-  private async write(record: LatencyRecord): Promise<void> {
-    const line = JSON.stringify(record) + "\n";
+  private async write(snapshot: () => LatencyRecord): Promise<void> {
+    const head = await this.readSegment(0);
+    const line = JSON.stringify(snapshot()) + "\n";
     const bytes = Buffer.byteLength(line);
     if (bytes > this.limits.bytesPerSegment) throw new Error("latency record exceeds segment limit");
-    const head = await this.readSegment(0);
     if (Buffer.byteLength(head) + bytes > this.limits.bytesPerSegment || (head.match(/\n/g)?.length ?? 0) >= this.limits.rowsPerSegment) {
       for (let i = this.limits.segmentCount - 1; i >= 1; i--) {
         const previous = this.path(i - 1), next = this.path(i);

@@ -21,6 +21,7 @@
  * live VAD numbers (rms/floor/threshold/state) so thresholds can be tuned by eye.
  */
 import { MAX_QUEUED_AUDIO_MS, canQueueAudio } from "./playback-policy";
+import { speechEndOrigin } from "./speech-end";
 
 export const PAGE = `<!doctype html>
 <html lang="en">
@@ -225,6 +226,8 @@ let pttBargeTimer = null;        // pending hold-to-interrupt (armed while press
 let state = "idle"; // idle | listening | speech | thinking | speaking
 let noiseFloor = 0.005, rms = 0;
 let preRoll = [], speechFrames = [], onsetFrames = 0, silenceFrames = 0, speechLen = 0, bargeOnset = 0;
+let lastVoicedAt = null;
+const speechEndOrigin = ${speechEndOrigin.toString()};
 let probeOn = false, probeSent = false, hangMs = HANGOVER_MS; // semantic turn probe state (per-pause)
 let frameMs = 21; // recomputed once we know the sample rate
 let audioQueue = [], playing = false, turnDone = false, currentAudio = null, currentEnv = null;
@@ -233,8 +236,8 @@ const speechEndAt = new Map(), playedMetrics = new Set();
 function clientMetric(turnId, event, at, sequence) {
   if (!turnId || !wsSessionId || !ws || ws.readyState !== 1) return;
   const origin = speechEndAt.get(turnId);
-  if (event !== "speech_end" && origin === undefined) return;
-  const sinceSpeechEndMs = event === "speech_end" ? 0 : Math.max(0, Math.min(300000, Math.round((at || performance.now()) - origin)));
+  if (event === "audio_started" && origin === undefined) return;
+  const sinceSpeechEndMs = event === "speech_end" || origin === undefined ? 0 : Math.max(0, Math.min(300000, Math.round((at || performance.now()) - origin)));
   try { ws.send(JSON.stringify({ type: "client_metric", sessionId: wsSessionId, turnId: turnId, event: event, sinceSpeechEndMs: sinceSpeechEndMs,
     ...(event === "audio_started" ? { sequence: sequence } : {}) })); } catch (e) { /* closed */ }
 }
@@ -263,7 +266,7 @@ function newTurnId() {
   if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
   return "turn-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
 }
-function beginCaptureIdentity() { captureTurnId = newTurnId(); }
+function beginCaptureIdentity() { captureTurnId = newTurnId(); lastVoicedAt = null; }
 function encodeTurnFrame(payload, turnId) {
   const enc = new TextEncoder(), session = enc.encode(wsSessionId), turn = enc.encode(turnId);
   const src = payload instanceof ArrayBuffer
@@ -333,6 +336,7 @@ function onFrame(buf) {
       onsetFrames++;
       if (onsetFrames >= frameCount(MIN_ONSET_MS)) {
         beginCaptureIdentity();
+        lastVoicedAt = performance.now();
         speechFrames = preRoll.slice();           // include pre-roll so we don't clip the start
         speechLen = speechFrames.reduce(function (n, f) { return n + f.length; }, 0);
         silenceFrames = 0;
@@ -345,7 +349,7 @@ function onFrame(buf) {
   } else { // speech
     speechFrames.push(buf); speechLen += buf.length;
     const closeThr = Math.max(ABS_CLOSE, noiseFloor * CLOSE_FACTOR);
-    if (rms < closeThr) { silenceFrames++; } else { silenceFrames = 0; probeSent = false; hangMs = HANGOVER_MS; }
+    if (rms < closeThr) { silenceFrames++; } else { silenceFrames = 0; probeSent = false; hangMs = HANGOVER_MS; if (speechConfirmed(VAD_POS)) lastVoicedAt = performance.now(); }
     const durMs = (speechLen / audioCtx.sampleRate) * 1000;
     if (probeOn && !probeSent && durMs >= MIN_UTTER_MS && silenceFrames >= frameCount(PROBE_MS)) {
       probeSent = true; sendProbe();
@@ -359,6 +363,7 @@ function onFrame(buf) {
 
 function finalizeUtterance() {
   const endedAt = performance.now();
+  const speechEndedAt = speechEndOrigin(lastVoicedAt, endedAt, ptt);
   const total = speechLen;
   const merged = new Float32Array(total);
   let o = 0; for (const f of speechFrames) { merged.set(f, o); o += f.length; }
@@ -369,7 +374,7 @@ function finalizeUtterance() {
   const turnId = captureTurnId || newTurnId();
   captureTurnId = null;
   activeTurnId = turnId;
-  speechEndAt.set(turnId, endedAt);
+  speechEndAt.set(turnId, speechEndedAt);
   while (speechEndAt.size > 4) speechEndAt.delete(speechEndAt.keys().next().value);
   setState("thinking"); setStatus("thinking…");
   if (ws && ws.readyState === 1 && wsSessionId) {
@@ -440,10 +445,12 @@ function watchBargeIn(buf) {
 }
 
 function triggerBargeIn() {
-  if (activeTurnId) clientMetric(activeTurnId, "barge_in");
+  const turnId = activeTurnId || currentAudioItem?.turnId;
+  if (turnId) clientMetric(turnId, "barge_in");
   abortActiveTurn();
   stopPlayback();                                              // silence our own reply
   beginCaptureIdentity();
+  lastVoicedAt = performance.now();
   speechFrames = preRoll.slice();                              // keep the pre-roll so we don't clip the interruption
   speechLen = speechFrames.reduce(function (n, f) { return n + f.length; }, 0);
   onsetFrames = 0; silenceFrames = 0; bargeOnset = 0;
@@ -499,7 +506,8 @@ function beginPtt() {
     pttBargeTimer = setTimeout(() => {
       pttBargeTimer = null;
       if (!holding) return;
-      if (activeTurnId) clientMetric(activeTurnId, "barge_in");
+      const turnId = activeTurnId || currentAudioItem?.turnId;
+      if (turnId) clientMetric(turnId, "barge_in");
       abortActiveTurn();
       stopPlayback();
       setState("speech"); orbLabel.textContent = "recording"; setStatus("recording… release to send");
@@ -612,7 +620,7 @@ function enqueueAudio(buf, frame) {
 function playNext() {
   if (audioQueue.length === 0) {
     playing = false; currentAudio = null; currentEnv = null;
-    if (turnDone) resumeListening();
+    if (turnDone) { activeTurnId = null; resumeListening(); }
     return;
   }
   playing = true; setState("speaking"); setStatus("speaking…");
@@ -795,7 +803,7 @@ function onWsMessage(e) {
     activeTurnId = null;
     turnDone = true; if (!playing) resumeListening();
   }
-  else if (msg.type === "done") { activeTurnId = null; turnDone = true; if (!playing) resumeListening(); }
+  else if (msg.type === "done") { turnDone = true; if (!playing) { activeTurnId = null; resumeListening(); } }
   if (msg.type === "transcript" || msg.type === "sentence") turnDone = false;
 }
 

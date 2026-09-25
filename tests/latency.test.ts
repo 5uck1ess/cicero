@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeClientMetric } from "../src/web-voice/protocol";
-import { LatencyTurn, LatencyStore, recordAudioStart, percentile, summarizeLatency, formatLatency } from "../src/latency";
+import { LatencyTurn, LatencyStore, percentile, summarizeLatency, formatLatency } from "../src/latency";
 
 test("v2 metric frames admit only bounded identities and durations; unrelated v1 controls stay untouched", () => {
   expect(decodeClientMetric({ type: "client_metric", sessionId: "s", turnId: "t", event: "audio_started", sequence: 1, sinceSpeechEndMs: 123 })).toMatchObject({ sequence: 1, sinceSpeechEndMs: 123 });
@@ -27,10 +27,9 @@ test("record assembles browser durations and server spans with injected clock", 
   t.mark("first_sentence", 360);
   t.mark("first_audio", 410);
   t.mark("parked", 500);
-  const kinds = new Map<number, "reply" | "filler">([[1, "filler"], [2, "reply"]]);
-  expect(recordAudioStart(t, kinds, 1, 300)).toBe(true);
-  expect(recordAudioStart(t, kinds, 1, 301)).toBe(false);
-  expect(recordAudioStart(t, kinds, 2, 520)).toBe(true);
+  t.started("filler", 300);
+  t.started("filler", 301);
+  t.started("reply", 520);
   now = 550; t.abort(); now = 610;
   expect(t.finish()).toMatchObject({ speechEndToReplyMs: 520, speechEndToFillerMs: 300, sttMs: 120, brainFirstTokenMs: 240, ttsFirstAudioMs: 50, cancellationSettlementMs: 60, interrupted: true, parked: true });
 });

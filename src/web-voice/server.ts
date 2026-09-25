@@ -1,6 +1,6 @@
 import { log } from "../logger";
 import { dashBus } from "../dashboard/bus";
-import { LatencyTurn, recordAudioStart, type LatencyStore, summarizeLatency } from "../latency";
+import { LatencyTurn, LatencyRecordOwner, type LatencyStore, summarizeLatency } from "../latency";
 import { isConfirmationNonce } from "../brain/approval";
 import type { Brain } from "../types";
 import { presentedToken, tokenMatches } from "../http-auth";
@@ -54,9 +54,11 @@ interface TurnState {
   delivered: Map<number, string>;
   played: string[];
   pacing: AudioPlaybackGate;
-  latency?: LatencyTurn;
+  latency?: LatencyRecordOwner;
   nextAudioKind?: "reply" | "filler";
-  audioKinds?: Map<number, "reply" | "filler">;
+  doneRequested?: boolean;
+  outputDone?: boolean;
+  handlerSettled?: boolean;
 }
 
 interface PendingTurn {
@@ -85,6 +87,8 @@ interface WsData {
   pending: PendingTurn | null;
   current: TurnState | null;
   lastCompleted: TurnState | null;
+  /** Unfinalized v2 records survive replacement turns and post-done playback. */
+  latencyTurns: Map<string, LatencyRecordOwner>;
   /** Recently accepted final turn ids, bounded to reject replay/duplicates. */
   recentTurnIds: string[];
   /** Latest v2 probe; invalidated when its final WAV arrives or a newer probe wins. */
@@ -300,10 +304,7 @@ export function makeSink(ws: import("bun").ServerWebSocket<WsData>, turn: TurnSt
       : audio;
     sendAudioBounded(ws, frame);
     if (ws.data.protocol === 2) {
-      if (turn.audioKinds) {
-        turn.audioKinds.set(sequence, kind);
-        while (turn.audioKinds.size > 64) turn.audioKinds.delete(turn.audioKinds.keys().next().value!);
-      }
+      turn.latency?.delivered(sequence, kind);
       turn.delivered.set(sequence, text.slice(0, 16_384));
       turn.pacing.track(sequence, durationMs);
     }
@@ -347,13 +348,15 @@ export function makeSink(ws: import("bun").ServerWebSocket<WsData>, turn: TurnSt
     audio: (buf, text = "") => sendAudio(buf, text),
     control: (m) => sendTurnJson(m),
     done: () => {
+      turn.doneRequested = true;
+      const completeOutput = () => { turn.outputDone = true; if (turn.handlerSettled) turn.latency?.serverSettled(); };
       if (pendingAudio) void pendingAudio.then(
-        () => sendTurnJson({ type: "done" }),
-        (error: unknown) => sendTurnJson({ type: "error", message: error instanceof Error ? error.message : String(error) }),
+        () => { sendTurnJson({ type: "done" }); completeOutput(); },
+        (error: unknown) => { sendTurnJson({ type: "error", message: error instanceof Error ? error.message : String(error) }); completeOutput(); },
       );
-      else sendTurnJson({ type: "done" });
+      else { sendTurnJson({ type: "done" }); completeOutput(); }
     },
-    error: (m) => sendTurnJson({ type: "error", message: m }),
+    error: (m) => { sendTurnJson({ type: "error", message: m }); turn.outputDone = true; if (turn.handlerSettled) turn.latency?.serverSettled(); },
     aborted: () => !live(),
     playedText: () => ws.data.protocol === 2 ? turn.played.slice() : null,
   };
@@ -671,6 +674,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
   let activeJobs = 0;
   let activeSocketCallbacks = 0;
   const backgroundTasks = new Set<Promise<void>>();
+  const latencyWrites = new Set<Promise<void>>();
   let resolveDrain: (() => void) | null = null;
   let drainPromise: Promise<void> | null = null;
   const ownedWorkCount = (): number => activeJobs + backgroundTasks.size + liveSpecs.size;
@@ -678,6 +682,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     activeJobs === 0 &&
     activeSocketCallbacks === 0 &&
     backgroundTasks.size === 0 &&
+    latencyWrites.size === 0 &&
     liveSpecs.size === 0;
   const resolveIfDrained = (): void => {
     if (!isDrained() || !resolveDrain) return;
@@ -981,11 +986,14 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     }
   };
 
-  const persistLatency = async (turn: TurnState): Promise<void> => {
-    if (!latencyStore || !turn.latency) return;
-    await latencyStore.append(turn.latency.finish()).then(async () => {
+  const persistLatency = (snapshot: () => import("../latency").LatencyRecord): Promise<void> => {
+    if (!latencyStore) return Promise.resolve();
+    const task = latencyStore.appendLazy(snapshot).then(async () => {
       dashBus.setLatency(summarizeLatency(await latencyStore.read(256)).web_voice.speechEndToReplyMs);
     }).catch(() => { log("warn", "latency record unavailable"); });
+    latencyWrites.add(task);
+    void task.finally(() => { latencyWrites.delete(task); resolveIfDrained(); });
+    return task;
   };
 
   // The latest input wins (spoken WAV or typed text): stash it as pending and
@@ -1033,9 +1041,20 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           delivered: new Map(),
           played: [],
           pacing: new AudioPlaybackGate(),
-          audioKinds: new Map(),
-          ...(latencyStore && ws.data.protocol === 2 ? { latency: new LatencyTurn(ws.data.sessionId, next.turnId, typeof next.input === "string" ? "web_text" : "web_voice", Date.now(), () => performance.now(), typeof next.input === "string" ? next.input.length : next.input.byteLength) } : {}),
         };
+        if (latencyStore && ws.data.protocol === 2) {
+          if (ws.data.latencyTurns.size >= 32) {
+            const oldestId = ws.data.latencyTurns.keys().next().value!;
+            ws.data.latencyTurns.get(oldestId)?.forceFinalize();
+            ws.data.latencyTurns.delete(oldestId);
+          }
+          state.latency = new LatencyRecordOwner(
+            new LatencyTurn(ws.data.sessionId, next.turnId, typeof next.input === "string" ? "web_text" : "web_voice", Date.now(), () => performance.now(), typeof next.input === "string" ? next.input.length : next.input.byteLength),
+            persistLatency, undefined, undefined,
+            () => { if (ws.data.latencyTurns.get(next.turnId) === state.latency) ws.data.latencyTurns.delete(next.turnId); },
+          );
+          ws.data.latencyTurns.set(next.turnId, state.latency);
+        }
         const timingMark = (name: string, offsetMs: number): void => {
           state.latency?.mark(name, offsetMs);
           if (name === "filler_queued" || name === "reassurance_queued") state.nextAudioKind = "filler";
@@ -1081,8 +1100,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           if (!state.aborted) protocolError(ws, m, state.turnId);
         } finally {
           await releaseSpec(spec);
-          state.latency?.settle();
-          await persistLatency(state);
+          state.handlerSettled = true;
+          state.latency?.turn.settle();
+          if (state.outputDone || state.aborted || !state.doneRequested) state.latency?.serverSettled();
           if (ws.data.current === state) {
             ws.data.current = null;
             ws.data.lastCompleted = state;
@@ -1217,6 +1237,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
                 pending: null,
                 current: null,
                 lastCompleted: null,
+                latencyTurns: new Map(),
                 recentTurnIds: [],
                 latestProbeTurnId: null,
                 record,
@@ -1672,23 +1693,18 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             if (msg.type === "client_metric" && ws.data.protocol === 2) {
               const metric = decodeClientMetric(msg, ws.data.protocol);
               if (!metric || metric.sessionId !== ws.data.sessionId) return;
-              const turn = ws.data.current?.turnId === metric.turnId ? ws.data.current
-                : ws.data.lastCompleted?.turnId === metric.turnId ? ws.data.lastCompleted : null;
-              if (!turn?.latency) return;
-              if (metric.event === "audio_started") {
-                if (!turn.audioKinds || !recordAudioStart(turn.latency, turn.audioKinds, metric.sequence!, metric.sinceSpeechEndMs)) return;
-              } else turn.latency.client(metric);
-              if (turn === ws.data.lastCompleted) await persistLatency(turn);
+              ws.data.latencyTurns.get(metric.turnId)?.client(metric);
               return;
             }
             if (msg.type === "audio_ack" && ws.data.protocol === 2) {
               const ack = decodeAudioAck(msg);
+              if (!ack || ack.sessionId !== ws.data.sessionId) return;
+              ws.data.latencyTurns.get(ack.turnId)?.ack(ack.sequence, ack.status);
               const turn = ws.data.current?.turnId === ack?.turnId ? ws.data.current : ws.data.lastCompleted;
-              if (!ack || ack.sessionId !== ws.data.sessionId || turn?.turnId !== ack.turnId) return;
+              if (turn?.turnId !== ack.turnId) return;
               const text = turn.delivered.get(ack.sequence);
               if (text === undefined) return;
               turn.delivered.delete(ack.sequence);
-              turn.audioKinds?.delete(ack.sequence);
               turn.pacing.acknowledge(ack.sequence);
               if (ack.status === "played" && text) {
                 turn.played.push(text);
@@ -1900,6 +1916,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           sockets.delete(ws);
           const wasAttached = clients.delete(ws);
           abortTurn(ws.data.current, "voice socket closed");
+          for (const owner of ws.data.latencyTurns.values()) { owner.interruptOutstanding(); owner.forceFinalize(); }
           // Every connected browser reaches the same brain, switchboard and
           // active lane (docs/web-voice.md, "Deliberate multi-client
           // boundary") — they are one conversation on several screens. It ends
@@ -1987,6 +2004,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           ws.data.departureCloseTimer = null;
         }
         abortTurn(ws.data.current, "web voice server shutting down");
+        for (const owner of ws.data.latencyTurns.values()) { owner.interruptOutstanding(); owner.forceFinalize(); }
         ws.data.pending = null;
         ws.data.latestProbeTurnId = null;
         const spec = ws.data.spec;
