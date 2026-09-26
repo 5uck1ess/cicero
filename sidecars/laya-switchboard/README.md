@@ -56,9 +56,8 @@ A successful response contains exactly these four fields:
 
 The six intents are `transfer`, `release`, `rollcall`, `standup`, `callme`, and
 `none`. Confidence is the selected intent's probability. The target `nobody`
-becomes null, except that callme retains an explicit off-roster name in phrases
-such as "have Morgan call me" for Cicero's existing off-roster rule. Generic
-pronouns and roster names/aliases are excluded from that extraction. Only
+becomes null; targets resolve only against the supplied roster, as in Cicero's
+intent prompt, so an off-roster "have Morgan call me" is a plain call-me. Only
 transfer and callme retain targets. Only callme uses the noul
 head (`> 0.5`) for `request_now`; all other actions force it true. None and a
 transfer without a target return none/null/false, retaining the model probability

@@ -76,27 +76,17 @@ def parse(intent: str, target: str | None, request_now: bool, confidence: float)
             "request_now": bool(request_now), "confidence": float(confidence)}
 
 
-def off_roster_callme_name(utterance: str, roster: dict) -> str | None:
-    generic = {"you", "someone", "somebody", "anyone", "anybody", "everyone", "them", "him", "her", "me", "us"}
-    known = {" ".join(alias.lower().split()) for name, lane in roster.items()
-             for alias in [name, *lane.get("aliases", [])]}
-    pattern = r"\b(?:have|ask|get|let)\s+([\w-]+(?:\s+[\w-]+){0,2}?)\s+(?:to\s+)?(?:call|ring|phone|dial)\s+me\b"
-    for match in re.finditer(pattern, utterance, re.IGNORECASE):
-        name = " ".join(match[1].lower().split())
-        if len(name) <= MAX_STRING and not generic.intersection(name.split()) and name not in known:
-            return name
-    return None
-
-
-def from_answers(ans: dict, utterance: str = "", roster: dict | None = None) -> dict:
+def from_answers(ans: dict) -> dict:
     """Laya/Jev answers -> parsed intent. ans values expose .choice/.probabilities/.noul (dict or attrs)."""
     g = lambda a, k: a[k] if isinstance(a, dict) else getattr(a, k)
     ia, ta, na = ans["intent"], ans["target"], ans["request_now"]
     intent = g(ia, "choice")
     conf = float(g(ia, "probabilities")[intent])
     target = g(ta, "choice")
+    # Targets resolve only against the supplied roster (matching Cicero's intent prompt and bench):
+    # an off-roster "have Morgan call me" is a plain call-me with no target.
     if target == NOBODY:
-        target = off_roster_callme_name(utterance, roster or {}) if intent == "callme" else None
+        target = None
     # Only callme has a deferred form ("call me when ..."); every other action is a present request
     # in the teacher data (Fable never labels them request_now=false), so don't let the head veto it.
     now = float(g(na, "noul")) > 0.5 if intent == "callme" else True
@@ -272,7 +262,7 @@ def make_handler(score: Scorer, model_name: str, device: Callable[[], str] = lam
                 return
             try:
                 with lock:
-                    result = from_answers(score(state(utterance), questions(roster)), utterance, roster)
+                    result = from_answers(score(state(utterance), questions(roster)))
             except Exception:  # never expose provider errors or transcript text
                 self._send(500, {"error": "classification failed"})
                 return

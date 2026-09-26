@@ -76,20 +76,10 @@ class FormatTests(unittest.TestCase):
 
 
 class DecodeTests(unittest.TestCase):
-    def test_off_roster_callme_names(self):
-        _, roster = serve.parse_request(request())
-        cases = [("have Morgan call me", "morgan"), ("GET build_bot-2 TO PHONE ME", "build_bot-2"),
-                 ("let build support team dial me", "build support team"),
-                 ("ask someone to ring me", None), ("call me", None),
-                 ("have Rick call me", None), ("ask CODER to ring me", None),
-                 ("have the coder call me", None), ("have one two three four call me", None)]
-        cases += [(f"ask {name} to ring me", None) for name in
-                  ("you", "somebody", "anyone", "anybody", "everyone", "them", "him", "her", "me", "us")]
-        for utterance, target in cases:
-            with self.subTest(utterance=utterance):
-                self.assertEqual(serve.from_answers(answers("callme", "nobody"), utterance, roster)["target"], target)
-        self.assertEqual(serve.from_answers(answers("callme", "coder"), "have Morgan call me", roster)["target"], "coder")
-        self.assertEqual(serve.from_answers(answers("transfer", "nobody"), "have Morgan call me", roster)["intent"], "none")
+    def test_off_roster_callme_has_no_target(self):
+        # Cicero's bench: "have UnknownEmployee call me back" -> callme, target null.
+        self.assertIsNone(serve.from_answers(answers("callme", "nobody"))["target"])
+        self.assertEqual(serve.from_answers(answers("callme", "coder"))["target"], "coder")
 
     def test_dict_and_attribute_answers(self):
         raw = answers()
@@ -214,14 +204,6 @@ class ServerTests(unittest.TestCase):
                                   "request_now": True, "confidence": 0.85})
         self.assertEqual(self.seen, [("Operator said: ask Rick", serve.questions({
             "coder": {"aliases": ["Rick", "the coder"]}, "reviewer": {"aliases": []}}))])
-
-    def test_callme_passes_original_utterance_and_roster_to_decoder(self):
-        self.result = answers("callme", "nobody")
-        for utterance, target in (("have Morgan call me", "morgan"), ("ask someone to ring me", None),
-                                  ("call me", None), ("have Rick call me", None)):
-            status, result = self.exchange(request(utterance=utterance))
-            self.assertEqual(status, 200)
-            self.assertEqual(result["target"], target)
 
     def test_stalled_connection_does_not_block_health(self):
         entered, release, stalled_done, health_done = (threading.Event() for _ in range(4))
