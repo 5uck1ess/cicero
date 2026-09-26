@@ -205,6 +205,7 @@ test("hold control reopens capture but accepts the deadline reply for the same t
   const audio: unknown[] = [];
   const context = {
     state: "thinking", wsSessionId: "s", activeTurnId: "t", turnDone: false, playing: false,
+    playbackPaused: false, captureTurnId: null, tentativeBarge: null,
     preRoll: [], onsetFrames: 0, orbLabel: { textContent: "" }, hintEl: { textContent: "" },
     setState(value: string) { this.state = value; }, setStatus() {},
     resumeListening() { this.state = "listening"; },

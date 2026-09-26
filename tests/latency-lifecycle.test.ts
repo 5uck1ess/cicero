@@ -118,7 +118,7 @@ test("post-done barge and interrupted ack mark the still-playing turn", async ()
   owner.ack(1, "interrupted");
   await owner.flush();
   expect(rows[0]).toMatchObject({ interrupted: true, bargeInCount: 1 });
-  expect(PAGE).toContain('else if (msg.type === "done") { turnDone = true; if (!playing) { activeTurnId = null; resumeListening(); } }');
+  expect(PAGE).toContain('else if (msg.type === "done") { turnDone = true; if (!playing && !playbackPaused && !captureTurnId) { activeTurnId = null; resumeListening(); } }');
   expect(PAGE).toContain('const turnId = activeTurnId || currentAudioItem?.turnId');
 });
 

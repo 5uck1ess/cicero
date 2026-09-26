@@ -164,6 +164,9 @@ export interface WebVoiceServerOptions {
   onTurn: (wav: ArrayBuffer, options?: { signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean }) => Promise<WebTurnResult>;
   /** Stream a captured utterance's reply over the WebSocket (Phase 2). Optional. */
   onStreamTurn?: (wav: ArrayBuffer, sink: WebReplySink, opts?: { incomplete?: IncompleteTurnFilter; record?: boolean; spec?: SpeculativeTurn | null; streamFinal?: Promise<string>; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
+  /** Transcribe tentative interruptions without acquiring/replacing a brain turn. */
+  onBargeTranscribe?: (wav: ArrayBuffer, signal: AbortSignal) => Promise<string>;
+  falseInterruptionMs?: number;
   /** Resolve the current wrapped STT provider's live capability for each capture. */
   resolveSttStream?: () => ((options: { signal: AbortSignal; sampleRate: number; onPartial: (text: string, at: number) => void }) => LivePcmSession) | undefined;
   /** Stream a TYPED message's reply (same pipeline, no STT). Optional. */
@@ -1111,6 +1114,21 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
     return task;
   };
 
+  const barges = new Map<import("bun").ServerWebSocket<WsData>, {
+    id: string; abort: AbortController; timer: ReturnType<typeof setTimeout>; consumed: boolean;
+  }>();
+  const cancelBarge = (ws: import("bun").ServerWebSocket<WsData>, retainUpload = false): void => {
+    const candidate = barges.get(ws);
+    if (!candidate) return;
+    if (retainUpload && ws.data.protocol === 2 && !ws.data.recentTurnIds.includes(candidate.id)) {
+      ws.data.recentTurnIds.push(candidate.id);
+      if (ws.data.recentTurnIds.length > 128) ws.data.recentTurnIds.shift();
+    }
+    if (!retainUpload || candidate.consumed) barges.delete(ws);
+    clearTimeout(candidate.timer);
+    candidate.abort.abort();
+  };
+
   // The latest input wins (spoken WAV or typed text): stash it as pending and
   // signal any in-flight turn to abort (barge-in). A single drain loop
   // processes pending turns so a mid-turn input is never dropped.
@@ -1171,6 +1189,13 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
       streamSession?.abort();
       if (!ws.data.busy) releaseJob();
       throw error;
+    }
+    // Only an admitted replacement invalidates this session's candidate.
+    // Other sockets have independent foreground ownership.
+    const candidate = barges.get(ws);
+    if (candidate) {
+      sendJson(ws, withSession(ws, { type: "barge_result", captureId: candidate.id, accepted: false, discarded: true }));
+      cancelBarge(ws, true);
     }
     // Its current sink is immediately invalidated; late results are dropped.
     abortTurn(ws.data.current, "superseded by a newer turn");
@@ -1821,6 +1846,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             });
             refreshSocketStream(ws);
           }
+          if (opts.onBargeTranscribe) sendJson(ws, withSession(ws, {
+            type: "barge_on", timeoutMs: opts.falseInterruptionMs ?? 1500,
+          }));
           // Tell the client whether mid-pause turn probes are worth sending —
           // without a detector they'd be dead weight on every pause.
           if (onTurnProbe) sendJson(ws, withSession(ws, { type: "probe_on" }));
@@ -1876,6 +1904,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               text?: string;
               sessionId?: unknown;
               turnId?: unknown;
+              captureId?: unknown;
               nonce?: unknown;
               approved?: unknown;
               sequence?: unknown;
@@ -1953,6 +1982,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               return;
             }
             if (msg.type === "bye") {
+              cancelBarge(ws);
               // Deliberately ahead of the session-id gate: this frame carries no
               // authority, only the operator's intent to stop, and refusing it
               // over a stale session id would silently downgrade a Stop into a
@@ -1986,7 +2016,20 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               protocolError(ws, "session id does not match this connection");
               return;
             }
+            if (msg.type === "barge_in" && opts.onBargeTranscribe && isProtocolId(msg.captureId)) {
+              cancelBarge(ws);
+              const abort = new AbortController();
+              const id = msg.captureId;
+              const timer = setTimeout(() => {
+                if (barges.get(ws)?.abort !== abort) return;
+                sendJson(ws, withSession(ws, { type: "barge_result", captureId: id, accepted: false }));
+                cancelBarge(ws, true);
+              }, MAX_TURN_AUDIO_MS + 15_000);
+              barges.set(ws, { id, abort, timer, consumed: false });
+              return;
+            }
             if (msg.type === "abort") {
+              cancelBarge(ws, true);
               if (ws.data.protocol === 2) {
                 if (!isProtocolId(msg.turnId)) {
                   protocolError(ws, "abort requires a valid turn id");
@@ -2272,7 +2315,45 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             await Promise.allSettled([...endedCaptureFinals]);
           }
           if (!sockets.has(ws) || !accepting) return;
-          await queueTurn(ws, wav.buffer, turnId, streamFinal, capture?.firstPartialMs, capture?.session ?? undefined, inputOrder).catch((err: unknown) => {
+          const candidate = barges.get(ws);
+          let acceptedFinal = streamFinal;
+          if (candidate && (ws.data.protocol === 1 || candidate.id === turnId)) {
+            if (candidate.consumed) return;
+            if (candidate.abort.signal.aborted) { cancelBarge(ws); return; }
+            candidate.consumed = true;
+            if (!acquireJob()) {
+              sendJson(ws, withSession(ws, { type: "barge_result", captureId: candidate.id, accepted: false }));
+              cancelBarge(ws);
+              return;
+            }
+            const deadline = setTimeout(() => {
+              if (barges.get(ws) !== candidate) return;
+              sendJson(ws, withSession(ws, { type: "barge_result", captureId: candidate.id, accepted: false }));
+              // Release the client independently of a provider that ignores
+              // cancellation. Its job/file/pin stay owned until it settles.
+              cancelBarge(ws);
+            }, 15_000);
+            const signal = AbortSignal.any([candidate.abort.signal, shutdownController.signal]);
+            let text = "";
+            try {
+              // Batch STT is intentional here: no speculative brain work or
+              // live-capture seat may replace the retained reply.
+              text = (await opts.onBargeTranscribe!(wav.buffer, signal)).trim();
+              if (text.length > 16_384) throw new Error("barge transcript too long");
+            } catch {
+              text = ""; // recognition failure preserves the original reply
+            } finally {
+              clearTimeout(deadline);
+              releaseJob();
+            }
+            if (barges.get(ws) !== candidate || !sockets.has(ws) || !accepting) return;
+            if (signal.aborted) text = "";
+            sendJson(ws, withSession(ws, { type: "barge_result", captureId: candidate.id, accepted: !!text, turnId }));
+            cancelBarge(ws);
+            if (!text) return;
+            acceptedFinal = Promise.resolve(text);
+          }
+          await queueTurn(ws, wav.buffer, turnId, acceptedFinal, capture?.firstPartialMs, capture?.session ?? undefined, inputOrder).catch((err: unknown) => {
             const detail = err instanceof Error ? err.message : String(err);
             log("error", `web-voice queue failed: ${detail}`);
             protocolError(ws, "turn queue failed", turnId);
@@ -2304,6 +2385,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             ws.data.departureCloseTimer = null;
           }
           sockets.delete(ws);
+          cancelBarge(ws);
           const wasAttached = clients.delete(ws);
           abortTurn(ws.data.current, "voice socket closed");
           if (ws.data.pending) dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
@@ -2408,6 +2490,8 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           ws.data.departureCloseTimer = null;
         }
         ws.data.incomplete?.reset();
+
+        cancelBarge(ws);
         abortTurn(ws.data.current, "web voice server shutting down");
         if (ws.data.pending) dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
         for (const owner of ws.data.latencyTurns.values()) { owner.interruptOutstanding(); owner.forceFinalize(); }
@@ -2423,6 +2507,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           // A forced terminate transfers socket ownership back to the runtime
           // synchronously. Bun need not emit close for an already-closing peer;
           // retaining it here would make every bounded stop retry wait forever.
+          cancelBarge(ws);
           sockets.delete(ws);
           clients.delete(ws);
         } catch { /* runtime still owns it; close callback/retry will confirm */ }

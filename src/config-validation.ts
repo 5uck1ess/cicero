@@ -1017,7 +1017,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
   }
   if (isRecord(config.web_voice)) {
     checkKnownKeys(config.web_voice, "web_voice", [
-      "enabled", "host", "port", "token", "tls", "tunnel", "resume_turns", "speech_gate", "tldr", "speculative", "long_turn", "incomplete_turn",
+      "enabled", "host", "port", "token", "tls", "tunnel", "resume_turns", "speech_gate", "false_interruption_ms", "tldr", "speculative", "long_turn", "incomplete_turn",
     ], issues);
   }
   if (isRecord(config.turn)) {
@@ -1077,6 +1077,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     checkOptionalString(config.web_voice, "host", "web_voice", issues);
     checkOptionalInteger(config.web_voice, "resume_turns", "web_voice", issues, { min: 0 });
     checkOptionalBoolean(config.web_voice, "speech_gate", "web_voice", issues);
+    checkOptionalInteger(config.web_voice, "false_interruption_ms", "web_voice", issues, { min: 250, max: 10000 });
     if (config.web_voice.token !== undefined) {
       const problem = webVoiceTokenProblem(config.web_voice.token);
       if (problem) {

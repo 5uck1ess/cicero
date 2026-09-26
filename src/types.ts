@@ -98,6 +98,7 @@ export interface TTSCoalesceConfig {
 
 /** Browser audio client: capture mic + play TTS in the browser, talk to a headless box. */
 export interface WebVoiceConfig {
+  false_interruption_ms?: number; // resume retained audio after 1500ms without recognized words (250–10000)
   enabled?: boolean;     // default false
   host?: string;         // bind address (default "0.0.0.0" — reachable from a LAN browser)
   port?: number;         // default 8090

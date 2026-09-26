@@ -218,3 +218,31 @@ but a complete verdict never pays the silence window. Run
 overhead; injected-clock tests also verify that a 12ms classifier adds exactly
 12ms, not 3000ms. This measures software timing, not real model accuracy or
 acoustic behavior. Measure your local classifier before enabling this experiment.
+
+## False interruptions
+
+Hands-free barge-in pauses the current audio clip and keeps the bounded playback
+queue. If recognition yields no words, or `web_voice.false_interruption_ms`
+elapses (default 1500; range 250–10000), playback resumes from the same position.
+It does not re-synthesize the reply. The Telegram call bridge negotiates the same
+behavior with the daemon; an older daemon retains the existing hard-abort path.
+Push-to-talk cancellation and Stop remain explicit cancellations.
+
+Tentative captures use batch STT on the completed utterance. Real words replace
+the old turn; a delayed transcript can still replace a reply that has resumed,
+but cannot replace a newer turn. Long utterances or slow STT can therefore allow
+playback to resume before recognition finishes. Recognition failures preserve
+the old reply. The recognition deadline is 15 seconds, with provider work owned
+until it settles; capture ownership also expires after the maximum utterance
+window. Paused audio remains bounded. The browser uses its existing playback
+limits; Telegram retains at most 64 queued clips and 16 MiB of decoded mono PCM
+(plus the current clip). Its reader never waits behind playback: control frames
+must remain visible while audio is paused. Overflow discards buffered speech and
+reconnects, rather than delaying a confirmed interruption behind old clips.
+
+Live smoke check (requires microphone and Telegram call access): start a long
+reply, make a short noise with no recognized words, and verify it continues from
+the pause point. Repeat with a real interjection, then with speech after the
+timeout. Stop/reconnect while paused and verify the old reply never restarts.
+Run this on both the PWA and a Telegram call; mocked transport tests do not
+establish acoustic or device behavior.

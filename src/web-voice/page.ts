@@ -1,3 +1,4 @@
+import { FalseInterruption } from "./false-interruption";
 /**
  * The browser audio client page (Phase 3): hands-free, full-duplex voice over WebSocket.
  *
@@ -434,7 +435,7 @@ function finalizeUtterance() {
   const wav = encodeWav(pcm16k, 16000);
   const turnId = captureTurnId || newTurnId();
   captureTurnId = null;
-  activeTurnId = turnId;
+  if (!tentativeBarge || tentativeBarge.id !== turnId) activeTurnId = turnId;
   speechEndAt.set(turnId, speechEndedAt);
   while (speechEndAt.size > 4) speechEndAt.delete(speechEndAt.keys().next().value);
   setState("thinking"); setStatus("thinking…");
@@ -450,7 +451,7 @@ function finalizeUtterance() {
 // whether the tail covers the whole utterance (the speculative-turn gate).
 // See probe.ts ("PRB2") for the wire format. Fire-and-forget: no verdict, no change.
 function sendProbe() {
-  if (!ws || ws.readyState !== 1 || !wsSessionId || !captureTurnId) return;
+  if (tentativeBarge || !ws || ws.readyState !== 1 || !wsSessionId || !captureTurnId) return;
   const sr = audioCtx.sampleRate;
   const utterMs = Math.round((speechLen / sr) * 1000);
   let need = Math.min(speechLen, Math.round(sr * PROBE_TAIL_S));
@@ -505,12 +506,57 @@ function watchBargeIn(buf) {
   }
 }
 
+const FalseInterruption = ${FalseInterruption.toString()};
+let falseInterruption = null, tentativeBarge = null, playbackPaused = false, playbackGeneration = 0;
+function pauseForBarge() {
+  if (!falseInterruption || !activeTurnId || !ws || ws.readyState !== 1) return false;
+  falseInterruption.cancel();
+  playbackPaused = true;
+  if (currentAudio) currentAudio.pause();
+  const pending = { id: captureTurnId, turnId: activeTurnId, token: 0, generation: ++playbackGeneration };
+  tentativeBarge = pending;
+  pending.token = falseInterruption.start(() => resumeBarge(pending));
+  // This capture is transcribed before it can acquire a replacement turn.
+  streamCaptureEnabled = false;
+  ws.send(JSON.stringify({ type: "barge_in", sessionId: wsSessionId, captureId: pending.id }));
+  return true;
+}
+function resumeBarge(pending) {
+  if (tentativeBarge !== pending || activeTurnId !== pending.turnId) return;
+  playbackPaused = false;
+  if (!captureTurnId) { setState("speaking"); setStatus("speaking…"); }
+  if (currentAudio) {
+    const audio = currentAudio;
+    audio.play().catch(() => {
+      if (playbackGeneration !== pending.generation || currentAudio !== audio || activeTurnId !== pending.turnId) return;
+      abortActiveTurn(); stopPlayback(); resumeListening();
+    });
+  }
+  else playNext();
+}
+function finishBarge(msg) {
+  const pending = tentativeBarge;
+  if (!pending || pending.id !== msg.captureId || !falseInterruption.finish(pending.token)) return;
+  if (msg.discarded) { stopPlayback(); resumeListening(); return; }
+  if (msg.accepted) {
+    clientMetric(pending.turnId, "barge_in");
+    stopPlayback();
+    activeTurnId = msg.turnId;
+    setState("thinking"); setStatus("thinking…");
+  } else {
+    resumeBarge(pending);
+    tentativeBarge = null;
+    if (!currentAudio && audioQueue.length === 0 && turnDone) { activeTurnId = null; resumeListening(); }
+  }
+}
+
 function triggerBargeIn() {
   beginCaptureIdentity();
   lastVoicedAt = performance.now();
   speechFrames = preRoll.slice();                              // keep the pre-roll so we don't clip the interruption
   speechLen = speechFrames.reduce(function (n, f) { return n + f.length; }, 0);
-  if (streamCaptureEnabled) pendingBargeAbort = true;
+  if (pauseForBarge()) { /* retained until transcript or timeout */ }
+  else if (streamCaptureEnabled) pendingBargeAbort = true;
   else {
     const turnId = activeTurnId || currentAudioItem?.turnId;
     if (turnId) clientMetric(turnId, "barge_in");
@@ -686,12 +732,13 @@ function enqueueAudio(buf, frame) {
   if (!playing) playNext();
 }
 function playNext() {
+  if (playbackPaused) return;
   if (audioQueue.length === 0) {
     playing = false; currentAudio = null; currentEnv = null;
-    if (turnDone) { activeTurnId = null; resumeListening(); }
+    if (turnDone && !captureTurnId) { activeTurnId = null; if (!tentativeBarge) resumeListening(); }
     return;
   }
-  playing = true; setState("speaking"); setStatus("speaking…");
+  playing = true; if (!captureTurnId) { setState("speaking"); setStatus("speaking…"); }
   const item = audioQueue.shift();
   queuedAudioMs -= item.durationMs;
   currentAudioItem = item;
@@ -717,19 +764,34 @@ function playNext() {
     try { if (currentGainNode) currentGainNode.disconnect(); } catch (e) { /* ignore */ }
     currentAudioSource = null; currentGainNode = null;
   };
-  a.onended = () => { sendAudioAck(item, "played"); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } };
+  const finishClip = (status) => {
+    if (currentAudio !== a) return;
+    sendAudioAck(item, status, a.currentTime * 1000);
+    cleanup(); URL.revokeObjectURL(a.src);
+    currentAudio = null; currentAudioItem = null;
+    playNext();
+  };
+  a.onended = () => finishClip("played");
   a.onplaying = () => {
     if (!item.turnId || !item.sequence) return;
     const key = item.turnId + ":" + item.sequence;
     if (!playedMetrics.has(key)) { playedMetrics.add(key); while (playedMetrics.size > 64) playedMetrics.delete(playedMetrics.values().next().value); clientMetric(item.turnId, "audio_started", performance.now(), item.sequence); }
   };
-  a.onerror = () => { sendAudioAck(item, "interrupted", a.currentTime * 1000); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } };
-  a.play().catch(() => { sendAudioAck(item, "interrupted", a.currentTime * 1000); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } });
+  a.onerror = () => finishClip("interrupted");
+  const generation = playbackGeneration;
+  a.play().catch(() => {
+    // A tentative pause can reject the initial play promise. The pause/resume
+    // owner now holds this clip; an old promise must not revoke its audio URL.
+    if (playbackGeneration !== generation) return;
+    finishClip("interrupted");
+  });
 }
 
 // Stop the reply mid-stream (barge-in or conversation stop): kill the playing clip,
 // drop anything queued, and forget the in-flight turn so a stale {done} can't resume us.
 function stopPlayback() {
+  playbackGeneration++;
+  falseInterruption?.cancel(); tentativeBarge = null; playbackPaused = false;
   for (const item of audioQueue) sendAudioAck(item, "interrupted", 0);
   audioQueue = [];
   queuedAudioMs = 0;
@@ -829,7 +891,7 @@ function handleVolumeControl(msg) {
 function onWsMessage(e) {
   if (typeof e.data !== "string") {
     const frame = decodeReplyFrame(e.data);
-    const live = state === "thinking" || state === "held" || state === "speaking";
+    const live = state === "thinking" || state === "held" || state === "speaking" || !!tentativeBarge;
     if (frame && live && frame.sessionId === wsSessionId && frame.turnId === activeTurnId) enqueueAudio(frame.payload, frame);
     return;
   }
@@ -843,6 +905,8 @@ function onWsMessage(e) {
     return;
   }
   if (!wsSessionId || msg.sessionId !== wsSessionId) return;
+  if (msg.type === "barge_on") { falseInterruption = new FalseInterruption(Math.max(250, Math.min(10000, Number(msg.timeoutMs) || 1500))); return; }
+  if (msg.type === "barge_result") { finishBarge(msg); return; }
   if (msg.type === "confirm_request") { showConfirmation(msg); return; }
   if (msg.type === "confirm_result" || msg.type === "confirm_resolved") { removeConfirmation(msg.nonce); return; }
   if (msg.type === "notify") { handleNotify(msg); return; } // arrives any time, not just mid-turn
@@ -863,7 +927,7 @@ function onWsMessage(e) {
   // frame from an aborted turn is ignored even if the UI is already thinking
   // about its replacement.
   if (!activeTurnId || msg.turnId !== activeTurnId) return;
-  const live = state === "thinking" || state === "held" || state === "speaking";
+  const live = state === "thinking" || state === "held" || state === "speaking" || !!tentativeBarge;
   if (!live) return;
   if (msg.type === "hold") {
     preRoll = []; onsetFrames = 0;
@@ -882,10 +946,10 @@ function onWsMessage(e) {
     // The server sends {type:"error", message} and no "done" after it — treat it
     // as terminal so the mic isn't locked in "thinking" forever.
     setStatus("error: " + (msg.message || msg.text || "unknown"));
-    activeTurnId = null;
-    turnDone = true; if (!playing) resumeListening();
+    turnDone = true;
+    if (!playing && !playbackPaused && !captureTurnId) { activeTurnId = null; resumeListening(); }
   }
-  else if (msg.type === "done") { turnDone = true; if (!playing) { activeTurnId = null; resumeListening(); } }
+  else if (msg.type === "done") { turnDone = true; if (!playing && !playbackPaused && !captureTurnId) { activeTurnId = null; resumeListening(); } }
   if (msg.type === "transcript" || msg.type === "sentence") turnDone = false;
 }
 
@@ -928,7 +992,8 @@ function connectWs(resume = false) {
     if (ws !== sock) return;          // superseded by a newer socket — not ours to handle
     wsSessionId = ""; activeTurnId = null; captureTurnId = null; streamOn = false;
     clearConfirmations();
-    if (state === "thinking" || state === "held" || state === "speaking") { stopPlayback(); setState("listening"); }
+    stopPlayback(); falseInterruption = null;
+    if (convOn) setState("listening");
     if (convOn) scheduleReconnect(); else setStatus("disconnected");
   };
 }

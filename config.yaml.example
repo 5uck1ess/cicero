@@ -38,6 +38,8 @@ web_voice:
   # fetched on first start, served same-origin — no CDN at runtime) confirms
   # an energy trigger is actually SPEECH before a hands-free utterance opens
   # or a barge-in interrupts — keyboard noise stops cutting Cicero off.
+  # Resume retained playback after noise, without re-synthesizing (250–10000ms).
+  false_interruption_ms: 1500  # web hands-free and Telegram calls
   # speech_gate: false          # energy-only gating (the pre-gate behavior)
   # REQUIRED for a stable setup: generate your own long random string. This is
   # commented out so copying the example never installs a public shared secret.
