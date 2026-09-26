@@ -385,6 +385,7 @@ notify:
 # Routing quality depends on the model: bun run bench/intent-bench.ts
 switchboard:
   # intent_url: http://127.0.0.1:8096 # opt-in Laya base URL; replaces the summarizer intent prompt
+  # Needs a fine-tuned switchboard checkpoint (bring your own for now; base Laya does not route).
   # Run separately: sidecars/laya-switchboard/README.md. Same deadline and parsing rules.
   front_desk_aliases: [cicero, jarvis] # main-assistant names; replace this list to customize
   intent_min_confidence: 0.7 # finite 0..1; request_now must also be true

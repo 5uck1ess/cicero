@@ -1,5 +1,7 @@
 # Laya switchboard sidecar
 
+> **Checkpoint required — bring your own for now.** The base Laya model does not route zero-shot; the sidecar needs a switchboard fine-tuned checkpoint. A public checkpoint trained on synthetic data only, plus the fine-tuning recipe, is a planned follow-up.
+
 Opt-in local intent routing with a fine-tuned Laya checkpoint. This replaces the
 switchboard's summarizer prompt classifier; its answers can trigger routing actions.
 The daemon still applies the same `parseIntent` roster/alias, front-desk and off-roster
@@ -14,9 +16,7 @@ uv run --python 3.11 --with-requirements requirements/laya-switchboard.txt \
     python sidecars/laya-switchboard/serve.py --ckpt /path/to/switchboard-checkpoint
 ```
 
-Requires `laya==0.3.20` and a switchboard-trained checkpoint. The base Laya model is not
-usable zero-shot for this task. For now, bring your own fine-tuned checkpoint. A public checkpoint
-trained on synthetic data only, plus the fine-tuning recipe, is planned as a follow-up. Binds
+Requires `laya==0.3.20` and a switchboard-trained checkpoint (see the note above). Binds
 `127.0.0.1:8096` by default; `--host`, `--port`, and `--device cuda|cpu` override it.
 Run this process separately from Cicero, then configure:
 
