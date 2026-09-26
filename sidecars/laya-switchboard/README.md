@@ -45,7 +45,8 @@ with at most 16 aliases; names and aliases have at most 128 characters. Names mu
 be nonempty and unique; `nobody` is reserved. Invalid requests return 400. Bodies
 are capped at 1 MiB, with a five-second absolute body-read deadline. No utterances
 or model exception text are logged. Unknown paths return 404; model failures
-return a generic 500.
+return a generic 500. Daemon request threads keep slow connections from blocking
+health checks or other clients; inference remains serialized.
 
 A successful response contains exactly these four fields:
 
@@ -55,7 +56,10 @@ A successful response contains exactly these four fields:
 
 The six intents are `transfer`, `release`, `rollcall`, `standup`, `callme`, and
 `none`. Confidence is the selected intent's probability. The target `nobody`
-becomes null; only transfer and callme retain targets. Only callme uses the noul
+becomes null, except that callme retains an explicit off-roster name in phrases
+such as "have Morgan call me" for Cicero's existing off-roster rule. Generic
+pronouns and roster names/aliases are excluded from that extraction. Only
+transfer and callme retain targets. Only callme uses the noul
 head (`> 0.5`) for `request_now`; all other actions force it true. None and a
 transfer without a target return none/null/false, retaining the model probability
 on the wire (Cicero normalizes these to its existing zero-confidence `NONE`).

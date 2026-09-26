@@ -178,3 +178,109 @@ test("API state masks stored API keys", async () => {
     expect(failedProbe.yaml).not.toContain("kanban:");
   } finally { await server.stop(); rmSync(home, { recursive: true, force: true }); }
 });
+
+test("router step defaults to the LLM prompt and contributes only an opt-in Laya URL", async () => {
+  const step = pick("router"); const c = ctx();
+  expect(SETUP_STEPS[SETUP_STEPS.findIndex((s) => s.id === "provider") + 1]).toBe(step);
+  expect(step).toMatchObject({ title: "Intent router", pipeline: "brain", available: true });
+  expect(await step.detect(c)).toMatchObject({ options: ["llm", "laya"], recommended: "llm", defaultUrl: "http://127.0.0.1:8096" });
+  const llm = step.parseChoice({ id: "llm" }, c);
+  expect(step.contribute(c, llm)).toEqual({});
+  const laya = step.parseChoice({ id: "laya" }, c);
+  expect(step.contribute(c, laya)).toEqual({ switchboard: { intent_url: "http://127.0.0.1:8096" } });
+  expect(step.contribute(c, step.parseChoice({ id: "laya", url: "https://example.test/router/" }, c)))
+    .toEqual({ switchboard: { intent_url: "https://example.test/router" } });
+  for (const raw of [{ id: "unknown" }, { id: "laya", url: "" }, { id: "laya", url: 42 },
+    ...["file:///tmp/router", "http://example.test/?", "http://example.test/#", "http://example.test/?token=synthetic-secret", "http://user:synthetic-secret@example.test"].map((url) => ({ id: "laya", url }))]) {
+    expect(() => step.parseChoice(raw, c)).toThrow();
+  }
+  const explain = Object.values(step.explain).join(" ");
+  for (const text of ["does not route zero-shot", "fine-tuned switchboard checkpoint", "bring-your-own", "synthetic data only", "fine-tuning recipe", "planned follow-up", "sidecars/laya-switchboard/README.md"]) expect(explain).toContain(text);
+});
+
+test("router probes only Laya health with GET and reports the device", async () => {
+  const step = pick("router"); const c = ctx();
+  const seen: string[] = []; let signal: AbortSignal | undefined;
+  const deps = { fetcher: (async (input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push(String(input)); expect(init?.method).toBe("GET"); signal = init?.signal ?? undefined;
+    return Response.json({ ok: true, device: "cuda" });
+  }) as typeof fetch };
+  expect(await step.probeChoice!(step.parseChoice({ id: "llm" }, c), deps)).toMatchObject({ ok: true });
+  expect(seen).toEqual([]);
+  expect(await step.probeChoice!(step.parseChoice({ id: "laya", url: "http://example.test/router/" }, c), deps))
+    .toEqual({ ok: true, message: "Laya sidecar ready on cuda" });
+  expect(seen).toEqual(["http://example.test/router/health"]);
+  expect(signal?.aborted).toBe(true);
+});
+
+test("router health fails closed for not-ready, malformed, oversized and unreachable responses", async () => {
+  const step = pick("router"); const choice = step.parseChoice({ id: "laya" }, ctx());
+  const replies = [() => Response.json({ ok: false, device: "cpu" }), () => Response.json({ ok: "true" }),
+    () => Response.json(null), () => Response.json({}), () => new Response("bad json"),
+    () => new Response("unavailable", { status: 503 }), () => new Response("x".repeat(8193)),
+    () => { throw new Error("synthetic-private-provider-error"); }];
+  for (const reply of replies) {
+    const result = await step.probeChoice!(choice, { fetcher: (async () => reply()) as typeof fetch });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("sidecar is not reachable");
+    expect(result.message).toContain("sidecars/laya-switchboard/README.md");
+    expect(result.message).not.toContain("synthetic-private");
+  }
+});
+
+test("router health deadline cancels a stalled body", async () => {
+  const step = pick("router"); let cancelled = false; let signal: AbortSignal | undefined;
+  const result = await step.probeChoice!(step.parseChoice({ id: "laya" }, ctx()), {
+    fetcher: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Response(new ReadableStream({ cancel() { cancelled = true; } }));
+    }) as typeof fetch,
+  });
+  expect(result.ok).toBe(false);
+  expect(signal?.aborted).toBe(true);
+  expect(cancelled).toBe(true);
+});
+
+test("router health deadline also bounds an unresponsive fetcher", async () => {
+  const step = pick("router"); let signal: AbortSignal | undefined;
+  const result = await step.probeChoice!(step.parseChoice({ id: "laya" }, ctx()), {
+    fetcher: ((_input: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(() => {});
+    }) as typeof fetch,
+  });
+  expect(result.ok).toBe(false);
+  expect(signal?.aborted).toBe(true);
+});
+
+test("setup API adds a healthy router, blocks failed probes, and removes the URL when LLM is reselected", async () => {
+  let handler: (req: Request) => Response | Promise<Response> = () => new Response();
+  const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop() {} }; }) as unknown as typeof Bun.serve;
+  const home = mkdtempSync(join(tmpdir(), "cicero-router-setup-"));
+  let ready = false;
+  const server = await startSetupServer({ home, serve, output: () => {},
+    systemDeps: { platform: () => "linux", arch: () => "x64", release: () => "6.8", which: () => null, exists: () => true, statfs: () => ({ bavail: 1, bsize: 1 }) as ReturnType<typeof import("node:fs")["statfsSync"]> },
+    pickerDeps: { fetcher: (async () => Response.json({ ok: ready, device: "cpu" })) as typeof fetch },
+  });
+  try {
+    const send = async (path: string, body: object) => {
+      const response = await handler(new Request(`http://127.0.0.1:9999${path}`, { method: "POST", headers: {
+        host: "127.0.0.1:9999", "x-cicero-setup-token": server.token, "x-cicero-setup-csrf": "1",
+      }, body: JSON.stringify(body) }));
+      expect(response.status).toBe(200);
+      return await response.json() as { selectedChoices: Record<string, string>; yaml: string; detected: { probe?: { ok: boolean } } };
+    };
+    await send("/api/step", { id: "router" });
+    const failed = await send("/api/choice", { id: "router", choice: { id: "laya" } });
+    expect(failed.detected.probe?.ok).toBe(false);
+    expect(failed.yaml).not.toContain("intent_url:");
+    expect(failed.selectedChoices.router).toBeUndefined();
+    ready = true;
+    const selected = await send("/api/choice", { id: "router", choice: { id: "laya" } });
+    expect(selected.yaml).toContain("intent_url: http://127.0.0.1:8096");
+    expect(selected.selectedChoices.router).toBe("laya");
+    const reset = await send("/api/choice", { id: "router", choice: { id: "llm" } });
+    expect(reset.yaml).not.toContain("intent_url:");
+    expect(reset.selectedChoices.router).toBe("llm");
+  } finally { await server.stop(); rmSync(home, { recursive: true, force: true }); }
+});

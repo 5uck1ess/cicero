@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 
 # Checkpoint training strings: must match the fine-tuning harness verbatim.
@@ -76,17 +76,31 @@ def parse(intent: str, target: str | None, request_now: bool, confidence: float)
             "request_now": bool(request_now), "confidence": float(confidence)}
 
 
-def from_answers(ans: dict) -> dict:
+def off_roster_callme_name(utterance: str, roster: dict) -> str | None:
+    generic = {"you", "someone", "somebody", "anyone", "anybody", "everyone", "them", "him", "her", "me", "us"}
+    known = {" ".join(alias.lower().split()) for name, lane in roster.items()
+             for alias in [name, *lane.get("aliases", [])]}
+    pattern = r"\b(?:have|ask|get|let)\s+([\w-]+(?:\s+[\w-]+){0,2}?)\s+(?:to\s+)?(?:call|ring|phone|dial)\s+me\b"
+    for match in re.finditer(pattern, utterance, re.IGNORECASE):
+        name = " ".join(match[1].lower().split())
+        if len(name) <= MAX_STRING and not generic.intersection(name.split()) and name not in known:
+            return name
+    return None
+
+
+def from_answers(ans: dict, utterance: str = "", roster: dict | None = None) -> dict:
     """Laya/Jev answers -> parsed intent. ans values expose .choice/.probabilities/.noul (dict or attrs)."""
     g = lambda a, k: a[k] if isinstance(a, dict) else getattr(a, k)
     ia, ta, na = ans["intent"], ans["target"], ans["request_now"]
     intent = g(ia, "choice")
     conf = float(g(ia, "probabilities")[intent])
     target = g(ta, "choice")
+    if target == NOBODY:
+        target = off_roster_callme_name(utterance, roster or {}) if intent == "callme" else None
     # Only callme has a deferred form ("call me when ..."); every other action is a present request
     # in the teacher data (Fable never labels them request_now=false), so don't let the head veto it.
     now = float(g(na, "noul")) > 0.5 if intent == "callme" else True
-    return parse(intent, None if target == NOBODY else target, now, conf)
+    return parse(intent, target, now, conf)
 
 def parse_request(body: bytes) -> tuple[str, dict]:
     """Validate before retaining or passing any request data to the model."""
@@ -170,7 +184,10 @@ class LayaModel:
                     print("laya-switchboard: no room on the GPU, staying on CPU", file=sys.stderr, flush=True)
                     return
                 if self.gpu_settings is None:  # started on CPU: use laya's own CUDA defaults
-                    self.gpu_settings = (torch.float16, True)
+                    from laya.common import amp_dtype
+                    dtype = (torch.float16 if torch.cuda.get_device_capability(a.device)[0] < 8
+                             else amp_dtype(a.cfg.get("amp_dtype", "fp16")))
+                    self.gpu_settings = (dtype, True)
                 a.dtype, a.amp_enabled = self.gpu_settings
         print(f"laya-switchboard: now on {self.device}", file=sys.stderr, flush=True)
 
@@ -255,7 +272,7 @@ def make_handler(score: Scorer, model_name: str, device: Callable[[], str] = lam
                 return
             try:
                 with lock:
-                    result = from_answers(score(state(utterance), questions(roster)))
+                    result = from_answers(score(state(utterance), questions(roster)), utterance, roster)
             except Exception:  # never expose provider errors or transcript text
                 self._send(500, {"error": "classification failed"})
                 return
@@ -283,7 +300,7 @@ def main() -> int:
     model.score(state("warm up"), questions({}))
     stop = threading.Event()
     follower = None
-    server = HTTPServer((a.host, a.port), make_handler(model.score, os.path.basename(ckpt.rstrip("/")),
+    server = ThreadingHTTPServer((a.host, a.port), make_handler(model.score, os.path.basename(ckpt.rstrip("/")),
                                                        lambda: model.device))
     if a.llama_swap:
         follower = threading.Thread(target=follow_llama_swap, args=(model, a.llama_swap, cpu_when, a.poll, stop),

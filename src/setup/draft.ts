@@ -37,6 +37,8 @@ const EXPLANATIONS: Record<string, string> = {
   "llm.model": "Model to load or request.",
   "llm.baseUrl": "Base URL of the OpenAI-compatible language model API.",
   "llm.apiKey": "Private authentication key for the language model API.",
+  switchboard: "Configures intent routing before the brain.",
+  "switchboard.intent_url": "Base Laya does not route zero-shot; a fine-tuned switchboard checkpoint is required, bring-your-own for now. A public checkpoint trained on synthetic data only plus the fine-tuning recipe are a planned follow-up.",
   notify: "Configures optional notifications.",
   "notify.kanban": "Watches one external task board.",
   "notify.kanban.enabled": "Enables task board notifications.",

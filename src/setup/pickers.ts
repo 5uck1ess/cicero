@@ -80,9 +80,11 @@ function hasLocalTerminal(deps: PickerDeps): boolean {
   return Boolean(process.stdout.isTTY && (process.env.KITTY_WINDOW_ID || process.env.WEZTERM_PANE || process.env.TMUX));
 }
 
-async function boundedResponse(response: Response, max = 128 * 1024): Promise<unknown> {
+async function boundedResponse(response: Response, max = 128 * 1024, signal?: AbortSignal): Promise<unknown> {
   if (!response.ok || !response.body) throw new Error("unavailable");
   const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal?.addEventListener("abort", cancel, { once: true });
   const chunks: Uint8Array[] = []; let size = 0;
   try {
     for (;;) {
@@ -94,7 +96,7 @@ async function boundedResponse(response: Response, max = 128 * 1024): Promise<un
     const bytes = new Uint8Array(size); let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
     return JSON.parse(new TextDecoder().decode(bytes));
-  } finally { void reader.cancel().catch(() => {}); }
+  } finally { signal?.removeEventListener("abort", cancel); cancel(); }
 }
 async function fetchLimited(fetcher: typeof fetch, address: string, json = true, headers?: HeadersInit, timeoutMs = 1500): Promise<{ running: boolean; models: string[] }> {
   const controller = new AbortController();
@@ -168,6 +170,43 @@ export function contributeProvider(c: ReturnType<typeof parseProvider>) {
   if (c.id === "llama-cpp" || c.id === "ollama") return { llm: { backend: c.id, model: c.model } };
   if (c.id === "lm-studio") return { llm: { backend: "openai", baseUrl: "http://127.0.0.1:1234/v1", model: c.model } };
   return { llm: { backend: c.id, baseUrl: c.baseUrl, model: c.model, ...(c.apiKey ? { apiKey: c.apiKey } : {}) } };
+}
+const ROUTER_URL = "http://127.0.0.1:8096";
+export async function detectRouter(_ctx: StepContext) {
+  return { options: ["llm", "laya"], recommended: "llm", defaultUrl: ROUTER_URL,
+    reason: "The LLM prompt works without a separate fine-tuned switchboard checkpoint." };
+}
+export function parseRouter(raw: unknown) {
+  const c = choice(raw);
+  const id = member(c.id, ["llm", "laya"], "intent router");
+  return id === "llm" ? { id } : { id, url: url(c.url ?? ROUTER_URL, "intent router URL") };
+}
+export function contributeRouter(c: ReturnType<typeof parseRouter>) {
+  return c.id === "llm" ? {} : { switchboard: { intent_url: c.url } };
+}
+export async function probeRouter(c: ReturnType<typeof parseRouter>, deps: PickerDeps = {}) {
+  if (c.id === "llm") return { ok: true, message: "Uses the LLM intent prompt" };
+  const failure = { ok: false, message: "Laya sidecar is not reachable or not ready; see sidecars/laya-switchboard/README.md" };
+  const controller = new AbortController();
+  let expire!: () => void;
+  const deadline = new Promise<never>((_, reject) => { expire = () => reject(new Error("probe deadline")); });
+  const timer = setTimeout(() => { controller.abort(); expire(); }, 1500);
+  try {
+    return await Promise.race([(async () => {
+      const response = await (deps.fetcher ?? fetch)(`${c.url}/health`, { method: "GET", signal: controller.signal });
+      if (controller.signal.aborted || !response.ok) {
+        void response.body?.cancel().catch(() => {});
+        return failure;
+      }
+      const payload = await boundedResponse(response, 8192, controller.signal);
+      if (!payload || typeof payload !== "object" || (payload as { ok?: unknown }).ok !== true) return failure;
+      const device = (payload as { device?: unknown }).device;
+      // Only display known device identifiers from the untrusted response.
+      const label = typeof device === "string" && /^(?:cpu|cuda|mps)(?::[0-9]{1,2})?$/.test(device) ? device : "unknown device";
+      return { ok: true, message: `Laya sidecar ready on ${label}` };
+    })(), deadline]);
+  } catch { return failure; }
+  finally { clearTimeout(timer); controller.abort(); }
 }
 const BRAINS = ["acp", "claude-code", "codex", "gemini", "qwen", "ollama", "openai-compatible", ...OPENAI_COMPATIBLE_BACKENDS.filter((id) => id !== "openai-compatible")] as const;
 const CLI_BINS: Record<string, string> = { "claude-code": "claude", codex: "codex", gemini: "gemini", qwen: "qwen" };

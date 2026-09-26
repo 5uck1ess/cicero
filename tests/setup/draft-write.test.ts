@@ -153,3 +153,14 @@ describe("setup draft and write", () => {
     expect(readFileSync(target, "utf8")).toBe("untouched");
   });
 });
+
+test("writing a Laya router annotates the checkpoint requirement and preserves the selected URL", () => {
+  const draft = createDraft("local-cpu", "a".repeat(64));
+  draft.switchboard = { intent_url: "http://127.0.0.1:8096" };
+  const path = writeDraft(home(), draft);
+  const text = readFileSync(path, "utf8");
+  expect(text).toContain("# Base Laya does not route zero-shot; a fine-tuned switchboard checkpoint is required, bring-your-own for now.");
+  expect(text).toContain("A public checkpoint trained on synthetic data only plus the fine-tuning recipe are a planned follow-up.");
+  expect(parseYaml(text)).toEqual(draft);
+  expect(loadConfig({}, { home: join(path, "..") }).raw.switchboard?.intent_url).toBe("http://127.0.0.1:8096");
+});

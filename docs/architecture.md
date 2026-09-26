@@ -17,6 +17,8 @@ All modes share the same summarization + TTS core.
  ┌──────────────────────────── Cicero daemon ────────────────────────────┐
  │                                                                       │
  │  STT provider ─text──▶ quick intents / switchboard                    │
+ │                        ├╌╌╌▶ Laya router sidecar (opt-in)             │
+ │                        │     ~30 ms · checkpoint required             │
  │  (local managed or      │ instant: transfers, roll call,              │
  │   configured remote)    │ user-defined phrases (microseconds)         │
  │                        ▼ everything else                              │

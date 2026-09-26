@@ -38,3 +38,26 @@ test("CUDA speech cards distinguish audio.cpp from the Python sidecar and explai
   expect(page).toContain("Model weights are installed manually.");
   expect(page).toContain("scripts/provision-audiocpp.sh");
 });
+
+test("setup page lists the router after provider with checkpoint guidance and the documented start command", () => {
+  const page = setupPage();
+  const definitions = page.slice(page.indexOf("var ORDER ="), page.indexOf("function h("));
+  const { ORDER, STEP, NAMES, NOTES, GUIDES } = new Function(`${definitions}; return { ORDER, STEP, NAMES, NOTES, GUIDES };`)();
+  expect(ORDER[ORDER.indexOf("provider") + 1]).toBe("router");
+  expect(STEP.router).toMatchObject({ short: "Route", title: "How should Cicero route requests?", sub: "Intent router" });
+  expect(STEP.router.lede.length).toBeGreaterThan(0);
+  expect(NAMES.llm).toBe("LLM prompt (default)");
+  expect(NAMES.laya).toBe("Laya sidecar (checkpoint required)");
+  for (const text of [NOTES.laya, GUIDES.laya[0][0]]) {
+    for (const phrase of ["does not route zero-shot", "fine-tuned switchboard checkpoint", "bring-your-own", "synthetic data only", "fine-tuning recipe", "planned follow-up"]) expect(text).toContain(phrase);
+  }
+  expect(GUIDES.laya[0][1]).toEndWith("/sidecars/laya-switchboard/README.md");
+  const readme = readFileSync(new URL("../../sidecars/laya-switchboard/README.md", import.meta.url), "utf8");
+  expect(readme.replace(/\\\n\s+/g, "")).toContain(GUIDES.laya[1][1]);
+  expect(page).toContain("field('Laya sidecar URL', fields.url)");
+  // Both responsive overview layouts must contain a navigable router node.
+  expect(page.match(/router: \[\d+, \d+\]/g)).toHaveLength(2);
+  // Parse the full generated browser script, including the new picker branch.
+  const script = page.match(/<script>([\s\S]*?)<\/script>/)![1]!;
+  expect(() => new Function(script)).not.toThrow();
+});

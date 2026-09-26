@@ -1,6 +1,6 @@
 import type { SetupDraft } from "./draft";
 import type { SystemFacts, Tier } from "./system";
-import { contributeBoard, contributeBrain, contributeProvider, contributeSpeech, detectBoard, detectBrain, detectProvider, detectSpeech, parseBoard, parseBrain, parseProvider, parseSpeech, probeBoard, type PickerDeps } from "./pickers";
+import { contributeRouter, detectRouter, parseRouter, probeRouter, contributeBoard, contributeBrain, contributeProvider, contributeSpeech, detectBoard, detectBrain, detectProvider, detectSpeech, parseBoard, parseBrain, parseProvider, parseSpeech, probeBoard, type PickerDeps } from "./pickers";
 
 export interface StepContext { system: SystemFacts; draft: SetupDraft; detected?: unknown }
 export interface StepExplain { what: string; why: string; happens: string; learnMore: string }
@@ -31,6 +31,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
   { id: "provider", title: "LLM provider", available: true, pipeline: "brain",
     explain: info("The language model answers ordinary conversation.", "A running local runtime takes priority; otherwise your hardware tier supplies the starting choice.", "Only read-only endpoint probes run. Your validated model and provider go into llm.", "docs/setup.md"),
     detect: detectProvider, parseChoice: parseProvider, contribute(_ctx, c) { return contributeProvider(c as ReturnType<typeof parseProvider>); } },
+  { id: "router", title: "Intent router", available: true, pipeline: "brain",
+    explain: info("Routes requests with the default LLM prompt or an opt-in Laya sidecar. Base Laya does not route zero-shot.", "Laya requires a fine-tuned switchboard checkpoint: bring-your-own for now. A public checkpoint trained on synthetic data only plus the fine-tuning recipe are a planned follow-up.", "A read-only health probe checks Laya. Its URL goes into switchboard.intent_url; the LLM default leaves that setting unset.", "sidecars/laya-switchboard/README.md"),
+    detect: detectRouter, parseChoice: parseRouter, contribute(_ctx, c) { return contributeRouter(c as ReturnType<typeof parseRouter>); }, probeChoice: probeRouter },
   { id: "brain", title: "Brain", available: true, pipeline: "brain",
     explain: info("A coding agent handles coding work while Cicero carries your voice.", "Installed CLIs are recommended first; model-only brains cannot edit files.", "Checks PATH and --version. Your choice configures brain.", "docs/brains.md"),
     detect: detectBrain, parseChoice: parseBrain, contribute(_ctx, c) { return contributeBrain(c as ReturnType<typeof parseBrain>); } },

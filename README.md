@@ -82,6 +82,7 @@ flowchart LR
     Y((you)) -->|speech| B["browser / PWA<br/>or Telegram call"]
     B -->|audio| S["STT<br/>faster-whisper · local"]
     S -->|text| SW{"switchboard<br/>transfers · quick intents"}
+    SW -.-> LAYA["Laya router sidecar<br/>opt-in · ~30 ms · checkpoint required"]
     SW -->|turn| BR["brain lane<br/>any ACP agent"]
     BR -->|sentences| T["TTS · cloned voice<br/>per-lane · local"]
     T -->|audio| B

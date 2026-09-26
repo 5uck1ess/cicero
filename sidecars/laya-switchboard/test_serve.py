@@ -4,7 +4,7 @@ import json
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import serve
 
@@ -76,6 +76,21 @@ class FormatTests(unittest.TestCase):
 
 
 class DecodeTests(unittest.TestCase):
+    def test_off_roster_callme_names(self):
+        _, roster = serve.parse_request(request())
+        cases = [("have Morgan call me", "morgan"), ("GET build_bot-2 TO PHONE ME", "build_bot-2"),
+                 ("let build support team dial me", "build support team"),
+                 ("ask someone to ring me", None), ("call me", None),
+                 ("have Rick call me", None), ("ask CODER to ring me", None),
+                 ("have the coder call me", None), ("have one two three four call me", None)]
+        cases += [(f"ask {name} to ring me", None) for name in
+                  ("you", "somebody", "anyone", "anybody", "everyone", "them", "him", "her", "me", "us")]
+        for utterance, target in cases:
+            with self.subTest(utterance=utterance):
+                self.assertEqual(serve.from_answers(answers("callme", "nobody"), utterance, roster)["target"], target)
+        self.assertEqual(serve.from_answers(answers("callme", "coder"), "have Morgan call me", roster)["target"], "coder")
+        self.assertEqual(serve.from_answers(answers("transfer", "nobody"), "have Morgan call me", roster)["intent"], "none")
+
     def test_dict_and_attribute_answers(self):
         raw = answers()
         for ans in (raw, {k: SimpleNamespace(**v) for k, v in raw.items()}):
@@ -120,6 +135,32 @@ class DecodeTests(unittest.TestCase):
 
 class DeviceTests(unittest.TestCase):
     PAT = __import__("re").compile(r"^qwen3\.8")
+
+    def test_cpu_start_uses_checkpoint_cuda_autocast_policy(self):
+        for major, cfg, expected in ((8, {"amp_dtype": "bf16"}, "bfloat16"),
+                                     (9, {}, "float16"), (7, {"amp_dtype": "bf16"}, "float16")):
+            with self.subTest(major=major, cfg=cfg):
+                amp_dtype = Mock(side_effect=lambda name: {"bf16": "bfloat16", "fp16": "float16"}[name])
+                model = serve.LayaModel.__new__(serve.LayaModel)
+                model.lock = threading.Lock()
+                model.gpu_settings = None
+                model.torch = SimpleNamespace(float16="float16", float32="float32",
+                    device=lambda name: SimpleNamespace(type=name),
+                    cuda=SimpleNamespace(is_available=lambda: True, get_device_capability=Mock(return_value=(major, 0)),
+                                         empty_cache=Mock(), OutOfMemoryError=MemoryError))
+                model.agent = SimpleNamespace(device=SimpleNamespace(type="cpu"), cfg=cfg, model=Mock(),
+                                              dtype="float32", amp_enabled=False)
+                with patch.dict("sys.modules", {"laya.common": SimpleNamespace(amp_dtype=amp_dtype)}), contextlib.redirect_stderr(io.StringIO()):
+                    model.move("cuda")
+                    self.assertEqual((model.agent.dtype, model.agent.amp_enabled), (expected, True))
+                    model.move("cpu")
+                    self.assertEqual((model.agent.dtype, model.agent.amp_enabled), ("float32", False))
+                    model.move("cuda")
+                    self.assertEqual((model.agent.dtype, model.agent.amp_enabled), (expected, True))
+                if major >= 8:
+                    amp_dtype.assert_called_once_with(cfg.get("amp_dtype", "fp16"))
+                else:
+                    amp_dtype.assert_not_called()
 
     def test_cpu_while_qwen_loaded_or_starting(self):
         for state in ("ready", "starting"):
@@ -173,6 +214,39 @@ class ServerTests(unittest.TestCase):
                                   "request_now": True, "confidence": 0.85})
         self.assertEqual(self.seen, [("Operator said: ask Rick", serve.questions({
             "coder": {"aliases": ["Rick", "the coder"]}, "reviewer": {"aliases": []}}))])
+
+    def test_callme_passes_original_utterance_and_roster_to_decoder(self):
+        self.result = answers("callme", "nobody")
+        for utterance, target in (("have Morgan call me", "morgan"), ("ask someone to ring me", None),
+                                  ("call me", None), ("have Rick call me", None)):
+            status, result = self.exchange(request(utterance=utterance))
+            self.assertEqual(status, 200)
+            self.assertEqual(result["target"], target)
+
+    def test_stalled_connection_does_not_block_health(self):
+        entered, release, stalled_done, health_done = (threading.Event() for _ in range(4))
+        class StalledInput(io.BytesIO):
+            def readline(self, *args):
+                entered.set()
+                if not release.wait(2):
+                    raise TimeoutError()
+                return b""
+        output = io.BytesIO()
+        def connection(stream, done):
+            return SimpleNamespace(settimeout=Mock(), makefile=lambda *_: stream, sendall=output.write,
+                                   shutdown=lambda *_: None, close=done.set)
+        # Exercise the real server dispatch with injected connections; no network or model.
+        with patch("socket.socket"), serve.ThreadingHTTPServer(("127.0.0.1", 0), self.handler, bind_and_activate=False) as server:
+            self.assertTrue(server.daemon_threads)
+            try:
+                server.process_request(connection(StalledInput(), stalled_done), ("127.0.0.1", 0))
+                self.assertTrue(entered.wait(1))
+                server.process_request(connection(io.BytesIO(b"GET /health HTTP/1.0\r\n\r\n"), health_done), ("127.0.0.1", 0))
+                self.assertTrue(health_done.wait(1), "health blocked behind a stalled connection")
+                self.assertIn(b'"ok": true', output.getvalue())
+            finally:
+                release.set()
+                self.assertTrue(stalled_done.wait(2))
 
     def test_bad_request_is_400_and_not_scored(self):
         for body in (request(utterance=1), request(utterance="x" * 2001), request(roster=[None]),
