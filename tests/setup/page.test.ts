@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { brandLogo, brandMark } from "../../src/brand";
+import { detectRouter, LAYA_LANES_REQUIRED } from "../../src/setup/pickers";
+import { createDraft } from "../../src/setup/draft";
+import type { StepContext } from "../../src/setup/steps";
 import { setupPage } from "../../src/setup/page";
 import { ICON_SVG } from "../../src/web-voice/pwa";
 
@@ -60,4 +63,35 @@ test("setup page lists the router after provider with checkpoint guidance and th
   // Parse the full generated browser script, including the new picker branch.
   const script = page.match(/<script>([\s\S]*?)<\/script>/)![1]!;
   expect(() => new Function(script)).not.toThrow();
+});
+
+test("router cards disable Laya without lanes and show the office guidance", async () => {
+  const page = setupPage();
+  const draw = page.slice(page.indexOf("  function draw() {"), page.indexOf("  var fields = {};"));
+  const definitions = page.slice(page.indexOf("var ORDER ="), page.indexOf("function h("));
+  const render = new Function("f", `
+    ${definitions}
+    var id = 'router', picked = 'llm', extra = null, options = f.options;
+    var cards = [];
+    var group = { querySelectorAll: () => [], append: card => cards.push(card) };
+    var document = { createTextNode: text => ({ text }) };
+    function h(tag, attrs, children) { return { tag, ...attrs, children }; }
+    function stateLabel() { return null; }
+    function optionName(id, o) { return NAMES[o]; }
+    ${draw}
+    draw();
+    return cards;
+  `);
+  const draft = createDraft("local-cpu");
+  for (const hasLanes of [false, true]) {
+    draft.brain.lanes = hasLanes ? { coder: {} } : {};
+    const detected = await detectRouter({ draft } as StepContext);
+    const cards = render(detected);
+    const laya = cards.find((card: any) => card.children[0].value === "laya");
+    expect(laya.children[0].disabled).toBe(!hasLanes);
+    expect(laya.children[2].text).toBe("Laya sidecar (checkpoint required)");
+    expect(laya.children[3].text.includes(LAYA_LANES_REQUIRED)).toBe(!hasLanes);
+    expect(cards[0].children[0].disabled).toBe(false);
+    expect(cards[0].children[0].checked).toBe(true);
+  }
 });

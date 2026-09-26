@@ -459,13 +459,15 @@ function renderPicker(id, step) {
   function realId() { return extra && picked === extra.key ? extra.value : picked; }
   function draw() {
     group.querySelectorAll('.choice').forEach(function (n) { n.remove(); });
-    options.forEach(function (o) {
+    options.concat(Object.keys(f.disabled || {})).forEach(function (o) {
       var input = h('input', { type: 'radio', name: 'pick-' + id, value: o });
-      input.checked = o === picked;
+      input.disabled = !!(f.disabled && f.disabled[o]);
+      input.checked = !input.disabled && o === picked;
       input.onchange = function () { picked = o; drawDetail(); };
       var s = stateLabel(o, f);
       var rt = f.runtimes && f.runtimes[o];
       var note = o === 'audiocpp' ? (id === 'stt' ? 'Fast, accurate English ASR with Nemotron’s streaming model on an NVIDIA GPU; needs the audio.cpp build.' : 'Voice cloning on an NVIDIA GPU; needs the audio.cpp build.') : (NOTES[o] || '');
+      if (input.disabled) note = f.disabled[o] + ' ' + note;
       if (rt && rt.running && rt.models && rt.models.length) note += ' ' + rt.models.length + ' models loaded.';
       group.append(h('label', { class: 'choice' }, [input,
         s ? h('span', { class: 'state' + (s[1] ? ' on' : '') }, [h('i'), document.createTextNode(s[0])]) : null,

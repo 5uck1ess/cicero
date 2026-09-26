@@ -48,27 +48,25 @@ class FormatTests(unittest.TestCase):
                 "not mentioning it in the past, hypothetically, for later, or asking about it."}})
         self.assertEqual(list(serve.INTENT_DESC), serve.INTENTS)
 
-    def test_request_boundaries_accept_maximum_unicode_lengths(self):
-        lanes = [{"name": str(i) + "😀" * (128 - len(str(i))), "aliases": ["😀" * 128] * 16}
-                 for i in range(32)]
+    def test_request_accepts_large_unicode_roster(self):
+        lanes = [{"name": str(i) + "😀" * (200 - len(str(i))), "aliases": ["😀" * 200] + ["alias"] * 17}
+                 for i in range(40)]
         utterance, roster = serve.parse_request(request(utterance="😀" * 2000, roster=lanes))
         self.assertEqual(len(utterance), 2000)
-        self.assertEqual(len(roster), 32)
+        self.assertEqual(len(roster), 40)
         self.assertEqual(serve.parse_request(request(utterance="", roster=[])), ("", {}))
 
     def test_rejects_malformed_request(self):
         for body in (b"[]", b"null", b"{}", b"not json", b"\xff", b"x" * (serve.MAX_BODY_BYTES + 1),
-                     request(utterance=3), request(utterance="x" * 2001), request(roster={}),
-                     request(roster=[{"name": str(i), "aliases": []} for i in range(33)])):
+                     request(utterance=3), request(utterance="x" * 2001), request(roster={})):
             with self.subTest(body=body[:40]), self.assertRaises(ValueError):
                 serve.parse_request(body)
 
     def test_rejects_invalid_lanes_without_truncating(self):
         for lane in (None, [], {}, {"name": 3, "aliases": []}, {"name": "", "aliases": []},
-                     {"name": "x" * 129, "aliases": []}, {"name": "coder"},
+                     {"name": "coder"},
                      {"name": "coder", "aliases": "Rick"}, {"name": "coder", "aliases": [3]},
-                     {"name": "coder", "aliases": ["x" * 129]},
-                     {"name": "coder", "aliases": ["x"] * 17}, {"name": "nobody", "aliases": []}):
+                     {"name": "nobody", "aliases": []}):
             with self.subTest(lane=lane), self.assertRaises(ValueError):
                 serve.parse_request(request(roster=[lane]))
         with self.assertRaises(ValueError):
@@ -110,7 +108,7 @@ class DecodeTests(unittest.TestCase):
     def test_invalid_model_values_fail_closed(self):
         for ans in ({}, answers("unknown"), answers(confidence=float("nan")),
                     answers(confidence=float("inf")), answers(confidence=-1), answers(confidence=1.1),
-                    answers(target=1), answers(target="x" * 129)):
+                    answers(target=1)):
             with self.subTest(ans=ans), self.assertRaises((ValueError, KeyError)):
                 serve.from_answers(ans)
 
@@ -204,6 +202,18 @@ class ServerTests(unittest.TestCase):
                                   "request_now": True, "confidence": 0.85})
         self.assertEqual(self.seen, [("Operator said: ask Rick", serve.questions({
             "coder": {"aliases": ["Rick", "the coder"]}, "reviewer": {"aliases": []}}))])
+
+    def test_large_roster_and_long_target_round_trip(self):
+        lanes = [{"name": str(i) + "x" * 200, "aliases": ["a" * 200] + [str(j) for j in range(17)]}
+                 for i in range(40)]
+        self.result = answers(target=lanes[-1]["name"])
+        status, result = self.exchange(request(roster=lanes))
+        self.assertEqual(status, 200)
+        self.assertEqual(result["target"], lanes[-1]["name"])
+        criteria = self.seen[0][1]["target"]["criteria"]
+        self.assertEqual(len(criteria), 41)  # Includes nobody.
+        for lane in lanes:
+            self.assertEqual(criteria[lane["name"]], "also called " + ", ".join(lane["aliases"]))
 
     def test_stalled_connection_does_not_block_health(self):
         entered, release, stalled_done, health_done = (threading.Event() for _ in range(4))

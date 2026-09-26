@@ -78,6 +78,20 @@ test("Laya HTTP adapter posts the structured roster and returns the exact respon
   } finally { mock.mockRestore(); }
 });
 
+test("Laya HTTP adapter preserves all 17 aliases including a long alias", async () => {
+  const aliases = Array.from({ length: 17 }, (_, i) => i === 16 ? "a".repeat(200) : "alias-" + i);
+  const mock = spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    expect(JSON.parse(init!.body as string)).toEqual({
+      utterance: "ask coder", roster: [{ name: "coder", aliases }],
+    });
+    return new Response(raw());
+  });
+  try {
+    await layaIntentClassifier("http://synthetic.invalid").structured("ask coder", { coder: { aliases } }, signal());
+    expect(mock).toHaveBeenCalledTimes(1);
+  } finally { mock.mockRestore(); }
+});
+
 test("Laya HTTP errors and oversized bodies cancel streams without exposing provider text", async () => {
   for (const status of [200, 500]) {
     let cancelled = false;

@@ -40,8 +40,8 @@ keep its listener on loopback or behind a private authenticated proxy.
 {"utterance":"let me speak to Rick","roster":[{"name":"coder","aliases":["Rick","the coder"]}]}
 ```
 
-The utterance is at most 2,000 characters. The roster has at most 32 lanes, each
-with at most 16 aliases; names and aliases have at most 128 characters. Names must
+The utterance is at most 2,000 characters. Lane and alias counts and name/alias
+lengths have no separate caps; the overall body limit still applies. Names must
 be nonempty and unique; `nobody` is reserved. Invalid requests return 400. Bodies
 are capped at 1 MiB, with a five-second absolute body-read deadline. No utterances
 or model exception text are logged. Unknown paths return 404; model failures
@@ -98,3 +98,8 @@ Tests are model-free and need no Laya installation. They cover protocol bounds,
 training strings, dict/attribute decoding, the runtime call contract and device
 selection. Real-checkpoint routing accuracy, latency and GPU/CPU moves require a
 separate hardware smoke test; these are not proven by the unit tests.
+
+The setup wizard enables Laya only when the draft already has office lanes in
+`brain.lanes`. For a fresh setup, add lanes, then set `switchboard.intent_url`;
+see [the office guide](../../docs/office.md). A fine-tuned switchboard checkpoint
+is still required.

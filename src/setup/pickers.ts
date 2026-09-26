@@ -172,13 +172,21 @@ export function contributeProvider(c: ReturnType<typeof parseProvider>) {
   return { llm: { backend: c.id, baseUrl: c.baseUrl, model: c.model, ...(c.apiKey ? { apiKey: c.apiKey } : {}) } };
 }
 const ROUTER_URL = "http://127.0.0.1:8096";
-export async function detectRouter(_ctx: StepContext) {
-  return { options: ["llm", "laya"], recommended: "llm", defaultUrl: ROUTER_URL,
+export const LAYA_LANES_REQUIRED = "Needs office lanes (brain.lanes): Laya routes between employees. Add lanes, then set switchboard.intent_url — see docs/office.md.";
+function hasOfficeLanes(ctx: StepContext): boolean {
+  const lanes = ctx.draft.brain.lanes;
+  return !!lanes && typeof lanes === "object" && !Array.isArray(lanes) && Object.keys(lanes).length > 0;
+}
+export async function detectRouter(ctx: StepContext) {
+  const available = hasOfficeLanes(ctx);
+  return { options: available ? ["llm", "laya"] : ["llm"],
+    disabled: available ? {} : { laya: LAYA_LANES_REQUIRED }, recommended: "llm", defaultUrl: ROUTER_URL,
     reason: "The LLM prompt works without a separate fine-tuned switchboard checkpoint." };
 }
-export function parseRouter(raw: unknown) {
+export function parseRouter(raw: unknown, ctx: StepContext) {
   const c = choice(raw);
   const id = member(c.id, ["llm", "laya"], "intent router");
+  if (id === "laya" && !hasOfficeLanes(ctx)) throw new Error(LAYA_LANES_REQUIRED);
   return id === "llm" ? { id } : { id, url: url(c.url ?? ROUTER_URL, "intent router URL") };
 }
 export function contributeRouter(c: ReturnType<typeof parseRouter>) {

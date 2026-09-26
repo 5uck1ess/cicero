@@ -38,12 +38,9 @@ NOW_INSTR = ("The operator is requesting this action now (including polite quest
              "not mentioning it in the past, hypothetically, for later, or asking about it.")
 NOBODY = "nobody"
 
-# Covers even JSON-escaped Unicode at every field's maximum length.
+# Bound the whole request without imposing extra roster limits.
 MAX_BODY_BYTES = 1024 * 1024
 MAX_UTTERANCE = 2000
-MAX_LANES = 32
-MAX_ALIASES = 16
-MAX_STRING = 128
 HTTP_TIMEOUT = 5.0
 
 
@@ -66,7 +63,7 @@ def parse(intent: str, target: str | None, request_now: bool, confidence: float)
     none = {"intent": "none", "target": None, "request_now": False, "confidence": float(confidence)}
     if intent not in INTENTS or not math.isfinite(confidence) or not 0 <= confidence <= 1:
         raise ValueError("invalid intent answer")
-    if target is not None and (not isinstance(target, str) or len(target) > MAX_STRING):
+    if target is not None and not isinstance(target, str):
         raise ValueError("invalid target answer")
     if intent == "none":
         return none
@@ -102,19 +99,19 @@ def parse_request(body: bytes) -> tuple[str, dict]:
     utterance, lanes = data.get("utterance"), data.get("roster")
     if not isinstance(utterance, str) or len(utterance) > MAX_UTTERANCE:
         raise ValueError("invalid utterance")
-    if not isinstance(lanes, list) or len(lanes) > MAX_LANES:
+    if not isinstance(lanes, list):
         raise ValueError("invalid roster")
     roster = {}
     for lane in lanes:
         if not isinstance(lane, dict):
             raise ValueError("invalid lane")
         name, aliases = lane.get("name"), lane.get("aliases")
-        if not isinstance(name, str) or not name.strip() or len(name) > MAX_STRING:
+        if not isinstance(name, str) or not name.strip():
             raise ValueError("invalid lane name")
         if name == NOBODY or name in roster:
             raise ValueError("reserved or duplicate lane name")
-        if not isinstance(aliases, list) or len(aliases) > MAX_ALIASES or any(
-            not isinstance(alias, str) or len(alias) > MAX_STRING for alias in aliases
+        if not isinstance(aliases, list) or any(
+            not isinstance(alias, str) for alias in aliases
         ):
             raise ValueError("invalid aliases")
         roster[name] = {"aliases": aliases}
