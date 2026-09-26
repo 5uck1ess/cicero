@@ -18,9 +18,10 @@ test("structured classifier receives utterance and roster and uses all shared pa
     ["not JSON", NONE],
   ] as const;
   for (const [response, expected] of cases) {
-    const result = await classifySwitchboardIntent({ structured: async (utterance, lanes, owned) => {
+    const result = await classifySwitchboardIntent({ structured: async (utterance, lanes, owned, frontDeskAliases) => {
       expect(utterance).toBe("synthetic routing utterance");
       expect(lanes).toBe(roster);
+      expect(frontDeskAliases).toEqual(["friday"]);
       expect(owned.aborted).toBe(false);
       return response;
     } }, "synthetic routing utterance", roster, signal(), 1500, undefined, ["friday"]);
@@ -68,12 +69,12 @@ test("Laya HTTP adapter posts the structured roster and returns the exact respon
     expect(init?.redirect).toBe("error");
     expect(init?.headers).toEqual({ "Content-Type": "application/json" });
     expect(JSON.parse(init!.body as string)).toEqual({
-      utterance: "ask Rick", roster: [{ name: "coder", aliases: ["Rick"] }, { name: "reviewer", aliases: [] }],
+      front_desk_aliases: ["mara"], utterance: "ask Rick", roster: [{ name: "coder", aliases: ["Rick"] }, { name: "reviewer", aliases: [] }],
     });
     return new Response(response);
   });
   try {
-    expect(await layaIntentClassifier("http://synthetic.invalid/base/").structured("ask Rick", roster, owned)).toBe(response);
+    expect(await layaIntentClassifier("http://synthetic.invalid/base/").structured("ask Rick", roster, owned, ["mara"])).toBe(response);
     expect(mock).toHaveBeenCalledTimes(1);
   } finally { mock.mockRestore(); }
 });
@@ -82,12 +83,12 @@ test("Laya HTTP adapter preserves all 17 aliases including a long alias", async 
   const aliases = Array.from({ length: 17 }, (_, i) => i === 16 ? "a".repeat(200) : "alias-" + i);
   const mock = spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
     expect(JSON.parse(init!.body as string)).toEqual({
-      utterance: "ask coder", roster: [{ name: "coder", aliases }],
+      front_desk_aliases: [], utterance: "ask coder", roster: [{ name: "coder", aliases }],
     });
     return new Response(raw());
   });
   try {
-    await layaIntentClassifier("http://synthetic.invalid").structured("ask coder", { coder: { aliases } }, signal());
+    await layaIntentClassifier("http://synthetic.invalid").structured("ask coder", { coder: { aliases } }, signal(), []);
     expect(mock).toHaveBeenCalledTimes(1);
   } finally { mock.mockRestore(); }
 });
@@ -101,7 +102,7 @@ test("Laya HTTP errors and oversized bodies cancel streams without exposing prov
     });
     const mock = spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status }));
     try {
-      await expect(layaIntentClassifier("http://synthetic.invalid").structured("hi", roster, signal()))
+      await expect(layaIntentClassifier("http://synthetic.invalid").structured("hi", roster, signal(), []))
         .rejects.toThrow("switchboard classifier request failed");
       expect(cancelled).toBe(true);
       expect(mock).toHaveBeenCalledTimes(1);
@@ -137,7 +138,7 @@ for (const useLaya of [true, false]) {
       const body = JSON.parse(init!.body as string);
       if (useLaya) {
         expect(String(url)).toBe("http://laya.invalid/v1/switchboard");
-        expect(body).toEqual({ utterance: "ask Rick", roster: [{ name: "coder", aliases: ["Rick"] }, { name: "reviewer", aliases: [] }] });
+        expect(body).toEqual({ front_desk_aliases: ["mara"], utterance: "ask Rick", roster: [{ name: "coder", aliases: ["Rick"] }, { name: "reviewer", aliases: [] }] });
         return new Response(raw());
       }
       expect(String(url)).toBe("http://gemma.invalid/v1/chat/completions");
@@ -150,15 +151,15 @@ for (const useLaya of [true, false]) {
       const config = {
         brain: { backend: "acp", lanes: { coder: { aliases: ["Rick"] } } },
         raw: {
-          switchboard: useLaya ? { intent_url: "http://laya.invalid" } : undefined,
+          switchboard: useLaya ? { intent_url: "http://laya.invalid", front_desk_aliases: ["mara"] } : undefined,
           web_voice: { tldr: { summarizer_url: "http://gemma.invalid/v1", summarizer_model: "gemma" } },
         },
       } as unknown as RuntimeConfig;
       const brain = createBrain(config);
       expect(brain).toBeInstanceOf(SwitchboardBrain);
       // Inspect the factory's selected classifier without starting an ACP process.
-      const classifier = (brain as unknown as { classify: IntentClassifier }).classify;
-      expect(await classifySwitchboardIntent(classifier, "ask Rick", roster, signal())).toMatchObject({ intent: "transfer", target: "coder" });
+      const { classify: classifier, frontDeskAliases } = brain as unknown as { classify: IntentClassifier; frontDeskAliases: readonly string[] };
+      expect(await classifySwitchboardIntent(classifier, "ask Rick", roster, signal(), 1500, undefined, frontDeskAliases)).toMatchObject({ intent: "transfer", target: "coder" });
       expect(mock).toHaveBeenCalledTimes(1);
     } finally { mock.mockRestore(); }
   });

@@ -109,13 +109,14 @@ export function summarizerClassifier(
 /** The switchboard owns the deadline, including the bounded response body read. */
 export function layaIntentClassifier(url: string): Exclude<IntentClassifier, Function> {
   return {
-    async structured(utterance, roster, signal) {
+    async structured(utterance, roster, signal, frontDeskAliases) {
       try {
         const res = await fetch(`${url.replace(/\/+$/, "")}/v1/switchboard`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             utterance,
+            front_desk_aliases: frontDeskAliases,
             roster: Object.entries(roster).map(([name, lane]) => ({ name, aliases: lane.aliases ?? [] })),
           }),
           signal,

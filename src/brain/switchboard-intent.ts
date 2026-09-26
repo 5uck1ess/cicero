@@ -9,7 +9,7 @@ export interface SwitchboardIntent {
   confidence: number;
 }
 export type IntentClassifier = ((prompt: string, signal?: AbortSignal) => Promise<string>) | {
-  structured: (utterance: string, roster: IntentRoster, signal: AbortSignal) => Promise<string>;
+  structured: (utterance: string, roster: IntentRoster, signal: AbortSignal, frontDeskAliases: readonly string[]) => Promise<string>;
 };
 export type IntentRoster = Record<string, { aliases?: string[] }>;
 export const DEFAULT_FRONT_DESK_ALIASES = ["cicero", "jarvis"] as const;
@@ -127,7 +127,7 @@ export async function classifySwitchboardIntent(
         controller.signal.throwIfAborted();
         return typeof classify === "function"
           ? classify(intentPrompt(utterance, roster, frontDeskAliases), controller.signal)
-          : classify.structured(utterance, roster, controller.signal);
+          : classify.structured(utterance, roster, controller.signal, frontDeskAliases);
       }), aborted,
     ]);
     controller.signal.throwIfAborted();

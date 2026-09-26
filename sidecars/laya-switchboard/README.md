@@ -37,12 +37,18 @@ keep its listener on loopback or behind a private authenticated proxy.
 `POST /v1/switchboard` takes:
 
 ```json
-{"utterance":"let me speak to Rick","roster":[{"name":"coder","aliases":["Rick","the coder"]}]}
+{"utterance":"let me speak to Rick","roster":[{"name":"coder","aliases":["Rick","the coder"]}],"front_desk_aliases":["mara"]}
 ```
 
 The utterance is at most 2,000 characters. Lane and alias counts and name/alias
 lengths have no separate caps; the overall body limit still applies. Names must
-be nonempty and unique; `nobody` is reserved. Invalid requests return 400. Bodies
+be nonempty and unique. A lane named `nobody` uses a unique internal choice key
+such as `nobody (employee)` (with a numeric suffix if needed), preserving its alias
+description. Its selected key maps back to the real lane name `nobody` in the
+response; the trained `nobody` no-target option and its description stay unchanged.
+The optional `front_desk_aliases` is a list of strings, defaulting to `[]` when
+absent; Cicero sends the configured front-desk aliases. Invalid requests, including
+an incorrectly typed aliases field or member, return 400. Bodies
 are capped at 1 MiB, with a five-second absolute body-read deadline. No utterances
 or model exception text are logged. Unknown paths return 404; model failures
 return a generic 500. Daemon request threads keep slow connections from blocking
@@ -55,13 +61,20 @@ A successful response contains exactly these four fields:
 ```
 
 The six intents are `transfer`, `release`, `rollcall`, `standup`, `callme`, and
-`none`. Confidence is the selected intent's probability. The target `nobody`
+`none`. Confidence is the selected intent's probability. The model's no-target choice `nobody`
 becomes null; targets resolve only against the supplied roster, as in Cicero's
 intent prompt, so an off-roster "have Morgan call me" is a plain call-me. Only
 transfer and callme retain targets. Only callme uses the noul
 head (`> 0.5`) for `request_now`; all other actions force it true. None and a
 transfer without a target return none/null/false, retaining the model probability
 on the wire (Cicero normalizes these to its existing zero-confidence `NONE`).
+
+After decoding, a `transfer` with the no-target choice becomes
+`release`/null/true if the utterance contains a front-desk alias as a whole word or
+phrase, ignoring case and normalizing whitespace. An alias that is also a roster
+name or alias cannot trigger this conversion. The response retains the transfer
+intent probability. Other cases follow the rules above. Front-desk aliases are
+never added to the model questions.
 
 The questions and whitespace-normalized, 500-character `Operator said: ...`
 state in `serve.py` are the exact strings the checkpoint was trained on. Inference calls

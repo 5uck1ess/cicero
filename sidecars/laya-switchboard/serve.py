@@ -44,8 +44,24 @@ MAX_UTTERANCE = 2000
 HTTP_TIMEOUT = 5.0
 
 
+def target_choices(roster: dict) -> dict[str, str]:
+    """Internal model choice -> real lane name, preserving the trained no-target option."""
+    choices = {}
+    for name in roster:
+        key = name
+        if key == NOBODY:
+            key = "nobody (employee)"
+            suffix = 2
+            while key in roster:
+                key = f"nobody (employee {suffix})"
+                suffix += 1
+        choices[key] = name
+    return choices
+
+
 def questions(roster: dict) -> dict:
-    tgt = {name: "also called " + ", ".join(l.get("aliases") or [name]) for name, l in roster.items()}
+    tgt = {key: "also called " + ", ".join(roster[name].get("aliases") or [name])
+           for key, name in target_choices(roster).items()}
     tgt[NOBODY] = "no particular employee is named or meant"
     return {
         "intent": {"type": "choice", "instructions": INTENT_INSTR, "criteria": dict(INTENT_DESC)},
@@ -73,7 +89,18 @@ def parse(intent: str, target: str | None, request_now: bool, confidence: float)
             "request_now": bool(request_now), "confidence": float(confidence)}
 
 
-def from_answers(ans: dict) -> dict:
+def mentions_front_desk(utterance: str, roster: dict, aliases: list[str]) -> bool:
+    normalize = lambda text: " ".join(text.casefold().split())
+    employees = {normalize(ref) for name, lane in roster.items()
+                 for ref in [name, *lane.get("aliases", [])]}
+    text = normalize(utterance)
+    return any(alias and alias not in employees and
+               re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", text)
+               for alias in map(normalize, aliases))
+
+
+def from_answers(ans: dict, roster: Optional[dict] = None, utterance: str = "",
+                 front_desk_aliases: Optional[list[str]] = None) -> dict:
     """Laya/Jev answers -> parsed intent. ans values expose .choice/.probabilities/.noul (dict or attrs)."""
     g = lambda a, k: a[k] if isinstance(a, dict) else getattr(a, k)
     ia, ta, na = ans["intent"], ans["target"], ans["request_now"]
@@ -84,12 +111,16 @@ def from_answers(ans: dict) -> dict:
     # an off-roster "have Morgan call me" is a plain call-me with no target.
     if target == NOBODY:
         target = None
+        if intent == "transfer" and mentions_front_desk(utterance, roster or {}, front_desk_aliases or []):
+            intent = "release"
+    elif roster is not None:
+        target = target_choices(roster)[target]
     # Only callme has a deferred form ("call me when ..."); every other action is a present request
     # in the teacher data (Fable never labels them request_now=false), so don't let the head veto it.
     now = float(g(na, "noul")) > 0.5 if intent == "callme" else True
     return parse(intent, target, now, conf)
 
-def parse_request(body: bytes) -> tuple[str, dict]:
+def parse_request(body: bytes) -> tuple[str, dict, list[str]]:
     """Validate before retaining or passing any request data to the model."""
     if len(body) > MAX_BODY_BYTES:
         raise ValueError("body too large")
@@ -101,6 +132,11 @@ def parse_request(body: bytes) -> tuple[str, dict]:
         raise ValueError("invalid utterance")
     if not isinstance(lanes, list):
         raise ValueError("invalid roster")
+    front_desk_aliases = data.get("front_desk_aliases", [])
+    if not isinstance(front_desk_aliases, list) or any(
+        not isinstance(alias, str) for alias in front_desk_aliases
+    ):
+        raise ValueError("invalid front desk aliases")
     roster = {}
     for lane in lanes:
         if not isinstance(lane, dict):
@@ -108,14 +144,14 @@ def parse_request(body: bytes) -> tuple[str, dict]:
         name, aliases = lane.get("name"), lane.get("aliases")
         if not isinstance(name, str) or not name.strip():
             raise ValueError("invalid lane name")
-        if name == NOBODY or name in roster:
-            raise ValueError("reserved or duplicate lane name")
+        if name in roster:
+            raise ValueError("duplicate lane name")
         if not isinstance(aliases, list) or any(
             not isinstance(alias, str) for alias in aliases
         ):
             raise ValueError("invalid aliases")
         roster[name] = {"aliases": aliases}
-    return utterance, roster
+    return utterance, roster, front_desk_aliases
 
 
 Scorer = Callable[[str, dict], dict]
@@ -253,13 +289,14 @@ def make_handler(score: Scorer, model_name: str, device: Callable[[], str] = lam
                         raise ValueError("incomplete body")
                     body.extend(chunk)
                 self.connection.settimeout(HTTP_TIMEOUT)
-                utterance, roster = parse_request(body)
+                utterance, roster, front_desk_aliases = parse_request(body)
             except (ValueError, OSError, RecursionError):
                 self._send(400, {"error": "invalid request"})
                 return
             try:
                 with lock:
-                    result = from_answers(score(state(utterance), questions(roster)))
+                    result = from_answers(score(state(utterance), questions(roster)),
+                                          roster, utterance, front_desk_aliases)
             except Exception:  # never expose provider errors or transcript text
                 self._send(500, {"error": "classification failed"})
                 return

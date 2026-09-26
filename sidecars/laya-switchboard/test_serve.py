@@ -27,7 +27,7 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(serve.state("x" * 2000), "Operator said: " + "x" * 500)
 
     def test_questions_match_training(self):
-        _, roster = serve.parse_request(request())
+        _, roster, _ = serve.parse_request(request())
         self.assertEqual(serve.questions(roster), {
             "intent": {"type": "choice", "instructions":
                 "Which switchboard action does the operator want? Interpret meaning, paraphrases and speech "
@@ -51,10 +51,10 @@ class FormatTests(unittest.TestCase):
     def test_request_accepts_large_unicode_roster(self):
         lanes = [{"name": str(i) + "😀" * (200 - len(str(i))), "aliases": ["😀" * 200] + ["alias"] * 17}
                  for i in range(40)]
-        utterance, roster = serve.parse_request(request(utterance="😀" * 2000, roster=lanes))
+        utterance, roster, _ = serve.parse_request(request(utterance="😀" * 2000, roster=lanes))
         self.assertEqual(len(utterance), 2000)
         self.assertEqual(len(roster), 40)
-        self.assertEqual(serve.parse_request(request(utterance="", roster=[])), ("", {}))
+        self.assertEqual(serve.parse_request(request(utterance="", roster=[])), ("", {}, []))
 
     def test_rejects_malformed_request(self):
         for body in (b"[]", b"null", b"{}", b"not json", b"\xff", b"x" * (serve.MAX_BODY_BYTES + 1),
@@ -65,8 +65,7 @@ class FormatTests(unittest.TestCase):
     def test_rejects_invalid_lanes_without_truncating(self):
         for lane in (None, [], {}, {"name": 3, "aliases": []}, {"name": "", "aliases": []},
                      {"name": "coder"},
-                     {"name": "coder", "aliases": "Rick"}, {"name": "coder", "aliases": [3]},
-                     {"name": "nobody", "aliases": []}):
+                     {"name": "coder", "aliases": "Rick"}, {"name": "coder", "aliases": [3]}):
             with self.subTest(lane=lane), self.assertRaises(ValueError):
                 serve.parse_request(request(roster=[lane]))
         with self.assertRaises(ValueError):
@@ -202,6 +201,62 @@ class ServerTests(unittest.TestCase):
                                   "request_now": True, "confidence": 0.85})
         self.assertEqual(self.seen, [("Operator said: ask Rick", serve.questions({
             "coder": {"aliases": ["Rick", "the coder"]}, "reviewer": {"aliases": []}}))])
+
+    def test_nobody_lane_and_no_target_are_distinct(self):
+        for occupied in ([], ["nobody (employee)", "nobody (employee 2)"]):
+            lanes = [{"name": "nobody", "aliases": ["Rick"]}]
+            lanes += [{"name": name, "aliases": []} for name in occupied]
+            key = "nobody (employee 3)" if occupied else "nobody (employee)"
+            for choice, intent, target in ((key, "transfer", "nobody"),
+                                            (serve.NOBODY, "none", None)):
+                with self.subTest(occupied=occupied, choice=choice):
+                    self.result = answers(target=choice)
+                    status, result = self.exchange(request(roster=lanes))
+                    self.assertEqual(status, 200)
+                    self.assertEqual(result, {"intent": intent, "target": target,
+                                             "request_now": intent != "none", "confidence": 0.85})
+                    criteria = self.seen[-1][1]["target"]["criteria"]
+                    self.assertEqual(len(criteria), len(lanes) + 1)
+                    self.assertEqual(criteria[key], "also called Rick")
+                    self.assertEqual(criteria[serve.NOBODY], "no particular employee is named or meant")
+                    for name in occupied:
+                        self.assertEqual(criteria[name], "also called " + name)
+        self.assertEqual(self.exchange(request(roster=[lanes[0], lanes[0]]))[0], 400)
+
+    def test_front_desk_transfer_without_target_becomes_release(self):
+        cases = [
+            ("I'd like Mara's ear", ["mara"], "release"),
+            ("I'd like Mara's ear", ["june"], "none"),
+            ("I'd like Mara's ear", [], "none"),
+            ("I'd like Rick's ear", ["rick"], "none"),
+            ("I'd like coder's ear", [" CODER "], "none"),
+            ("I'd like THE   CODER's ear", ["the\tcoder"], "none"),
+            ("I'd like marathon's ear", ["mara"], "none"),
+            ("I'd like Mara's ear", [""], "none"),
+            ("I'd like MAIN\n DESK's ear", [" main  desk "], "release"),
+        ]
+        for utterance, aliases, intent in cases:
+            with self.subTest(utterance=utterance, aliases=aliases):
+                self.result = answers(target=serve.NOBODY)
+                status, result = self.exchange(request(utterance=utterance, front_desk_aliases=aliases))
+                self.assertEqual(status, 200)
+                self.assertEqual(result, {"intent": intent, "target": None,
+                                         "request_now": intent == "release", "confidence": 0.85})
+                self.assertEqual(self.seen[-1][1], serve.questions({
+                    lane["name"]: {"aliases": lane["aliases"]} for lane in ROSTER}))
+
+    def test_front_desk_rule_requires_transfer_and_no_target(self):
+        for intent, target in (("callme", serve.NOBODY), ("none", serve.NOBODY), ("transfer", "coder")):
+            self.result = answers(intent, target, now=0.1)
+            status, result = self.exchange(request(utterance="I'd like Mara's ear", front_desk_aliases=["mara"]))
+            self.assertEqual(status, 200)
+            self.assertEqual(result, serve.from_answers(self.result))
+
+    def test_front_desk_aliases_wrong_type_is_400(self):
+        for aliases in (None, "mara", {}, 1, ["mara", 1]):
+            with self.subTest(aliases=aliases):
+                self.assertEqual(self.exchange(request(front_desk_aliases=aliases))[0], 400)
+        self.assertEqual(self.seen, [])
 
     def test_large_roster_and_long_target_round_trip(self):
         lanes = [{"name": str(i) + "x" * 200, "aliases": ["a" * 200] + [str(j) for j in range(17)]}
