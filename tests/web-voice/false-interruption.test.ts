@@ -62,6 +62,7 @@ function browser() {
     falseInterruption = new FalseInterruption(1500, clock);
     return { audio, sent, pause: pauseForBarge, finish: finishBarge, stop: stopPlayback,
       recording() { state = "speech"; },
+      newCapture(id) { captureTurnId = id; state = "speech"; },
       disconnect() { ${disconnect} },
       originalError() { onWsMessage({ data: JSON.stringify({ type: "error", turnId: "reply", sessionId: "session", message: "provider failed" }) }); },
       originalDoneDuringCapture() { playing = false; currentAudio = null; state = 'speech'; onWsMessage({ data: JSON.stringify({ type: 'done', turnId: 'reply', sessionId: 'session' }) }); },
@@ -70,7 +71,7 @@ function browser() {
       snapshot() { return { activeTurnId, paused: playbackPaused, queued: audioQueue.length, state }; } };
   `)(clock) as {
     audio: { currentTime: number; paused: boolean; plays: number };
-    recording(): void; disconnect(): void; originalError(): void; originalDoneDuringCapture(): void; rejectPlaybackLater(): () => void;
+    newCapture(id: string): void; recording(): void; disconnect(): void; originalError(): void; originalDoneDuringCapture(): void; rejectPlaybackLater(): () => void;
     sent: unknown[]; pause(): boolean; submitted(): void; finish(msg: unknown): void; stop(): void;
     snapshot(): { activeTurnId: string | null; paused: boolean; queued: number; state: string };
   };
@@ -132,4 +133,24 @@ test('an original reply error preserves paused audio for noise recovery', () => 
   page.finish({ captureId: 'capture', accepted: false });
   expect(page.snapshot()).toMatchObject({ activeTurnId: 'reply', paused: false, queued: 1 });
   expect(page.audio.plays).toBe(1);
+});
+
+
+test('resumed play rejection cannot clear a newer capture on the same reply', async () => {
+  const page = browser(); const reject = page.rejectPlaybackLater();
+  page.pause(); page.submitted(); page.expire();
+  page.newCapture('second'); page.pause();
+  reject(); await Promise.resolve();
+  expect(page.snapshot()).toMatchObject({ activeTurnId: 'reply', paused: true, state: 'speech' });
+  page.finish({ captureId: 'second', accepted: true, turnId: 'replacement' });
+  expect(page.snapshot().activeTurnId).toBe('replacement');
+});
+
+
+test('a current resume rejection still releases playback after an empty transcript', async () => {
+  const page = browser(); const reject = page.rejectPlaybackLater();
+  page.pause(); page.submitted();
+  page.finish({ captureId: 'capture', accepted: false });
+  reject(); await Promise.resolve();
+  expect(page.snapshot()).toMatchObject({ activeTurnId: null, queued: 0, state: 'listening' });
 });

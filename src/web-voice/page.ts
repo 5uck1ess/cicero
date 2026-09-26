@@ -507,13 +507,13 @@ function watchBargeIn(buf) {
 }
 
 const FalseInterruption = ${FalseInterruption.toString()};
-let falseInterruption = null, tentativeBarge = null, playbackPaused = false;
+let falseInterruption = null, tentativeBarge = null, playbackPaused = false, playbackGeneration = 0;
 function pauseForBarge() {
   if (!falseInterruption || !activeTurnId || !ws || ws.readyState !== 1) return false;
   falseInterruption.cancel();
   playbackPaused = true;
   if (currentAudio) currentAudio.pause();
-  const pending = { id: captureTurnId, turnId: activeTurnId, token: 0 };
+  const pending = { id: captureTurnId, turnId: activeTurnId, token: 0, generation: ++playbackGeneration };
   tentativeBarge = pending;
   pending.token = falseInterruption.start(() => resumeBarge(pending));
   // This capture is transcribed before it can acquire a replacement turn.
@@ -528,7 +528,7 @@ function resumeBarge(pending) {
   if (currentAudio) {
     const audio = currentAudio;
     audio.play().catch(() => {
-      if (currentAudio !== audio || activeTurnId !== pending.turnId) return;
+      if (playbackGeneration !== pending.generation || currentAudio !== audio || activeTurnId !== pending.turnId) return;
       abortActiveTurn(); stopPlayback(); resumeListening();
     });
   }
@@ -777,6 +777,7 @@ function playNext() {
 // Stop the reply mid-stream (barge-in or conversation stop): kill the playing clip,
 // drop anything queued, and forget the in-flight turn so a stale {done} can't resume us.
 function stopPlayback() {
+  playbackGeneration++;
   falseInterruption?.cancel(); tentativeBarge = null; playbackPaused = false;
   for (const item of audioQueue) sendAudioAck(item, "interrupted", 0);
   audioQueue = [];

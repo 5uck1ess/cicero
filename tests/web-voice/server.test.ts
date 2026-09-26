@@ -2871,3 +2871,34 @@ for (const protocol of [1, 2] as const) {
     } finally { ws.close(); }
   });
 }
+
+test('a second Telegram capture supersedes the first pending transcription', async () => {
+  const firstStt = deferred<string>();
+  const firstStarted = deferred();
+  const transcripts: string[] = [];
+  let calls = 0;
+  const base = start({
+    onBargeTranscribe: async () => {
+      if (++calls === 1) { firstStarted.resolve(); return firstStt.promise; }
+      return 'second utterance';
+    },
+    onStreamTurn: async (_wav, sink, options) => {
+      const text = await options!.streamFinal!;
+      transcripts.push(text);
+      sink.transcript(text); sink.done();
+    },
+  });
+  const ws = await connect(base);
+  try {
+    ws.send(JSON.stringify({ type: 'barge_in', captureId: 'first' }));
+    ws.send(wav());
+    await firstStarted.promise;
+    const next = nextJson(ws, m => m.type === 'transcript');
+    ws.send(JSON.stringify({ type: 'barge_in', captureId: 'second' }));
+    ws.send(wav());
+    expect(await next).toMatchObject({ text: 'second utterance' });
+    firstStt.resolve('stale first utterance');
+    await handle!.stop(); handle = null;
+    expect(transcripts).toEqual(['second utterance']);
+  } finally { firstStt.resolve(''); ws.close(); }
+});

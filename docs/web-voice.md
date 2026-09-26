@@ -234,7 +234,11 @@ but cannot replace a newer turn. Long utterances or slow STT can therefore allow
 playback to resume before recognition finishes. Recognition failures preserve
 the old reply. The recognition deadline is 15 seconds, with provider work owned
 until it settles; capture ownership also expires after the maximum utterance
-window. Paused audio remains subject to the existing queue limits.
+window. Paused audio remains bounded. The browser uses its existing playback
+limits; Telegram retains at most 64 queued clips and 16 MiB of decoded mono PCM
+(plus the current clip). Its reader never waits behind playback: control frames
+must remain visible while audio is paused. Overflow discards buffered speech and
+reconnects, rather than delaying a confirmed interruption behind old clips.
 
 Live smoke check (requires microphone and Telegram call access): start a long
 reply, make a short noise with no recognized words, and verify it continues from

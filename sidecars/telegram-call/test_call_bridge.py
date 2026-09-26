@@ -21,6 +21,7 @@ import types
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _module(name: str, **attrs: object) -> types.ModuleType:
@@ -108,6 +109,10 @@ class FakeDaemonSocket:
     def __init__(self) -> None:
         self._queue: asyncio.Queue = asyncio.Queue()
         self.closed = False
+        self.sent = []
+
+    async def send(self, message):
+        self.sent.append(message)
 
     def __aiter__(self) -> "FakeDaemonSocket":
         return self
@@ -164,6 +169,98 @@ class FakeBargeClock:
 
 
 class BridgePlaybackLifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_second_wav_supersedes_pending_recognition_after_playback_finishes(self):
+        bridge = make_bridge(FakeCalls())
+        bridge.ws = FakeDaemonSocket()
+        bridge.barge_timeout = 1.5
+        bridge._pause_barge(FakeBargeClock())
+        first = bridge.barge_id
+        try:
+            with patch.object(call_agent, "resample", side_effect=lambda pcm, *_: pcm), patch.object(call_agent, "pcm_to_wav", return_value=b"wav"):
+                await bridge._send_utterance(clip(b"first"))
+                # All original playback and turn accounting are now settled.
+                bridge.sent_turns = bridge.done_turns = 1
+                self.assertTrue(bridge._busy(), "pending recognition still owns the voice input")
+                await bridge._send_utterance(clip(b"second"))
+            self.assertNotEqual(bridge.barge_id, first)
+            self.assertEqual(json.loads(bridge.ws.sent[-2]), {"type": "barge_in", "captureId": bridge.barge_id})
+            self.assertEqual(bridge.ws.sent[-1], b"wav")
+            bridge.reader = asyncio.create_task(bridge._read_loop())
+            await bridge.ws._queue.put(json.dumps({"type": "barge_result", "captureId": first, "accepted": True}))
+            await bridge.ws._queue.put(json.dumps({"type": "barge_result", "captureId": bridge.barge_id, "accepted": True}))
+            await eventually(lambda: bridge.barge_id is None)
+            self.assertEqual(bridge.sent_turns, bridge.done_turns + 1)
+        finally:
+            await bridge.close()
+
+    async def test_accepted_control_is_read_while_paused_audio_backlog_grows(self):
+        calls = FakeCalls()
+        calls.connected = True
+        bridge = make_bridge(calls)
+        bridge.ws = FakeDaemonSocket()
+        bridge.barge_timeout = 1.5
+        clock = FakeBargeClock()
+        bridge._pause_barge(clock)
+        candidate = bridge.barge_id
+        try:
+            bridge.start_player()
+            await bridge.speak(clip(b"paused"))
+            await eventually(lambda: bridge.playing)
+            for _ in range(4):
+                await bridge.speak(clip(b"queued"))
+            with patch.object(call_agent, "wav_to_pcm", return_value=(clip(b"fifth"), call_agent.CALL_RATE)), patch.object(call_agent, "resample", side_effect=lambda pcm, *_: pcm):
+                bridge.reader = asyncio.create_task(bridge._read_loop())
+                await bridge.ws._queue.put(b"wav")
+                await bridge.ws._queue.put(json.dumps({"type": "barge_result", "captureId": candidate, "accepted": True}))
+                await eventually(lambda: bridge.barge_id is None, timeout=0.2,
+                                 message="acceptance must not wait for old audio to play")
+                clock.advance()
+                await settle()
+            self.assertEqual(calls.sent, [])
+            self.assertTrue(bridge.playq.empty())
+        finally:
+            await bridge.close()
+
+    async def test_playback_mailbox_byte_and_clip_caps_release_on_consumption(self):
+        queue = call_agent.PlaybackQueue()
+        queue.MAX_PCM_BYTES = 12
+        queue.put_nowait(clip(b"abc"))
+        self.assertEqual(queue.pcm_bytes, 6)
+        with self.assertRaises(asyncio.QueueFull):
+            queue.put_nowait(clip(b"abcd"))
+        self.assertEqual(queue.pcm_bytes, 6)
+        queue.get_nowait()
+        self.assertEqual(queue.pcm_bytes, 0)
+        for _ in range(queue.maxsize):
+            queue.put_nowait(clip(b""))
+        with self.assertRaises(asyncio.QueueFull):
+            queue.put_nowait(clip(b""))
+        while not queue.empty():
+            queue.get_nowait()
+        self.assertEqual(queue.pcm_bytes, 0)
+
+    async def test_reader_overflow_cancels_pause_and_closes_old_socket(self):
+        calls = FakeCalls()
+        calls.connected = True
+        bridge = make_bridge(calls)
+        socket = bridge.ws = FakeDaemonSocket()
+        bridge.barge_timeout = 1.5
+        clock = FakeBargeClock()
+        bridge._pause_barge(clock)
+        bridge.playq.MAX_PCM_BYTES = 2
+        try:
+            with patch.object(call_agent, "wav_to_pcm", return_value=(clip(b"too big"), call_agent.CALL_RATE)), patch.object(call_agent, "resample", side_effect=lambda pcm, *_: pcm):
+                bridge.reader = asyncio.create_task(bridge._read_loop())
+                await socket._queue.put(b"wav")
+                await eventually(lambda: socket.closed)
+                clock.advance()
+            self.assertIsNone(bridge.barge_id)
+            self.assertTrue(bridge.playq.empty())
+            self.assertEqual(bridge.playq.pcm_bytes, 0)
+            self.assertEqual(calls.sent, [])
+        finally:
+            await bridge.close()
+
     async def test_noise_resumes_same_pcm_offset_without_resynthesis(self):
         calls = FakeCalls()
         calls.connected = True
