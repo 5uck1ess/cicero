@@ -2815,7 +2815,8 @@ for (const protocol of [1, 2] as const) {
       const accepted = nextJson(ws, m => m.type === 'barge_result');
       const transcript = nextJson(ws, m => m.type === 'transcript');
       send('speech');
-      expect(await accepted).toMatchObject({ accepted: true });
+      // v2 clients adopt this id as the live turn; a null here strands them.
+      expect(await accepted).toMatchObject(protocol === 2 ? { accepted: true, turnId: 'speech' } : { accepted: true });
       expect(await transcript).toMatchObject({ text: result });
       expect(originalSignal!.aborted).toBe(true);
       expect(invocations).toBe(2);

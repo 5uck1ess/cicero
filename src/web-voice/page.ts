@@ -541,7 +541,9 @@ function finishBarge(msg) {
   if (msg.accepted) {
     clientMetric(pending.turnId, "barge_in");
     stopPlayback();
-    activeTurnId = msg.turnId;
+    // The accepted turn is the capture this page uploaded; never adopt a
+    // missing id, which would drop every frame of the reply.
+    activeTurnId = pending.id;
     setState("thinking"); setStatus("thinking…");
   } else {
     resumeBarge(pending);
