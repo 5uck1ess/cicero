@@ -442,7 +442,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     checkKnownKeys(config.brain, "brain", [
       "backend", "mode", "target_tab", "auto_approve_tools", "confirm_tools", "confirm_retry",
       "max_queue_bytes", "max_response_bytes", "max_pending_turns", "mcp_servers", "session_resume", "session_resume_max_age_hours", "escalate", "lanes",
-      "history_compaction",
+      "history_compaction", "idle_compact",
       "binary", "binary_args", "ollama_port", "ollama_model",
       "base_url", "model", "api_key", "api_key_env", "max_tokens", "timeout_ms", "turn_timeout_ms",
       "headers", "session_header", "narrate_progress", "unset_env", "agent_first", "thinking_filler", "tool_start_notice",
@@ -461,6 +461,21 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     checkOptionalBoolean(config.brain, "session_resume", "brain", issues);
     if (config.brain.session_resume_max_age_hours !== undefined) {
       checkNumber(config.brain.session_resume_max_age_hours, "brain.session_resume_max_age_hours", issues, { min: 0, max: 720, minExclusive: true });
+    }
+    const idleCompact = config.brain.idle_compact;
+    if (idleCompact !== undefined && checkRecord(idleCompact, "brain.idle_compact", issues)) {
+      checkKnownKeys(idleCompact, "brain.idle_compact", ["command", "idle_minutes", "min_usage"], issues);
+      checkString(idleCompact.command, "brain.idle_compact.command", issues);
+      if (typeof idleCompact.command === "string" && idleCompact.command.length > 256) {
+        issues.push("brain.idle_compact.command must be at most 256 characters");
+      }
+      if (idleCompact.idle_minutes !== undefined) {
+        checkNumber(idleCompact.idle_minutes, "brain.idle_compact.idle_minutes", issues, { min: 1, max: 1440 });
+      }
+      if (idleCompact.min_usage !== undefined) {
+        checkNumber(idleCompact.min_usage, "brain.idle_compact.min_usage", issues, { min: 0, max: 1, minExclusive: true });
+      }
+      if (config.brain.backend !== "acp") issues.push("brain.idle_compact requires the acp backend");
     }
     if ((config.brain.session_resume !== undefined || config.brain.session_resume_max_age_hours !== undefined) && config.brain.backend !== "acp") {
       issues.push("brain.session_resume and brain.session_resume_max_age_hours require the acp backend");

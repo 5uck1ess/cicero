@@ -40,6 +40,22 @@ test("ACP session resume settings validate on every ACP brain", () => {
   expect(() => loadYaml("brain:\n  backend: acp\n  lanes:\n    coder: { backend: codex, session_resume: true }\n")()).toThrow(/require an acp lane/);
 });
 
+test("ACP idle compaction settings validate", () => {
+  const valid = loadYaml("brain:\n  backend: acp\n  idle_compact: { command: /compress, idle_minutes: 5, min_usage: 0.35 }\n")();
+  expect(valid.brain.idle_compact).toEqual({ command: "/compress", idle_minutes: 5, min_usage: 0.35 });
+  for (const bad of [
+    "{ idle_minutes: 5 }",
+    "{ command: '' }",
+    "{ command: /compress, idle_minutes: 0 }",
+    "{ command: /compress, min_usage: 0 }",
+    "{ command: /compress, min_usage: 1.5 }",
+    "{ command: /compress, every: 5 }",
+  ]) {
+    expect(() => loadYaml(`brain:\n  backend: acp\n  idle_compact: ${bad}\n`)()).toThrow(/idle_compact/);
+  }
+  expect(() => loadYaml("brain:\n  backend: codex\n  idle_compact: { command: /compress }\n")()).toThrow(/requires the acp backend/);
+});
+
 describe("Config — default values", () => {
   const config = loadConfig();
 

@@ -308,6 +308,9 @@ export interface BrainConfig {
   mcp_servers?: AcpMcpServerConfig[]; // acp: bounded stdio MCP servers for the front desk
   session_resume?: boolean; // acp: resume a recent stored session (default true)
   session_resume_max_age_hours?: number; // acp: maximum idle age before a new session (default 12; max 720)
+  // acp: send the agent's own compaction command (e.g. hermes "/compress") after
+  // idle_minutes without a turn, when its reported context usage >= min_usage.
+  idle_compact?: { command: string; idle_minutes?: number; min_usage?: number };
   // Background history compaction: when the replayed transcript crosses its cap,
   // summarize the older half through a small local model instead of dropping it.
   // Off by default. Without a summarizer_url here it falls back to the one under

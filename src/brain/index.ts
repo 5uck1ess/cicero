@@ -223,6 +223,13 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
       maxPendingTurns: max_pending_turns,
       onConfirmationPending,
       onNudgeReply: hooks.onNudgeReply,
+      ...(config.brain.idle_compact ? {
+        idleCompact: {
+          command: config.brain.idle_compact.command,
+          idleMs: (config.brain.idle_compact.idle_minutes ?? 5) * 60_000,
+          minUsage: config.brain.idle_compact.min_usage ?? 0.35,
+        },
+      } : {}),
     });
     // Optional think lane: "think hard about…" routes the turn to a second,
     // heavier ACP agent (e.g. a profile on a bigger model).

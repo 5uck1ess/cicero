@@ -218,6 +218,37 @@ The bounds matter more than the feature:
 
 Because it runs in the background, a compaction never adds latency to a turn.
 
+## Idle agent compaction (acp backend)
+
+Background history compaction covers Cicero's own replayed transcript. An ACP
+agent with a persistent session keeps its own history too, and an agent such as
+hermes compacts it when a turn pushes past its threshold — in the middle of the
+conversation, with the user waiting on a summary call. `idle_compact` moves that
+work to a quiet moment:
+
+```yaml
+brain:
+  backend: acp
+  idle_compact:
+    command: /compress   # the agent's own compaction command
+    idle_minutes: 5      # default 5; 1-1440
+    min_usage: 0.35      # default 0.35; fraction of the context window
+```
+
+- It needs the agent's context-usage reports (the off-spec `usage_update`
+  session update). An agent that sends none is never compacted.
+- After `idle_minutes` with no turn, if the last reported usage is at least
+  `min_usage` of the window, Cicero sends `command` verbatim: no injected
+  context, and one-shot context stays queued for the next real turn.
+- It runs through the normal turn queue, so a turn that arrives during
+  compaction waits for it, and it is cancelled like any turn after 5 minutes.
+- At most one compaction per idle period; any turn restarts the countdown.
+  Stopping or restarting the brain cancels a pending one.
+- Only the front-desk brain is covered; escalation and lane brains are not.
+
+Set `min_usage` below the agent's own automatic threshold (hermes defaults to
+`compression.threshold: 0.5`), or the agent will still get there first.
+
 ## Progress narration
 
 When an agent can stream structured events — **`codex`** (`exec --json`) and **`claude-code`** (`--output-format stream-json`) — Cicero speaks a running summary of what it's *doing*: its plan, the commands it runs ("Running ls.", "Editing auth.ts."), and the final answer — so you hear it work, not just the end result. On by default; disable with `brain: { narrate_progress: false }`. Brains without event streaming fall back to speaking their answer.
