@@ -371,19 +371,20 @@ export function parseContextUsage(update: unknown): AcpContextUsage | null {
  */
 export function dropOffSpecUpdates(
   readable: ReadableStream<unknown>,
-  onUsage?: (usage: AcpContextUsage) => void,
+  onUsage?: (usage: AcpContextUsage, sessionId: string) => void,
 ): ReadableStream<unknown> {
   const warned = new Set<string>();
   let warnedAboutLimit = false;
   return readable.pipeThrough(
     new TransformStream<unknown, unknown>({
       transform(msg, controller) {
-        const m = msg as { id?: unknown; method?: unknown; params?: { update?: { sessionUpdate?: unknown } } };
+        const m = msg as { id?: unknown; method?: unknown; params?: { sessionId?: unknown; update?: { sessionUpdate?: unknown } } };
         if (m && m.method === "session/update" && m.id === undefined && !sessionNotificationSchema.safeParse(m.params).success) {
           const rawKind = m.params?.update?.sessionUpdate;
           if (rawKind === "usage_update" && onUsage) {
             const usage = parseContextUsage(m.params?.update);
-            if (usage) onUsage(usage);
+            const sessionId = m.params?.sessionId;
+            if (usage && typeof sessionId === "string" && sessionId) onUsage(usage, sessionId);
           }
           const kind = (
             typeof rawKind === "string"
@@ -797,7 +798,10 @@ export class AcpBrain implements Brain {
   // Spoken confirmation gate state — see AcpBrainConfig.confirmTools.
   private confirmationGrant: ConfirmationGrant | null = null;
   private pendingConfirmation: PendingConfirmationState | null = null;
-  private contextUsage: AcpContextUsage | null = null;
+  // Bound to the exact runtime and session that reported it: a report from
+  // another session, or from a runtime that has since died, never counts.
+  private contextUsage: { runtime: AcpRuntime; sessionId: string; usage: AcpContextUsage } | null = null;
+  private compactionReservation: object | null = null;
   private idleCompactTimer: ReturnType<typeof setTimeout> | null = null;
   private idleCompacting = false;
   private readonly config: AcpBrainConfig;
@@ -870,7 +874,12 @@ export class AcpBrain implements Brain {
   }
 
   /** The agent's last reported context usage, if it reports one. */
-  lastContextUsage(): AcpContextUsage | null { return this.contextUsage; }
+  lastContextUsage(): AcpContextUsage | null {
+    const entry = this.contextUsage;
+    const runtime = this.runtime;
+    if (!entry || !runtime || entry.runtime !== runtime || runtime.stopping || entry.sessionId !== runtime.sessionId) return null;
+    return entry.usage;
+  }
 
   private cancelIdleCompact(): void {
     if (this.idleCompactTimer) clearTimeout(this.idleCompactTimer);
@@ -891,7 +900,7 @@ export class AcpBrain implements Brain {
   }
 
   private async runIdleCompact(idle: AcpIdleCompactConfig): Promise<void> {
-    const usage = this.contextUsage;
+    const usage = this.lastContextUsage();
     if (!usage || usage.used / usage.size < idle.minUsage) return;
     // Anything queued or live means the conversation is not idle after all.
     if (this.idleCompacting || this.pendingReservations.size > 0 || this.runtime?.activeTurn || !this.runtime?.conn) return;
@@ -1012,7 +1021,10 @@ export class AcpBrain implements Brain {
     }
     const reservedGeneration = reservedRuntime.generation;
     const maxPendingTurns = this.config.maxPendingTurns ?? DEFAULT_ACP_PENDING_TURN_LIMIT;
-    if (this.pendingReservations.size >= maxPendingTurns) {
+    // Background compaction never takes a user's admission slot: a turn that
+    // arrives during it waits, even at max_pending_turns: 1.
+    const compactionSlot = this.compactionReservation && this.pendingReservations.has(this.compactionReservation) ? 1 : 0;
+    if (this.pendingReservations.size - compactionSlot >= maxPendingTurns) {
       throw new AcpTurnAdmissionError(maxPendingTurns);
     }
     // Serialize turns: a second caller (another websocket, the POST path) waits for
@@ -1030,6 +1042,7 @@ export class AcpBrain implements Brain {
     this.turnReleases.add(release);
     const reservationToken = {};
     this.pendingReservations.add(reservationToken);
+    if (raw) this.compactionReservation = reservationToken;
     // Chain the reservation itself to its predecessor. That lets an aborted
     // queued caller release its own gate without allowing its successor to
     // bypass the still-active turn.
@@ -1635,8 +1648,10 @@ export class AcpBrain implements Brain {
     });
     const conn = new ClientSideConnection(() => this.makeClient(runtime), {
       writable: stream.writable,
-      readable: dropOffSpecUpdates(stream.readable, (usage) => {
-        if (this.runtime === runtime) this.contextUsage = usage;
+      readable: dropOffSpecUpdates(stream.readable, (usage, sessionId) => {
+        if (this.runtime === runtime && runtime.sessionId && sessionId === runtime.sessionId) {
+          this.contextUsage = { runtime, sessionId, usage };
+        }
       }) as typeof stream.readable,
     });
     runtime.conn = conn;

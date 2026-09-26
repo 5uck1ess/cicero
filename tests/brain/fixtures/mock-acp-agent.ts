@@ -101,6 +101,12 @@ new AgentSideConnection((client: Client): Agent => {
       if (usage?.length === 2) {
         await client.sessionUpdate({ sessionId: params.sessionId, update: { sessionUpdate: "usage_update", used: usage[0], size: usage[1] } } as never);
       }
+      // Per-prompt usage markers: "usage:U/S" for this session, "usage-other:U/S" for a stranger.
+      for (const [, other, used, size] of text.matchAll(/usage(-other)?:(\d+)\/(\d+)/g)) {
+        await client.sessionUpdate({ sessionId: other ? "other-session" : params.sessionId, update: { sessionUpdate: "usage_update", used: Number(used), size: Number(size) } } as never);
+      }
+      if (text.includes("crash now")) process.exit(3);
+      if (text === "/compress") await Bun.sleep(Number(process.env.CICERO_TEST_ACP_COMPRESS_DELAY_MS ?? "0"));
 
       if (text.includes("structured updates")) {
         await client.sessionUpdate({ sessionId: "wrong-session", update: { sessionUpdate: "tool_call", toolCallId: "stale", title: "stale", status: "failed" } });

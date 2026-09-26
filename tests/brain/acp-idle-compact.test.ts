@@ -86,6 +86,42 @@ test("compaction leaves one-shot injected context for the next real turn", async
   expect(last).toContain("second");
 }, 20_000);
 
+test("usage reported for another session never triggers compaction", async () => {
+  const { brain, prompts } = start(null);
+  await brain.start();
+  await brain.send("usage:10000/100000 usage-other:90000/100000");
+  expect(brain.lastContextUsage()).toEqual({ used: 10_000, size: 100_000 });
+  await idle();
+  expect(prompts()).not.toContain("/compress");
+}, 20_000);
+
+test("a crashed session's usage does not compact its replacement", async () => {
+  const { brain, prompts } = start(null);
+  await brain.start();
+  await brain.send("usage:90000/100000 crash now").catch(() => {});
+  await Bun.sleep(300);
+  await brain.start();
+  expect(brain.lastContextUsage()).toBeNull();
+  await brain.send("fresh session, no usage report");
+  await idle();
+  expect(prompts()).not.toContain("/compress");
+}, 20_000);
+
+test("a turn arriving during compaction waits instead of being refused at max_pending_turns 1", async () => {
+  const { brain, prompts } = start("45000/100000", {
+    maxPendingTurns: 1,
+    env: {
+      CICERO_TEST_ACP_USAGE: "45000/100000",
+      CICERO_TEST_ACP_COMPRESS_DELAY_MS: "1500",
+      CICERO_TEST_ACP_PROMPT_LOG: join(mkdtempSync(join(tmpdir(), "cicero-idle-compact-")), "prompts.jsonl"),
+    },
+  });
+  await brain.start();
+  await brain.send("first");
+  await Bun.sleep(IDLE_MS + 300); // compaction is now in flight
+  expect(await brain.send("second")).toContain("second");
+}, 20_000);
+
 test("stop cancels a pending idle compaction", async () => {
   const { brain: b, prompts } = start("45000/100000");
   await b.start();
