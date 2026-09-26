@@ -82,16 +82,32 @@ test("typed live failure stage is recorded while batch recovers", async () => {
   expect(record.finish()).toMatchObject({ sttSource: "batch_fallback", sttLiveFailure: "push_rejected" });
 });
 
-test("empty live final is no speech and does not invoke batch STT", async () => {
+// Live 2026-09-26: ~2 s spoken turns came back with an empty live final and no
+// partials at all, while batch STT on clean audio of the same length succeeded.
+test("empty live final retries the full WAV through batch STT", async () => {
   const d = streamDeps();
   let batchCalls = 0;
-  d.stt = { transcribe: async () => { batchCalls++; return "stale words"; } };
+  d.stt = { transcribe: async () => { batchCalls++; return "recovered words"; } };
   d.streamFinal = Promise.resolve("  \n  ");
+  const record = new LatencyTurn("s", "t", "web_voice", 1, () => 0);
+  d.timingMark = (name, offset) => record.mark(name, offset);
+  const { sink, calls } = capturingSink();
+  await streamWebTurn(tinyWav([1]), d, sink);
+  expect(calls.transcript).toEqual(["recovered words"]);
+  expect(batchCalls).toBe(1);
+  expect(record.finish()).toMatchObject({ sttSource: "batch_fallback", sttLiveFailure: "empty_final" });
+});
+
+test("empty live and batch transcripts are no speech", async () => {
+  const d = streamDeps();
+  let batchCalls = 0;
+  d.stt = { transcribe: async () => { batchCalls++; return ""; } };
+  d.streamFinal = Promise.resolve("");
   const { sink, calls } = capturingSink();
   await streamWebTurn(tinyWav([1]), d, sink);
   expect(calls.transcript).toEqual([""]);
   expect(calls.done).toBe(1);
-  expect(batchCalls).toBe(0);
+  expect(batchCalls).toBe(1);
 });
 
 for (const [input, setup] of [

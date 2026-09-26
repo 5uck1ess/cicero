@@ -947,7 +947,16 @@ export async function streamWebTurn(
   let streamedFinal: Promise<string | null> | undefined;
   const liveTranscript = (): Promise<string | null> => {
     if (!deps.streamFinal) return Promise.resolve(null);
-    streamedFinal ??= deps.streamFinal.then((text) => boundedTranscript(text.trim())).catch((error: unknown) => {
+    streamedFinal ??= deps.streamFinal.then((text): string | null => {
+      const transcript = boundedTranscript(text.trim());
+      if (transcript || deps.signal?.aborted) return transcript;
+      // An empty live final is not proof of silence: real ~2 s turns have come
+      // back empty with no partials. The full WAV decides; batch "" is no speech.
+      log("info", "web voice: live STT empty_final; retrying full WAV with batch STT");
+      deps.timingMark?.("stt_live_failure:empty_final", 0);
+      deps.timingMark?.("stt_batch_fallback", 0);
+      return null;
+    }).catch((error: unknown) => {
       const signalReason = deps.signal?.reason;
       const superseded = deps.signal?.aborted && /supersed/i.test(signalReason instanceof Error ? signalReason.message : String(signalReason ?? ""));
       const stage = superseded ? "superseded" : liveSttFailure(error);
