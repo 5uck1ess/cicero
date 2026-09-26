@@ -1,4 +1,4 @@
-import { INTENT_SCHEMA, MAX_INTENT_BYTES } from "./switchboard-intent";
+import { INTENT_SCHEMA, MAX_INTENT_BYTES, type IntentClassifier } from "./switchboard-intent";
 import type { RuntimeConfig } from "../config";
 import type { AcpMcpServerConfig, Brain, TerminalAdapter } from "../types";
 import type { Stdio } from "@zed-industries/agent-client-protocol";
@@ -24,6 +24,7 @@ import {
   discardResponseBody,
   PROVIDER_TIMEOUT_MS,
   providerSignal,
+  readBoundedBytes,
   readBoundedJson,
 } from "../backends/http-transfer";
 
@@ -102,6 +103,34 @@ export function summarizerClassifier(
     } catch (err: unknown) {
       throw err;
     }
+  };
+}
+
+/** The switchboard owns the deadline, including the bounded response body read. */
+export function layaIntentClassifier(url: string): Exclude<IntentClassifier, Function> {
+  return {
+    async structured(utterance, roster, signal) {
+      try {
+        const res = await fetch(`${url.replace(/\/+$/, "")}/v1/switchboard`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            utterance,
+            roster: Object.entries(roster).map(([name, lane]) => ({ name, aliases: lane.aliases ?? [] })),
+          }),
+          signal,
+          redirect: "error",
+        });
+        if (!res.ok) {
+          await discardResponseBody(res);
+          throw new Error("switchboard classifier HTTP error");
+        }
+        return new TextDecoder().decode(await readBoundedBytes(res, MAX_INTENT_BYTES));
+      } catch {
+        signal.throwIfAborted();
+        throw new Error("switchboard classifier request failed");
+      }
+    },
   };
 }
 
@@ -260,10 +289,10 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
           persona: l.persona,
         };
       }
-      // Intent classifier for phrasings the lexical patterns miss: the same
-      // small local model the TLDR summarizer uses (already loaded, ~0.4s).
-      // Without a summarizer endpoint the switchboard is lexical-only.
-      return new SwitchboardBrain(front, lanes, summarizerClassifier(config.raw.web_voice?.tldr, true), {
+      // Prefer the opt-in Laya sidecar; otherwise retain the summarizer prompt path.
+      const intentUrl = config.raw.switchboard?.intent_url;
+      return new SwitchboardBrain(front, lanes, intentUrl !== undefined
+        ? layaIntentClassifier(intentUrl) : summarizerClassifier(config.raw.web_voice?.tldr, true), {
         intentTimeoutMs: config.raw.switchboard?.intent_timeout_ms,
         intentMinConfidence: config.raw.switchboard?.intent_min_confidence,
         frontDeskAliases: config.raw.switchboard?.front_desk_aliases,
