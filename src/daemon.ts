@@ -1,3 +1,4 @@
+import { IncompleteTurnFilter, INCOMPLETE_PROMPT } from "./web-voice/incomplete";
 import { existsSync, readFileSync, rmSync, watch } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "node:os";
@@ -1777,6 +1778,21 @@ export class CiceroDaemon {
           graceMs: toneCfg.graceMs,
         };
       }
+      const incompleteCfg = wv.incomplete_turn;
+      const createIncompleteFilter = incompleteCfg?.enabled ? () => new IncompleteTurnFilter(
+        async (text, signal) => {
+          const classifier = this.providers.classifier;
+          if (!classifier) return "complete";
+          return classifier.chatCompletion([
+            { role: "system", content: INCOMPLETE_PROMPT },
+            { role: "user", content: text },
+          ], { temperature: 0, max_tokens: 8, signal });
+        },
+        { waitMs: incompleteCfg.wait_ms, classifyMs: incompleteCfg.classifier_timeout_ms },
+      ) : undefined;
+      if (createIncompleteFilter && wv.speculative?.enabled) {
+        log("info", "Speculation off while incomplete-turn filtering is enabled");
+      }
       // Speculative turns (opt-in, needs the end-of-turn detector): on a
       // confident "complete" probe the tail is transcribed and the brain
       // started before the final WAV lands — see speculative.ts for the gates.
@@ -1806,7 +1822,7 @@ export class CiceroDaemon {
       if (judgeWillRun && specCfg?.enabled) {
         log("info", "Speculation off while the intent judge is on: speculation would reach the brain before the veto could decline the turn");
       }
-      const speculator = specCfg?.enabled && !judgeWillRun && this.config.turn.enabled && this.brain.sendStream && specSideEffectsAllowed
+      const speculator = specCfg?.enabled && !judgeWillRun && !createIncompleteFilter && this.config.turn.enabled && this.brain.sendStream && specSideEffectsAllowed
         ? makeSpeculator({
             stt: this.providers.stt,
             brain: this.brain,
@@ -1831,6 +1847,7 @@ export class CiceroDaemon {
         });
       }
       this.webVoice = (this.options.webVoiceServerStarter ?? startWebVoiceServer)({
+        createIncompleteFilter,
         coordinator: this.turnCoordinator,
         host: webHost,
         port: webPort,
@@ -1859,29 +1876,33 @@ export class CiceroDaemon {
         // applies (resolved per sentence, so the pin ack already sounds like
         // the employee). Notifications stay in Cicero's own voice.
         onTurn: async (wav, options) => {
-          const turn = await processWebTurn(wav, {
-          // Same veto as the streaming path. Adding the option without wiring
-          // it here is what left this entry point open the first time round.
-          judge: this.webIntentGate(),
-          stt: this.providers.stt,
-          brain: this.brain,
-          tts: laneTts,
-          tldr,
-          coalesce: this.config.ttsCoalesce ?? undefined,
-          discardControlTurnVoices,
-          tone,
-          maxAudioBytes: MAX_TURN_AUDIO_BYTES,
-          signal: options?.signal,
-          trackBackground: options?.trackBackground,
-          operationalContext: (signal) => this.operationalContext(signal),
-          });
-          // Context for the next verdict -- but only what the client could
-          // actually hear. A reply of "**" is non-empty text that synthesizes
-          // to an empty clip, and recording it would tell the judge Cicero said
-          // something the room never heard.
-          if (options?.signal?.aborted) return turn;
-          if (turn.audio.byteLength > 0) this.noteWebSpoken(turn.reply);
-          return turn;
+          const incomplete = createIncompleteFilter?.();
+          try {
+            const turn = await processWebTurn(wav, {
+              // Same veto as the streaming path. Adding the option without wiring
+              // it here is what left this entry point open the first time round.
+              judge: this.webIntentGate(),
+              incomplete,
+              stt: this.providers.stt,
+              brain: this.brain,
+              tts: laneTts,
+              tldr,
+              coalesce: this.config.ttsCoalesce ?? undefined,
+              discardControlTurnVoices,
+              tone,
+              maxAudioBytes: MAX_TURN_AUDIO_BYTES,
+              signal: options?.signal,
+              trackBackground: options?.trackBackground,
+              operationalContext: (signal) => this.operationalContext(signal),
+            });
+            // Context for the next verdict -- but only what the client could
+            // actually hear. A reply of "**" is non-empty text that synthesizes
+            // to an empty clip, and recording it would tell the judge Cicero said
+            // something the room never heard.
+            if (options?.signal?.aborted) return turn;
+            if (turn.audio.byteLength > 0) this.noteWebSpoken(turn.reply);
+            return turn;
+          } finally { incomplete?.reset(); }
         },
         // Semantic end-of-turn probes (see probe.ts): the client asks mid-pause
         // whether the speaker sounds done. this.turnDetector is read lazily —
@@ -1912,7 +1933,7 @@ export class CiceroDaemon {
         resolveSttStream: () => this.providers.stt.openStream,
         onStreamTurn: async (wav, sink, options) => {
           try {
-            const deps = { stt: this.providers.stt, streamFinal: options?.streamFinal, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), toolStartNotice: this.config.brain.tool_start_notice !== false, tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, timingMark: options?.timingMark, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
+            const deps = { incomplete: options?.incomplete, stt: this.providers.stt, streamFinal: options?.streamFinal, brain: this.brain, tts: laneTts, voice: { state: voiceState }, filler: pickFiller, tldr, coalesce: this.config.ttsCoalesce ?? undefined, discardControlTurnVoices, recover, lastReply, park: makePark(), toolStartNotice: this.config.brain.tool_start_notice !== false, tone, judge: this.webIntentGate(), signal: options?.signal, trackBackground: options?.trackBackground, timingMark: options?.timingMark, operationalContext: (signal?: AbortSignal) => this.operationalContext(signal) };
             if (options?.record === false) {
               await streamWebTurn(wav, deps, sink, options.spec);
               return;

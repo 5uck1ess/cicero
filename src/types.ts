@@ -130,6 +130,12 @@ export interface WebVoiceConfig {
     summarizer_url?: string;   // e.g. http://127.0.0.1:8080/v1
     summarizer_model?: string;
   };
+  // Text-level completion filter for browser voice. Requires classifier.
+  incomplete_turn?: {
+    enabled?: boolean; // default false
+    wait_ms?: number; // original turn deadline, default 3000 (100..10000)
+    classifier_timeout_ms?: number; // fail open, default 250 (1..1000)
+  };
   // Speculative turns (needs turn.enabled): on a confident mid-pause "complete"
   // verdict the server transcribes the probe tail and starts the brain BEFORE
   // the final utterance WAV arrives, then adopts the in-flight turn when the

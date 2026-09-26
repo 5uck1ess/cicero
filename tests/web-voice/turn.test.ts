@@ -1681,3 +1681,82 @@ test("web text and voice carry intent durations into their latency record", asyn
     expect(record.finish().intentMs).toBe(421);
   }
 });
+
+test("incomplete voice input reaches neither history nor brain while held", async () => {
+  const d = streamDeps({ transcript: "so what I want is" });
+  let release!: (text: string | null) => void;
+  const waiting = new Promise<string | null>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const enteredGate = new Promise<void>((resolve) => { entered = resolve; });
+  const brainInputs: string[] = [];
+  d.brain.send = async (text) => { brainInputs.push(text); return "Done."; };
+  const { sink, calls } = capturingSink();
+  const turn = streamWebTurn(tinyWav([1]), { ...d, incomplete: {
+    resolve: () => { entered(); return waiting; },
+  } } as WebStreamDeps, sink);
+  // Existing code ignores the option and completes; a wired gate enters first.
+  await Promise.race([enteredGate, turn]);
+  expect(brainInputs).toEqual([]);
+  expect(calls.transcript).toEqual([]);
+  release("so what I want is a test");
+  await turn;
+  expect(brainInputs).toEqual(["so what I want is a test"]);
+  expect(calls.transcript).toEqual(["so what I want is a test"]);
+});
+
+test("POST voice uses the completion gate before sending the combined transcript", async () => {
+  const calls: string[] = [];
+  const result = await processWebTurn(tinyWav([1]), { ...deps({ calls }), incomplete: {
+    resolve: async (text) => `${text} please`,
+  } });
+  expect(result.transcript).toBe("what time is it please");
+  expect(calls).toContain("brain:what time is it please");
+});
+
+test("aborted completeness wait cannot publish a late result", async () => {
+  const abort = new AbortController();
+  const { sink, calls } = capturingSink();
+  const d = streamDeps();
+  await streamWebTurn(tinyWav([1]), { ...d, signal: abort.signal, incomplete: {
+    resolve: async () => { abort.abort(); return "late"; },
+  } }, sink);
+  expect(calls.transcript).toEqual([]);
+  expect(calls.sentence).toEqual([]);
+  expect(calls.audio).toBe(0);
+});
+
+for (const continuation of ["", "room speech", "stt failure"]) {
+  test(`unusable continuation clears retained voice prefix: ${continuation}`, async () => {
+    const { IncompleteTurnFilter } = await import("../../src/web-voice/incomplete");
+    const filter = new IncompleteTurnFilter(async (text) => text === "please delete" ? "incomplete" : "complete");
+    const abort = new AbortController();
+    const held = filter.resolve("please delete", abort.signal);
+    await Promise.resolve(); abort.abort(); await held;
+    const d = streamDeps();
+    d.incomplete = filter;
+    d.streamFinal = Promise.resolve(continuation);
+    if (continuation === "stt failure") {
+      d.streamFinal = undefined;
+      d.stt = { transcribe: async () => { throw new Error("synthetic STT failure"); } };
+    } else if (continuation) d.judge = async () => false;
+    const { sink } = capturingSink();
+    try {
+      await streamWebTurn(tinyWav([1]), d, sink);
+      expect(await filter.resolve("run the tests")).toBe("run the tests");
+    } finally { filter.reset(); }
+  });
+}
+
+test("incomplete verdict emits only a hold control until the transport aborts", async () => {
+  const { IncompleteTurnFilter } = await import("../../src/web-voice/incomplete");
+  const abort = new AbortController();
+  const filter = new IncompleteTurnFilter(async () => "incomplete");
+  const { sink, calls } = capturingSink();
+  sink.control = (message) => { calls.control.push(message); abort.abort(); };
+  try {
+    await streamWebTurn(tinyWav([1]), { ...streamDeps(), incomplete: filter, signal: abort.signal }, sink);
+    expect(calls.control).toEqual([{ type: "hold" }]);
+    expect(calls.transcript).toEqual([]);
+    expect(calls.audio).toBe(0);
+  } finally { filter.reset(); }
+});

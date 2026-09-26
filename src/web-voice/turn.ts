@@ -1,3 +1,4 @@
+import type { IncompleteTurnGate } from "./incomplete";
 import { unlink } from "node:fs/promises";
 import type { Brain, BrainTurnOptions } from "../types";
 import type { STTProvider } from "../backends/stt/provider";
@@ -30,6 +31,7 @@ import {
  * narrowed to the one method each so the turn logic is trivially testable.
  */
 export interface WebTurnDeps {
+  incomplete?: IncompleteTurnGate;
   /**
    * Optional "was that addressed to me?" veto — see {@link WebStreamDeps.judge}.
    * The non-streaming POST path needs it for the same reason the streaming one
@@ -128,19 +130,26 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
       sttPin.release();
     }
     throwIfTurnAborted(deps.signal);
-    if (!transcript) return { transcript: "", reply: "", audio: EMPTY };
+    if (!transcript) { deps.incomplete?.reset?.(); return { transcript: "", reply: "", audio: EMPTY }; }
     // Same veto the streaming path runs: this is browser-captured audio too,
     // and on a headless box it is the only capture path there is.
     // Reported as nothing heard, not as a heard-but-unanswered turn: the caller
     // persists what it is told, and a vetoed utterance recorded as conversation
     // is replayed into the brain later. Same reasoning as the streaming path.
-    if (!(await dispatchAllowed(transcript, deps))) return { transcript: "", reply: "", audio: EMPTY };
+    if (!(await dispatchAllowed(transcript, deps))) { deps.incomplete?.reset?.(); return { transcript: "", reply: "", audio: EMPTY }; }
     // The judge resolves as ACCEPT when it is cancelled -- failing open is the
     // whole design -- so acceptance says nothing about whether the turn is
     // still wanted. Without this, an aborted turn walks straight into the TLDR
     // fast path below and starts a TTS request nobody is waiting for, holding
     // the server's lease until it finishes.
     throwIfTurnAborted(deps.signal);
+
+    if (deps.incomplete) {
+      const resolved = await deps.incomplete.resolve(transcript, deps.signal);
+      throwIfTurnAborted(deps.signal);
+      if (resolved === null) return { transcript: "", reply: "", audio: EMPTY };
+      transcript = boundedTranscript(resolved);
+    }
 
     // Expand request: speak the gated remainder of the previous reply, no brain turn.
     if (deps.tldr?.pending && isExpandRequest(transcript)) {
@@ -225,6 +234,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
     }
     return { transcript, reply, audio: parts.finish() };
   } catch (error) {
+    if (!deps.signal?.aborted) deps.incomplete?.reset?.();
     if (error instanceof Error) throw error;
     throw new Error("web voice turn failed", { cause: error });
   } finally {
@@ -237,6 +247,7 @@ export async function processWebTurn(wav: ArrayBuffer, deps: WebTurnDeps): Promi
 
 /** Dependencies for a STREAMING web turn (Phase 2): brain must be able to stream. */
 export interface WebStreamDeps {
+  incomplete?: IncompleteTurnGate;
   /** Optional bounded latency mark observer supplied by the web transport. */
   timingMark?: (name: string, offsetMs: number) => void;
   /** Final live STT for this browser turn, when opt-in capture was active. */
@@ -516,7 +527,7 @@ export interface WebReplySink {
   sentence(text: string): void;       // a reply sentence (text), sent before its audio
   notice?(text: string): void;        // progress spoken through the sentence transport frame
   audio(wav: ArrayBuffer, text?: string): void | Promise<void>; // text belongs to this audio chunk
-  control(message: { type: "volume"; delta: number; volume: number } | { type: "rate"; rate: number }): void;
+  control(message: { type: "hold" } | { type: "volume"; delta: number; volume: number } | { type: "rate"; rate: number }): void;
   done(): void;                        // turn complete
   error(message: string): void;
   /** True once the client asked to abort (barge-in). Checked between sentences. */
@@ -932,6 +943,9 @@ export async function streamWebTurn(
     return streamedFinal;
   };
 
+  // Incomplete filtering must precede all brain work, including speculation.
+  if (deps.incomplete && spec) { await spec.abort(); spec = null; }
+
   // A speculative turn raced ahead on the probe tail (see speculative.ts).
   // Adopt it when the final WAV's duration says nothing new was said — the
   // tail transcript IS the transcript, and the brain may already be talking.
@@ -1047,12 +1061,21 @@ export async function streamWebTurn(
     }
     if (deps.signal?.aborted || sink.aborted()) return;
     timer.mark("stt");
-    if (!transcript) { sink.transcript(transcript); sink.done(); return; }
+    if (!transcript) { deps.incomplete?.reset?.(); sink.transcript(transcript); sink.done(); return; }
     // Judged BEFORE the transcript is emitted. The recording wrapper treats any
     // transcript as a completed conversation, so a vetoed utterance announced
     // here is persisted to history and replayed into the brain on the next
     // resume -- the ambient speech reaches the brain after all, just later.
-    if (!(await dispatchAllowed(transcript, deps))) { sink.done(); return; }
+    if (!(await dispatchAllowed(transcript, deps))) { deps.incomplete?.reset?.(); sink.done(); return; }
+    if (deps.signal?.aborted || sink.aborted()) return;
+    if (deps.incomplete) {
+      const resolved = await deps.incomplete.resolve(transcript, deps.signal, () => {
+        if (!deps.signal?.aborted && !sink.aborted()) sink.control({ type: "hold" });
+      });
+      if (deps.signal?.aborted || sink.aborted()) return;
+      if (resolved === null) { sink.done(); return; }
+      transcript = boundedTranscript(resolved);
+    }
     sink.transcript(transcript);
     // Cancellation resolves the judge as ACCEPT, so re-check before spending
     // anything on a turn that is already gone.
@@ -1060,6 +1083,7 @@ export async function streamWebTurn(
     const tag = await settleTone(tonePending?.result ?? null, deps.tone?.graceMs);
     await streamReply(transcript, deps, sink, timer, undefined, tag);
   } catch (err: unknown) {
+    if (!deps.signal?.aborted && !sink.aborted()) deps.incomplete?.reset?.();
     sink.error(err instanceof Error ? err.message : String(err));
   } finally {
     sttPin.release();

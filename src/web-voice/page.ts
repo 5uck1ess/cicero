@@ -230,7 +230,7 @@ let ptt = true, holding = false; // push-to-talk mode (default) + whether the ke
 // shouldn't have to re-tap it every time the installed app opens.
 try { if (localStorage.getItem("ciceroMode") === "vad") ptt = false; } catch (e) { /* storage disabled */ }
 let pttBargeTimer = null;        // pending hold-to-interrupt (armed while pressing during a reply)
-let state = "idle"; // idle | listening | speech | thinking | speaking
+let state = "idle"; // idle | listening | speech | thinking | held | speaking
 let noiseFloor = 0.005, rms = 0;
 let preRoll = [], speechFrames = [], onsetFrames = 0, silenceFrames = 0, speechLen = 0, bargeOnset = 0;
 let lastVoicedAt = null;
@@ -365,7 +365,7 @@ function abortActiveTurn() {
 
 function onFrame(buf) {
   rms = rmsOf(buf);
-  if (!ptt && (state === "listening" || state === "speech" || state === "speaking")) speechGateFeed(buf);
+  if (!ptt && (state === "listening" || state === "held" || state === "speech" || state === "speaking")) speechGateFeed(buf);
   micLevel = Math.min(1, Math.pow(rms * 16, 0.8)); // perceptual-ish map: quiet speech still visibly moves the orb
   if (ptt) {                                   // push-to-talk: capture only while held, no VAD
     // Record whenever held — including the pre-barge window where the reply is
@@ -381,9 +381,9 @@ function onFrame(buf) {
     return;
   }
   if (state === "speaking") { watchBargeIn(buf); updateDebug(); return; }
-  if (state !== "listening" && state !== "speech") { updateDebug(); return; }
+  if (state !== "listening" && state !== "held" && state !== "speech") { updateDebug(); return; }
 
-  if (state === "listening") {
+  if (state === "listening" || state === "held") {
     preRoll.push(buf);
     while (preRoll.length > frameCount(PREROLL_MS)) preRoll.shift();
     const openThr = Math.max(ABS_OPEN, noiseFloor * OPEN_FACTOR);
@@ -391,6 +391,7 @@ function onFrame(buf) {
       if (!speechConfirmed(VAD_POS)) { onsetFrames = 0; updateDebug(); return; } // loud but not speech
       onsetFrames++;
       if (onsetFrames >= frameCount(MIN_ONSET_MS)) {
+        if (state === "held") abortActiveTurn();
         beginCaptureIdentity();
         lastVoicedAt = performance.now();
         speechFrames = preRoll.slice();           // include pre-roll so we don't clip the start
@@ -559,7 +560,7 @@ function beginPtt() {
   holding = true;
   beginCaptureIdentity();
   speechFrames = []; speechLen = 0; silenceFrames = 0; onsetFrames = 0;
-  if (state === "speaking" || state === "thinking") {
+  if (state === "speaking" || state === "thinking" || state === "held") {
     // Holding during a reply = barge-in; during "thinking" = cancel the in-flight
     // turn (a brain stuck in a tool loop would otherwise lock the mic for minutes).
     // Either way it only triggers once the hold lasts long enough to be a real
@@ -590,7 +591,7 @@ function endPtt() {
     abortLiveCapture();
     speechFrames = []; speechLen = 0;           // stray tap — the in-flight turn is untouched
     captureTurnId = null;
-    setStatus(state === "thinking" ? "thinking…" : "speaking…");
+    setStatus(state === "held" ? "listening… finish your thought" : state === "thinking" ? "thinking…" : "speaking…");
     return;
   }
   const durMs = (speechLen / (audioCtx ? audioCtx.sampleRate : 16000)) * 1000;
@@ -767,7 +768,7 @@ function handleNotify(msg) {
   showNotice(msg.text);
   const buf = notifyBuf(msg);
   if (!buf) return;
-  const busy = state === "thinking" || state === "speaking" || state === "speech" || holding || playing;
+  const busy = state === "thinking" || state === "held" || state === "speaking" || state === "speech" || holding || playing;
   if (busy) { notifyQueue.push(buf); return; }
   turnDone = true;            // so playback completion resumes listening
   enqueueAudio(buf);
@@ -828,7 +829,7 @@ function handleVolumeControl(msg) {
 function onWsMessage(e) {
   if (typeof e.data !== "string") {
     const frame = decodeReplyFrame(e.data);
-    const live = state === "thinking" || state === "speaking";
+    const live = state === "thinking" || state === "held" || state === "speaking";
     if (frame && live && frame.sessionId === wsSessionId && frame.turnId === activeTurnId) enqueueAudio(frame.payload, frame);
     return;
   }
@@ -862,8 +863,15 @@ function onWsMessage(e) {
   // frame from an aborted turn is ignored even if the UI is already thinking
   // about its replacement.
   if (!activeTurnId || msg.turnId !== activeTurnId) return;
-  const live = state === "thinking" || state === "speaking";
+  const live = state === "thinking" || state === "held" || state === "speaking";
   if (!live) return;
+  if (msg.type === "hold") {
+    preRoll = []; onsetFrames = 0;
+    setState("held"); orbLabel.textContent = "listening";
+    setStatus("listening… finish your thought");
+    return;
+  }
+  if (state === "held") { setState("thinking"); setStatus("thinking…"); }
   if (msg.type === "volume") { handleVolumeControl(msg); return; } // apply before the ack audio arrives
   if (msg.type === "rate") { hintEl.textContent = "voice speed " + Math.round((Number(msg.rate) || 1) * 100) + "%"; return; }
   // No chat panel — the hint line flashes what STT heard, so a mishear is
@@ -920,7 +928,7 @@ function connectWs(resume = false) {
     if (ws !== sock) return;          // superseded by a newer socket — not ours to handle
     wsSessionId = ""; activeTurnId = null; captureTurnId = null; streamOn = false;
     clearConfirmations();
-    if (state === "thinking" || state === "speaking") { stopPlayback(); setState("listening"); }
+    if (state === "thinking" || state === "held" || state === "speaking") { stopPlayback(); setState("listening"); }
     if (convOn) scheduleReconnect(); else setStatus("disconnected");
   };
 }
@@ -1058,7 +1066,7 @@ function applyMode() {
   // Don't yank the state while a turn is in flight — the reply's remaining frames
   // would be dropped. The mode change applies at the natural resume (resumeListening
   // reads ptt fresh when the turn ends).
-  if (convOn && state !== "thinking" && state !== "speaking") resumeListening();
+  if (convOn && state !== "thinking" && state !== "held" && state !== "speaking") resumeListening();
 }
 modePtt.addEventListener("click", () => { ptt = true; applyMode(); modePtt.blur(); try { localStorage.setItem("ciceroMode", "ptt"); } catch (e) { /* ignore */ } });
 modeVad.addEventListener("click", () => { ptt = false; applyMode(); modeVad.blur(); try { localStorage.setItem("ciceroMode", "vad"); } catch (e) { /* ignore */ } });
@@ -1085,6 +1093,7 @@ const ORB_STYLE = {
   idle:      { hue: 200, glow: 0.35, spin: 0.25 },
   listening: { hue: 187, glow: 0.55, spin: 0.5 },
   speech:    { hue: 145, glow: 0.9,  spin: 0.9 },
+  held:      { hue: 185, glow: 0.35, spin: 0.4 },
   thinking:  { hue: 42,  glow: 0.7,  spin: 3.0 },
   speaking:  { hue: 210, glow: 0.85, spin: 1.1 },
 };

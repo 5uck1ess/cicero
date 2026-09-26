@@ -1,3 +1,4 @@
+import { IncompleteTurnFilter } from "../../src/web-voice/incomplete";
 import { test, expect, afterEach } from "bun:test";
 import { startWebVoiceServer, type WebVoiceHandle } from "../../src/web-voice/server";
 import { encodeProbeFrame } from "../../src/web-voice/probe";
@@ -76,6 +77,7 @@ function pcm16WavWithByteLength(byteLength: number): ArrayBuffer {
 }
 
 function start(opts: {
+  createIncompleteFilter?: () => IncompleteTurnFilter;
   onTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onTurn"]>;
   onStreamTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onStreamTurn"]>;
   onTextTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onTextTurn"]>;
@@ -96,6 +98,7 @@ function start(opts: {
   conversationEndGraceMs?: number;
 } = {}): string {
   handle = startWebVoiceServer({
+    createIncompleteFilter: opts.createIncompleteFilter,
     host: "127.0.0.1",
     port: 0, // ephemeral
     token: TOKEN,
@@ -2704,4 +2707,71 @@ test("a pending conversation end does not outlive the server", async () => {
   await Bun.sleep(400);
   expect(ended).toBe(afterStop);              // ...and the armed timer never fires again
   expect(base).toContain("127.0.0.1");
+});
+
+test("unfinished voice belongs to one socket and joins its superseding final", async () => {
+  const held = deferred();
+  const filters: IncompleteTurnFilter[] = [];
+  const base = start({
+    createIncompleteFilter: () => {
+      const filter = new IncompleteTurnFilter(async (text) => {
+        if (text === "prefix") { held.resolve(); return "incomplete"; }
+        return "complete";
+      });
+      filters.push(filter);
+      return filter;
+    },
+    onStreamTurn: async (audio, sink, options) => {
+      const text = new Uint8Array(audio)[44] === 1 ? "prefix" : "continuation";
+      const resolved = await options!.incomplete!.resolve(text, options?.signal);
+      if (resolved === null || sink.aborted()) return;
+      sink.transcript(resolved); sink.done();
+    },
+  });
+  const first = await connect(base);
+  const second = await connect(base);
+  try {
+    first.send(wav(1));
+    await held.promise;
+    const joined = nextJson(first, (m) => m.type === "transcript");
+    first.send(wav(2));
+    expect(await joined).toMatchObject({ text: "prefix continuation" });
+    const isolated = nextJson(second, (m) => m.type === "transcript");
+    second.send(wav(2));
+    expect(await isolated).toMatchObject({ text: "continuation" });
+    expect(filters.length).toBe(2);
+    expect(filters[0]).not.toBe(filters[1]);
+  } finally { first.close(); second.close(); }
+});
+
+test("typed replacement clears unfinished voice and shutdown cancels a hold", async () => {
+  let held = deferred();
+  let cancelled = deferred();
+  const base = start({
+    createIncompleteFilter: () => new IncompleteTurnFilter(async (text) => {
+      if (text === "prefix") { held.resolve(); return "incomplete"; }
+      return "complete";
+    }),
+    onStreamTurn: async (audio, sink, options) => {
+      const text = new Uint8Array(audio)[44] === 1 ? "prefix" : "fresh";
+      const result = await options!.incomplete!.resolve(text, options?.signal);
+      if (result === null || sink.aborted()) { cancelled.resolve(); return; }
+      sink.transcript(result); sink.done();
+    },
+    onTextTurn: async (text, sink) => { sink.transcript(text); sink.done(); },
+  });
+  const ws = await connect(base);
+  try {
+    ws.send(wav(1)); await held.promise;
+    const typed = nextJson(ws, (m) => m.type === "transcript");
+    ws.send(JSON.stringify({ type: "text", text: "typed" }));
+    expect(await typed).toMatchObject({ text: "typed" });
+    const fresh = nextJson(ws, (m) => m.type === "transcript");
+    ws.send(wav(2));
+    expect(await fresh).toMatchObject({ text: "fresh" });
+    held = deferred(); cancelled = deferred();
+    ws.send(wav(1)); await held.promise;
+    await handle!.stop();
+    await cancelled.promise;
+  } finally { ws.close(); }
 });
