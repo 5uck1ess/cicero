@@ -14,7 +14,9 @@ uv run --python 3.11 --with-requirements requirements/laya-switchboard.txt \
     python sidecars/laya-switchboard/serve.py --ckpt /path/to/switchboard-checkpoint
 ```
 
-Requires `laya==0.3.20` and a switchboard-trained checkpoint. Binds
+Requires `laya==0.3.20` and a switchboard-trained checkpoint. The base Laya model is not
+usable zero-shot for this task. For now, bring your own fine-tuned checkpoint. A public checkpoint
+trained on synthetic data only, plus the fine-tuning recipe, is planned as a follow-up. Binds
 `127.0.0.1:8096` by default; `--host`, `--port`, and `--device cuda|cpu` override it.
 Run this process separately from Cicero, then configure:
 
@@ -59,7 +61,7 @@ transfer without a target return none/null/false, retaining the model probabilit
 on the wire (Cicero normalizes these to its existing zero-confidence `NONE`).
 
 The questions and whitespace-normalized, 500-character `Operator said: ...`
-state match `sb_common_ref.py` exactly. Inference calls
+state in `serve.py` are the exact strings the checkpoint was trained on. Inference calls
 `system_one(state, questions, max_len=512, head_max_len=384)` and accepts answer
 fields as either dictionary keys or attributes. These training strings must not
 be paraphrased.

@@ -19,7 +19,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Callable, Optional
 
-# Checkpoint training strings: copied verbatim from sb_common_ref.py.
+# Checkpoint training strings: must match the fine-tuning harness verbatim.
 INTENTS = ["transfer", "release", "rollcall", "standup", "callme", "none"]
 # One line per intent, condensed from Cicero's intentPrompt (src/brain/switchboard-intent.ts).
 INTENT_DESC = {
