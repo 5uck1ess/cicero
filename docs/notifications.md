@@ -139,7 +139,10 @@ quiet boards reconcile at least every five minutes (or `interval_seconds` if
 longer); age-based reminders can consequently be up to that cadence late.
 Sockets renew after five minutes to bound silent connections. A failed connection,
 auth timeout (10 seconds), or disconnect restores the configured polling cadence
-while reconnects back off from 1 to 30 seconds. Shutdown cancels the socket,
+while reconnects back off from 1 to 30 seconds. Repeated failed connection
+attempts do not trigger additional CLI reads. A failed CLI read also restores
+the configured polling cadence until a read succeeds, even if the socket is
+still connected. Shutdown cancels the socket,
 retry/deadline timers, pending refreshes and the active CLI read. This is snapshot
 reconciliation, not durable event replay: intermediate transitions between CLI
 reads can still be missed, just as with polling.

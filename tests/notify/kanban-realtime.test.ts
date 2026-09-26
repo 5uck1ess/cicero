@@ -236,3 +236,54 @@ test("absent credentials and constructor failure fall back without escaping prov
     feed.stop(); expect(scheduled).toBe(0);
   }
 });
+
+test("a failed push-triggered read retries at the configured cadence, then returns to quiet reconciliation", async () => {
+  let change = () => {};
+  let reads = 0;
+  const announcements: string[] = [];
+  const watcher = new KanbanWatcher({
+    intervalMs: 20,
+    list: async () => {
+      reads++;
+      if (reads === 3) throw new Error("synthetic list failure");
+      return [{ id: "one", title: "One", status: reads > 3 ? "done" : "in_progress" }];
+    },
+    announce(task) { announcements.push(task.status); },
+    realtime: { start(c, r) { change = c; r(true); }, stop() {} },
+  });
+  try {
+    watcher.start(); await settle();
+    expect(reads).toBe(2); // initial seed and authenticated catch-up
+    change(); await settle();
+    expect(reads).toBe(4); // failed push read, then configured-cadence recovery
+    expect(announcements).toEqual(["done"]);
+    await settle(); expect(reads).toBe(4);
+  } finally { await watcher.stop(); }
+});
+
+test("missing-token reconnect retries do not override an hourly polling cadence", async () => {
+  let retry: (() => void) | undefined;
+  let reads = 0;
+  const feed = createBoardRealtime("multica", {
+    server_url: "https://board.example", scope_id: "scope", token_env: "BOARD_TOKEN",
+  }, {
+    token: () => undefined,
+    socket() { throw new Error("must not connect without a token"); },
+    setTimeout(fn) { retry = fn; return 1; },
+    clearTimeout() { retry = undefined; },
+  })!;
+  const watcher = new KanbanWatcher({
+    intervalMs: 3_600_000,
+    list: async () => { reads++; return []; },
+    announce() {}, realtime: feed,
+  });
+  try {
+    watcher.start(); await settle();
+    expect(reads).toBe(1);
+    // Drive multiple connection backoff attempts independently of the poll clock.
+    for (let i = 0; i < 8; i++) retry!();
+    await settle();
+    expect(reads).toBe(1);
+  } finally { await watcher.stop(); }
+  expect(retry).toBeUndefined();
+});

@@ -242,6 +242,8 @@ export class KanbanWatcher {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private running = false;
   private pushConnected = false;
+  /** A healthy socket cannot substitute for a successful authoritative read. */
+  private lastReadSucceeded = false;
   private refreshPending = false;
   private scheduledPoll: Promise<void> | undefined;
   private activePoll: Promise<void> | undefined;
@@ -297,7 +299,7 @@ export class KanbanWatcher {
     this.opts.realtime?.start(
       () => this.requestRefresh(),
       (ready) => {
-        if (!this.running) return;
+        if (!this.running || this.pushConnected === ready) return;
         this.pushConnected = ready;
         this.requestRefresh();
       },
@@ -363,6 +365,7 @@ export class KanbanWatcher {
   }
 
   private async runTrackedPoll(controller: AbortController): Promise<void> {
+    this.lastReadSucceeded = false;
     try {
       await this.poll(controller.signal);
     } finally {
@@ -415,6 +418,7 @@ export class KanbanWatcher {
       }
     }
     this.seeded = true;
+    this.lastReadSucceeded = true;
   }
 
   private launchScheduledPoll(): void {
@@ -438,7 +442,7 @@ export class KanbanWatcher {
     this.timer = setTimeout(() => {
       this.timer = undefined;
       this.launchScheduledPoll();
-    }, this.refreshPending ? 100 : this.pushConnected ? Math.max(this.opts.intervalMs, 5 * 60_000) : Math.max(0, this.opts.intervalMs));
+    }, this.refreshPending ? 100 : this.pushConnected && this.lastReadSucceeded ? Math.max(this.opts.intervalMs, 5 * 60_000) : Math.max(0, this.opts.intervalMs));
   }
 
   /**
