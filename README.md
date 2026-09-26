@@ -100,7 +100,25 @@ Replies stream sentence-by-sentence, so speech starts while the brain is still g
 - **A GPU is recommended, not required.** The latency numbers above come from an NVIDIA card. On Linux, everything also runs on CPU: transcription gets noticeably slower, but the default voice engine (pocket-tts) is CPU-friendly at roughly half a second per sentence. On Apple Silicon (measured on an M4), the local MLX stack transcribes a spoken command in about a second and pocket-tts runs ~0.4 s per sentence (≈9× realtime) — see [stored results](docs/performance-portability-evaluation.md#stored-results--apple-silicon-m4) for the measured numbers.
 - **Disk and patience for first start.** The speech models and the small local LLM download on first use — expect a few GB.
 - **Tools:** [Bun](https://bun.sh) (the runtime), [uv](https://docs.astral.sh/uv/) (manages the Python model servers), ffmpeg, a local LLM runtime for the small router model ([Ollama](https://ollama.com) in the by-hand setup below; the guided setup also takes llama.cpp, LM Studio or MLX), and OpenSSL (used once, to create the HTTPS certificate).
-- **A coding agent, installed and authenticated.** Cicero ships no brain — bring Claude Code, Codex, Gemini, or any ACP/OpenAI-compatible harness.
+- **A coding agent, installed and authenticated.** Cicero ships no brain — bring Claude Code, Codex, Gemini, or any ACP/OpenAI-compatible harness. [Hermes](https://hermes-agent.nousresearch.com) is the recommended default; see below.
+
+## Which brain
+
+Cicero does not depend on any one agent: the voice loop — speech in, the agent's
+answer out loud, notifications, Telegram, voice cloning — works with every
+supported brain. The operator features sit on top and need more from the agent.
+[Hermes](https://hermes-agent.nousresearch.com) over ACP covers all of them, so
+it is the recommended default; everything below also works with another agent
+that meets the same requirement.
+
+| Feature | What it needs |
+|---|---|
+| Voice loop, notifications, Telegram, voice cloning | Any brain |
+| Spoken confirmation gate for risky tools | An ACP brain ([brains](docs/brains.md)) |
+| Resume the agent's session after a restart | An ACP agent that supports `session/load` |
+| Office lanes: transfers, roll call, status from everyone, per-lane voices | Lane agents over ACP or Codex ([office](docs/office.md)) |
+| Task-board notifications and read-back | A task board: Hermes, Multica or Paperclip |
+| Idle compaction of the agent's context | An ACP agent that reports context usage and has a compaction command (Hermes: `/compress`) |
 
 ## Try it in two minutes (sidecar mode)
 

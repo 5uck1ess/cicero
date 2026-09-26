@@ -94,6 +94,19 @@ new AgentSideConnection((client: Client): Agent => {
     },
     async prompt(params: PromptRequest) {
       const text = params.prompt.map((b) => (b.type === "text" ? b.text : "")).join("");
+      const promptLog = process.env.CICERO_TEST_ACP_PROMPT_LOG;
+      if (promptLog) appendFileSync(promptLog, JSON.stringify(text) + "\n");
+      // hermes-style off-spec context usage ("used/size"), sent before the reply settles.
+      const usage = process.env.CICERO_TEST_ACP_USAGE?.split("/").map(Number);
+      if (usage?.length === 2) {
+        await client.sessionUpdate({ sessionId: params.sessionId, update: { sessionUpdate: "usage_update", used: usage[0], size: usage[1] } } as never);
+      }
+      // Per-prompt usage markers: "usage:U/S" for this session, "usage-other:U/S" for a stranger.
+      for (const [, other, used, size] of text.matchAll(/usage(-other)?:(\d+)\/(\d+)/g)) {
+        await client.sessionUpdate({ sessionId: other ? "other-session" : params.sessionId, update: { sessionUpdate: "usage_update", used: Number(used), size: Number(size) } } as never);
+      }
+      if (text.includes("crash now")) process.exit(3);
+      if (text === "/compress") await Bun.sleep(Number(process.env.CICERO_TEST_ACP_COMPRESS_DELAY_MS ?? "0"));
 
       if (text.includes("structured updates")) {
         await client.sessionUpdate({ sessionId: "wrong-session", update: { sessionUpdate: "tool_call", toolCallId: "stale", title: "stale", status: "failed" } });

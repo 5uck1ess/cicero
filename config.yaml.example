@@ -234,6 +234,14 @@ brain:
   #     command: /usr/local/bin/search-mcp
   #     args: [--stdio]
   #     env: [SEARCH_TOKEN]
+  # Idle agent compaction (acp, off by default). An agent that compacts its own
+  # context when a turn crosses its threshold does it mid-conversation, and the
+  # user waits. This sends the agent's compaction command while you're idle
+  # instead. Needs an agent that reports usage_update (hermes does).
+  # idle_compact:
+  #   command: /compress   # hermes; use your agent's own command
+  #   idle_minutes: 5      # 1-1440; any turn restarts the countdown
+  #   min_usage: 0.35      # fraction of the window; set below the agent's own threshold
 
   # Background history compaction (off by default). Cicero replays a bounded
   # transcript to the brain; past the cap the oldest turns are simply dropped and

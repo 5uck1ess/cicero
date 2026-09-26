@@ -344,22 +344,48 @@ export function boundedNdJsonStream(
   return { readable, writable };
 }
 
+/** An agent's own estimate of how full its context window is, in tokens. */
+export interface AcpContextUsage { used: number; size: number }
+
+const MAX_CONTEXT_TOKENS = 100_000_000;
+
+/** Accept only sane integer token counts from an untrusted agent frame. */
+export function parseContextUsage(update: unknown): AcpContextUsage | null {
+  if (!update || typeof update !== "object") return null;
+  const { used, size } = update as { used?: unknown; size?: unknown };
+  if (!Number.isSafeInteger(used) || !Number.isSafeInteger(size)) return null;
+  const u = used as number, s = size as number;
+  if (u < 0 || s <= 0 || s > MAX_CONTEXT_TOKENS || u > MAX_CONTEXT_TOKENS) return null;
+  return { used: u, size: s };
+}
+
 /**
  * Drop session/update notifications the spec schema doesn't know — e.g. hermes'
  * "usage_update" context-usage extension. The library zod-validates before our
  * callback runs and console.errors a full multi-line dump per unknown
  * notification (one per turn); filtering here keeps the log clean without
  * touching updates we actually consume.
+ *
+ * A well-formed "usage_update" is still reported to `onUsage` before it is
+ * dropped: it is the only signal of how full the agent's context is.
  */
-export function dropOffSpecUpdates(readable: ReadableStream<unknown>): ReadableStream<unknown> {
+export function dropOffSpecUpdates(
+  readable: ReadableStream<unknown>,
+  onUsage?: (usage: AcpContextUsage, sessionId: string) => void,
+): ReadableStream<unknown> {
   const warned = new Set<string>();
   let warnedAboutLimit = false;
   return readable.pipeThrough(
     new TransformStream<unknown, unknown>({
       transform(msg, controller) {
-        const m = msg as { id?: unknown; method?: unknown; params?: { update?: { sessionUpdate?: unknown } } };
+        const m = msg as { id?: unknown; method?: unknown; params?: { sessionId?: unknown; update?: { sessionUpdate?: unknown } } };
         if (m && m.method === "session/update" && m.id === undefined && !sessionNotificationSchema.safeParse(m.params).success) {
           const rawKind = m.params?.update?.sessionUpdate;
+          if (rawKind === "usage_update" && onUsage) {
+            const usage = parseContextUsage(m.params?.update);
+            const sessionId = m.params?.sessionId;
+            if (usage && typeof sessionId === "string" && sessionId) onUsage(usage, sessionId);
+          }
           const kind = (
             typeof rawKind === "string"
             || typeof rawKind === "number"
@@ -491,7 +517,25 @@ export interface AcpBrainConfig {
   terminateGraceMs?: number;
   /** Protocol cancellation settlement window. Primarily exposed for deterministic tests. */
   cancelSettleMs?: number;
+  /**
+   * Compact the agent's context while the conversation is idle, instead of
+   * letting the agent do it in the middle of a spoken turn. `idleMs` after the
+   * last turn, if the agent's last reported usage ("usage_update") is at least
+   * `minUsage` of its window, `command` is sent as a raw prompt with no
+   * injected context — e.g. hermes' "/compress". At most once per idle period.
+   */
+  idleCompact?: AcpIdleCompactConfig;
 }
+
+export interface AcpIdleCompactConfig {
+  command: string;
+  idleMs: number;
+  /** Fraction of the context window, 0 < minUsage <= 1. */
+  minUsage: number;
+}
+
+/** A compaction that outlives this is cancelled like any other turn. */
+const IDLE_COMPACT_DEADLINE_MS = 300_000;
 
 /**
  * Pull a human-readable message out of an ACP/JSON-RPC error. The library rejects
@@ -754,6 +798,12 @@ export class AcpBrain implements Brain {
   // Spoken confirmation gate state — see AcpBrainConfig.confirmTools.
   private confirmationGrant: ConfirmationGrant | null = null;
   private pendingConfirmation: PendingConfirmationState | null = null;
+  // Bound to the exact runtime and session that reported it: a report from
+  // another session, or from a runtime that has since died, never counts.
+  private contextUsage: { runtime: AcpRuntime; sessionId: string; usage: AcpContextUsage } | null = null;
+  private compactionReservation: object | null = null;
+  private idleCompactTimer: ReturnType<typeof setTimeout> | null = null;
+  private idleCompacting = false;
   private readonly config: AcpBrainConfig;
 
   constructor(config: AcpBrainConfig) {
@@ -808,7 +858,69 @@ export class AcpBrain implements Brain {
         serverNames.add(server.name);
       }
     }
+    const idle = config.idleCompact;
+    if (idle !== undefined) {
+      if (typeof idle.command !== "string" || !idle.command.trim() || idle.command.length > 256) {
+        throw new RangeError("idleCompact.command must be a non-empty string of at most 256 characters");
+      }
+      if (!Number.isFinite(idle.idleMs) || idle.idleMs < 1_000 || idle.idleMs > 86_400_000) {
+        throw new RangeError("idleCompact.idleMs must be from 1000 through 86400000");
+      }
+      if (!Number.isFinite(idle.minUsage) || idle.minUsage <= 0 || idle.minUsage > 1) {
+        throw new RangeError("idleCompact.minUsage must be greater than 0 and at most 1");
+      }
+    }
     this.config = config;
+  }
+
+  /** The agent's last reported context usage, if it reports one. */
+  lastContextUsage(): AcpContextUsage | null {
+    const entry = this.contextUsage;
+    const runtime = this.runtime;
+    if (!entry || !runtime || entry.runtime !== runtime || runtime.stopping || entry.sessionId !== runtime.sessionId) return null;
+    return entry.usage;
+  }
+
+  private cancelIdleCompact(): void {
+    if (this.idleCompactTimer) clearTimeout(this.idleCompactTimer);
+    this.idleCompactTimer = null;
+  }
+
+  private scheduleIdleCompact(): void {
+    const idle = this.config.idleCompact;
+    this.cancelIdleCompact();
+    if (!idle || !this.desiredRunning) return;
+    const timer = setTimeout(() => {
+      if (this.idleCompactTimer !== timer) return;
+      this.idleCompactTimer = null;
+      void this.runIdleCompact(idle);
+    }, idle.idleMs);
+    (timer as { unref?: () => void }).unref?.();
+    this.idleCompactTimer = timer;
+  }
+
+  private async runIdleCompact(idle: AcpIdleCompactConfig): Promise<void> {
+    const usage = this.lastContextUsage();
+    if (!usage || usage.used / usage.size < idle.minUsage) return;
+    // Anything queued or live means the conversation is not idle after all.
+    if (this.idleCompacting || this.pendingReservations.size > 0 || this.runtime?.activeTurn || !this.runtime?.conn) return;
+    this.idleCompacting = true;
+    const percent = Math.round((usage.used / usage.size) * 100);
+    log("info", `acp: idle compaction — context ${percent}% full; sending ${idle.command}`);
+    let reply = "";
+    try {
+      // Through the turn lock like any turn: a real turn arriving now waits
+      // behind it instead of racing the agent's own compaction.
+      for await (const chunk of this.turnStream(idle.command, { signal: AbortSignal.timeout(IDLE_COMPACT_DEADLINE_MS) }, true)) {
+        if (reply.length < 512) reply += chunk;
+      }
+      const summary = this.redactAgentText(reply).replace(/\s+/g, " ").trim().slice(0, 200);
+      log("info", `acp: idle compaction finished${summary ? `: ${summary}` : ""}`);
+    } catch (error: unknown) {
+      log("warn", `acp: idle compaction failed: ${this.describeAgentError(error)}`);
+    } finally {
+      this.idleCompacting = false;
+    }
   }
 
   sessionRestored(): boolean { return this.runtime?.restored ?? false; }
@@ -893,13 +1005,26 @@ export class AcpBrain implements Brain {
   }
 
   async *sendStream(message: string, options: BrainTurnOptions = {}): AsyncGenerator<string> {
+    this.cancelIdleCompact();
+    try {
+      yield* this.turnStream(message, options, false);
+    } finally {
+      this.scheduleIdleCompact();
+    }
+  }
+
+  /** `raw` sends `message` verbatim: no injected context, no approval bookkeeping. */
+  private async *turnStream(message: string, options: BrainTurnOptions, raw: boolean): AsyncGenerator<string> {
     const reservedRuntime = this.runtime;
     if (!reservedRuntime?.conn || !reservedRuntime.sessionId) {
       throw new Error("ACP brain not started — call start() first");
     }
     const reservedGeneration = reservedRuntime.generation;
     const maxPendingTurns = this.config.maxPendingTurns ?? DEFAULT_ACP_PENDING_TURN_LIMIT;
-    if (this.pendingReservations.size >= maxPendingTurns) {
+    // Background compaction never takes a user's admission slot: a turn that
+    // arrives during it waits, even at max_pending_turns: 1.
+    const compactionSlot = this.compactionReservation && this.pendingReservations.has(this.compactionReservation) ? 1 : 0;
+    if (this.pendingReservations.size - compactionSlot >= maxPendingTurns) {
       throw new AcpTurnAdmissionError(maxPendingTurns);
     }
     // Serialize turns: a second caller (another websocket, the POST path) waits for
@@ -917,6 +1042,7 @@ export class AcpBrain implements Brain {
     this.turnReleases.add(release);
     const reservationToken = {};
     this.pendingReservations.add(reservationToken);
+    if (raw) this.compactionReservation = reservationToken;
     // Chain the reservation itself to its predecessor. That lets an aborted
     // queued caller release its own gate without allowing its successor to
     // bypass the still-active turn.
@@ -964,8 +1090,10 @@ export class AcpBrain implements Brain {
       ) {
         throw new Error("ACP brain stopped while waiting for turn");
       }
-      this.noteApprovalIfPending(message);
-      const promptText = this.buildPrompt(message, options.systemContext); // once — consumes one-shot mutable context
+      if (!raw) this.noteApprovalIfPending(message);
+      // Once — buildPrompt consumes one-shot mutable context, which a raw
+      // command must leave for the next real turn.
+      const promptText = raw ? message : this.buildPrompt(message, options.systemContext);
       for (let attempt = 0; attempt < 2; attempt++) {
         const conn = runtime.conn;
         const sessionId = runtime.sessionId;
@@ -1430,6 +1558,9 @@ export class AcpBrain implements Brain {
   }
 
   private async stopCurrentRuntime(reason: Error): Promise<void> {
+    // Usage and the idle timer describe the session being stopped.
+    this.cancelIdleCompact();
+    this.contextUsage = null;
     const interruptedStart = this.startOperation;
     if (this.stopOperation) {
       try {
@@ -1517,7 +1648,11 @@ export class AcpBrain implements Brain {
     });
     const conn = new ClientSideConnection(() => this.makeClient(runtime), {
       writable: stream.writable,
-      readable: dropOffSpecUpdates(stream.readable) as typeof stream.readable,
+      readable: dropOffSpecUpdates(stream.readable, (usage, sessionId) => {
+        if (this.runtime === runtime && runtime.sessionId && sessionId === runtime.sessionId) {
+          this.contextUsage = { runtime, sessionId, usage };
+        }
+      }) as typeof stream.readable,
     });
     runtime.conn = conn;
 
