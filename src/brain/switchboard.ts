@@ -1,4 +1,4 @@
-import { classifySwitchboardIntent, DEFAULT_FRONT_DESK_ALIASES, type SwitchboardIntent } from "./switchboard-intent";
+import { classifySwitchboardIntent, DEFAULT_FRONT_DESK_ALIASES, type IntentClassifier, type SwitchboardIntent } from "./switchboard-intent";
 import { nameKey, normalizeRef } from "./switchboard-ref";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BackgroundTurnOptions, Brain, BrainTurnOptions, PendingConfirmation } from "../types";
@@ -447,7 +447,7 @@ export class SwitchboardBrain implements Brain {
     private primary: Brain,
     private lanes: Record<string, LaneDef>,
     /** Optional small-local-model classifier for phrasings the patterns miss. */
-    private classify?: (prompt: string, signal?: AbortSignal) => Promise<string>,
+    private classify?: IntentClassifier,
     options: SwitchboardOptions = {},
   ) {
     // Explicit aliases are validated against the roster at config load. The

@@ -193,19 +193,22 @@ var state = null;
 var view = 'overview';
 var app = document.getElementById('app');
 
-var ORDER = ['system', 'stt', 'provider', 'brain', 'tts', 'board', 'review'];
+var ORDER = ['system', 'stt', 'provider', 'router', 'brain', 'tts', 'board', 'review'];
 var STEP = {
   system:   { short: 'Machine', title: 'This machine', lede: 'Cicero picks a starting preset from your hardware. You can change it.', sub: 'Runs everything' },
   stt:      { short: 'Hear',    title: 'How should Cicero hear you?', lede: 'Speech-to-text turns your voice into words.', sub: 'Speech-to-text' },
   provider: { short: 'Think',   title: 'Which model handles conversation?', lede: 'A language model answers everyday talk quickly. Coding work goes to the agent.', sub: 'Language model' },
+  router:   { short: 'Route',   title: 'How should Cicero route requests?', lede: 'Use the LLM prompt, or a local Laya sidecar with your fine-tuned switchboard checkpoint.', sub: 'Intent router' },
   brain:    { short: 'Agent',   title: 'Which coding agent does the work?', lede: 'Cicero is the voice. Your agent reads code, runs tools and opens PRs.', sub: 'Coding agent' },
   tts:      { short: 'Speak',   title: 'How should Cicero speak?', lede: 'Text-to-speech turns replies into audio.', sub: 'Text-to-speech' },
   board:    { short: 'Tasks',   title: 'Where do your tasks live?', lede: 'Optional. Cicero can announce when tasks on your board finish or get stuck.', sub: 'Optional board' },
   review:   { short: 'Save',    title: 'Review and save', lede: 'Cicero checks your choices before writing the config.', sub: 'Check and write' }
 };
-var NAMES = {'llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'OpenAI-compatible URL','claude-code':'Claude Code','codex':'Codex','gemini':'Gemini CLI','qwen':'Qwen Code','acp':'ACP agent','faster-whisper':'faster-whisper','mlx-whisper':'MLX Whisper','audiocpp':'audio.cpp','kokoro':'Kokoro','pocket-tts':'Pocket TTS (Python)','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming server','hermes':'Hermes','multica':'Multica','paperclip':'Paperclip','none':'No board','cloud':'Cloud or custom API','api':'Model API','local-cuda':'NVIDIA GPU','local-mlx':'Apple Silicon','local-cpu':'CPU only'};
+var NAMES = {'llm':'LLM prompt (default)','laya':'Laya sidecar (checkpoint required)','llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'OpenAI-compatible URL','claude-code':'Claude Code','codex':'Codex','gemini':'Gemini CLI','qwen':'Qwen Code','acp':'ACP agent','faster-whisper':'faster-whisper','mlx-whisper':'MLX Whisper','audiocpp':'audio.cpp','kokoro':'Kokoro','pocket-tts':'Pocket TTS (Python)','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming server','hermes':'Hermes','multica':'Multica','paperclip':'Paperclip','none':'No board','cloud':'Cloud or custom API','api':'Model API','local-cuda':'NVIDIA GPU','local-mlx':'Apple Silicon','local-cpu':'CPU only'};
 function optionName(stepId, option) { return option === 'audiocpp' ? (stepId === 'stt' ? 'Nemotron (audio.cpp)' : 'Pocket TTS (audio.cpp)') : (NAMES[option] || option); }
 var NOTES = {
+  'llm':'Routes with the conversational LLM; no separate checkpoint needed.',
+  'laya':'Base Laya does not route zero-shot. A fine-tuned switchboard checkpoint is required: bring-your-own for now. A public checkpoint trained on synthetic data only plus the fine-tuning recipe are a planned follow-up.',
   'llama-cpp':'Fast local GGUF models.', 'ollama':'Easy local model library.', 'lm-studio':'Desktop app with a local server.', 'mlx-lm':'Local models on Apple Silicon.',
   'cloud':'Any OpenAI-compatible endpoint or a cloud provider.', 'api':'An OpenAI-compatible model API instead of an agent CLI.',
   'claude-code':'Anthropic\\u2019s coding agent.', 'codex':'OpenAI\\u2019s coding agent.', 'gemini':'Google\\u2019s coding agent.', 'qwen':'Qwen\\u2019s coding agent.', 'acp':'Any Agent Client Protocol harness, such as Hermes.',
@@ -215,6 +218,7 @@ var NOTES = {
   'local-cuda':'Local speech and models on your NVIDIA card.', 'local-mlx':'Local speech and models on Apple Silicon.', 'local-cpu':'Works anywhere, slower.'
 };
 var GUIDES = {
+  'laya':[['Base Laya does not route zero-shot. A fine-tuned switchboard checkpoint is required: bring-your-own for now. A public checkpoint trained on synthetic data only plus the fine-tuning recipe are a planned follow-up. Read the sidecar guide','https://github.com/5uck1ess/cicero/blob/main/sidecars/laya-switchboard/README.md'],['Start with your checkpoint','uv run --python 3.11 --with-requirements requirements/laya-switchboard.txt python sidecars/laya-switchboard/serve.py --ckpt /path/to/switchboard-checkpoint']],
   'llama-cpp':[['Build or install llama.cpp','https://github.com/ggml-org/llama.cpp'],['Start the server on port 8080','llama-server -m your-model.gguf --port 8080']],
   'ollama':[['Install Ollama','https://ollama.com/download'],['Pull a model','ollama pull qwen3.5:4b']],
   'lm-studio':[['Install LM Studio','https://lmstudio.ai'],['Load a model, then start its local server on port 1234','']],
@@ -279,6 +283,7 @@ function valueFor(id) {
   if (id === 'system') return NAMES[state.tier] || state.tier;
   if (id === 'review') return state.written ? 'Saved' : 'Not saved yet';
   var c = state.selectedChoices && state.selectedChoices[id];
+  if (id === 'router' && c) return c === 'laya' ? 'Laya sidecar' : 'LLM prompt';
   return c ? optionName(id, c) : 'Choose';
 }
 function gib(n) { return n == null ? 'unknown' : (n / 1073741824).toFixed(0) + ' GB'; }
@@ -300,18 +305,19 @@ async function goInner(id) {
 // A choice whose probe failed was not added to the draft: keep the operator on that step.
 function blockedByProbe(s) { var p = s && s.detected && s.detected.probe; return p && p.ok === false ? (p.message || 'The check failed.') : null; }
 var tried = {};
+var routerUrl = '';
 function next(id) { var i = ORDER.indexOf(id); return ORDER[Math.min(i + 1, ORDER.length - 1)]; }
 
 /* ---------- Overview diagram ---------- */
 function diagram(layout) {
   var wide = layout === 'wide';
-  var W = wide ? 900 : 360, H = wide ? 420 : 832;
+  var W = wide ? 1140 : 360, H = wide ? 420 : 952;
   var nw = wide ? 180 : 250, nh = 92;
   var pos = wide ? {
-    stt: [150, 20], provider: [410, 20], brain: [670, 20],
-    tts: [280, 190], board: [670, 190], system: [150, 324], review: [670, 324]
+    stt: [150, 20], provider: [410, 20], router: [670, 20], brain: [910, 20],
+    tts: [280, 190], board: [910, 190], system: [150, 324], review: [910, 324]
   } : {
-    system: [55, 0], stt: [55, 120], provider: [55, 240], brain: [55, 360], board: [55, 480], tts: [55, 600], review: [55, 740]
+    system: [55, 0], stt: [55, 120], provider: [55, 240], router: [55, 360], brain: [55, 480], board: [55, 600], tts: [55, 720], review: [55, 860]
   };
   var root = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'group', 'aria-label': 'Cicero voice loop. Choose a part to set it up.', class: wide ? 'wide' : 'tall' });
   function mid(id, side) {
@@ -329,14 +335,16 @@ function diagram(layout) {
     root.append(svg('text', { x: 56, y: 71, 'text-anchor': 'middle', class: 'person-label', text: 'You' }));
     edge([90, 66], mid('stt', 'l'), false, 'talk', 120, 56);
     edge(mid('stt', 'r'), mid('provider', 'l'), false, 'words', 370, 56);
-    edge(mid('provider', 'r'), mid('brain', 'l'), false, 'code', 630, 56);
+    edge(mid('provider', 'r'), mid('router', 'l'), false, 'route', 630, 56);
+    edge(mid('router', 'r'), mid('brain', 'l'), false, 'code', 880, 56);
     edge([480, 112], [400, 190], false, 'reply', 462, 158);
-    edge(mid('brain', 'b'), mid('board', 't'), true, 'tasks', 790, 156);
+    edge(mid('brain', 'b'), mid('board', 't'), true, 'tasks', 1030, 156);
     edge(mid('tts', 'l'), [72, 96], false, 'hear it', 150, 170);
   } else {
     edge(mid('system', 'b'), mid('stt', 't'), true);
     edge(mid('stt', 'b'), mid('provider', 't'), false);
-    edge(mid('provider', 'b'), mid('brain', 't'), false);
+    edge(mid('provider', 'b'), mid('router', 't'), false);
+    edge(mid('router', 'b'), mid('brain', 't'), false);
     edge(mid('brain', 'b'), mid('board', 't'), true);
     edge(mid('board', 'b'), mid('tts', 't'), false);
     edge(mid('tts', 'b'), mid('review', 't'), true);
@@ -451,13 +459,15 @@ function renderPicker(id, step) {
   function realId() { return extra && picked === extra.key ? extra.value : picked; }
   function draw() {
     group.querySelectorAll('.choice').forEach(function (n) { n.remove(); });
-    options.forEach(function (o) {
+    options.concat(Object.keys(f.disabled || {})).forEach(function (o) {
       var input = h('input', { type: 'radio', name: 'pick-' + id, value: o });
-      input.checked = o === picked;
+      input.disabled = !!(f.disabled && f.disabled[o]);
+      input.checked = !input.disabled && o === picked;
       input.onchange = function () { picked = o; drawDetail(); };
       var s = stateLabel(o, f);
       var rt = f.runtimes && f.runtimes[o];
       var note = o === 'audiocpp' ? (id === 'stt' ? 'Fast, accurate English ASR with Nemotron’s streaming model on an NVIDIA GPU; needs the audio.cpp build.' : 'Voice cloning on an NVIDIA GPU; needs the audio.cpp build.') : (NOTES[o] || '');
+      if (input.disabled) note = f.disabled[o] + ' ' + note;
       if (rt && rt.running && rt.models && rt.models.length) note += ' ' + rt.models.length + ' models loaded.';
       group.append(h('label', { class: 'choice' }, [input,
         s ? h('span', { class: 'state' + (s[1] ? ' on' : '') }, [h('i'), document.createTextNode(s[0])]) : null,
@@ -476,6 +486,11 @@ function renderPicker(id, step) {
       box.append(field(id === 'provider' ? 'Provider' : 'Model API', sel));
     }
     var rt = f.runtimes && f.runtimes[o];
+    if (id === 'router' && o === 'laya') {
+      fields.url = textInput(routerUrl || f.defaultUrl, 'url');
+      fields.url.oninput = function () { routerUrl = this.value; };
+      box.append(field('Laya sidecar URL', fields.url));
+    }
     if (id === 'provider' && o === 'llama-cpp') fields.model = textInput(f.defaultModel), box.append(field('Model (GGUF file path or Hugging Face repo)', fields.model));
     if (id === 'provider' && (o === 'ollama' || o === 'lm-studio') && rt && rt.models.length) fields.model = selectOf(rt.models), box.append(field('Model', fields.model));
     var remote = id === 'provider' && ['llama-cpp', 'ollama', 'lm-studio', 'mlx-lm'].indexOf(o) < 0;
@@ -507,8 +522,8 @@ function renderPicker(id, step) {
     var s = stateLabel(o, f);
     var speechStatus = f.status && f.status[o];
     var guide = o === 'audiocpp' && speechStatus && speechStatus.installed ? null : GUIDES[o];
-    if (s && !s[1] && o !== 'none') {
-      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: optionName(id, o) + ': ' + s[0] })]);
+    if ((s && !s[1] && o !== 'none') || o === 'laya') {
+      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: optionName(id, o) + ': ' + (s ? s[0] : 'Checkpoint required') })]);
       if (guide) {
         var list = h('ol');
         guide.forEach(function (g) {

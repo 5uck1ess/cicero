@@ -175,10 +175,16 @@ Cicero validates configuration before it starts providers, subprocesses, listene
 
 ## Switchboard intent settings
 
-Top-level `switchboard` controls the model fallback for `brain.lanes`:
+Top-level `switchboard` controls the model fallback for `brain.lanes`.
+
+Optional: `intent_url` sends classification to the local [Laya switchboard sidecar](../sidecars/laya-switchboard/README.md) (~30 ms on GPU) instead of the summarizer prompt.
+
+> **Checkpoint required — bring your own for now.** The base Laya model does not route zero-shot; the sidecar needs a switchboard fine-tuned checkpoint. A public checkpoint trained on synthetic data only, plus the fine-tuning recipe, is a planned follow-up.
+
 
 ```yaml
 switchboard:
+  # intent_url: http://127.0.0.1:8096 # opt-in Laya sidecar; needs a fine-tuned checkpoint
   front_desk_aliases: [cicero, jarvis] # names of the main assistant
   intent_min_confidence: 0.7 # finite number, 0 through 1
   intent_timeout_ms: 1500    # integer, 1 through 300000 milliseconds

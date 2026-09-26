@@ -30,6 +30,7 @@ jobs:
       - run: bun x tsc --noEmit
       - run: bun test
       - run: python3 -m unittest discover -s sidecars/telegram-call -p 'test_*.py'
+      - run: python3 -m unittest discover -s sidecars/laya-switchboard -p 'test_*.py'
       - run: uv run --python 3.11 --with-requirements requirements/telegram-call.txt python sidecars/telegram-call/native_contract.py
 
   # The `test` job above runs on Linux, where every win32-only assertion is

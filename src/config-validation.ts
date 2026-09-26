@@ -328,7 +328,8 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
   ], issues);
 
   if (config.switchboard !== undefined && checkRecord(config.switchboard, "switchboard", issues)) {
-    checkKnownKeys(config.switchboard, "switchboard", ["intent_timeout_ms", "intent_min_confidence", "front_desk_aliases"], issues);
+    checkKnownKeys(config.switchboard, "switchboard", ["intent_url", "intent_timeout_ms", "intent_min_confidence", "front_desk_aliases"], issues);
+    checkOptionalHttpUrl(config.switchboard, "intent_url", "switchboard", issues);
     if (config.switchboard.intent_timeout_ms !== undefined) checkInteger(config.switchboard.intent_timeout_ms, "switchboard.intent_timeout_ms", issues, { min: 1, max: 300_000 });
     if (config.switchboard.intent_min_confidence !== undefined) checkNumber(config.switchboard.intent_min_confidence, "switchboard.intent_min_confidence", issues, { min: 0, max: 1 });
     if (config.switchboard.front_desk_aliases !== undefined) {

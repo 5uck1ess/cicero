@@ -1673,3 +1673,14 @@ test("incomplete-turn filter is opt-in, bounded, and needs its own classifier", 
     expect(() => loadYaml(classifier + `web_voice: { incomplete_turn: { ${settings} } }\n`)()).toThrow(/incomplete_turn/);
   }
 });
+
+test("switchboard intent_url accepts HTTP(S) bases and rejects invalid or path-unsafe URLs", () => {
+  for (const url of ["http://127.0.0.1:8096", "https://sidecar.example/base/"]) {
+    expect(loadYaml(`switchboard: { intent_url: ${JSON.stringify(url)} }\n`)().raw.switchboard?.intent_url).toBe(url);
+  }
+  for (const value of [null, 123, [], {}, "", "not a URL", "ftp://sidecar.example", "/relative", "http://", "http://h/?", "http://h/#", "https://h/?token=SYNTHETIC_SECRET_VALUE"]) {
+    const load = loadYaml(`switchboard: { intent_url: ${JSON.stringify(value)} }\n`);
+    expect(load).toThrow(/switchboard.intent_url/);
+    try { load(); } catch (error) { expect(String(error)).not.toContain("SYNTHETIC_SECRET_VALUE"); }
+  }
+});
