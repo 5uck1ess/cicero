@@ -173,3 +173,48 @@ Tools the agent auto-approves on its own side, such as in a yolo or auto-approve
 mode, can still run during speculation. Cicero logs this limitation at startup
 when ACP speculation is enabled. Speculation stays off while the intent judge
 runs, even with an ACP brain.
+
+
+## Incomplete-turn filter (opt-in)
+
+Smart-Turn judges audio. The optional text filter asks the configured `classifier`
+model whether the final transcript is clearly unfinished, such as “so what I want
+is, um”. Enable it with:
+
+```yaml
+web_voice:
+  incomplete_turn:
+    enabled: true
+    wait_ms: 3000
+    classifier_timeout_ms: 250
+```
+
+A separate `classifier` backend must be configured (see [Intent judge](intent-judge.md)).
+The filter runs after STT and the addressed-to-me veto, before history, brain work,
+fillers or speech. Only an exact `incomplete` verdict holds the turn. Complete,
+malformed, failed and timed-out verdicts proceed. Speculation is disabled while
+this filter is enabled because it would start brain work before the verdict.
+
+While held, the WebSocket stays silent and sends a `hold` control frame so the
+browser reopens hands-free capture while keeping the pending reply live. A continuation on the same socket joins
+the unfinished text; the combined transcript reaches the brain and history once.
+After `wait_ms` (100–10000, default 3000), the pipeline answers the retained text
+anyway. Further incomplete verdicts never extend that original deadline. Speech
+onset cancels the old response, but retains the prefix for one bounded capture
+(up to 120 seconds); if the original deadline has passed by its final transcript,
+the combined text proceeds immediately. An abandoned capture expires silently.
+Typed input, an empty/failed/vetoed continuation, socket close and server shutdown
+discard retained voice text. Each
+socket owns its own prefix; reconnects do not recover unfinished turns.
+
+The HTTP POST voice endpoint also checks and waits, but separate POST requests
+cannot join a turn; use the WebSocket for continuations. Typed input and host-mic
+turns do not use this browser-voice filter.
+
+The default is off: no classifier call or added wait. Enabling it adds the
+classifier's latency (bounded by `classifier_timeout_ms`, 1–1000, default 250),
+but a complete verdict never pays the silence window. Run
+`bun run bench/incomplete-turn-bench.ts` for synthetic complete-turn pipeline
+overhead; injected-clock tests also verify that a 12ms classifier adds exactly
+12ms, not 3000ms. This measures software timing, not real model accuracy or
+acoustic behavior. Measure your local classifier before enabling this experiment.

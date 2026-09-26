@@ -140,5 +140,5 @@ test("speech gate confirms speech behind the energy gate and degrades honestly",
   // load or run failure → energy-only, never a broken gate
   expect(script).toContain("return !vadSession || vadProb >= thr");
   // PTT capture stays ungated (a held key is deliberate)
-  expect(script).toContain('if (!ptt && (state === "listening" || state === "speech" || state === "speaking")) speechGateFeed(buf);');
+  expect(script).toContain('if (!ptt && (state === "listening" || state === "held" || state === "speech" || state === "speaking")) speechGateFeed(buf);');
 });

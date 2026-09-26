@@ -1651,3 +1651,14 @@ test("front-desk aliases validate bounds, characters, and lane collisions", () =
   expect(loadYaml("brain:\n  lanes:\n    coder: { aliases: [Jarvis agent] }\n")).not.toThrow();
   expect(loadYaml("brain:\n  lanes:\n    jarvis: {}\n")).not.toThrow();
 });
+
+test("incomplete-turn filter is opt-in, bounded, and needs its own classifier", () => {
+  expect(loadConfig().web_voice?.incomplete_turn?.enabled ?? false).toBe(false);
+  const classifier = "classifier: { backend: ollama, model: synthetic, port: 11435 }\n";
+  const valid = loadYaml(classifier + "web_voice: { incomplete_turn: { enabled: true, wait_ms: 3000, classifier_timeout_ms: 250 } }\n")();
+  expect(valid.web_voice?.incomplete_turn?.enabled).toBe(true);
+  expect(() => loadYaml("web_voice: { incomplete_turn: { enabled: true } }\n")()).toThrow(/requires a classifier/);
+  for (const settings of ["enabled: yes", "wait_ms: 0", "wait_ms: 10001", "classifier_timeout_ms: 0", "classifier_timeout_ms: 1001", "wait_ms: .nan", "unknown: true"]) {
+    expect(() => loadYaml(classifier + `web_voice: { incomplete_turn: { ${settings} } }\n`)()).toThrow(/incomplete_turn/);
+  }
+});

@@ -181,3 +181,79 @@ test("audio admission preserves headroom for a terminal frame", () => {
   expect(() => sendAudioBounded(socket as never, new ArrayBuffer(clipBytes))).toThrow("backpressure");
   expect(MAX_OUTBOUND_AUDIO_BUFFER_BYTES - buffered).toBeGreaterThanOrEqual(CONTROL_FRAME_RESERVE_BYTES);
 });
+
+test("held voice turn captures hands-free continuation and aborts the old response", () => {
+  let aborts = 0;
+  const context = {
+    state: "held", rms: 0, micLevel: 0, ptt: false,
+    preRoll: [] as Float32Array[], onsetFrames: 0, noiseFloor: 0.01,
+    ABS_OPEN: 0.01, OPEN_FACTOR: 2, MIN_ONSET_MS: 1, PREROLL_MS: 1, VAD_POS: 0.5,
+    speechFrames: [] as Float32Array[], speechLen: 0, silenceFrames: 0, lastVoicedAt: 0,
+    rmsOf: () => 0.2, speechGateFeed() {}, speechConfirmed: () => true,
+    frameCount: () => 1, beginCaptureIdentity() {}, commitLiveCapture() {}, updateDebug() {},
+    abortActiveTurn() { aborts++; },
+    setState(value: string) { this.state = value; },
+  };
+  const frame = new Function("context", `with (context) { ${pageFunction("onFrame", "finalizeUtterance")}; return onFrame; }`)(context);
+  frame(new Float32Array([0.2, 0.2]));
+  expect(context.state).toBe("speech");
+  expect(context.speechLen).toBe(2);
+  expect(aborts).toBe(1);
+});
+
+test("hold control reopens capture but accepts the deadline reply for the same turn", () => {
+  const audio: unknown[] = [];
+  const context = {
+    state: "thinking", wsSessionId: "s", activeTurnId: "t", turnDone: false, playing: false,
+    preRoll: [], onsetFrames: 0, orbLabel: { textContent: "" }, hintEl: { textContent: "" },
+    setState(value: string) { this.state = value; }, setStatus() {},
+    resumeListening() { this.state = "listening"; },
+    decodeReplyFrame: () => ({ sessionId: "s", turnId: "t", payload: "audio" }),
+    enqueueAudio: (value: unknown) => audio.push(value),
+  };
+  const receive = new Function("context", `with (context) { ${pageFunction("onWsMessage", "scheduleReconnect")}; return onWsMessage; }`)(context);
+  const send = (type: string, turnId = "t") => receive({ data: JSON.stringify({ type, sessionId: "s", turnId, text: "combined" }) });
+  send("hold");
+  expect(context.state).toBe("held");
+  expect(context.activeTurnId).toBe("t");
+  send("done", "old");
+  expect(context.state).toBe("held");
+  receive({ data: new ArrayBuffer(1) });
+  expect(audio).toEqual(["audio"]);
+  send("transcript");
+  expect(context.state).toBe("thinking");
+  expect(context.hintEl.textContent).toContain("combined");
+  send("done");
+  expect(context.state).toBe("listening");
+});
+
+test("a short PTT tap during a hold preserves its pending deadline reply", () => {
+  let aborts = 0;
+  let nextTimer = 0;
+  const timers = new Map<number, () => void>();
+  const context = {
+    state: "held", ptt: true, convOn: true, ready: true, holding: false,
+    pttBargeTimer: null as number | null, MIN_UTTER_MS: 250,
+    activeTurnId: "original", captureTurnId: null as string | null,
+    speechFrames: [], speechLen: 0, silenceFrames: 0, onsetFrames: 0,
+    audioCtx: { sampleRate: 16000 }, orbLabel: { textContent: "" },
+    beginCaptureIdentity() { this.captureTurnId = "continuation"; },
+    abortActiveTurn() { aborts++; this.activeTurnId = ""; }, abortLiveCapture() {},
+    setStatus() {}, setState(value: string) { this.state = value; },
+    resumeListening() { this.state = "listening"; },
+    setTimeout(fn: () => void) { timers.set(++nextTimer, fn); return nextTimer; },
+    clearTimeout(id: number) { timers.delete(id); },
+  };
+  const methods = new Function("context", `with (context) {
+    ${pageFunction("beginPtt", "endPtt")}
+    ${pageFunction("endPtt", "resumeListening")}
+    return { beginPtt, endPtt };
+  }`)(context);
+  methods.beginPtt();
+  methods.endPtt();
+  expect(aborts).toBe(0);
+  expect(context.state).toBe("held");
+  expect(context.activeTurnId).toBe("original");
+  expect(context.captureTurnId).toBeNull();
+  expect(timers.size).toBe(0);
+});

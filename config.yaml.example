@@ -68,6 +68,12 @@ web_voice:
     spoken_sentences: 4
     # summarizer_url: http://127.0.0.1:8080/v1
     # summarizer_model: your-small-model
+  # Optional text completeness check using the separately configured classifier.
+  # Hold unfinished thoughts before the brain/TTS; disables speculation.
+  incomplete_turn:
+    enabled: false
+    wait_ms: 3000                 # fixed deadline, 100..10000
+    classifier_timeout_ms: 250    # fail open, 1..1000
   # Speculative turns (needs turn.enabled below): when the end-of-turn model is
   # confident you're done mid-pause, transcription and the brain start BEFORE
   # the final audio arrives — typically 300-600ms off time-to-first-audio.

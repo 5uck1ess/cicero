@@ -1,3 +1,4 @@
+import type { IncompleteTurnFilter } from "./incomplete";
 import { log } from "../logger";
 import { dashBus } from "../dashboard/bus";
 import { admitLatencyOwner, dropPendingLatencyOwner, LatencyTurn, LatencyRecordOwner, type LatencyStore, summarizeLatency } from "../latency";
@@ -115,6 +116,7 @@ interface SpecState {
 
 /** Per-connection state for a streaming voice WebSocket. */
 interface WsData {
+  incomplete?: IncompleteTurnFilter;
   pendingClientSlot: boolean;
   callClient: boolean;
   sessionId: string;
@@ -145,6 +147,8 @@ interface WsData {
 }
 
 export interface WebVoiceServerOptions {
+  /** One unfinished voice turn per socket, never shared between clients. */
+  createIncompleteFilter?: () => IncompleteTurnFilter;
   /** Injectable server factory for transport tests without binding a port. */
   serve?: typeof Bun.serve;
   /** Shared single-operator owner supplied by the daemon. */
@@ -159,7 +163,7 @@ export interface WebVoiceServerOptions {
   /** Process one captured utterance (WAV) into a spoken reply (Phase 1 POST path). */
   onTurn: (wav: ArrayBuffer, options?: { signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean }) => Promise<WebTurnResult>;
   /** Stream a captured utterance's reply over the WebSocket (Phase 2). Optional. */
-  onStreamTurn?: (wav: ArrayBuffer, sink: WebReplySink, opts?: { record?: boolean; spec?: SpeculativeTurn | null; streamFinal?: Promise<string>; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
+  onStreamTurn?: (wav: ArrayBuffer, sink: WebReplySink, opts?: { incomplete?: IncompleteTurnFilter; record?: boolean; spec?: SpeculativeTurn | null; streamFinal?: Promise<string>; signal?: AbortSignal; trackBackground?: (task: Promise<void>) => boolean; timingMark?: (name: string, offsetMs: number) => void }) => Promise<void>;
   /** Resolve the current wrapped STT provider's live capability for each capture. */
   resolveSttStream?: () => ((options: { signal: AbortSignal; sampleRate: number; onPartial: (text: string, at: number) => void }) => LivePcmSession) | undefined;
   /** Stream a TYPED message's reply (same pipeline, no STT). Optional. */
@@ -1227,6 +1231,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
         const handlerSpec = spec ? serverOwnedSpec(spec) : null;
         try {
           if (typeof next.input === "string") {
+            ws.data.incomplete?.reset();
             await onTextTurn?.(next.input, coordinatedWebSink(next.lease, rawSink), {
               record: ws.data.record,
               signal: state.signal,
@@ -1234,7 +1239,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
               timingMark,
             });
           } else {
+            ws.data.incomplete ??= opts.createIncompleteFilter?.();
             await onStreamTurn?.(next.input, coordinatedWebSink(next.lease, rawSink), {
+              incomplete: ws.data.incomplete,
               record: ws.data.record,
               spec: handlerSpec,
               signal: state.signal,
@@ -2279,6 +2286,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           }
         },
         close(ws) {
+          ws.data.incomplete?.reset();
           ws.data.liveCapture?.abort.abort();
           if (ws.data.liveCapture?.session && !ws.data.finalizingSessions.has(ws.data.liveCapture.session)) {
             ws.data.liveCapture.session.abort();
@@ -2399,6 +2407,7 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
           clearTimeout(ws.data.departureCloseTimer);
           ws.data.departureCloseTimer = null;
         }
+        ws.data.incomplete?.reset();
         abortTurn(ws.data.current, "web voice server shutting down");
         if (ws.data.pending) dropPendingLatencyOwner(ws.data.latencyTurns, ws.data.pending.turnId, ws.data.pending.latency);
         for (const owner of ws.data.latencyTurns.values()) { owner.interruptOutstanding(); owner.forceFinalize(); }

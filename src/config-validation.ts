@@ -1016,7 +1016,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
   }
   if (isRecord(config.web_voice)) {
     checkKnownKeys(config.web_voice, "web_voice", [
-      "enabled", "host", "port", "token", "tls", "tunnel", "resume_turns", "speech_gate", "tldr", "speculative", "long_turn",
+      "enabled", "host", "port", "token", "tls", "tunnel", "resume_turns", "speech_gate", "tldr", "speculative", "long_turn", "incomplete_turn",
     ], issues);
   }
   if (isRecord(config.turn)) {
@@ -1082,7 +1082,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
         issues.push(`web_voice.token ${problem}; ${WEB_VOICE_TOKEN_GENERATION_HINT}`);
       }
     }
-    for (const name of ["tls", "tunnel", "tldr", "speculative", "long_turn"] as const) {
+    for (const name of ["tls", "tunnel", "tldr", "speculative", "long_turn", "incomplete_turn"] as const) {
       const section = config.web_voice[name];
       if (section === undefined || !checkRecord(section, `web_voice.${name}`, issues)) continue;
       if (name !== "tunnel") checkOptionalBoolean(section, "enabled", `web_voice.${name}`, issues);
@@ -1111,6 +1111,15 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
       checkOptionalInteger(config.web_voice.tldr, "spoken_sentences", "web_voice.tldr", issues, { min: 0 });
       checkOptionalHttpUrl(config.web_voice.tldr, "summarizer_url", "web_voice.tldr", issues);
       checkOptionalString(config.web_voice.tldr, "summarizer_model", "web_voice.tldr", issues);
+    }
+    if (isRecord(config.web_voice.incomplete_turn)) {
+      const section = config.web_voice.incomplete_turn;
+      checkKnownKeys(section, "web_voice.incomplete_turn", ["enabled", "wait_ms", "classifier_timeout_ms"], issues);
+      checkOptionalInteger(section, "wait_ms", "web_voice.incomplete_turn", issues, { min: 100, max: 10_000 });
+      checkOptionalInteger(section, "classifier_timeout_ms", "web_voice.incomplete_turn", issues, { min: 1, max: 1000 });
+      if (section.enabled === true && !isRecord(config.classifier)) {
+        issues.push("web_voice.incomplete_turn.enabled requires a classifier backend");
+      }
     }
     if (isRecord(config.web_voice.speculative)) {
       checkKnownKeys(config.web_voice.speculative, "web_voice.speculative", [
