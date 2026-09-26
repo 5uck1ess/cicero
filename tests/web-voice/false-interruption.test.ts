@@ -90,8 +90,8 @@ test('browser pauses existing media and preserves its buffered clips on noise', 
 });
 test('browser real speech discards audio; stop rejects a stale result', () => {
   const page = browser(); page.pause(); page.submitted();
-  page.finish({ captureId: 'capture', accepted: true, turnId: 'new' });
-  expect(page.snapshot()).toMatchObject({ activeTurnId: 'new', queued: 0, state: 'thinking' });
+  page.finish({ captureId: 'capture', accepted: true, turnId: 'capture' });
+  expect(page.snapshot()).toMatchObject({ activeTurnId: 'capture', queued: 0, state: 'thinking' });
   page.finish({ captureId: 'capture', accepted: false });
   expect(page.audio.plays).toBe(0);
   const stopped = browser(); stopped.pause(); stopped.stop();
@@ -100,12 +100,18 @@ test('browser real speech discards audio; stop rejects a stale result', () => {
 });
 
 
+test('accepted speech follows the uploaded capture even when the result carries no turn id', () => {
+  const page = browser(); page.pause(); page.submitted();
+  page.finish({ captureId: 'capture', accepted: true, turnId: null });
+  expect(page.snapshot()).toMatchObject({ activeTurnId: 'capture', queued: 0, state: 'thinking' });
+});
+
 test('browser late speech after timeout replaces the resumed reply', () => {
   const page = browser(); page.pause(); page.submitted(); page.expire();
   expect(page.audio.plays).toBe(1);
   expect(page.audio.currentTime).toBe(1.25);
-  page.finish({ captureId: 'capture', accepted: true, turnId: 'late' });
-  expect(page.snapshot()).toMatchObject({ activeTurnId: 'late', queued: 0, state: 'thinking' });
+  page.finish({ captureId: 'capture', accepted: true, turnId: 'capture' });
+  expect(page.snapshot()).toMatchObject({ activeTurnId: 'capture', queued: 0, state: 'thinking' });
   page.expire();
   expect(page.audio.plays).toBe(1);
 });
@@ -122,9 +128,9 @@ test('original done cannot clear an interruption still being captured', () => {
 test('old resumed play rejection cannot abort an accepted replacement', async () => {
   const page = browser(); const reject = page.rejectPlaybackLater();
   page.pause(); page.submitted(); page.expire();
-  page.finish({ captureId: 'capture', accepted: true, turnId: 'replacement' });
+  page.finish({ captureId: 'capture', accepted: true, turnId: 'capture' });
   reject(); await Promise.resolve();
-  expect(page.snapshot()).toMatchObject({ activeTurnId: 'replacement', state: 'thinking' });
+  expect(page.snapshot()).toMatchObject({ activeTurnId: 'capture', state: 'thinking' });
 });
 
 
@@ -142,8 +148,8 @@ test('resumed play rejection cannot clear a newer capture on the same reply', as
   page.newCapture('second'); page.pause();
   reject(); await Promise.resolve();
   expect(page.snapshot()).toMatchObject({ activeTurnId: 'reply', paused: true, state: 'speech' });
-  page.finish({ captureId: 'second', accepted: true, turnId: 'replacement' });
-  expect(page.snapshot().activeTurnId).toBe('replacement');
+  page.finish({ captureId: 'second', accepted: true, turnId: 'second' });
+  expect(page.snapshot().activeTurnId).toBe('second');
 });
 
 

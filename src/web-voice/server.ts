@@ -2348,7 +2348,9 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             }
             if (barges.get(ws) !== candidate || !sockets.has(ws) || !accepting) return;
             if (signal.aborted) text = "";
-            sendJson(ws, withSession(ws, { type: "barge_result", captureId: candidate.id, accepted: !!text, turnId }));
+            // withTurn, not withSession: the session envelope nulls turnId, and
+            // a v2 client adopts this id as the turn it plays.
+            sendJson(ws, withTurn(ws, turnId, { type: "barge_result", captureId: candidate.id, accepted: !!text, turnId }));
             cancelBarge(ws);
             if (!text) return;
             acceptedFinal = Promise.resolve(text);
