@@ -61,7 +61,7 @@ watch always requires an explicit `command`. Cicero supplies no default CLI.
 | Preset | List command | Optional `task_command` | Verification |
 | --- | --- | --- | --- |
 | `hermes` | `[hermes, kanban, list, --json]` | `[hermes, kanban, show]` | Live-tested board integration |
-| `multica` | `[multica, issue, list, --output, json]` | `[multica, issue, get]` | Built from upstream source, not live-tested |
+| `multica` | `[multica, issue, list, --output, json]` | `[multica, issue, get]` | CLI list normalization live-tested; realtime pending |
 | `paperclip` | `[paperclipai, issue, list, --json]` (or `[paperclipai, issue, list, -C, <company-id>, --json]` when an ID is entered) | `[paperclipai, issue, get]` (append `-C, <company-id>` when an ID is entered) | Built from upstream source, not live-tested |
 
 The Paperclip CLI installs as `paperclipai` and needs a company: pass
@@ -102,6 +102,54 @@ notify:
       board-agent-id: coder
       board-user-id: ada
 ```
+
+### Optional realtime feeds
+
+Multica and Paperclip can refresh on push events instead of the normal 20-second
+poll. Add `realtime` to the existing board config; Hermes remains polling-only:
+
+```yaml
+notify:
+  kanban:
+    preset: multica
+    command: [multica, issue, list, --output, json]
+    realtime:
+      server_url: https://your-multica-server.example
+      scope_id: your-workspace-uuid
+      token_env: CICERO_BOARD_TOKEN
+```
+
+Set the named environment variable to a Multica PAT/JWT. For Paperclip, use
+`preset: paperclip`, its list command, the company UUID as `scope_id`, and an
+agent API key for that company. The CLI and socket must address the **same board
+scope**. Existing CLI credentials are not read or exported by Cicero. The server
+URL must be an HTTP(S) origin without credentials, query, or path; use HTTPS for
+remote servers. Missing credentials leave polling active and are retried.
+
+Multica connects to `/ws?workspace_id=…`, sends a first-message auth frame,
+and waits for `auth_ack`; Paperclip connects to
+`/api/companies/{id}/events/ws` with a bearer header. Issue events (Multica) and
+company activity events (Paperclip) invalidate the board. Their bodies never
+supply task state: a bounded CLI read feeds the existing normalizer and escalation
+path. Events are coalesced over 100 ms, including a follow-up read when one
+arrives during a read. Duplicate events do not re-announce unchanged statuses.
+
+Every connection, including reconnects, triggers a catch-up read. While connected,
+quiet boards reconcile at least every five minutes (or `interval_seconds` if
+longer); age-based reminders can consequently be up to that cadence late.
+Sockets renew after five minutes to bound silent connections. A failed connection,
+auth timeout (10 seconds), or disconnect restores the configured polling cadence
+while reconnects back off from 1 to 30 seconds. Shutdown cancels the socket,
+retry/deadline timers, pending refreshes and the active CLI read. This is snapshot
+reconciliation, not durable event replay: intermediate transitions between CLI
+reads can still be missed, just as with polling.
+
+Verification: fake-socket lifecycle tests, a local Bun WebSocket handshake, and
+real Multica CLI list normalization (four project issues, including the current
+issue in progress).
+Real Multica/Paperclip feed verification remains outstanding; the Multica runtime
+used for this change permits platform access only through its CLI, which has no
+realtime subscription command.
 
 Unmapped ids become an unassigned task; Cicero never speaks the raw id.
 Paperclip prefers `assigneeAgentId`, falling back to `assigneeUserId` when no

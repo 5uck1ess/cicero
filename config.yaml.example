@@ -332,6 +332,11 @@ notify:
     enabled: false
     interval_seconds: 20
     preset: hermes             # default; hermes | multica | paperclip
+    # Optional for multica/paperclip only; scope must match the list CLI:
+    # realtime:
+    #   server_url: https://your-board-server.example
+    #   scope_id: your-workspace-or-company-uuid
+    #   token_env: CICERO_BOARD_TOKEN   # token value stays in the environment
     # command: [hermes, kanban, list, --json]   # REQUIRED when enabled
     # task_command: [hermes, kanban, show]     # optional parent details + deliverable links
     # Multica (built from upstream source, not live-tested):

@@ -1,3 +1,4 @@
+import type { BoardFeed, BoardRealtimeConfig } from "./board-realtime";
 import { boundedParentIds, detailArgs, detailParentIds, normalizeBoardList, type BoardNormalizationOptions } from "./board-presets";
 import { log } from "../logger";
 import { CommandAbortError, runBoundedCommand } from "../process/bounded-command";
@@ -55,6 +56,7 @@ export interface KanbanSnapshot {
 
 export interface KanbanWatchConfig extends BoardNormalizationOptions {
   enabled?: boolean;
+  realtime?: BoardRealtimeConfig;
   /** Poll cadence. Default 20s — announcements should feel prompt, not instant. */
   interval_seconds?: number;
   /** Command that prints the board in the preset JSON shape (required to watch a board), e.g. [hermes, kanban, list, --json]. */
@@ -239,6 +241,8 @@ export class KanbanWatcher {
   private seeded = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private running = false;
+  private pushConnected = false;
+  private refreshPending = false;
   private scheduledPoll: Promise<void> | undefined;
   private activePoll: Promise<void> | undefined;
   private activeController: AbortController | undefined;
@@ -259,6 +263,7 @@ export class KanbanWatcher {
     /** Called with the transitioned task — the caller formats and voices it. */
     announce: (task: KanbanTask, signal: AbortSignal) => void | Promise<void>;
     intervalMs: number;
+    realtime?: BoardFeed;
     /** Called for each reminder about a task sitting unstarted past nudgeAfterMs. */
     nudge?: (task: KanbanTask, waitedMinutes: number, nth: number, signal: AbortSignal) => void | Promise<void>;
     nudgeAfterMs?: number;
@@ -289,10 +294,34 @@ export class KanbanWatcher {
     if (this.running) return;
     this.running = true;
     this.launchScheduledPoll();
+    this.opts.realtime?.start(
+      () => this.requestRefresh(),
+      (ready) => {
+        if (!this.running) return;
+        this.pushConnected = ready;
+        this.requestRefresh();
+      },
+    );
+  }
+
+  /** Coalesce bursts; an event during a read must cause a subsequent read. */
+  private requestRefresh(): void {
+    if (!this.running) return;
+    if (this.refreshPending) return;
+    this.refreshPending = true;
+    if (this.scheduledPoll) return;
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.launchScheduledPoll();
+    }, 100);
   }
 
   async stop(): Promise<void> {
     this.running = false;
+    this.opts.realtime?.stop();
+    this.pushConnected = false;
+    this.refreshPending = false;
     if (this.timer !== undefined) {
       clearTimeout(this.timer);
       this.timer = undefined;
@@ -390,6 +419,7 @@ export class KanbanWatcher {
 
   private launchScheduledPoll(): void {
     if (!this.running || this.scheduledPoll) return;
+    this.refreshPending = !!this.activePoll;
     const poll = this.tick();
     this.scheduledPoll = poll;
     void poll.then(
@@ -408,7 +438,7 @@ export class KanbanWatcher {
     this.timer = setTimeout(() => {
       this.timer = undefined;
       this.launchScheduledPoll();
-    }, Math.max(0, this.opts.intervalMs));
+    }, this.refreshPending ? 100 : this.pushConnected ? Math.max(this.opts.intervalMs, 5 * 60_000) : Math.max(0, this.opts.intervalMs));
   }
 
   /**

@@ -1,3 +1,4 @@
+import type { BoardRealtimeConfig } from "./notify/board-realtime";
 import type { BoardPreset } from "./notify/board-presets";
 // Core types for Cicero voice assistant
 
@@ -59,7 +60,7 @@ export interface CiceroConfig {
     briefing?: { at: string; call?: boolean; catch_up_minutes?: number };  // daily digest of deferred news + board state; call: also ring and speak it; catch-up defaults to 180 minutes
     schedules?: Array<{ name?: string; at: string; prompt: string; lane?: string }>; // daily unattended brain turns (research briefs, digests) texted via notify.telegram; lane targets a named brain lane, otherwise the front desk answers; quiet hours hold delivery, not the work
     call_minutes?: boolean | { min_minutes?: number }; // notes texted after a voice session goes quiet; only for calls longer than min_minutes (default 3)
-    kanban?: { preset?: BoardPreset; assignees?: Record<string, string>; enabled?: boolean; interval_seconds?: number; command?: string[]; task_command?: string[]; call_back?: boolean; escalation?: "priority"; nudge_after_minutes?: number }; // escalation: priority uses board urgency; unset preserves status routing. nudge_after_minutes (default 60, 0 = off) reminds about tasks nobody picked up
+    kanban?: { realtime?: BoardRealtimeConfig; preset?: BoardPreset; assignees?: Record<string, string>; enabled?: boolean; interval_seconds?: number; command?: string[]; task_command?: string[]; call_back?: boolean; escalation?: "priority"; nudge_after_minutes?: number }; // escalation: priority uses board urgency; unset preserves status routing. nudge_after_minutes (default 60, 0 = off) reminds about tasks nobody picked up
   }; // extra proactive-notify channels beyond connected browsers
   headless?: boolean; // no local mic/speakers: skip clap/conversational/hotkey/AEC, talk only via web_voice (default false)
   turn?: TurnDetectionConfig; // semantic end-of-turn detection (default off)

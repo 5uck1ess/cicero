@@ -1,4 +1,5 @@
 import { IncompleteTurnFilter, INCOMPLETE_PROMPT } from "./web-voice/incomplete";
+import { createBoardRealtime } from "./notify/board-realtime";
 import { existsSync, readFileSync, rmSync, watch } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "node:os";
@@ -685,6 +686,7 @@ export class CiceroDaemon {
       }
       const listCommand = kw.command;
       this.kanbanWatcher = new KanbanWatcher({
+        realtime: createBoardRealtime(kw.preset, kw.realtime),
         list: (signal) => listViaCli(listCommand, { signal, preset: kw.preset, assignees: kw.assignees }),
         announce: async (t, signal) => {
           // A lane-owned task announces itself in that employee's voice.
@@ -759,7 +761,7 @@ export class CiceroDaemon {
       // replayed. start() is idempotent, so the deferred call is safe regardless.
       if (!this.config.web_voice?.enabled) {
         this.kanbanWatcher.start();
-        log("ok", `📋 Kanban watch on — polling tasks every ${kw.interval_seconds ?? 20}s`);
+        log("ok", `📋 Kanban watch on — ${kw.realtime ? "realtime with polling fallback" : `polling tasks every ${kw.interval_seconds ?? 20}s`}`);
       }
     }
     return healthStore;
@@ -780,7 +782,7 @@ export class CiceroDaemon {
   private startBoardPollingIfPending(): void {
     if (this.kanbanWatcher && !this.kanbanWatcher.polling) {
       this.kanbanWatcher.start();
-      log("ok", `📋 Kanban watch on — polling tasks every ${this.config.notify?.kanban?.interval_seconds ?? 20}s`);
+      log("ok", `📋 Kanban watch on — ${this.config.notify?.kanban?.realtime ? "realtime with polling fallback" : `polling tasks every ${this.config.notify?.kanban?.interval_seconds ?? 20}s`}`);
     }
   }
 
@@ -811,6 +813,7 @@ export class CiceroDaemon {
     };
 
     add(this.config.web_voice?.token);
+    addEnv(this.config.notify?.kanban?.realtime?.token_env);
     // Mirror telegramToken()'s runtime resolution (explicit token, else token_env,
     // else the default CICERO_TELEGRAM_TOKEN env var) so the default is redacted too.
     if (this.config.notify?.telegram) add(telegramToken(this.config.notify.telegram) ?? undefined);
