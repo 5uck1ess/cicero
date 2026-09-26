@@ -47,7 +47,10 @@ such as `nobody (employee)` (with a numeric suffix if needed), preserving its al
 description. Its selected key maps back to the real lane name `nobody` in the
 response; the trained `nobody` no-target option and its description stay unchanged.
 The optional `front_desk_aliases` is a list of strings, defaulting to `[]` when
-absent; Cicero sends the configured front-desk aliases. Invalid requests, including
+absent; Cicero sends the configured front-desk aliases. Names that are not also an
+employee name/alias become one extra target choice, "the main assistant (front desk)".
+When the model picks it for a transfer, the sidecar returns `release`; an off-roster
+name still resolves to `nobody` (no action). Invalid requests, including
 an incorrectly typed aliases field or member, return 400. Bodies
 are capped at 1 MiB, with a five-second absolute body-read deadline. No utterances
 or model exception text are logged. Unknown paths return 404; model failures

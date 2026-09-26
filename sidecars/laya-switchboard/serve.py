@@ -44,24 +44,45 @@ MAX_UTTERANCE = 2000
 HTTP_TIMEOUT = 5.0
 
 
-def target_choices(roster: dict) -> dict[str, str]:
-    """Internal model choice -> real lane name, preserving the trained no-target option."""
-    choices = {}
+FRONT_DESK = object()  # decoded target meaning "the main assistant", never returned on the wire
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def front_desk_names(roster: dict, aliases: list[str]) -> list[str]:
+    """Front-desk aliases that are not also an employee name/alias (an exact employee alias wins)."""
+    employees = {_norm(ref) for name, lane in roster.items() for ref in [name, *lane.get("aliases", [])]}
+    out = []
+    for alias in aliases:
+        if _norm(alias) and _norm(alias) not in employees and alias not in out:
+            out.append(alias)
+    return out
+
+
+def target_choices(roster: dict, front_desk_aliases: list[str] | None = None) -> dict:
+    """Internal model choice -> real lane name (or FRONT_DESK), preserving the trained no-target option."""
+    choices: dict = {}
+    taken = set(roster) | {NOBODY}
+    def unique(base: str, numbered: str) -> str:
+        key, suffix = base, 2
+        while key in taken or key in choices:
+            key = numbered.format(suffix)
+            suffix += 1
+        return key
     for name in roster:
-        key = name
-        if key == NOBODY:
-            key = "nobody (employee)"
-            suffix = 2
-            while key in roster:
-                key = f"nobody (employee {suffix})"
-                suffix += 1
-        choices[key] = name
+        choices[unique("nobody (employee)", "nobody (employee {})") if name == NOBODY else name] = name
+    if front_desk_names(roster, front_desk_aliases or []):
+        choices[unique("front desk", "front desk {}")] = FRONT_DESK
     return choices
 
 
-def questions(roster: dict) -> dict:
-    tgt = {key: "also called " + ", ".join(roster[name].get("aliases") or [name])
-           for key, name in target_choices(roster).items()}
+def questions(roster: dict, front_desk_aliases: list[str] | None = None) -> dict:
+    fd = front_desk_names(roster, front_desk_aliases or [])
+    tgt = {key: ("the main assistant (front desk), also called " + ", ".join(fd)) if name is FRONT_DESK
+           else "also called " + ", ".join(roster[name].get("aliases") or [name])
+           for key, name in target_choices(roster, fd).items()}
     tgt[NOBODY] = "no particular employee is named or meant"
     return {
         "intent": {"type": "choice", "instructions": INTENT_INSTR, "criteria": dict(INTENT_DESC)},
@@ -89,16 +110,6 @@ def parse(intent: str, target: str | None, request_now: bool, confidence: float)
             "request_now": bool(request_now), "confidence": float(confidence)}
 
 
-def mentions_front_desk(utterance: str, roster: dict, aliases: list[str]) -> bool:
-    normalize = lambda text: " ".join(text.casefold().split())
-    employees = {normalize(ref) for name, lane in roster.items()
-                 for ref in [name, *lane.get("aliases", [])]}
-    text = normalize(utterance)
-    return any(alias and alias not in employees and
-               re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", text)
-               for alias in map(normalize, aliases))
-
-
 def from_answers(ans: dict, roster: Optional[dict] = None, utterance: str = "",
                  front_desk_aliases: Optional[list[str]] = None) -> dict:
     """Laya/Jev answers -> parsed intent. ans values expose .choice/.probabilities/.noul (dict or attrs)."""
@@ -111,10 +122,12 @@ def from_answers(ans: dict, roster: Optional[dict] = None, utterance: str = "",
     # an off-roster "have Morgan call me" is a plain call-me with no target.
     if target == NOBODY:
         target = None
-        if intent == "transfer" and mentions_front_desk(utterance, roster or {}, front_desk_aliases or []):
-            intent = "release"
     elif roster is not None:
-        target = target_choices(roster)[target]
+        target = target_choices(roster, front_desk_aliases)[target]
+        if target is FRONT_DESK:
+            # Asking for the front desk while an employee is pinned means release (Cicero's rule);
+            # any other action with the front desk carries no employee target.
+            intent, target = ("release" if intent == "transfer" else intent), None
     # Only callme has a deferred form ("call me when ..."); every other action is a present request
     # in the teacher data (Fable never labels them request_now=false), so don't let the head veto it.
     now = float(g(na, "noul")) > 0.5 if intent == "callme" else True
@@ -295,7 +308,7 @@ def make_handler(score: Scorer, model_name: str, device: Callable[[], str] = lam
                 return
             try:
                 with lock:
-                    result = from_answers(score(state(utterance), questions(roster)),
+                    result = from_answers(score(state(utterance), questions(roster, front_desk_aliases)),
                                           roster, utterance, front_desk_aliases)
             except Exception:  # never expose provider errors or transcript text
                 self._send(500, {"error": "classification failed"})

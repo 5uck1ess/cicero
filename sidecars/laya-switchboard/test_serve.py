@@ -223,34 +223,34 @@ class ServerTests(unittest.TestCase):
                         self.assertEqual(criteria[name], "also called " + name)
         self.assertEqual(self.exchange(request(roster=[lanes[0], lanes[0]]))[0], 400)
 
-    def test_front_desk_transfer_without_target_becomes_release(self):
+    def test_front_desk_is_a_target_choice(self):
+        # The model, not a keyword rule, decides who a request is for: choosing the front desk
+        # while transferring means release; "nobody" (e.g. an off-roster name) stays none.
         cases = [
-            ("I'd like Mara's ear", ["mara"], "release"),
-            ("I'd like Mara's ear", ["june"], "none"),
-            ("I'd like Mara's ear", [], "none"),
-            ("I'd like Rick's ear", ["rick"], "none"),
-            ("I'd like coder's ear", [" CODER "], "none"),
-            ("I'd like THE   CODER's ear", ["the\tcoder"], "none"),
-            ("I'd like marathon's ear", ["mara"], "none"),
-            ("I'd like Mara's ear", [""], "none"),
-            ("I'd like MAIN\n DESK's ear", [" main  desk "], "release"),
+            ("front desk", "transfer", "release"),
+            (serve.NOBODY, "transfer", "none"),
+            ("front desk", "callme", "callme"),
+            ("coder", "transfer", "transfer"),
         ]
-        for utterance, aliases, intent in cases:
-            with self.subTest(utterance=utterance, aliases=aliases):
-                self.result = answers(target=serve.NOBODY)
-                status, result = self.exchange(request(utterance=utterance, front_desk_aliases=aliases))
+        for choice, intent, want in cases:
+            with self.subTest(choice=choice, intent=intent):
+                self.result = answers(intent, choice)
+                status, result = self.exchange(request(utterance="Mara, I'd like Morgan's ear", front_desk_aliases=["mara"]))
                 self.assertEqual(status, 200)
-                self.assertEqual(result, {"intent": intent, "target": None,
-                                         "request_now": intent == "release", "confidence": 0.85})
-                self.assertEqual(self.seen[-1][1], serve.questions({
-                    lane["name"]: {"aliases": lane["aliases"]} for lane in ROSTER}))
+                self.assertEqual(result["intent"], want)
+                self.assertEqual(result["target"], "coder" if want == "transfer" else None)
+                criteria = self.seen[-1][1]["target"]["criteria"]
+                self.assertEqual(criteria["front desk"], "the main assistant (front desk), also called mara")
 
-    def test_front_desk_rule_requires_transfer_and_no_target(self):
-        for intent, target in (("callme", serve.NOBODY), ("none", serve.NOBODY), ("transfer", "coder")):
-            self.result = answers(intent, target, now=0.1)
-            status, result = self.exchange(request(utterance="I'd like Mara's ear", front_desk_aliases=["mara"]))
-            self.assertEqual(status, 200)
-            self.assertEqual(result, serve.from_answers(self.result))
+    def test_front_desk_choice_only_for_names_not_on_roster(self):
+        def criteria(aliases):
+            return serve.questions({lane["name"]: {"aliases": lane["aliases"]} for lane in ROSTER}, aliases)["target"]["criteria"]
+        self.assertNotIn("front desk", criteria([]))
+        self.assertNotIn("front desk", criteria(["", " RICK ", "the\tcoder"]))  # employee aliases win
+        self.assertEqual(criteria(["cicero", "Rick", "jarvis"])["front desk"],
+                         "the main assistant (front desk), also called cicero, jarvis")
+        lanes = {"front desk": {"aliases": []}}
+        self.assertIn("front desk 2", serve.questions(lanes, ["mara"])["target"]["criteria"])
 
     def test_front_desk_aliases_wrong_type_is_400(self):
         for aliases in (None, "mara", {}, 1, ["mara", 1]):
