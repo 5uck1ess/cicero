@@ -78,6 +78,8 @@ function pcm16WavWithByteLength(byteLength: number): ArrayBuffer {
 
 function start(opts: {
   createIncompleteFilter?: () => IncompleteTurnFilter;
+
+  onBargeTranscribe?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onBargeTranscribe"]>;
   onTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onTurn"]>;
   onStreamTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onStreamTurn"]>;
   onTextTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onTextTurn"]>;
@@ -104,6 +106,7 @@ function start(opts: {
     token: TOKEN,
     tls: null,
     onTurn: opts.onTurn ?? (async () => ({ transcript: "hi", reply: "hello", audio: new ArrayBuffer(0) })),
+    onBargeTranscribe: opts.onBargeTranscribe,
     onStreamTurn: opts.onStreamTurn,
     onTextTurn: opts.onTextTurn,
     onNotify: opts.onNotify,
@@ -2775,3 +2778,96 @@ test("typed replacement clears unfinished voice and shutdown cancels a hold", as
     await cancelled.promise;
   } finally { ws.close(); }
 });
+
+for (const protocol of [1, 2] as const) {
+  test(`tentative v${protocol} noise keeps the original turn; real words replace it with cached STT`, async () => {
+    const started = deferred();
+    let originalSignal: AbortSignal | undefined;
+    let invocations = 0;
+    let result = '';
+    const base = start({
+      onBargeTranscribe: async () => result,
+      onStreamTurn: async (_wav, sink, options) => {
+        invocations++;
+        if (invocations === 1) {
+          originalSignal = options!.signal;
+          started.resolve();
+          await new Promise<void>((resolve) => originalSignal!.addEventListener('abort', () => resolve(), { once: true }));
+        } else {
+          sink.transcript(await options!.streamFinal!);
+        }
+        sink.done();
+      },
+    });
+    const connection = protocol === 2 ? await connectV2(base) : { ws: await connect(base), sessionId: '' };
+    const { ws, sessionId } = connection;
+    const send = (id: string) => ws.send(protocol === 2 ? encodeTurnAudioFrame(sessionId, id, wav()) : wav());
+    try {
+      send('original'); await started.promise;
+      ws.send(JSON.stringify({ type: 'barge_in', sessionId, captureId: 'noise' }));
+      const noise = nextJson(ws, m => m.type === 'barge_result');
+      send('noise');
+      expect(await noise).toMatchObject({ accepted: false, captureId: 'noise' });
+      expect(originalSignal!.aborted).toBe(false);
+      expect(invocations).toBe(1);
+      result = 'Actually, change that.';
+      ws.send(JSON.stringify({ type: 'barge_in', sessionId, captureId: 'speech' }));
+      const accepted = nextJson(ws, m => m.type === 'barge_result');
+      const transcript = nextJson(ws, m => m.type === 'transcript');
+      send('speech');
+      expect(await accepted).toMatchObject({ accepted: true });
+      expect(await transcript).toMatchObject({ text: result });
+      expect(originalSignal!.aborted).toBe(true);
+      expect(invocations).toBe(2);
+    } finally { ws.close(); }
+  });
+}
+
+test('superseded tentative STT cannot dispatch after a newer typed turn', async () => {
+  const recognized = deferred<string>();
+  const recognizing = deferred();
+  let spokenTurns = 0;
+  const base = start({
+    onBargeTranscribe: async () => { recognizing.resolve(); return recognized.promise; },
+    onStreamTurn: async (_wav, sink) => { spokenTurns++; sink.done(); },
+    onTextTurn: async (text, sink) => { sink.transcript(text); sink.done(); },
+  });
+  const { ws, sessionId } = await connectV2(base);
+  try {
+    ws.send(JSON.stringify({ type: 'barge_in', sessionId, captureId: 'late-speech' }));
+    ws.send(encodeTurnAudioFrame(sessionId, 'late-speech', wav()));
+    await recognizing.promise;
+    const newer = nextJson(ws, m => m.type === 'transcript');
+    ws.send(JSON.stringify({ type: 'text', sessionId, turnId: 'newer', text: 'New work' }));
+    expect(await newer).toMatchObject({ text: 'New work' });
+    recognized.resolve('stale speech');
+    // The socket shutdown drain observes the outstanding transcription.
+    await handle!.stop(); handle = null;
+    expect(spokenTurns).toBe(0);
+  } finally { recognized.resolve(''); ws.close(); }
+});
+
+for (const protocol of [1, 2] as const) {
+  test(`v${protocol} supersession before tentative upload rejects the stale WAV`, async () => {
+    let transcriptions = 0, spokenTurns = 0;
+    const base = start({
+      onBargeTranscribe: async () => { transcriptions++; return 'stale'; },
+      onStreamTurn: async (_wav, sink) => { spokenTurns++; sink.done(); },
+      onTextTurn: async (text, sink) => { sink.transcript(text); sink.done(); },
+    });
+    const { ws, sessionId } = protocol === 2 ? await connectV2(base) : { ws: await connect(base), sessionId: '' };
+    try {
+      ws.send(JSON.stringify({ type: 'barge_in', sessionId, captureId: 'not-uploaded' }));
+      const done = nextJson(ws, m => m.type === 'done');
+      ws.send(JSON.stringify({ type: 'text', sessionId, turnId: 'replacement', text: 'new work' }));
+      await done;
+      ws.send(protocol === 2 ? encodeTurnAudioFrame(sessionId, 'not-uploaded', wav()) : wav());
+      // A following text response is the socket-order barrier for admission.
+      const barrier = nextJson(ws, m => m.type === 'transcript');
+      ws.send(JSON.stringify({ type: 'text', sessionId, turnId: 'barrier', text: 'barrier' }));
+      await barrier;
+      expect(transcriptions).toBe(0);
+      expect(spokenTurns).toBe(0);
+    } finally { ws.close(); }
+  });
+}

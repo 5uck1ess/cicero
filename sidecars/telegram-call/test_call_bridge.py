@@ -146,7 +146,96 @@ async def settle(seconds: float = 0.05) -> None:
     await asyncio.sleep(seconds)
 
 
+class FakeBargeClock:
+    def __init__(self):
+        self.callback = None
+
+    def call_later(self, delay, callback):
+        self.callback = callback
+        return self
+
+    def cancel(self):
+        self.callback = None
+
+    def advance(self):
+        callback, self.callback = self.callback, None
+        if callback:
+            callback()
+
+
 class BridgePlaybackLifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_noise_resumes_same_pcm_offset_without_resynthesis(self):
+        calls = FakeCalls()
+        calls.connected = True
+        bridge = make_bridge(calls)
+        clock = FakeBargeClock()
+        bridge.barge_timeout = 1.5
+        original_send = calls.send_frame
+        async def pause_after_first(*args):
+            await original_send(*args)
+            if len(calls.sent) == 1:
+                bridge._pause_barge(clock)
+        calls.send_frame = pause_after_first
+        payload = b"a" * bridge.FRAME_SAMPLES + b"b" * bridge.FRAME_SAMPLES
+        bridge.start_player()
+        await bridge.speak(clip(payload))
+        await eventually(lambda: len(calls.sent) == 1)
+        await settle()
+        self.assertEqual(len(calls.sent), 1)
+        clock.advance()
+        await eventually(lambda: len(calls.sent) == 2)
+        self.assertEqual(b"".join(calls.sent), payload)
+        await bridge.close()
+
+    async def test_speech_after_resume_discards_old_frames_even_with_new_audio_queued(self):
+        calls = FakeCalls()
+        calls.connected = True
+        bridge = make_bridge(calls)
+        clock = FakeBargeClock()
+        bridge.barge_timeout = 1.5
+        original_send = calls.send_frame
+        async def replace_after_first(*args):
+            await original_send(*args)
+            if len(calls.sent) == 1:
+                bridge._pause_barge(clock)
+                clock.advance()
+                bridge._flush_playback()
+                await bridge.speak(clip(b"new"))
+        calls.send_frame = replace_after_first
+        bridge.start_player()
+        await bridge.speak(clip(b"a" * bridge.FRAME_SAMPLES + b"stale"))
+        await eventually(lambda: len(calls.sent) == 2)
+        self.assertEqual(calls.sent[-1], b"new")
+        await bridge.close()
+
+    async def test_stop_invalidates_resume_timer(self):
+        bridge = make_bridge(FakeCalls())
+        bridge.barge_timeout = 1.5
+        clock = FakeBargeClock()
+        bridge._pause_barge(clock)
+        old_callback = clock.callback
+        bridge._flush_playback()
+        bridge._pause_barge(clock)
+        old_callback()
+        self.assertFalse(bridge.playback_ready.is_set())
+        await bridge.close()
+        self.assertIsNone(clock.callback)
+
+    async def test_accepted_interruption_reconciles_a_turn_with_no_terminal_done(self):
+        bridge = make_bridge(FakeCalls())
+        bridge.ws = FakeDaemonSocket()
+        bridge.reader = asyncio.create_task(bridge._read_loop())
+        bridge.barge_timeout = 1.5
+        bridge.sent_turns = 1
+        bridge._pause_barge(FakeBargeClock())
+        await bridge.ws._queue.put(json.dumps({"type": "barge_result", "captureId": bridge.barge_id, "accepted": True}))
+        await eventually(lambda: bridge.barge_id is None)
+        self.assertFalse(bridge._audio_is_stale())
+        await bridge.ws._queue.put(json.dumps({"type": "done"}))
+        await eventually(lambda: bridge.done_turns == 1)
+        self.assertFalse(bridge._busy())
+        await bridge.close()
+
     async def test_connect_does_not_start_player(self) -> None:
         """The ordering boundary itself: connect() (daemon socket + reader) must
         leave the player unstarted — a regression that re-adds player startup

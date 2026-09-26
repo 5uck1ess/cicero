@@ -98,6 +98,24 @@ async function retainOwnedTone(
   if (trackBackground || signal) await tone.drain;
 }
 
+/** STT-only admission for tentative barge-in. Own the file and provider pin
+ * until recognition settles; the caller supplies a bounded transport signal. */
+export async function transcribeBarge(wav: ArrayBuffer, stt: Pick<STTProvider, "transcribe">, signal: AbortSignal): Promise<string> {
+  signal.throwIfAborted();
+  const pin = pinGeneration(stt);
+  let file: string | undefined;
+  try {
+    file = await writeSecureTempAudio(wav, { prefix: "cicero-barge" });
+    signal.throwIfAborted();
+    const text = await pin.provider.transcribe(file, signal);
+    signal.throwIfAborted();
+    return boundedTranscript(text?.trim() ?? "");
+  } finally {
+    pin.release();
+    if (file) await unlink(file).catch(() => {});
+  }
+}
+
 /**
  * Process one browser-captured utterance end-to-end, reusing the existing
  * pipeline at the provider level: WAV → STT → brain → TTS → reply WAV.

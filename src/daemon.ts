@@ -1,5 +1,7 @@
 import { IncompleteTurnFilter, INCOMPLETE_PROMPT } from "./web-voice/incomplete";
 import { createBoardRealtime } from "./notify/board-realtime";
+
+import { transcribeBarge } from "./web-voice/turn";
 import { existsSync, readFileSync, rmSync, watch } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "node:os";
@@ -1933,6 +1935,8 @@ export class CiceroDaemon {
         // an employee is pinned (the wrong voice saying "one moment" is worse
         // than a beat of silence).
         latencyStore: new LatencyStore(),
+        falseInterruptionMs: wv.false_interruption_ms,
+        onBargeTranscribe: (wav, signal) => transcribeBarge(wav, this.providers.stt, signal),
         resolveSttStream: () => this.providers.stt.openStream,
         onStreamTurn: async (wav, sink, options) => {
           try {

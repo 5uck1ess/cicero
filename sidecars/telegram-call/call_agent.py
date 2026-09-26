@@ -535,6 +535,13 @@ class Bridge:
         self.gate_buf: list[np.ndarray] = []
         self.last_frame_at = time.monotonic()  # call liveness (see STALE_CALL_S)
         self.closed = False
+        self.barge_timeout = None  # negotiated with the daemon; old servers keep hard abort
+        self.barge_id = None
+        self.barge_sequence = 0
+        self.barge_timer = None
+        self.playback_ready = asyncio.Event()
+        self.playback_ready.set()
+        self.playback_epoch = 0
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -614,7 +621,22 @@ class Bridge:
                 if not isinstance(data, dict):
                     continue
                 t = data.get("type")
-                if t == "transcript":
+                if t == "barge_on":
+                    self.barge_timeout = max(0.25, min(10.0, float(data.get("timeoutMs", 1500)) / 1000))
+                elif t == "barge_result":
+                    if data.get("captureId") != self.barge_id:
+                        continue
+                    if data.get("accepted"):
+                        self._flush_playback()
+                        # The aborted handler emits no done. Frames before
+                        # this ordered control belonged to the old turn; only
+                        # the newly accepted turn remains outstanding.
+                        self.sent_turns = self.done_turns + 1
+                    elif data.get("discarded"):
+                        self._flush_playback()
+                    else:
+                        self._cancel_barge()
+                elif t == "transcript":
                     log_daemon_text("transcript", data.get("text", ""))
                 elif t == "sentence" and not self._audio_is_stale():
                     log_daemon_text("reply sentence", data.get("text", ""))
@@ -645,6 +667,7 @@ class Bridge:
     async def _reconnect(self) -> None:
         """The daemon restarted mid-call: re-dial its socket instead of dead air."""
         self._flush_playback()
+        self.barge_timeout = None
         self.sent_turns = self.done_turns = 0  # fresh server session, fresh accounting
         for delay in (1, 2, 5, 5, 10, 10, 15):
             if self.closed:
@@ -688,10 +711,17 @@ class Bridge:
             if latched and loop.time() < probe_at:
                 continue  # muted: drain quietly between probes, stay cancellable
             self.playing = True
+            epoch = self.playback_epoch
             next_at = max(next_at, loop.time())  # fresh clip after idle: start now
             sent_any = False
             try:
                 for off in range(0, pcm48.size, self.FRAME_SAMPLES):
+                    was_paused = not self.playback_ready.is_set()
+                    await self.playback_ready.wait()
+                    if epoch != self.playback_epoch:
+                        break  # discarded even if the replacement already queued audio
+                    if was_paused:
+                        next_at = loop.time()  # resume from this PCM offset, never catch up
                     if self.playq.empty() and not self.playing:
                         break  # flushed by a barge-in
                     chunk = pcm48[off : off + self.FRAME_SAMPLES]
@@ -738,7 +768,27 @@ class Bridge:
             finally:
                 self.playing = False
 
+    def _cancel_barge(self) -> None:
+        if self.barge_timer is not None:
+            self.barge_timer.cancel()
+            self.barge_timer = None
+        self.barge_id = None
+        self.playback_ready.set()
+
+    def _pause_barge(self, clock=None) -> None:
+        self._cancel_barge()
+        self.barge_sequence += 1
+        candidate = self.barge_id = f"call-barge-{self.barge_sequence}"
+        self.playback_ready.clear()
+        def resume():
+            if self.barge_id == candidate and not self.closed:
+                self.barge_timer = None
+                self.playback_ready.set()
+        self.barge_timer = (clock or asyncio.get_running_loop()).call_later(self.barge_timeout, resume)
+
     def _flush_playback(self) -> None:
+        self._cancel_barge()
+        self.playback_epoch += 1
         self.playing = False  # stops the frame loop within one frame
         while not self.playq.empty():
             try:
@@ -751,7 +801,8 @@ class Bridge:
     async def _send_utterance(self, utter48: np.ndarray) -> None:
         if self.ws is None:
             raise ConnectionError("daemon socket is unavailable")
-        self.sent_turns += 1  # a new utterance implicitly aborts the previous turn
+        if self.barge_id is None:
+            self.sent_turns += 1  # tentative WAV is admitted only after real words
         async with asyncio.timeout(WS_IO_TIMEOUT_S):
             await self.ws.send(pcm_to_wav(resample(utter48, CALL_RATE, STT_RATE), STT_RATE))
 
@@ -767,9 +818,12 @@ class Bridge:
 
     def _interrupt(self, now: float, label: str) -> None:
         """Caller talked over Cicero: cut audio, kill the turn, capture the pivot."""
-        self._flush_playback()
-        self.sent_turns += 1  # anything still rendering for the old turn is stale
-        self.done_turns += 1  # (the abort's own done rebalances the counters)
+        if self.barge_timeout is not None:
+            self._pause_barge()
+        else:
+            self._flush_playback()
+            self.sent_turns += 1  # anything still rendering for the old turn is stale
+            self.done_turns += 1  # (the abort's own done rebalances the counters)
         # Seed the VAD so the interruption's start isn't clipped.
         self.vad.speech = True
         self.vad.started = self.gate_started or now
@@ -812,7 +866,14 @@ class Bridge:
                 "speaking" if speaking else "thinking",
             )
             if fired:
-                await self._abort_turn()
+                if self.barge_id is not None:
+                    try:
+                        async with asyncio.timeout(WS_IO_TIMEOUT_S):
+                            await self.ws.send(json.dumps({"type": "barge_in", "captureId": self.barge_id}))
+                    except Exception:
+                        self._cancel_barge()
+                else:
+                    await self._abort_turn()
             return
         utter = self.vad.feed(pcm, now)
         if utter is None:
