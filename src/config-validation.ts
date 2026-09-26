@@ -1,3 +1,4 @@
+import { validRealtimeConfig } from "./notify/board-realtime";
 import { MAX_BOARD_ASSIGNEES } from "./notify/board-presets";
 import type { CiceroConfig } from "./types";
 import { log } from "./logger";
@@ -1254,9 +1255,12 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     }
     if (isRecord(config.notify.kanban)) {
       checkKnownKeys(config.notify.kanban, "notify.kanban", [
-        "enabled", "interval_seconds", "command", "task_command", "call_back", "escalation", "nudge_after_minutes", "preset", "assignees",
+        "enabled", "interval_seconds", "command", "task_command", "call_back", "escalation", "nudge_after_minutes", "preset", "assignees", "realtime",
       ], issues);
-      const { preset, assignees, escalation } = config.notify.kanban;
+      const { preset, assignees, escalation, realtime } = config.notify.kanban;
+      if (realtime !== undefined && ((preset !== "multica" && preset !== "paperclip") || !validRealtimeConfig(realtime))) {
+        issues.push("notify.kanban.realtime requires a Multica/Paperclip preset, an http(s) server origin without credentials/query, scope_id, and token_env");
+      }
       if (escalation !== undefined && escalation !== "priority") {
         issues.push("notify.kanban.escalation must be priority");
       }

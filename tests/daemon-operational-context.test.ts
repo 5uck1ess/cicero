@@ -145,6 +145,39 @@ test("daemon operational context redacts an env-resolved brain api key", async (
   }
 });
 
+test("daemon operational context redacts an env-resolved board realtime token", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cicero-daemon-operational-envsecret-"));
+  roots.push(root);
+  // All-letter env-resolved key: shape rules can't catch it, and only the env-var
+  // NAME is in config — the daemon must resolve and redact process.env's value.
+  const envName = "CICERO_TEST_BOARD_KEY";
+  const key = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+  const prior = process.env[envName];
+  process.env[envName] = key;
+  const now = Date.now();
+  const config = loadConfig({}, { home: root });
+  config.raw.notify = { kanban: { preset: "multica", command: ["multica", "issue", "list", "--output", "json"], realtime: { server_url: "https://board.example", scope_id: "scope", token_env: envName } } };
+  const daemon = new CiceroDaemon(config) as unknown as OperationalDaemonHarness;
+  daemon.startedAtMs = now;
+  daemon.overnightStore = new OvernightStore(join(root, "overnight.json"));
+  daemon.kanbanWatcher = {
+    snapshot: () => ({
+      asOfMs: now, truncated: false, totalTasks: 1,
+      tasks: [{ id: "secret", title: `remote api-key=${key}`, status: "blocked" }],
+    }),
+  };
+
+  try {
+    expect(daemon.snapshotKnownSecrets()).toContain(key);
+    const text = await daemon.operationalContext();
+    expect(text).not.toContain(key);
+    expect(text).toContain("<redacted>");
+  } finally {
+    if (prior === undefined) delete process.env[envName];
+    else process.env[envName] = prior;
+  }
+});
+
 test("daemon operational context redacts the llm preset's default env api key", async () => {
   const root = mkdtempSync(join(tmpdir(), "cicero-daemon-operational-default-envsecret-"));
   roots.push(root);

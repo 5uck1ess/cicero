@@ -1502,6 +1502,17 @@ describe("Config — fail-fast validation", () => {
     }
   });
 
+  test("kanban realtime is explicit, scoped and credential-free in config", () => {
+    const realtime = { server_url: "https://board.example", scope_id: "scope", token_env: "BOARD_TOKEN" };
+    for (const preset of ["multica", "paperclip"]) {
+      expect(loadYaml(`notify:\n  kanban: ${JSON.stringify({ preset, command: ["board", "list"], realtime })}\n`)).not.toThrow();
+    }
+    for (const value of [null, [], {}, { ...realtime, token: "secret" }, { ...realtime, server_url: "https://board.example?token=secret" }, { ...realtime, token_env: "" }]) {
+      expect(loadYaml(`notify:\n  kanban: ${JSON.stringify({ preset: "multica", command: ["board", "list"], realtime: value })}\n`)).toThrow(/notify\.kanban\.realtime/);
+    }
+    expect(loadYaml(`notify:\n  kanban: ${JSON.stringify({ preset: "hermes", command: ["board", "list"], realtime })}\n`)).toThrow(/notify\.kanban\.realtime/);
+  });
+
   test("kanban escalation accepts only priority", () => {
     expect(loadYaml("notify:\n  kanban: { enabled: false, escalation: priority }\n")).not.toThrow();
     for (const value of ["status", "none", "true", "42", "null", "[]"]) {
