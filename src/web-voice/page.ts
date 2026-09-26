@@ -764,14 +764,27 @@ function playNext() {
     try { if (currentGainNode) currentGainNode.disconnect(); } catch (e) { /* ignore */ }
     currentAudioSource = null; currentGainNode = null;
   };
-  a.onended = () => { sendAudioAck(item, "played"); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } };
+  const finishClip = (status) => {
+    if (currentAudio !== a) return;
+    sendAudioAck(item, status, a.currentTime * 1000);
+    cleanup(); URL.revokeObjectURL(a.src);
+    currentAudio = null; currentAudioItem = null;
+    playNext();
+  };
+  a.onended = () => finishClip("played");
   a.onplaying = () => {
     if (!item.turnId || !item.sequence) return;
     const key = item.turnId + ":" + item.sequence;
     if (!playedMetrics.has(key)) { playedMetrics.add(key); while (playedMetrics.size > 64) playedMetrics.delete(playedMetrics.values().next().value); clientMetric(item.turnId, "audio_started", performance.now(), item.sequence); }
   };
-  a.onerror = () => { sendAudioAck(item, "interrupted", a.currentTime * 1000); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } };
-  a.play().catch(() => { sendAudioAck(item, "interrupted", a.currentTime * 1000); cleanup(); URL.revokeObjectURL(a.src); if (currentAudio === a) { currentAudio = null; currentAudioItem = null; playNext(); } });
+  a.onerror = () => finishClip("interrupted");
+  const generation = playbackGeneration;
+  a.play().catch(() => {
+    // A tentative pause can reject the initial play promise. The pause/resume
+    // owner now holds this clip; an old promise must not revoke its audio URL.
+    if (playbackGeneration !== generation) return;
+    finishClip("interrupted");
+  });
 }
 
 // Stop the reply mid-stream (barge-in or conversation stop): kill the playing clip,
