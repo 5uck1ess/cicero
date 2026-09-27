@@ -106,7 +106,8 @@ import { TurnHistory } from "./web-voice/history";
 import { classifyCallIntent, sendTelegramVoice, sendTelegramText, startTelegramUpdatePoller, telegramToken } from "./notify/telegram";
 import { briefingTurnContext, notificationTurnContext } from "./notify/context";
 import { KanbanWatcher, listViaCli, nudgeLine, spokenLine, taskLinkViaCli, taskParentsViaCli, type KanbanTask } from "./notify/kanban-watch";
-import { kanbanChannel } from "./notify/kanban-escalation";
+import { kanbanChannel, nudgeChannel } from "./notify/kanban-escalation";
+import { NudgeStateFile } from "./notify/nudge-state-store";
 import { inQuietHours, composeBriefing, composeBriefingDigest, chunkBriefingDigest, minutesPrompt, worthMinutes, callMinutesThresholdMs, dayOf } from "./notify/briefing";
 import { PromptScheduler, scheduleLabel } from "./notify/schedules";
 import {
@@ -741,12 +742,31 @@ export class CiceroDaemon {
           }
         },
         intervalMs: (kw.interval_seconds ?? 20) * 1000,
-        // Unstarted tasks get one "nobody's picked this up" reminder —
-        // text/voice only, never a ring; quiet hours defer it like any notify.
-        nudge: async (t, waited, nth) => {
-          await this.webVoice?.notify(nudgeLine(t, waited, nth));
+        // Unstarted tasks get "nobody's picked this up" reminders — never a ring.
+        // Priority boards route them like announcements: p2 waits for the morning
+        // briefing's board section (no ping); p1/p0 text outside quiet hours.
+        nudge: async (t, waited, nth, signal) => {
+          const line = nudgeLine(t, waited, nth);
+          const channel = nudgeChannel(t, kw.escalation, kw.preset, new Date(),
+            this.config.notify?.quiet_hours, this.config.notify?.timezone);
+          if (channel === "legacy") {
+            await this.webVoice?.notify(line);
+            return;
+          }
+          if (channel === "skip") return;
+          if (this.config.notify?.telegram) {
+            try {
+              await sendTelegramText(this.config.notify.telegram, line, undefined, {}, signal);
+            } catch (error) {
+              if (signal.aborted) return;
+              log("warn", `kanban watch: nudge text delivery failed: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            if (signal.aborted) return;
+          }
+          await this.webVoice?.notify(line, undefined, { telegramMirror: false, textOnly: true, signal });
         },
         nudgeAfterMs: (kw.nudge_after_minutes ?? 60) * 60_000,
+        nudgeState: new NudgeStateFile(),
         // Presets use list parents first, falling back to detail when absent. A
         // gated companion (e.g. a QA card parented to a not-yet-done work card)
         // is recognized as parked-behind-a-dependency, not "nobody picked it up".

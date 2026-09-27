@@ -162,6 +162,43 @@ test("nudge: an unstarted task past the threshold nudges from the first poll; ba
   expect(nudges).toEqual(["old:120"]);
 });
 
+test("nudge: persisted state survives a restart — no re-send before the next slot; parked backlog never nudges (#134)", async () => {
+  const nudges: string[] = [];
+  const base = 1_750_000_000_000;
+  let clock = base;
+  const saved = new Map<string, { count: number; nextAt: number }>();
+  const store = {
+    load: async () => new Map(saved),
+    save: async (entries: ReadonlyMap<string, { count: number; nextAt: number }>) => {
+      saved.clear();
+      for (const [id, state] of entries) saved.set(id, { ...state });
+    },
+  };
+  const created = Math.floor(base / 1000) - 2 * 3600;
+  const board: KanbanTask[] = [
+    { id: "t1", title: "Waiting task", status: "todo", created_at: created },
+    { id: "b1", title: "Parked fix", status: "todo", parked: true, created_at: created },
+  ];
+  const watcher = () => new KanbanWatcher({
+    list: async () => board,
+    announce: () => {},
+    intervalMs: 60_000,
+    nudge: (t, _waited, nth) => nudges.push(`${t.id}#${nth}`),
+    nudgeAfterMs: 60 * 60_000,
+    nudgeState: store,
+    now: () => clock,
+  });
+  await watcher().tick();                        // first boot: reminder 1, saved
+  expect(saved.get("t1")).toEqual({ count: 1, nextAt: base + 60 * 60_000 });
+  clock += 5 * 60_000; await watcher().tick();   // restart 5 min later: no re-send
+  clock += 56 * 60_000; await watcher().tick();  // restart past the slot: reminder 2 continues the count
+  expect(nudges).toEqual(["t1#1", "t1#2"]);
+  board.splice(0, 1);                            // t1 leaves the board
+  clock += 5 * 3600_000; await watcher().tick();
+  expect(saved.has("t1")).toBe(false);           // state tracks the live board
+  expect(nudges).toEqual(["t1#1", "t1#2"]);      // b1 (backlog) never nudged
+});
+
 test("nudge: reminders repeat with a doubling gap and stop when someone starts the task", async () => {
   const nudges: string[] = [];
   const base = 1_750_000_000_000;

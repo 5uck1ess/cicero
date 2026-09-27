@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { kanbanChannel } from "../../src/notify/kanban-escalation";
+import { kanbanChannel, nudgeChannel } from "../../src/notify/kanban-escalation";
 import type { KanbanTask } from "../../src/notify/kanban-watch";
 
 const task = (priority?: KanbanTask["priority"], status = "blocked"): KanbanTask =>
@@ -37,4 +37,19 @@ test("Hermes and unset escalation retain legacy status routing", () => {
     expect(kanbanChannel(task(undefined, status), "priority", "hermes", now)).toBe("legacy");
   }
   expect(kanbanChannel(task(undefined), "priority", "multica", now)).toBe("briefing");
+});
+
+test("nudges follow priority: p2 is silent, p1/p0 text by day and wait out quiet hours, legacy unchanged (#134)", () => {
+  const q = { from: "23:00", to: "08:00" };
+  const day = new Date("2026-09-25T16:00:00Z"); // 12:00 in New York
+  const night = new Date("2026-09-26T03:00:00Z"); // 23:00 in New York
+  const todo = (priority?: KanbanTask["priority"]) => task(priority, "todo");
+  for (const [priority, daytime, nighttime] of [
+    ["p0", "text", "skip"], ["p1", "text", "skip"], ["p2", "skip", "skip"], [undefined, "skip", "skip"],
+  ] as const) {
+    expect(nudgeChannel(todo(priority), "priority", "multica", day, q, "America/New_York")).toBe(daytime);
+    expect(nudgeChannel(todo(priority), "priority", "multica", night, q, "America/New_York")).toBe(nighttime);
+  }
+  expect(nudgeChannel(todo("p0"), undefined, "multica", day, q)).toBe("legacy");
+  expect(nudgeChannel(todo(undefined), "priority", "hermes", day, q)).toBe("legacy");
 });

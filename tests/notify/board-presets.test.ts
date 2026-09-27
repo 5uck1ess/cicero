@@ -204,3 +204,18 @@ test("real board list past 1MB parses; output past the list cap still fails the 
   expect(tasks.length).toBeGreaterThan(700);
   await expect(listViaCli(board(KANBAN_LIST_STDOUT_LIMIT_BYTES + 64 * 1024))).rejects.toThrow("output limit");
 }, 30_000);
+
+test("issue-board backlog is parked: canonical todo, but never a nudge candidate (#134)", () => {
+  const rows = [
+    { id: "b", title: "Parked fix", status: "backlog", created_at: "2026-09-27T10:00:00Z" },
+    { id: "t", title: "Ready fix", status: "todo", created_at: "2026-09-27T10:00:00Z" },
+  ];
+  for (const [preset, payload] of [["multica", { issues: rows }], ["paperclip", rows]] as const) {
+    const [backlog, todo] = normalizeBoardList(payload, { preset });
+    expect(backlog!.status).toBe("todo");
+    expect(backlog!.parked).toBe(true);
+    expect(isUnstarted(backlog!)).toBe(false);
+    expect(todo!.parked).toBeUndefined();
+    expect(isUnstarted(todo!)).toBe(true);
+  }
+});

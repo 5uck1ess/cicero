@@ -41,7 +41,7 @@ Announcements fire on `done`/`blocked`/`review`, and an `assignee` matching a la
 | P1 | Text | Text |
 | P2 | Next scheduled briefing | Next scheduled briefing |
 
-Multica `urgent` and Paperclip `critical` map to P0; `high` maps to P1 for either preset. All other values, including missing or unknown priority, map to P2. P0 also calls for a `blocked` transition by day. Text bypasses quiet-hour deferral in this mode; P2 news is placed in the existing briefing store, so configure `notify.briefing.at` to receive it. Hermes has no priority field, so the key is ignored for that preset with one startup warning. Manual requests such as “have ada call me” still work.
+Multica `urgent` and Paperclip `critical` map to P0; `high` maps to P1 for either preset. All other values, including missing or unknown priority, map to P2. P0 also calls for a `blocked` transition by day. Text bypasses quiet-hour deferral in this mode; P2 news is placed in the existing briefing store, so configure `notify.briefing.at` to receive it. Reminders for unstarted tasks follow the same table but never ring: P2 reminders stay silent (the briefing carries the board), and P0/P1 reminders text outside quiet hours. Hermes has no priority field, so the key is ignored for that preset with one startup warning. Manual requests such as “have ada call me” still work.
 
 Two deliberate policies ride along:
 
@@ -87,6 +87,10 @@ with a bounded budget of 128 distinct statuses per process. All task timestamps
 are unix seconds internally; ISO timestamps are converted at the list boundary.
 A task is unstarted only while `todo` and without a start timestamp, so an
 in-progress Multica issue does not get reminders despite lacking `started_at`.
+Multica/Paperclip `backlog` is canonical `todo` but parked on purpose, so it
+never gets reminders. Reminder state is saved to `~/.cicero/kanban-nudges.json`
+(bounded, pruned to tasks still on the board), so a daemon restart continues
+the schedule instead of re-sending every reminder.
 
 Multica and Paperclip supply assignee ids rather than names. Map these ids to
 spoken names (use the exact lane name to get that employee's voice):
