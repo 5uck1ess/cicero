@@ -133,7 +133,7 @@ The pieces that close the loop — proactive voice-back, the kanban watch, quiet
 
 ### Intent routing
 
-> Opt-in: `switchboard.intent_url` routes classification to the local [Laya switchboard sidecar](../sidecars/laya-switchboard/README.md) instead of the summarizer model. **Checkpoint required — bring your own for now.** The base Laya model does not route zero-shot; the sidecar needs a switchboard fine-tuned checkpoint. A public checkpoint trained on synthetic data only, plus the fine-tuning recipe, is a planned follow-up.
+> Opt-in: `switchboard.intent_url` routes classification to the local [Laya switchboard sidecar](https://github.com/5uck1ess/cicero/blob/main/sidecars/laya-switchboard/README.md) instead of the summarizer model. **Checkpoint required — bring your own for now.** The base Laya model does not route zero-shot; the sidecar needs a switchboard fine-tuned checkpoint. A public checkpoint trained on synthetic data only, plus the fine-tuning recipe, is a planned follow-up.
 
 Exact switchboard commands still run immediately. Every other foreground
 utterance is classified by the local OpenAI-compatible model configured under

@@ -1,20 +1,31 @@
 name: Docs
 
+# The site renders every markdown file under the repo root (srcDir: ".."), so
+# any .md change can add a dead link. PRs run the build only, so a broken
+# link fails the PR instead of main; deploy stays main-only.
 on:
   push:
     branches: [main]
     paths:
+      - "**.md"
       - docs/**
-      - README.md
+      - package.json
+      - bun.lock
+      - .github/workflows/docs.yml
+  pull_request:
+    paths:
+      - "**.md"
+      - docs/**
+      - package.json
+      - bun.lock
+      - .github/workflows/docs.yml
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.ref) || 'pages' }}
   cancel-in-progress: true
 
 jobs:
@@ -27,13 +38,18 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bun run docs:build
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: docs/.vitepress/dist
 
   deploy:
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
