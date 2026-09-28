@@ -2,6 +2,7 @@ import type { BoardFeed, BoardRealtimeConfig } from "./board-realtime";
 import { boundedParentIds, detailArgs, detailParentIds, normalizeBoardList, type BoardNormalizationOptions } from "./board-presets";
 import { log } from "../logger";
 import { CommandAbortError, runBoundedCommand } from "../process/bounded-command";
+import type { NudgeState, NudgeStateStore } from "./nudge-state-store";
 
 const KANBAN_COMMAND_TIMEOUT_MS = 10_000;
 /**
@@ -45,6 +46,8 @@ export interface KanbanTask {
   parent_ids?: string[];
   /** Raw unknown statuses can collide with canonical names; never act on them. */
   unknown_status?: boolean;
+  /** Issue-board backlog: canonical todo, but parked on purpose — never nudged. */
+  parked?: boolean;
 }
 
 export interface KanbanSnapshot {
@@ -252,7 +255,10 @@ export class KanbanWatcher {
   private lastSnapshot: KanbanSnapshot | null = null;
 
   /** Per unstarted task: reminders already sent and when the next is allowed. */
-  private nudged = new Map<string, { count: number; nextAt: number }>();
+  private nudged = new Map<string, NudgeState>();
+  /** Persisted nudge state is loaded once, before the first poll's nudge checks. */
+  private nudgeStateLoaded = false;
+  private nudgeStateDirty = false;
 
   /** Status by id from the current poll's task list — used for parent-gate checks. */
   private statusById = new Map<string, string>();
@@ -283,6 +289,11 @@ export class KanbanWatcher {
      * {@link GATE_RECHECK_MS}; tests set 0 to re-check on every tick.
      */
     gateRecheckMs?: number;
+    /**
+     * Durable nudge state, so a daemon restart does not re-send every reminder
+     * at count 0. Absent = in-memory only (reminders restart with the process).
+     */
+    nudgeState?: NudgeStateStore;
     /** Clock override for tests. */
     now?: () => number;
   }) {}
@@ -400,6 +411,8 @@ export class KanbanWatcher {
       tasks.filter((t) => t?.id && typeof t.status === "string").map((t) => [t.id, t.unknown_status ? "" : t.status]),
     );
     this.gateLookupsThisPoll = 0; // fresh per-poll subprocess budget
+    await this.loadNudgeState();
+    if (signal.aborted) return;
     for (const t of tasks) {
       if (signal.aborted) return;
       if (!t?.id || typeof t.status !== "string") continue;
@@ -419,6 +432,45 @@ export class KanbanWatcher {
     }
     this.seeded = true;
     this.lastReadSucceeded = true;
+    await this.saveNudgeState(tasks);
+  }
+
+  private async loadNudgeState(): Promise<void> {
+    if (this.nudgeStateLoaded) return;
+    this.nudgeStateLoaded = true;
+    if (!this.opts.nudgeState) return;
+    try {
+      for (const [id, state] of await this.opts.nudgeState.load()) {
+        if (!this.nudged.has(id)) this.nudged.set(id, state);
+      }
+    } catch (error) {
+      log("warn", `kanban watch: nudge state unreadable, starting fresh: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** Persist only ids still on the board, so the file tracks the live board and stays bounded. */
+  private async saveNudgeState(tasks: readonly KanbanTask[]): Promise<void> {
+    if (!this.opts.nudgeState) return;
+    const onBoard = new Set(tasks.map((t) => t?.id).filter((id): id is string => typeof id === "string"));
+    for (const id of [...this.nudged.keys()]) {
+      if (!onBoard.has(id)) {
+        this.nudged.delete(id);
+        this.nudgeStateDirty = true;
+      }
+    }
+    if (!this.nudgeStateDirty) return;
+    this.nudgeStateDirty = false;
+    try {
+      await this.opts.nudgeState.save(this.nudged);
+    } catch (error) {
+      this.nudgeStateDirty = true; // retry on the next poll
+      log("warn", `kanban watch: nudge state not saved: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private setNudge(id: string, state: NudgeState): void {
+    this.nudged.set(id, state);
+    this.nudgeStateDirty = true;
   }
 
   private launchScheduledPoll(): void {
@@ -458,7 +510,7 @@ export class KanbanWatcher {
     const { nudge, nudgeAfterMs } = this.opts;
     if (!nudge || !nudgeAfterMs) return;
     if (!isUnstarted(t) || typeof t.created_at !== "number" || !Number.isFinite(t.created_at)) {
-      this.nudged.delete(t.id); // picked up or resolved — stop reminding
+      if (this.nudged.delete(t.id)) this.nudgeStateDirty = true; // picked up or resolved — stop reminding
       return;
     }
     const now = this.opts.now?.() ?? Date.now();
@@ -479,7 +531,7 @@ export class KanbanWatcher {
       // longer gate cooldown) so once the looked-up tasks enter their cooldown
       // the overflow rotates in and no task is starved. Escalation is preserved.
       if (t.parent_ids === undefined && this.gateLookupsThisPoll >= MAX_GATE_LOOKUPS_PER_POLL) {
-        this.nudged.set(t.id, { count: state.count, nextAt: now });
+        this.setNudge(t.id, { count: state.count, nextAt: now });
         return;
       }
       if (t.parent_ids === undefined) this.gateLookupsThisPoll++;
@@ -491,13 +543,13 @@ export class KanbanWatcher {
         // parked task doesn't run a parent-lookup subprocess on every poll.
         // Escalation state (count) is preserved so an eventual un-gating nudges
         // at the right level instead of restarting from zero.
-        this.nudged.set(t.id, { count: state.count, nextAt: now + recheckMs });
+        this.setNudge(t.id, { count: state.count, nextAt: now + recheckMs });
         return;
       }
       if (signal.aborted) return;
     }
     const gap = Math.min(nudgeAfterMs * 2 ** state.count, Math.max(nudgeAfterMs, 4 * 3_600_000));
-    this.nudged.set(t.id, { count: state.count + 1, nextAt: now + gap });
+    this.setNudge(t.id, { count: state.count + 1, nextAt: now + gap });
     try {
       await nudge(t, waitedMs / 60_000, state.count + 1, signal);
     } catch (error) {
@@ -551,13 +603,14 @@ function boundedTask(task: KanbanTask): KanbanTask | null {
     assignee: typeof task.assignee === "string" ? task.assignee.slice(0, 128) : null,
     created_at: typeof task.created_at === "number" && Number.isFinite(task.created_at) ? task.created_at : null,
     ...(task.unknown_status ? { unknown_status: true } : {}),
+    ...(task.parked ? { parked: true } : {}),
     ...(task.parent_ids !== undefined ? { parent_ids: boundedParentIds(task.parent_ids) } : {}),
     completed_at: typeof task.completed_at === "number" && Number.isFinite(task.completed_at) ? task.completed_at : null,
     started_at: typeof task.started_at === "number" && Number.isFinite(task.started_at) ? task.started_at : null,
   };
 }
 
-/** Only queued tasks without a start timestamp are eligible for reminders. */
+/** Only queued tasks without a start timestamp are eligible for reminders; parked backlog is waiting by design. */
 export function isUnstarted(task: KanbanTask): boolean {
-  return !task.unknown_status && task.status === "todo" && task.started_at == null;
+  return !task.unknown_status && !task.parked && task.status === "todo" && task.started_at == null;
 }

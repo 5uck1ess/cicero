@@ -103,6 +103,7 @@ export function normalizeBoardList(value: unknown, options: BoardNormalizationOp
       status,
       ...(preset === "hermes" ? {} : { priority: priority(row.priority, preset) }),
       ...(mapped ? {} : { unknown_status: true }),
+      ...(preset !== "hermes" && row.status === "backlog" ? { parked: true } : {}),
       assignee: typeof name === "string" ? name.slice(0, 128) : null,
       created_at: timestamp(preset === "paperclip" ? row.createdAt : row.created_at, preset),
       started_at: timestamp(preset === "paperclip" ? row.startedAt : preset === "hermes" ? row.started_at : null, preset),
