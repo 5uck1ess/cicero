@@ -4,11 +4,25 @@ import { dirname, join } from "node:path";
 import { PrivateJsonTooLargeError, readPrivateJson, writePrivateJson } from "../platform/private-json";
 import { ensurePrivateDirectorySync, ensurePrivateFileIfExistsSync } from "../platform/secure-storage";
 
+/** A board card that changed overnight; the morning digest groups these by kind. */
+export type OvernightCardKind = "done" | "review" | "blocked" | "unstarted";
+export interface OvernightCard {
+  kind: OvernightCardKind;
+  title: string;
+  who?: string;
+}
+
 export interface OvernightItem {
   id: string;
   queuedAt: number;
   text: string;
+  /** Present for kanban items; plain notices carry text only. */
+  card?: OvernightCard;
 }
+
+const CARD_KINDS: ReadonlySet<string> = new Set<OvernightCardKind>(["done", "review", "blocked", "unstarted"]);
+const MAX_CARD_TITLE_CHARS = 240;
+const MAX_CARD_WHO_CHARS = 128;
 
 const MAX_ITEMS = 40;
 const MAX_TEXT_CHARS = 12_000;
@@ -30,10 +44,14 @@ export class OvernightStore {
     ensurePrivateFileIfExistsSync(file);
   }
 
-  enqueue(text: string): Promise<void> {
+  enqueue(text: string, card?: OvernightCard): Promise<void> {
     return this.serialize(async () => {
       const { items } = await this.read();
-      items.push({ id: this.makeId(), queuedAt: this.now(), text: text.slice(0, MAX_TEXT_CHARS) });
+      const bounded = card ? boundCard(card) : undefined;
+      items.push({
+        id: this.makeId(), queuedAt: this.now(), text: text.slice(0, MAX_TEXT_CHARS),
+        ...(bounded ? { card: bounded } : {}),
+      });
       await writePrivateJson(this.file, items.slice(-MAX_ITEMS));
     });
   }
@@ -84,7 +102,11 @@ export class OvernightStore {
         continue;
       }
       if (!isItem(entry)) continue;
-      items.push({ id: entry.id, queuedAt: entry.queuedAt, text: entry.text.slice(0, MAX_TEXT_CHARS) });
+      const card = boundCard((entry as { card?: unknown }).card);
+      items.push({
+        id: entry.id, queuedAt: entry.queuedAt, text: entry.text.slice(0, MAX_TEXT_CHARS),
+        ...(card ? { card } : {}),
+      });
     }
     // Legacy string[] migration intentionally shares the write-path MAX_ITEMS bound: the old writer
     // also used slice(-40), so retaining only the newest 40 remains the queue's memory bound.
@@ -98,4 +120,20 @@ function isItem(value: unknown): value is OvernightItem {
   return typeof item.id === "string" && item.id.length > 0 && item.id.length <= 128
     && typeof item.queuedAt === "number" && Number.isFinite(item.queuedAt)
     && typeof item.text === "string";
+}
+
+/**
+ * The card exactly as given, or undefined when any field is malformed or over its
+ * bound. Never normalizes: trimming or cutting a field could merge two distinct
+ * cards in the digest, and a rejected card simply leaves the item as a verbatim
+ * notice, so its text is never lost.
+ */
+function boundCard(value: unknown): OvernightCard | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const card = value as Partial<OvernightCard>;
+  if (typeof card.kind !== "string" || !CARD_KINDS.has(card.kind)) return undefined;
+  if (typeof card.title !== "string" || !card.title.trim() || card.title.length > MAX_CARD_TITLE_CHARS) return undefined;
+  if (card.who !== undefined
+    && (typeof card.who !== "string" || !card.who.trim() || card.who.length > MAX_CARD_WHO_CHARS)) return undefined;
+  return { kind: card.kind, title: card.title, ...(card.who !== undefined ? { who: card.who } : {}) };
 }

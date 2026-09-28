@@ -1,4 +1,20 @@
 import type { KanbanTask } from "./kanban-watch";
+import type { OvernightCard, OvernightCardKind } from "./overnight-store";
+
+/** One quiet-hours item: a plain notice, or a board card the digest can group. */
+export type BriefingNews = string | { text: string; card?: OvernightCard };
+
+const CARD_GROUPS: ReadonlyArray<[OvernightCardKind, string]> = [
+  ["done", "Done"], ["review", "Ready for review"], ["blocked", "Parked"], ["unstarted", "Not picked up yet"],
+];
+/** Cards and board titles are pointers to the board, which keeps the full record, so the digest caps them. */
+const DIGEST_LIST_CAP = 5;
+const DIGEST_TITLE_CHARS = 60;
+
+function clipTitle(title: string): string {
+  const flat = title.replace(/\s+/g, " ").trim();
+  return flat.length > DIGEST_TITLE_CHARS ? `${flat.slice(0, DIGEST_TITLE_CHARS - 1)}…` : flat;
+}
 
 /** Telegram's maximum plain-text sendMessage payload, measured like String.slice(). */
 export const TELEGRAM_TEXT_MAX_CHARS = 4_096;
@@ -85,6 +101,16 @@ export function composeBriefing(overnight: string[], board: KanbanTask[] | null,
   return parts.join(" ");
 }
 
+function cappedList(items: string[], separator: string): string {
+  const shown = items.slice(0, DIGEST_LIST_CAP).join(separator);
+  return items.length > DIGEST_LIST_CAP ? `${shown}${separator}+${items.length - DIGEST_LIST_CAP} more` : shown;
+}
+
+function boardTitles(tasks: KanbanTask[]): string[] {
+  const shown = tasks.slice(0, DIGEST_LIST_CAP).map((t) => `"${clipTitle(t.title)}"`);
+  return tasks.length > DIGEST_LIST_CAP ? [...shown, `+${tasks.length - DIGEST_LIST_CAP} more on the board`] : shown;
+}
+
 /** One "━━━ label ━━━" block. Bulleted items by default; health rides bare. */
 function briefingSection(label: string, items: string[], bullet = true): string {
   const body = bullet ? items.map((i) => `• ${i}`).join("\n") : items.join("\n");
@@ -100,7 +126,7 @@ function briefingSection(label: string, items: string[], bullet = true): string 
  * read as garbage aloud.
  */
 export function composeBriefingDigest(
-  overnight: string[],
+  overnight: readonly BriefingNews[],
   board: KanbanTask[] | null,
   healthLine?: string | null,
   date?: string,
@@ -108,14 +134,39 @@ export function composeBriefingDigest(
   const header = `☀️ Morning briefing${date ? ` — ${date}` : ""}`;
   const sections: string[] = [];
 
-  const news = [...new Set(overnight.map((s) => s.trim()).filter(Boolean))];
+  // Board cards collapse to one line per kind; plain notices stay verbatim (the queue
+  // is acked after delivery, so the digest is the only place they survive).
+  // Dedupe only what the verbatim digest would have merged (identical text), keyed
+  // on unclipped fields: two cards that only differ past the clip point, or in their
+  // announcement text, are distinct work and must both be counted.
+  const cards = new Map<OvernightCardKind, Map<string, string>>();
+  const notices: string[] = [];
+  for (const item of overnight) {
+    const card = typeof item === "string" ? undefined : item.card;
+    if (card) {
+      const seen = cards.get(card.kind) ?? new Map<string, string>();
+      const key = JSON.stringify([(typeof item === "string" ? item : item.text).trim(), card.title, card.who ?? ""]);
+      if (!seen.has(key)) seen.set(key, `${clipTitle(card.title)}${card.who ? ` — ${card.who}` : ""}`);
+      cards.set(card.kind, seen);
+    } else {
+      const text = (typeof item === "string" ? item : item.text).trim();
+      if (text) notices.push(text);
+    }
+  }
+  const news = [
+    ...CARD_GROUPS.flatMap(([kind, label]) => {
+      const list = [...(cards.get(kind)?.values() ?? [])];
+      return list.length ? [`${label} (${list.length}): ${cappedList(list, " · ")}`] : [];
+    }),
+    ...new Set(notices),
+  ];
   if (news.length) sections.push(briefingSection("while you were away", news));
 
   if (board) {
     const blocked = board.filter((t) => !t.unknown_status && t.status === "blocked");
     const review = board.filter((t) => !t.unknown_status && t.status === "review");
-    if (blocked.length) sections.push(briefingSection("needs your input", blocked.map((t) => `"${t.title}"`)));
-    if (review.length) sections.push(briefingSection("waiting on review", review.map((t) => `"${t.title}"`)));
+    if (blocked.length) sections.push(briefingSection("needs your input", boardTitles(blocked)));
+    if (review.length) sections.push(briefingSection("waiting on review", boardTitles(review)));
   }
 
   if (healthLine) sections.push(briefingSection("health", [healthLine], false));
