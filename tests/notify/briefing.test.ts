@@ -267,7 +267,8 @@ test("digest briefing: cards whose titles only differ past the clip point are st
   const text = composeBriefingDigest([
     { text: "a", card: { kind: "done", title: `${long}A`, who: "elliot" } },
     { text: "b", card: { kind: "done", title: `${long}B`, who: "elliot" } },
-    { text: "c", card: { kind: "done", title: `${long}A`, who: "elliot" } }, // true duplicate
+    { text: "a", card: { kind: "done", title: `${long}A`, who: "elliot" } }, // true duplicate
+    { text: "a again, different task", card: { kind: "done", title: `${long}A`, who: "elliot" } },
   ], null, null);
-  expect(text).toContain("• Done (2): ");
+  expect(text).toContain("• Done (3): ");
 });

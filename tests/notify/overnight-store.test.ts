@@ -97,7 +97,7 @@ test.skipIf(process.platform === "win32")("writes remain private", async () => {
 test("a card rides with its item and survives a reload; a malformed card never drops the text", async () => {
   const { file } = fresh();
   const queue = store(file);
-  await queue.enqueue("Elliot here — finished: Fix parser.", { kind: "done", title: "  Fix parser  ", who: "elliot" });
+  await queue.enqueue("Elliot here — finished: Fix parser.", { kind: "done", title: "Fix parser", who: "elliot" });
   await queue.enqueue("plain notice");
   const raw = JSON.parse(readFileSync(file, "utf8"));
   raw.push({ id: "bad-card", queuedAt: 1, text: "kept anyway", card: { kind: "exploded", title: "x" } });
@@ -108,4 +108,24 @@ test("a card rides with its item and survives a reload; a malformed card never d
   expect(items[0]!.card).toEqual({ kind: "done", title: "Fix parser", who: "elliot" });
   expect(items[1]!.card).toBeUndefined();
   expect(items[2]!.card).toBeUndefined();
+});
+
+test("a card that is malformed or over its bounds is dropped whole, never trimmed, so its text shows verbatim", async () => {
+  const { file } = fresh();
+  const queue = store(file);
+  const longWho = "w".repeat(129);
+  await queue.enqueue("over-long assignee", { kind: "done", title: "Fix parser", who: longWho });
+  await queue.enqueue("over-long title", { kind: "done", title: "t".repeat(241) });
+  await queue.enqueue("padded title kept as-is", { kind: "done", title: "  Fix parser  " });
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  raw.push({ id: "num-who", queuedAt: 1, text: "Review this release blocker", card: { kind: "blocked", title: "Build blocked", who: 42 } });
+  writeFileSync(file, JSON.stringify(raw));
+
+  const items = await store(file).peek();
+  expect(items.map((i) => [i.text, i.card])).toEqual([
+    ["over-long assignee", undefined],
+    ["over-long title", undefined],
+    ["padded title kept as-is", { kind: "done", title: "  Fix parser  " }],
+    ["Review this release blocker", undefined],
+  ]);
 });

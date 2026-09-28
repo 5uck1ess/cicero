@@ -22,7 +22,7 @@ export interface OvernightItem {
 
 const CARD_KINDS: ReadonlySet<string> = new Set<OvernightCardKind>(["done", "review", "blocked", "unstarted"]);
 const MAX_CARD_TITLE_CHARS = 240;
-const MAX_CARD_WHO_CHARS = 64;
+const MAX_CARD_WHO_CHARS = 128;
 
 const MAX_ITEMS = 40;
 const MAX_TEXT_CHARS = 12_000;
@@ -122,12 +122,18 @@ function isItem(value: unknown): value is OvernightItem {
     && typeof item.text === "string";
 }
 
-/** A well-formed, length-bounded card, or undefined; a bad card never drops the item's text. */
+/**
+ * The card exactly as given, or undefined when any field is malformed or over its
+ * bound. Never normalizes: trimming or cutting a field could merge two distinct
+ * cards in the digest, and a rejected card simply leaves the item as a verbatim
+ * notice, so its text is never lost.
+ */
 function boundCard(value: unknown): OvernightCard | undefined {
   if (!value || typeof value !== "object") return undefined;
   const card = value as Partial<OvernightCard>;
   if (typeof card.kind !== "string" || !CARD_KINDS.has(card.kind)) return undefined;
-  if (typeof card.title !== "string" || !card.title.trim()) return undefined;
-  const who = typeof card.who === "string" && card.who.trim() ? card.who.trim().slice(0, MAX_CARD_WHO_CHARS) : undefined;
-  return { kind: card.kind, title: card.title.trim().slice(0, MAX_CARD_TITLE_CHARS), ...(who ? { who } : {}) };
+  if (typeof card.title !== "string" || !card.title.trim() || card.title.length > MAX_CARD_TITLE_CHARS) return undefined;
+  if (card.who !== undefined
+    && (typeof card.who !== "string" || !card.who.trim() || card.who.length > MAX_CARD_WHO_CHARS)) return undefined;
+  return { kind: card.kind, title: card.title, ...(card.who !== undefined ? { who: card.who } : {}) };
 }

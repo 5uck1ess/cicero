@@ -136,15 +136,16 @@ export function composeBriefingDigest(
 
   // Board cards collapse to one line per kind; plain notices stay verbatim (the queue
   // is acked after delivery, so the digest is the only place they survive).
-  // Dedupe on the full title + assignee: two cards whose titles only differ past the
-  // clip point are distinct work and must both be counted.
+  // Dedupe only what the verbatim digest would have merged (identical text), keyed
+  // on unclipped fields: two cards that only differ past the clip point, or in their
+  // announcement text, are distinct work and must both be counted.
   const cards = new Map<OvernightCardKind, Map<string, string>>();
   const notices: string[] = [];
   for (const item of overnight) {
     const card = typeof item === "string" ? undefined : item.card;
     if (card) {
       const seen = cards.get(card.kind) ?? new Map<string, string>();
-      const key = JSON.stringify([card.title, card.who ?? ""]);
+      const key = JSON.stringify([(typeof item === "string" ? item : item.text).trim(), card.title, card.who ?? ""]);
       if (!seen.has(key)) seen.set(key, `${clipTitle(card.title)}${card.who ? ` — ${card.who}` : ""}`);
       cards.set(card.kind, seen);
     } else {
