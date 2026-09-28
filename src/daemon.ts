@@ -697,7 +697,9 @@ export class CiceroDaemon {
           const channel = kanbanChannel(t, kw.escalation, kw.preset, new Date(),
             this.config.notify?.quiet_hours, this.config.notify?.timezone);
           if (channel === "briefing") {
-            await this.getOvernightStore().enqueue(spokenLine(t, !!lane));
+            const kind = t.status === "done" || t.status === "review" || t.status === "blocked" ? t.status : undefined;
+            await this.getOvernightStore().enqueue(spokenLine(t, !!lane),
+              kind ? { kind, title: t.title, ...(t.assignee ? { who: t.assignee } : {}) } : undefined);
             return;
           }
           if (channel === "legacy" && !this.webVoice) return;
@@ -751,7 +753,8 @@ export class CiceroDaemon {
             now: new Date(), quietHours: this.config.notify?.quiet_hours, timeZone: this.config.notify?.timezone,
           }, {
             legacy: (line) => this.webVoice?.notify(line) ?? Promise.resolve(),
-            briefing: (line) => this.getOvernightStore().enqueue(line),
+            briefing: (line) => this.getOvernightStore().enqueue(line,
+              { kind: "unstarted", title: t.title, ...(t.assignee ? { who: t.assignee } : {}) }),
             text: async (line) => {
               if (this.config.notify?.telegram) {
                 try {
@@ -2182,7 +2185,7 @@ export class CiceroDaemon {
 
               const overnight = snapshot.map((item) => item.text);
               const day = dayOf(new Date(), tz);
-              const digest = composeBriefingDigest(overnight, board, health, day);
+              const digest = composeBriefingDigest(snapshot, board, health, day);
               const tg = this.config.notify?.telegram;
               const channels: NonNullable<BriefingRunResult["channels"]> = {};
               const telegramDelivery = tg

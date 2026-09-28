@@ -93,3 +93,19 @@ test.skipIf(process.platform === "win32")("writes remain private", async () => {
   await queue.enqueue("one");
   expect(lstatSync(file).mode & 0o777).toBe(0o600);
 });
+
+test("a card rides with its item and survives a reload; a malformed card never drops the text", async () => {
+  const { file } = fresh();
+  const queue = store(file);
+  await queue.enqueue("Elliot here — finished: Fix parser.", { kind: "done", title: "  Fix parser  ", who: "elliot" });
+  await queue.enqueue("plain notice");
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  raw.push({ id: "bad-card", queuedAt: 1, text: "kept anyway", card: { kind: "exploded", title: "x" } });
+  writeFileSync(file, JSON.stringify(raw));
+
+  const items = await store(file).peek();
+  expect(items.map((i) => i.text)).toEqual(["Elliot here — finished: Fix parser.", "plain notice", "kept anyway"]);
+  expect(items[0]!.card).toEqual({ kind: "done", title: "Fix parser", who: "elliot" });
+  expect(items[1]!.card).toBeUndefined();
+  expect(items[2]!.card).toBeUndefined();
+});

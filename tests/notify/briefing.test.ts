@@ -232,3 +232,32 @@ test("composeBriefing: the health line rides last when present, silence otherwis
   );
   expect(composeBriefing([], [], null)).toBe("Morning briefing. All quiet overnight, and the board is clean.");
 });
+
+test("digest briefing: overnight board cards collapse to one capped line per kind; notices stay verbatim", () => {
+  const card = (kind: "done" | "review" | "blocked" | "unstarted", title: string, who?: string) =>
+    ({ text: `${who ?? "someone"} spoke at length about ${title}.`, card: { kind, title, ...(who ? { who } : {}) } });
+  const longTitle = "A very long card title that keeps going well past what fits on a phone line";
+  const notice = "GitHub: 5uck1ess/yazyk PR #783 (new activity) \"Scrub\" — reviewer: please rebase. https://github.com/5uck1ess/yazyk/pull/783";
+  const text = composeBriefingDigest([
+    ...["One", "Two", "Three", "Four", "Five", "Six", "Seven"].map((t) => card("done", t, "elliot")),
+    card("done", "One", "elliot"), // duplicate announcement
+    card("unstarted", longTitle),
+    card("review", "Ship orb", "samantha"),
+    notice,
+  ], null, null, "2026-09-28");
+
+  const lines = text.split("\n");
+  expect(lines[2]).toBe("━━━━━ while you were away ━━━━━");
+  expect(lines[3]).toBe("• Done (7): One — elliot · Two — elliot · Three — elliot · Four — elliot · Five — elliot · +2 more");
+  expect(lines[4]).toBe("• Ready for review (1): Ship orb — samantha");
+  expect(lines[5]).toBe(`• Not picked up yet (1): ${longTitle.slice(0, 59)}…`);
+  expect(lines[6]).toBe(`• ${notice}`); // plain notices are never clipped
+  expect(text).not.toContain("spoke at length"); // card prose is replaced by the grouped line
+});
+
+test("digest briefing: board lists cap at five with a pointer to the rest", () => {
+  const board = Array.from({ length: 8 }, (_, i) => ({ id: String(i), title: `Review item ${i + 1}`, status: "review" as const }));
+  const text = composeBriefingDigest([], board, null);
+  expect(text).toContain('• "Review item 5"\n• +3 more on the board');
+  expect(text).not.toContain("Review item 6");
+});
