@@ -136,15 +136,17 @@ export function composeBriefingDigest(
 
   // Board cards collapse to one line per kind; plain notices stay verbatim (the queue
   // is acked after delivery, so the digest is the only place they survive).
-  const cards = new Map<OvernightCardKind, string[]>();
+  // Dedupe on the full title + assignee: two cards whose titles only differ past the
+  // clip point are distinct work and must both be counted.
+  const cards = new Map<OvernightCardKind, Map<string, string>>();
   const notices: string[] = [];
   for (const item of overnight) {
     const card = typeof item === "string" ? undefined : item.card;
     if (card) {
-      const label = `${clipTitle(card.title)}${card.who ? ` — ${card.who}` : ""}`;
-      const list = cards.get(card.kind) ?? [];
-      if (!list.includes(label)) list.push(label);
-      cards.set(card.kind, list);
+      const seen = cards.get(card.kind) ?? new Map<string, string>();
+      const key = JSON.stringify([card.title, card.who ?? ""]);
+      if (!seen.has(key)) seen.set(key, `${clipTitle(card.title)}${card.who ? ` — ${card.who}` : ""}`);
+      cards.set(card.kind, seen);
     } else {
       const text = (typeof item === "string" ? item : item.text).trim();
       if (text) notices.push(text);
@@ -152,8 +154,8 @@ export function composeBriefingDigest(
   }
   const news = [
     ...CARD_GROUPS.flatMap(([kind, label]) => {
-      const list = cards.get(kind);
-      return list?.length ? [`${label} (${list.length}): ${cappedList(list, " · ")}`] : [];
+      const list = [...(cards.get(kind)?.values() ?? [])];
+      return list.length ? [`${label} (${list.length}): ${cappedList(list, " · ")}`] : [];
     }),
     ...new Set(notices),
   ];

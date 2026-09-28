@@ -261,3 +261,13 @@ test("digest briefing: board lists cap at five with a pointer to the rest", () =
   expect(text).toContain('• "Review item 5"\n• +3 more on the board');
   expect(text).not.toContain("Review item 6");
 });
+
+test("digest briefing: cards whose titles only differ past the clip point are still counted separately", () => {
+  const long = "X".repeat(60);
+  const text = composeBriefingDigest([
+    { text: "a", card: { kind: "done", title: `${long}A`, who: "elliot" } },
+    { text: "b", card: { kind: "done", title: `${long}B`, who: "elliot" } },
+    { text: "c", card: { kind: "done", title: `${long}A`, who: "elliot" } }, // true duplicate
+  ], null, null);
+  expect(text).toContain("• Done (2): ");
+});
