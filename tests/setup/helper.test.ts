@@ -138,6 +138,24 @@ test("choosing audio.cpp speech later shrinks the budget below E2B: the helper c
   expect(s.draft.llm).toBeUndefined();
 });
 
+test("stored models that outgrow the budget after a speech change are warned about by Check, not only on the Helper step", async () => {
+  const s = new SetupSession(fixtureSystem("cuda16"));
+  const deps = { which: () => null, env: {}, readFile: () => null, homeDir: () => "/fixture/home", fetcher: ollamaFetcher(["gemma4:e4b-it-qat", "gemma4:12b-it-qat"]) };
+  await s.choose("privacy", { mode: "local" }, { probe: false });
+  await s.choose("stt", { id: "faster-whisper" }, { probe: false });
+  await s.choose("tts", { id: "kokoro" }, { probe: false });
+  const fd = await s.detect("frontdesk", deps);
+  expect((await s.choose("frontdesk", { kind: "model", runtime: "ollama", model: "gemma4:12b-it-qat" }, { deps, detected: fd, probe: false })).accepted).toBe(true);
+  const hd = await s.detect("helper", deps);
+  expect((await s.choose("helper", { id: "model", runtime: "ollama", model: "gemma4:e4b-it-qat" }, { deps, detected: hd, probe: false })).accepted).toBe(true);
+  const ok = async () => [{ name: "config", level: "ok" as const, detail: "fine" }];
+  expect((await s.check(ok)).filter((c) => c.level === "warn")).toEqual([]);
+  await s.choose("stt", { id: "audiocpp" }, { probe: false });
+  await s.choose("tts", { id: "audiocpp" }, { probe: false });
+  const warned = (await s.check(ok)).filter((c) => c.level === "warn");
+  expect(warned).toEqual([{ name: "memory fit", level: "warn", detail: expect.stringContaining("no longer fit") }]);
+});
+
 test("local mode on a machine too small for E2B: no helper recommended, a listed model is refused with the fit reason", async () => {
   const detected = await detectHelper(ctx("local", [], undefined, fixtureSystem("cuda4")), { fetcher: ollamaFetcher(["gemma4:e4b-it-qat"]) }, "python");
   expect(detected.fit?.localHelperImpossible).toBe(true);

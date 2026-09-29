@@ -1,5 +1,7 @@
 import { checkDraft, createDraft, type SetupDraft } from "./draft";
 import { classifySetupChecks } from "./checks";
+import { speechKind } from "./fit";
+import { chosenFitWarnings } from "./helper";
 import { SETUP_STEPS, NO_CHOICE_STEP_IDS, type StepContext } from "./steps";
 import type { SystemFacts, Tier } from "./system";
 import type { PickerDeps } from "./pickers";
@@ -134,11 +136,19 @@ export class SetupSession {
     const revision = this.revision;
     this.checks = null;
     this.checksRevision = null;
-    const result = await run(this.draft, options);
+    const result = [...await run(this.draft, options), ...this.fitChecks()];
     if (revision !== this.revision) throw new DraftChangedError();
     this.checks = result;
     this.checksRevision = revision;
     return result;
+  }
+
+  /** Stored model choices that no longer fit the budget for the chosen speech engines (e.g. after switching to audio.cpp). */
+  private fitChecks(): Check[] {
+    const stt = (this.choices.get("stt") as { id?: string } | undefined)?.id;
+    const tts = (this.choices.get("tts") as { id?: string } | undefined)?.id;
+    if (!stt || !tts) return [];
+    return chosenFitWarnings(this.context(), speechKind(this.draft.deployment, stt, tts)).map((detail) => ({ name: "memory fit", level: "warn" as const, detail }));
   }
 
   /** Checks for the current draft only; null when none ran or they are stale. */
