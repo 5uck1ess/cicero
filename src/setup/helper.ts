@@ -117,4 +117,3 @@ export async function probeHelper(c: HelperChoice, deps: PickerDeps = {}): Promi
   if (!r.running) return { ok: false, message: `${label} is not running` };
   return r.models.includes(c.model) ? { ok: true, message: `${label} serves ${c.model}` } : { ok: false, message: `${label} does not list ${c.model}; load it and try again` };
 }
-
