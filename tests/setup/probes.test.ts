@@ -31,6 +31,18 @@ test("Front desk: an agent is never run; its install and credential are reported
   expect((await probeFrontDesk({ brain: { backend: "codex" } }, { signal: signal(), deps: { which: () => null } })).state).toBe("failed");
 });
 
+test("Front desk: an ACP adapter's credential follows its provider and the configured unset_env", async () => {
+  const deps = {
+    which: (b: string) => `/usr/bin/${b}`, env: { ANTHROPIC_API_KEY: "synthetic-anthropic-marker" }, readFile: () => null, homeDir: () => "/fixture/home",
+    runCommand: (async (command: readonly string[]) => command[0]!.endsWith("claude") ? out('{"loggedIn":true,"authMethod":"claude.ai"}') : out("{}", 1)) as never,
+  };
+  const brain = { backend: "acp", binary: "bunx", binary_args: ["@agentclientprotocol/claude-agent-acp@0.84.0"] };
+  expect((await probeFrontDesk({ brain }, { signal: signal(), deps })).data).toEqual({ credential: "per-token key" });
+  expect((await probeFrontDesk({ brain: { ...brain, unset_env: ["ANTHROPIC_API_KEY"] } }, { signal: signal(), deps })).data).toEqual({ credential: "subscription" });
+  const esc = await probeFrontDesk({ brain: { backend: "ollama", ollama_model: "m", escalate: { ...brain, unset_env: ["ANTHROPIC_API_KEY"] } } }, { signal: signal(), deps: { ...deps, probePort: async () => false } });
+  expect(esc.message).toContain("credential subscription");
+});
+
 test("Front desk: a model answers one completion; a closed runtime port is 'not running'", async () => {
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     expect(String(input)).toBe("http://127.0.0.1:11434/v1/chat/completions");

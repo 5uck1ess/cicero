@@ -8,6 +8,7 @@ import { ttsDefaultPort } from "../backends/tts/provider";
 import { probeNvidiaGpu, type GpuCommandRunner } from "../platform/gpu";
 import { runBoundedCommand } from "../process/bounded-command";
 import { detectAccounts } from "./accounts";
+import { acpProviderOf } from "./acp-agents";
 import { defaultPortProbe, type PickerDeps } from "./pickers";
 import { engineStartCommand } from "./sample";
 
@@ -139,13 +140,18 @@ export function probeHear(config: Config, o: ProbeOptions): Promise<ProbeResult>
   });
 }
 
-async function agentCredential(backend: string, binary: string | undefined, deps: ProbeDeps): Promise<{ installed: boolean; credential: string }> {
+/** An agent's install and likely credential, seen with the env the brain gives it (its unset_env removed). */
+async function agentCredential(backend: string, command: Record<string, unknown>, deps: ProbeDeps): Promise<{ installed: boolean; credential: string }> {
   const which = deps.which ?? ((b: string) => Bun.which(b));
+  const binary = str(command.binary);
   const name = binary ?? (backend === "claude-code" ? "claude" : backend === "acp" ? "hermes" : backend);
   const installed = Boolean(which(name));
-  const provider = PROVIDER_OF_BACKEND[backend] ?? (binary === "grok" ? "grok" : undefined);
+  const args = Array.isArray(command.binary_args) ? command.binary_args.filter((a): a is string => typeof a === "string") : [];
+  const provider = PROVIDER_OF_BACKEND[backend] ?? (backend === "acp" ? acpProviderOf(binary, args) : binary === "grok" ? "grok" : null);
   if (!installed || !provider) return { installed, credential: "unknown" };
-  const accounts = await detectAccounts({ ...deps, runCommand: deps.runCommand ?? ((command, options) => runBoundedCommand(command, { ...options, timeoutMs: Math.min(options?.timeoutMs ?? STATUS_TIMEOUT_MS, STATUS_TIMEOUT_MS) })) });
+  const env = { ...(deps.env ?? process.env) };
+  for (const key of Array.isArray(command.unset_env) ? command.unset_env : []) if (typeof key === "string") delete env[key];
+  const accounts = await detectAccounts({ ...deps, env, runCommand: deps.runCommand ?? ((command, options) => runBoundedCommand(command, { ...options, timeoutMs: Math.min(options?.timeoutMs ?? STATUS_TIMEOUT_MS, STATUS_TIMEOUT_MS) })) });
   const status = accounts.agents.find((a) => a.provider === provider);
   return { installed, credential: status?.likely ?? "unknown" };
 }
@@ -156,16 +162,16 @@ export function probeFrontDesk(config: Config, o: ProbeOptions): Promise<ProbeRe
     const brain = record(config.brain);
     const backend = str(brain.backend) ?? "";
     const escalate = record(brain.escalate);
-    const escalation = str(escalate.binary) ? await agentCredential("acp", str(escalate.binary), deps) : null;
+    const escalation = str(escalate.binary) ? await agentCredential("acp", { ...escalate, unset_env: escalate.unset_env ?? brain.unset_env }, deps) : null;
     const escNote = escalation ? ` Think-hard agent ${str(escalate.binary)}: ${escalation.installed ? "installed" : "not found"}, credential ${escalation.credential}.` : "";
     if (AGENT_BACKENDS.has(backend) || str(brain.mode) === "tab-inject") {
-      const agent = await agentCredential(backend, str(brain.binary), deps);
+      const agent = await agentCredential(backend, brain, deps);
       if (!agent.installed) return { id: "frontdesk", state: "failed", message: `The ${backend} agent is not installed.${escNote}` };
       return { id: "frontdesk", state: "installed; tested on first call", message: `The ${backend} agent is installed; it will likely use: ${agent.credential}. It runs on your first call.${escNote}`, data: { credential: agent.credential } };
     }
     const target = modelTarget(brain, deps.env ?? process.env);
     if (!target || !target.model) return { id: "frontdesk", state: "failed", message: "No front desk model is configured" };
-    if (!(await portOpen(target.base, deps))) return { id: "frontdesk", state: "not running", message: `Nothing is listening at ${target.base}. Start your model runtime.` };
+    if (!(await portOpen(target.base, deps))) return { id: "frontdesk", state: "not running", message: `Nothing is listening at ${target.base}. Start your model runtime.${escNote}` };
     const started = Date.now();
     const reply = await chatOnce(target.base, target.model, "Reply with one short sentence: are you ready?", 40, signal, deps, target.apiKey);
     return { id: "frontdesk", state: "ok", message: `${target.model} answered in ${((Date.now() - started) / 1000).toFixed(1)} s: ${clip(reply)}${escNote}` };
