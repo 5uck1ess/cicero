@@ -110,6 +110,26 @@ test("Memory: cancel reaches the running nvidia-smi and no later command starts"
   expect(calls).toEqual(["/usr/bin/nvidia-smi"]);
 });
 
+test("Front desk: cancel reaches the pending login check and no later account command starts", async () => {
+  const calls: string[] = [];
+  let signalled: AbortSignal | undefined;
+  let finish = () => {};
+  const runCommand = ((command: readonly string[], options?: BoundedCommandOptions) => {
+    calls.push(command.join(" "));
+    if (command[1] === "auth") { signalled = options?.signal; return new Promise((resolve) => { finish = () => resolve(out('{"loggedIn":true,"authMethod":"claude.ai"}')); }); }
+    return Promise.resolve(out("{}"));
+  }) as never;
+  const controller = new AbortController();
+  const pending = probeFrontDesk({ brain: { backend: "claude-code", mode: "subprocess" } }, { signal: controller.signal, deps: { which: (b) => `/usr/bin/${b}`, env: {}, readFile: () => null, homeDir: () => "/fixture/home", runCommand } });
+  await Bun.sleep(5);
+  controller.abort();
+  expect(await pending).toMatchObject({ state: "cancelled" });
+  expect(signalled?.aborted).toBe(true);
+  finish();
+  await Bun.sleep(5);
+  expect(calls).toEqual(["/usr/bin/claude auth status"]);
+});
+
 test("headless probes include the browser-only Speak row as skipped", async () => {
   const results = await runHeadlessProbes({}, { signal: signal(), timeoutMs: 100, deps: { probePort: async () => false, which: () => null, platform: "linux" } });
   expect(results.map((r) => r.id)).toEqual(["hear", "frontdesk", "helper", "memory", "speak"]);

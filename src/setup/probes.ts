@@ -141,7 +141,7 @@ export function probeHear(config: Config, o: ProbeOptions): Promise<ProbeResult>
 }
 
 /** An agent's install and likely credential, seen with the env the brain gives it (its unset_env removed). */
-async function agentCredential(backend: string, command: Record<string, unknown>, deps: ProbeDeps): Promise<{ installed: boolean; credential: string }> {
+async function agentCredential(backend: string, command: Record<string, unknown>, deps: ProbeDeps, signal: AbortSignal): Promise<{ installed: boolean; credential: string }> {
   const which = deps.which ?? ((b: string) => Bun.which(b));
   const binary = str(command.binary);
   const name = binary ?? (backend === "claude-code" ? "claude" : backend === "acp" ? "hermes" : backend);
@@ -151,7 +151,10 @@ async function agentCredential(backend: string, command: Record<string, unknown>
   if (!installed || !provider) return { installed, credential: "unknown" };
   const env = { ...(deps.env ?? process.env) };
   for (const key of Array.isArray(command.unset_env) ? command.unset_env : []) if (typeof key === "string") delete env[key];
-  const accounts = await detectAccounts({ ...deps, env, runCommand: deps.runCommand ?? ((command, options) => runBoundedCommand(command, { ...options, timeoutMs: Math.min(options?.timeoutMs ?? STATUS_TIMEOUT_MS, STATUS_TIMEOUT_MS) })) });
+  const base: NonNullable<ProbeDeps["runCommand"]> = deps.runCommand ?? ((cmd, options) => runBoundedCommand(cmd, { ...options, timeoutMs: Math.min(options?.timeoutMs ?? STATUS_TIMEOUT_MS, STATUS_TIMEOUT_MS) }));
+  // Every status command gets the probe's signal, and none starts after a cancel or timeout.
+  const runCommand: NonNullable<ProbeDeps["runCommand"]> = (cmd, options) => signal.aborted ? Promise.reject(new ProbeAbort()) : base(cmd, { ...options, signal });
+  const accounts = await detectAccounts({ ...deps, env, runCommand });
   const status = accounts.agents.find((a) => a.provider === provider);
   return { installed, credential: status?.likely ?? "unknown" };
 }
@@ -162,10 +165,10 @@ export function probeFrontDesk(config: Config, o: ProbeOptions): Promise<ProbeRe
     const brain = record(config.brain);
     const backend = str(brain.backend) ?? "";
     const escalate = record(brain.escalate);
-    const escalation = str(escalate.binary) ? await agentCredential("acp", { ...escalate, unset_env: escalate.unset_env ?? brain.unset_env }, deps) : null;
+    const escalation = str(escalate.binary) ? await agentCredential("acp", { ...escalate, unset_env: escalate.unset_env ?? brain.unset_env }, deps, signal) : null;
     const escNote = escalation ? ` Think-hard agent ${str(escalate.binary)}: ${escalation.installed ? "installed" : "not found"}, credential ${escalation.credential}.` : "";
     if (AGENT_BACKENDS.has(backend) || str(brain.mode) === "tab-inject") {
-      const agent = await agentCredential(backend, brain, deps);
+      const agent = await agentCredential(backend, brain, deps, signal);
       if (!agent.installed) return { id: "frontdesk", state: "failed", message: `The ${backend} agent is not installed.${escNote}` };
       return { id: "frontdesk", state: "installed; tested on first call", message: `The ${backend} agent is installed; it will likely use: ${agent.credential}. It runs on your first call.${escNote}`, data: { credential: agent.credential } };
     }
