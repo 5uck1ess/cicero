@@ -11,6 +11,7 @@ import { SETUP_STEPS } from "./steps";
 import { detectSystem, type SystemDeps, type SystemFacts } from "./system";
 import { contributeSpeech, parseSpeech, probeRemoteProviderModels, type PickerDeps, type ProviderModelList } from "./pickers";
 import { synthesizeSample } from "./sample";
+import { PROBE_IDS, PROBE_TIMEOUT_MS, PROBES, type ProbeId, type ProbeResult } from "./probes";
 import type { TTSProviderConfig } from "../backends/tts/provider";
 import { backupInvalidConfig, inspectExistingConfig, writeDraft } from "./write";
 import { DraftChangedError, SetupSession, mergeDraft } from "./session";
@@ -168,6 +169,9 @@ export interface SetupServerOptions {
   /** Test-only timer injection for the hand-off shutdown path. */
   scheduleStop?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout> | number;
   cancelScheduledStop?: (timer: ReturnType<typeof setTimeout> | number) => void;
+  /** Test-only probe overrides and deadline for the Test step. */
+  probes?: Partial<typeof PROBES>;
+  probeTimeoutMs?: number;
   /** Test overrides for deterministic hand-off paths and command selection. */
   defaultHome?: string;
   platform?: string;
@@ -205,6 +209,9 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
   const system: SystemFacts = await detectSystem(options.systemDeps);
   const session = new SetupSession(system, undefined, options.pickerDeps);
   let providerModels: ProviderModelList | null = null;
+  /** Test-step results keyed to the draft revision they ran against, and one controller per running probe. */
+  const testResults = new Map<ProbeId, { revision: number; result: ProbeResult }>();
+  const testRuns = new Map<ProbeId, AbortController>();
   /** The one in-flight Play sample; a new sample or /api/sample/cancel aborts it. */
   let sample: AbortController | null = null;
   let current = SETUP_STEPS[0]!.id;
@@ -226,10 +233,13 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
     const checkGroups = safeChecks === null ? null : classifySetupChecks(safeChecks);
     const existing = inspectExistingConfig(home);
     // Only free text and remote-derived values can echo a secret; structural fields stay exact.
-    const free = redactStateValue({ detected, providerModels, checks: safeChecks, checkGroups, existing, invalidated }, draftSecrets(draft)) as Record<string, unknown>;
+    // A probe result describes the draft it ran against; a later choice drops it.
+    const liveTests = Object.fromEntries([...testResults].filter(([, r]) => r.revision === session.revision).map(([id, r]) => [id, r.result]));
+    const testsCleared = [...testResults.values()].some((r) => r.revision !== session.revision);
+    const free = redactStateValue({ detected, providerModels, checks: safeChecks, checkGroups, existing, invalidated, tests: liveTests, testsCleared }, draftSecrets(draft)) as Record<string, unknown>;
     return {
       steps: SETUP_STEPS.map(({ id, title, explain, pipeline, available }) => ({ id, title, explain, pipeline, available })),
-      current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, choiceLabel(choice)])), privacyAllow: (choices.get("privacy") as { allow?: string[] } | undefined)?.allow ?? [], accountsChoice: (choices.get("accounts") as { useSubscription?: string[] } | undefined)?.useSubscription ?? null, frontdeskChoice: choices.get("frontdesk") ?? null, helperChoice: choices.get("helper") ?? null, storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
+      current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, choiceLabel(choice)])), privacyAllow: (draft.privacy as { allow?: string[] } | undefined)?.allow ?? [], accountsChoice: (choices.get("accounts") as { useSubscription?: string[] } | undefined)?.useSubscription ?? null, frontdeskChoice: choices.get("frontdesk") ?? null, helperChoice: choices.get("helper") ?? null, storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
       written, finished, startCommand: handoff.startCommand, handoff,
       canWrite: !written && checkGroups !== null && checkGroups.blocking.length === 0 && existing.status === "missing",
       requiresNotReadyAcknowledgement: (checkGroups?.notReady.length ?? 0) > 0,
@@ -254,6 +264,31 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
         const body = await readRequestJsonLimited(req, { maxBytes: 2048, timeoutMs: 5000 });
         if (!body || typeof body !== "object" || Array.isArray(body)) return json({ error: "Expected JSON object" }, 400);
         const data = body as Record<string, unknown>;
+        if (url.pathname === "/api/test/cancel") {
+          const id = data.probe as ProbeId;
+          if (!PROBE_IDS.includes(id)) return json({ error: "Unknown probe" }, 400);
+          testRuns.get(id)?.abort();
+          return json(view());
+        }
+        if (url.pathname === "/api/test") {
+          const id = data.probe as ProbeId;
+          if (!PROBE_IDS.includes(id)) return json({ error: "Unknown probe" }, 400);
+          testRuns.get(id)?.abort();
+          const controller = new AbortController();
+          testRuns.set(id, controller);
+          const revision = session.revision;
+          try {
+            const result = await (options.probes?.[id] ?? PROBES[id])(structuredClone(session.draft) as Record<string, unknown>, {
+              signal: AbortSignal.any([controller.signal, closed.signal]),
+              timeoutMs: options.probeTimeoutMs ?? PROBE_TIMEOUT_MS,
+              deps: options.pickerDeps,
+            });
+            testResults.set(id, { revision, result });
+          } finally {
+            if (testRuns.get(id) === controller) testRuns.delete(id);
+          }
+          return json(view());
+        }
         if (url.pathname === "/api/sample/cancel") {
           sample?.abort();
           return json({ ok: true });
@@ -339,6 +374,7 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
         handoffTimer = null;
       }
       sample?.abort();
+      for (const run of testRuns.values()) run.abort();
       try { await Promise.resolve(server.stop(true)); }
       finally { closed.abort(); }
     })();

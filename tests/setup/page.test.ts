@@ -87,6 +87,14 @@ test("Speak offers Play sample only for running local engines", () => {
   expect(page).toContain("new Audio('data:' + r.mime + ';base64,' + r.audio).play()");
 });
 
+test("the Test screen runs and cancels each probe and says when results were cleared", () => {
+  const page = setupPage();
+  expect(page).toContain("if (view === 'test') renderTest(step);");
+  expect(page).toContain("api('/api/test', { probe: p[0] })");
+  expect(page).toContain("api('/api/test/cancel', { probe: p[0] })");
+  expect(page).toContain("Results were cleared because the draft changed.");
+});
+
 test("the Tasks screen asks before task text goes to a board", () => {
   const page = setupPage();
   expect(page).toContain("Allow task text to go to this board?");

@@ -154,6 +154,8 @@ details.advanced summary{cursor:pointer;color:var(--muted);font-weight:600;paddi
 .pill.ok{color:var(--ok);border-color:var(--ok);background:var(--ok-soft)}
 .pill.todo{color:var(--accent-text);border-color:var(--accent-line);background:var(--accent-soft)}
 .pill.bad{color:var(--bad);border-color:var(--bad);background:var(--bad-soft)}
+table.mem{border-collapse:collapse;margin:8px 0 0;font-size:14px}
+table.mem td{padding:4px 16px 4px 0;color:var(--muted);font-variant-numeric:tabular-nums}
 .rows{list-style:none;margin:0 0 28px;padding:0;max-width:760px;border:1px solid var(--line);border-radius:var(--r-outer);background:var(--surface)}
 .rows li{padding:14px 18px;border-top:1px solid var(--line)}
 .rows li:first-child{border-top:0}
@@ -201,7 +203,7 @@ var state = null;
 var view = 'overview';
 var app = document.getElementById('app');
 
-var ORDER = ['privacy', 'system', 'accounts', 'frontdesk', 'helper', 'stt', 'tts', 'brain', 'board', 'review'];
+var ORDER = ['privacy', 'system', 'accounts', 'frontdesk', 'helper', 'stt', 'tts', 'brain', 'board', 'test', 'review'];
 var STEP = {
   privacy:  { short: 'Privacy', title: 'What may leave this machine?', lede: 'Choose what Cicero may send off this machine. Later steps ask before anything else leaves.', sub: 'Data policy' },
   system:   { short: 'Machine', title: 'This machine', lede: 'Cicero picks a starting preset from your hardware. You can change it.', sub: 'Runs everything' },
@@ -212,6 +214,7 @@ var STEP = {
   brain:    { short: 'Agent',   title: 'Which coding agent does the work?', lede: 'Cicero is the voice. Your agent reads code, runs tools and opens PRs.', sub: 'Coding agent' },
   tts:      { short: 'Speak',   title: 'How should Cicero speak?', lede: 'Text-to-speech turns replies into audio.', sub: 'Text-to-speech' },
   board:    { short: 'Tasks',   title: 'Where do your tasks live?', lede: 'Optional. Cicero can announce when tasks on your board finish or get stuck.', sub: 'Optional board' },
+  test:     { short: 'Test',    title: 'Try it', lede: 'Each check runs one small request against an engine that is already running. None of them blocks saving.', sub: 'Live checks' },
   review:   { short: 'Save',    title: 'Review and save', lede: 'Cicero checks your choices before writing the config.', sub: 'Check and write' }
 };
 var NAMES = {'llm':'LLM prompt (default)','laya':'Laya sidecar (checkpoint required)','llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'OpenAI-compatible URL','claude-code':'Claude Code','codex':'Codex','gemini':'Gemini CLI','qwen':'Qwen Code','acp':'ACP agent','faster-whisper':'faster-whisper','mlx-whisper':'MLX Whisper','audiocpp':'audio.cpp','kokoro':'Kokoro','pocket-tts':'Pocket TTS (Python)','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming server','hermes':'Hermes','multica':'Multica','paperclip':'Paperclip','none':'No board','cloud':'Cloud or custom API','api':'Model API','local-cuda':'NVIDIA GPU','local-mlx':'Apple Silicon','local-cpu':'CPU only'};
@@ -684,6 +687,39 @@ function renderHelper(step) {
   }, row));
   app.append(row);
 }
+var PROBE_ROWS = [['hear', 'Hear', 'Transcribes a bundled clip of “Cicero, what time is it in Tokyo?”'], ['frontdesk', 'Front desk', 'One short answer from your front desk model; an agent is only checked for install and login'], ['helper', 'Helper', 'One summary of a bundled long reply'], ['memory', 'Memory', 'GPU memory each engine is using right now']];
+function renderTest(step) {
+  if (state.testsCleared && !Object.keys(state.tests || {}).length) app.append(h('p', { class: 'note-line tight', text: 'Results were cleared because the draft changed.' }));
+  var ul = h('ul', { class: 'rows' });
+  PROBE_ROWS.forEach(function (p) {
+    var r = state.tests && state.tests[p[0]];
+    var pill = r ? h('span', { class: 'pill ' + (r.state === 'ok' ? 'ok' : r.state === 'skipped' || r.state.indexOf('installed') === 0 ? 'todo' : 'bad'), text: r.state }) : null;
+    var li = h('li', {}, [h('div', { class: 'head' }, [h('span', { class: 'name', text: p[1] }), pill]), h('p', { class: 'detail', text: r ? r.message : p[2] })]);
+    if (r && r.startCommand) li.append(cmd(r.startCommand));
+    if (p[0] === 'memory' && r && r.data && r.data.engines) {
+      var table = h('table', { class: 'mem' });
+      r.data.engines.forEach(function (e) { table.append(h('tr', {}, [h('td', { text: e.label }), h('td', { text: e.gb + ' GB (measured)' })])); });
+      table.append(h('tr', {}, [h('td', { text: 'Other GPU use' }), h('td', { text: r.data.otherGb + ' GB' })]));
+      li.append(table);
+    }
+    var row = h('div', { class: 'actions' });
+    var cancel = button('Cancel', 'small', async function () { state = await api('/api/test/cancel', { probe: p[0] }); }, row);
+    cancel.hidden = true;
+    row.append(button(r ? 'Run again' : 'Run', 'small', async function () {
+      cancel.hidden = false;
+      try { state = await api('/api/test', { probe: p[0] }); } finally { cancel.hidden = true; }
+      render();
+    }, row), cancel);
+    li.append(row);
+    ul.append(li);
+  });
+  var speak = h('li', {}, [h('div', { class: 'head' }, [h('span', { class: 'name', text: 'Speak' })]), h('p', { class: 'detail', text: 'Use Play sample on the Speak step to hear your voice engine.' })]);
+  ul.append(speak);
+  app.append(ul, why(step));
+  var next_ = h('div', { class: 'actions' });
+  next_.append(button('Continue', 'primary', async function () { await go('review'); }, next_));
+  app.append(next_);
+}
 function invalidatedBanner() {
   var list = state.invalidated || [];
   if (!list.length) return null;
@@ -933,6 +969,7 @@ function render() {
   else if (view === 'accounts') renderAccounts(step);
   else if (view === 'frontdesk') renderFrontDesk(step);
   else if (view === 'helper') renderHelper(step);
+  else if (view === 'test') renderTest(step);
   else if (view === 'review') renderReview(step);
   else renderPicker(view, step);
 }

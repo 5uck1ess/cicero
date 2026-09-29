@@ -82,7 +82,7 @@ export function createSTTProvider(config: RuntimeConfig): STTProvider {
   return provider;
 }
 
-function buildSTTProvider(sttConfig: STTProviderConfig, configKey: string): STTProvider {
+export function buildSTTProvider(sttConfig: STTProviderConfig, configKey: string): STTProvider {
   switch (sttConfig.backend) {
     case "mlx-whisper":
       return new MlxWhisperProvider(sttConfig);

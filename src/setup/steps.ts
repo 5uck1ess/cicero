@@ -86,6 +86,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     detect: detectBoard,
     recommend() { return { choice: { id: "none" }, reason: "Sending task text to a board is your call; add one on the Tasks step." }; },
     parseChoice: parseBoard, contribute(ctx, c) { const board = c as ReturnType<typeof parseBoard>; return board.id === "none" ? {} : { ...withAllowance(ctx, "board"), ...contributeBoard(board) }; }, probeChoice: probeBoard },
+  { id: "test", title: "Test", available: true, pipeline: "speaker",
+    explain: info("Tries each running engine once: hearing a bundled clip, one front desk answer, one helper summary, and GPU memory.", "It catches a stopped runtime or a wrong model before your first call. Agents are never run here; they are checked on your first call.", "Probes run against your draft with a deadline each; a later choice clears their results. Failures never block Save.", "docs/setup.md"), ...noop },
   step("channels", "Channels", "Channels carry messages and calls beyond the browser.", "docs/channels.md", "speaker"),
   step("install", "Install", "Selected local engines need their runtime and model files.", "docs/setup.md"),
   { id: "check", title: "Check", available: true, pipeline: "speaker", explain: info("Runs the real Cicero doctor against a private temporary copy of the draft.", "Failures block writing; warnings show what still needs attention.", "The temporary copy is removed after checks finish.", "docs/setup.md"), ...noop },
