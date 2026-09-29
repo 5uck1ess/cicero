@@ -303,7 +303,15 @@ async function go(id) {
   app.setAttribute('aria-busy', 'true');
   try { await goInner(id); } finally { app.removeAttribute('aria-busy'); }
 }
+// The one Play sample in flight; leaving the page or pressing Cancel stops it on the server.
+var sampleRun = 0;
+function cancelSample() {
+  if (!sampleRun) return;
+  sampleRun = 0;
+  api('/api/sample/cancel', {}).catch(function () {});
+}
 async function goInner(id) {
+  cancelSample();
   if (location.hash.slice(1) !== (id === 'overview' ? '' : id)) history.pushState(null, '', id === 'overview' ? location.pathname : '#' + id);
   if (id === 'overview') { view = 'overview'; render(); return; }
   var serverId = id === 'review' ? 'check' : id;
@@ -814,14 +822,23 @@ function renderPicker(id, step) {
     if (id === 'tts' && o !== 'elevenlabs' && engine && engine.running) {
       var sampleRow = h('div', { class: 'actions' });
       var sampleNote = h('small');
+      var cancelBtn = h('button', { type: 'button', class: 'btn small', text: 'Cancel', hidden: true });
+      cancelBtn.onclick = function () { cancelSample(); cancelBtn.hidden = true; sampleNote.textContent = 'Cancelled.'; };
       sampleRow.append(button('Play sample', 'small', async function () {
         var tts = { id: o };
         if (fields.host) { tts.host = fields.host.value; tts.port = Number(fields.port.value); }
+        var run = sampleRun = Date.now();
         sampleNote.textContent = 'Generating…';
-        var r = await api('/api/sample', { tts: tts });
-        if (r.ok) { sampleNote.textContent = ''; new Audio('data:' + r.mime + ';base64,' + r.audio).play(); }
-        else sampleNote.textContent = r.message + (r.startCommand ? ' ' + r.startCommand : '');
-      }, sampleRow), sampleNote);
+        cancelBtn.hidden = false;
+        try {
+          var r = await api('/api/sample', { tts: tts });
+          if (sampleRun !== run) return; // cancelled or left the page: never play late audio
+          if (r.ok) { sampleNote.textContent = ''; new Audio('data:' + r.mime + ';base64,' + r.audio).play(); }
+          else sampleNote.textContent = r.message + (r.startCommand ? ' ' + r.startCommand : '');
+        } finally {
+          if (sampleRun === run) { sampleRun = 0; cancelBtn.hidden = true; }
+        }
+      }, sampleRow), cancelBtn, sampleNote);
       box.append(sampleRow);
     }
     if (fields.apiKey && state.storedSecrets && state.storedSecrets[id] && saved === o) fields.apiKey.parentNode.append(h('small', { text: 'A key is saved. Leave blank to keep it.' }));
