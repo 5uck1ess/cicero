@@ -1,10 +1,11 @@
 import { defineConfig } from "vitepress";
+import { withMermaid } from "vitepress-plugin-mermaid";
 import { fileURLToPath } from "node:url";
 
 const repository = "https://github.com/5uck1ess/cicero";
 const assets = fileURLToPath(new URL("../../assets/", import.meta.url));
 
-export default defineConfig({
+export default withMermaid(defineConfig({
   title: "Cicero",
   description: "Self-hosted voice layer for coding agents",
   base: "/cicero/",
@@ -138,4 +139,4 @@ export default defineConfig({
       },
     ],
   },
-});
+}));
