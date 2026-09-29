@@ -46,6 +46,9 @@ test("each picker parses valid input and rejects malformed input", () => {
     expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "synthetic-key" }, p)).toThrow("Speech stays on this machine");
     expect(() => parseSpeech("stt", { id: "wyoming", host: "192.168.1.2", port: 10300 }, p)).toThrow("Speech stays on this machine");
     expect(parseSpeech("stt", { id: "wyoming", host: "127.0.0.1", port: 10300 }, p).host).toBe("127.0.0.1");
+    expect(parseSpeech("stt", { id: "wyoming", host: "127.0.0.2", port: 10300 }, p).host).toBe("127.0.0.2");
+    // A DNS name that merely starts with 127. can resolve anywhere.
+    expect(() => parseSpeech("stt", { id: "wyoming", host: "127.example.com", port: 10300 }, p)).toThrow("Speech stays on this machine");
   }
 });
 

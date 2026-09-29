@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { connect, isIP } from "node:net";
 import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "../backends/llm/openai";
-import { isLocalHost } from "../backends/net";
+import { isLoopbackHost } from "../backends/net";
 import { BOARD_COMMANDS, normalizeBoardList, type BoardPreset } from "../notify/board-presets";
 import { findVenvPython } from "../platform/python";
 import { audioCppLocalRuntimePaths } from "../backends/tts/audiocpp";
@@ -214,7 +214,7 @@ export async function defaultPortProbe(hostname: string, number: number): Promis
 /** Both privacy modes keep speech on this machine; the wizard enforces that once a mode is declared. */
 export const SPEECH_LOCAL = "Speech stays on this machine in both privacy modes";
 const speechLocal = (ctx: StepContext) => Boolean(ctx.draft.privacy);
-const localSpeechHost = (h: string) => isLocalHost(h) || /^127\./.test(h);
+const localSpeechHost = (h: string) => isLoopbackHost(h);
 const VENV: Record<string, string> = { "faster-whisper": ".venv-stt", "mlx-whisper": ".venv", kokoro: ".venv-kokoro", "pocket-tts": ".venv-pocket", "mlx-audio": ".venv" };
 export async function detectSpeech(kind: "stt" | "tts", ctx: StepContext, deps: PickerDeps = {}) {
   const options = kind === "stt" ? ["faster-whisper", ...(mlx(ctx) ? ["mlx-whisper"] : []), "wyoming", ...(cuda(ctx) ? ["audiocpp"] : [])]

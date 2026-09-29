@@ -1,4 +1,4 @@
-import { isLocalHost } from "../backends/net";
+import { isLoopbackHost } from "../backends/net";
 import { redactSecrets } from "../redact";
 import { OPENAI_COMPATIBLE_BACKENDS } from "../backends/llm/openai";
 import type { Check } from "../cli/doctor";
@@ -12,7 +12,7 @@ import { isCloudAcpCommand } from "./acp-agents";
 const AGENT_NOTE = "declared policy; doctor cannot see what a CLI agent does on the network";
 const CLOUD_CLIS = new Set(["claude-code", "codex", "gemini", "qwen"]);
 
-const loopbackHost = (host: string) => { const h = host.replace(/^\[|\]$/g, ""); return isLocalHost(h) || /^127\./.test(h); };
+const loopbackHost = (host: string) => isLoopbackHost(host);
 
 function loopback(url: string | undefined): boolean {
   if (!url) return false;

@@ -45,6 +45,8 @@ test("both modes: speech must stay on this machine", () => {
   for (const mode of ["local", "cloud"]) {
     expect(names(cfg({ privacy: { mode }, tts: { backend: "elevenlabs" } }))).toEqual(["privacy: speech"]);
     expect(names(cfg({ privacy: { mode }, stt: { backend: "wyoming", host: "203.0.113.2", port: 10300 } }))).toEqual(["privacy: speech"]);
+    expect(names(cfg({ privacy: { mode }, stt: { backend: "wyoming", host: "127.example.com", port: 10300 } }))).toEqual(["privacy: speech"]);
+    expect(names(cfg({ privacy: { mode }, stt: { backend: "wyoming", host: "127.0.0.2", port: 10300 } }))).toEqual([]);
     expect(names(cfg({ privacy: { mode }, stt: { backend: "faster-whisper" }, tts: { backend: "wyoming", host: "localhost", port: 10200 } }))).toEqual([]);
   }
 });

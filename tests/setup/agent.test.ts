@@ -41,7 +41,10 @@ test("local privacy: a cloud agent needs allowCloud, which adds agent to privacy
   expect(written).toEqual({ privacy: { mode: "local", allow: ["agent"] }, brain: { backend: "codex", mode: "subprocess" } });
   expect(contributeAgent(ctx("cloud", [agentFront]), parseAgent({ id: "codex" }, ctx("cloud", [agentFront])))).toEqual({ brain: { backend: "codex", mode: "subprocess" } });
   expect(parseAgent({ id: "hermes" }, ctx("local", [agentFront]))).toMatchObject({ id: "acp", binary: "hermes", cloud: false });
-  expect(parseAgent({ id: "openai-compatible", baseUrl: "http://192.168.1.5:8080/v1", model: "m" }, ctx("local", [agentFront])).cloud).toBe(false);
+  // Local privacy means this machine: a LAN endpoint leaves it, so it needs the allowance (doctor warns on it too).
+  expect(parseAgent({ id: "openai-compatible", baseUrl: "http://127.0.0.1:8080/v1", model: "m" }, ctx("local", [agentFront])).cloud).toBe(false);
+  expect(() => parseAgent({ id: "openai-compatible", baseUrl: "http://192.168.1.5:8080/v1", model: "m" }, ctx("local", [agentFront]))).toThrow("Allow this agent");
+  expect(parseAgent({ id: "openai-compatible", baseUrl: "http://192.168.1.5:8080/v1", model: "m", allowCloud: true }, ctx("local", [agentFront])).cloud).toBe(true);
   expect(() => parseAgent({ id: "groq", model: "m" }, ctx("local", [agentFront]))).toThrow("Allow this agent");
   expect(() => parseAgent({ id: "codex", allowCloud: "yes" }, c)).toThrow();
 });

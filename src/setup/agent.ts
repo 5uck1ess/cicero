@@ -1,4 +1,4 @@
-import { isKeylessHost } from "../backends/net";
+import { isLoopbackHost } from "../backends/net";
 import { ACP_AGENTS, acpProviderOf, isCloudAcpCommand, type AcpAgent } from "./acp-agents";
 export { ACP_AGENTS } from "./acp-agents";
 import { unsetEnvFor, type AccountsChoice } from "./accounts";
@@ -53,7 +53,8 @@ function isCloud(parsed: ReturnType<typeof parseBrain>, acp: AcpAgent | null): b
   if (parsed.id === "ollama") return false;
   if (parsed.id in CLOUD_CLIS) return true;
   if (parsed.id === "openai-compatible") {
-    try { return !isKeylessHost(new URL(String((parsed as { base_url?: string }).base_url)).hostname); } catch { return true; }
+    // Anything off this machine (a LAN server too) leaves it, as doctor's local-mode check says.
+    try { return !isLoopbackHost(new URL(String((parsed as { base_url?: string }).base_url)).hostname); } catch { return true; }
   }
   return true; // a cloud API preset
 }
