@@ -101,6 +101,20 @@ test("recommend: the fit plan's front desk when listed, else reuse the helper's 
   expect(unsized.reason).toContain("Not sized for this machine");
 });
 
+test("recommend: with a fit target, a listed model that is too large or of unknown size is never picked; a smaller known one is", () => {
+  const tooBig = recommendLocal(runtimes({ ollama: listing("ollama", ["gemma4:31b-it-qat", "mystery:70b"]) }), byId("e4b"), byId("e2b"));
+  expect(tooBig.choice).toBeNull();
+  expect(tooBig.reason).toContain("ollama pull gemma4:e4b-it-qat");
+  const smaller = recommendLocal(runtimes({ ollama: listing("ollama", ["gemma4:31b-it-qat", "gemma4:e2b-it-qat"]) }), byId("12b"), null);
+  expect(smaller.choice).toEqual({ runtime: "ollama", model: "gemma4:e2b-it-qat" });
+});
+
+test("detect on a 16 GB card with only a 20 GB model listed recommends nothing for either step", async () => {
+  const fetcher = (async (input: RequestInfo | URL) => String(input).includes("11434") ? Response.json({ models: [{ name: "gemma4:31b-it-qat" }] }) : new Response("down", { status: 503 })) as typeof fetch;
+  const c = ctx("local", { system: fixtureSystem("cuda16") });
+  expect((await detectFrontDesk(c, { ...noAccounts, fetcher }, "audiocpp")).recommended).toBeNull();
+});
+
 test("detection: local mode disables cloud and lists install steps; cloud mode prefers a found key", async () => {
   const fetcher = (async (input: RequestInfo | URL) => String(input).includes("11434") ? Response.json({ models: [{ name: "gemma4:e4b-it-qat" }] }) : new Response("down", { status: 503 })) as typeof fetch;
   const local = await detectFrontDesk(ctx("local"), { ...noAccounts, fetcher }, "audiocpp");

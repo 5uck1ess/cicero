@@ -1,16 +1,34 @@
 import { expect, test } from "bun:test";
 import { DraftChangedError, SetupSession } from "../../src/setup/session";
 import { fixtureSystem } from "./fixtures";
+import { REQUIRED_ANSWERS, requiredDeps } from "./required";
+
+async function complete(s: SetupSession): Promise<void> {
+  for (const [id, choice] of REQUIRED_ANSWERS) expect((await s.choose(id, choice, { probe: false, deps: requiredDeps })).accepted).toBe(true);
+}
+
+test("the write gate names every required step still unchosen, even with a passing Check", async () => {
+  const s = new SetupSession(fixtureSystem("cuda24"), undefined, requiredDeps);
+  await s.choose("privacy", { mode: "cloud" }, { probe: false });
+  await s.choose("frontdesk", { kind: "agent" }, { probe: false });
+  await s.check(async () => [{ name: "config", level: "ok", detail: "fine" }]);
+  expect(s.missingChoices()).toEqual(["Machine", "Helper", "Hear", "Speak", "Agent"]);
+  expect(s.writeGate(true)).toEqual({ ok: false, error: "Choose Machine, Helper, Hear, Speak, Agent before writing" });
+  await complete(s);
+  await s.check(async () => [{ name: "config", level: "ok", detail: "fine" }]);
+  expect(s.writeGate(false)).toEqual({ ok: true });
+});
 
 test("revision bumps and the write gate needs a fresh Check", async () => {
-  const s = new SetupSession(fixtureSystem("cuda24"));
+  const s = new SetupSession(fixtureSystem("cuda24"), undefined, requiredDeps);
   const before = s.revision;
   await s.choose("privacy", { mode: "local" }, { probe: false });
   expect(s.revision).toBe(before + 1);
+  await complete(s);
   expect(s.writeGate(false)).toEqual({ ok: false, error: "Run Check again before writing" });
   await s.check(async () => [{ name: "config", level: "ok", detail: "fine" }]);
   expect(s.writeGate(false)).toEqual({ ok: true });
-  await s.choose("privacy", { mode: "cloud" }, { probe: false });
+  await s.choose("system", "local-cuda", { probe: false });
   expect(s.writeGate(false)).toEqual({ ok: false, error: "Run Check again before writing" });
 });
 
@@ -25,7 +43,8 @@ test("a choice made during Check makes that Check stale", async () => {
 });
 
 test("write gate mirrors the page: blocking, then not-ready acknowledgement", async () => {
-  const s = new SetupSession(fixtureSystem("cuda24"));
+  const s = new SetupSession(fixtureSystem("cuda24"), undefined, requiredDeps);
+  await complete(s);
   await s.check(async () => [{ name: "config", level: "fail", detail: "bad" }]);
   expect(s.writeGate(true)).toEqual({ ok: false, error: "Resolve config validity failures before writing" });
   await s.check(async () => [{ name: "stt (audiocpp)", level: "fail", detail: "not running" }]);

@@ -1,6 +1,6 @@
 import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "../backends/llm/openai";
 import { detectAccounts } from "./accounts";
-import { modelBudget, planFit, type FitPlan, type GemmaModel } from "./fit";
+import { GEMMA_MODELS, modelBudget, planFit, speechKind, type FitPlan, type GemmaModel } from "./fit";
 import { probeRemoteProviderModels, type PickerDeps } from "./pickers";
 import { isLocal } from "./privacy";
 import { RUNTIME_ENDPOINTS, RUNTIME_IDS, installHint, listRuntimes, llamaSwapEntry, suggestListedModel, type RuntimeId, type RuntimeListing } from "./runtimes";
@@ -41,6 +41,17 @@ export function fitFor(ctx: StepContext, speech: Parameters<typeof modelBudget>[
   return budget ? planFit(budget.budgetGb, isLocal(ctx) ? "local" : "cloud") : null;
 }
 
+/**
+ * The fit a parser must hold a choice to: from the chosen Hear and Speak engines when both are set
+ * (so a rebuild after a speech change re-checks it), else what this step's detection saw.
+ */
+export function currentFit(ctx: StepContext): FitPlan | null | undefined {
+  const stt = (ctx.choices?.get("stt") as { id?: string } | undefined)?.id;
+  const tts = (ctx.choices?.get("tts") as { id?: string } | undefined)?.id;
+  if (stt && tts) return fitFor(ctx, speechKind(ctx.draft.deployment, stt, tts));
+  return (ctx.detected as { fit?: FitPlan | null } | undefined)?.fit;
+}
+
 function firstRunning(runtimes: Record<RuntimeId, RuntimeListing>): RuntimeListing | null {
   return RUNTIME_IDS.map((id) => runtimes[id]).find((r) => r.running && r.models.length > 0) ?? null;
 }
@@ -58,6 +69,20 @@ export function recommendLocal(runtimes: Record<RuntimeId, RuntimeListing>, targ
     if (!r.running) continue;
     const listed = fallback ? suggestListedModel(r.models, fallback) : null;
     if (listed) return { choice: { runtime: id, model: listed }, reason: `${target ? `${target.label} is not listed on ${RUNTIME_ENDPOINTS[id].label} (${installHint(id, target)}). ` : ""}Reusing ${fallback!.label}.` };
+  }
+  if (target) {
+    // Sized machine: only a listed model known to be no larger than the target may stand in.
+    const smaller = GEMMA_MODELS.filter((g) => g.footprintGb <= target.footprintGb).reverse();
+    for (const id of RUNTIME_IDS) {
+      const r = runtimes[id];
+      if (!r.running) continue;
+      for (const g of smaller) {
+        const listed = suggestListedModel(r.models, g);
+        if (listed) return { choice: { runtime: id, model: listed }, reason: `${target.label} is not listed on ${RUNTIME_ENDPOINTS[id].label} (${installHint(id, target)}). Using the smaller ${g.label}.` };
+      }
+    }
+    const up = firstRunning(runtimes);
+    if (up) return { choice: null, reason: `${target.label} is not listed, and nothing listed is known to fit this machine. ${installHint(up.id, target)}.` };
   }
   const running = firstRunning(runtimes);
   if (running) return { choice: { runtime: running.id, model: running.models[0]! }, reason: `${target ? `${target.label} is not listed (${installHint(running.id, target)}). ` : "Not sized for this machine. "}Using the first model ${RUNTIME_ENDPOINTS[running.id].label} lists.` };
@@ -106,7 +131,8 @@ export function parseFrontDesk(raw: unknown, ctx: StepContext, deps: PickerDeps 
   const runtime = c.runtime as RuntimeId;
   const model = text(c.model, "model");
   const detected = ctx.detected as FrontDeskDetected | undefined;
-  if (isLocal(ctx) && detected?.fit?.localHelperImpossible) throw new Error(detected.fit.reason);
+  const fit = currentFit(ctx);
+  if (isLocal(ctx) && fit?.localHelperImpossible) throw new Error(fit.reason);
   const listing = detected?.runtimes?.[runtime];
   if (listing && (!listing.running || !listing.models.includes(model))) throw new Error("Start the runtime, load a model, and Re-check before choosing it");
   return { kind: "model", runtime, model };

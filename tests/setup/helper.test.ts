@@ -122,6 +122,21 @@ test("switching Privacy to local clears a no-helper choice and the cloud front d
   expect(s.draft.llm).toBeUndefined();
 });
 
+test("choosing audio.cpp speech later shrinks the budget below E2B: the helper choice is invalidated", async () => {
+  const s = new SetupSession(fixtureSystem("cuda6"));
+  const deps = { which: () => null, fetcher: ollamaFetcher(["gemma4:e2b-it-qat"]) };
+  await s.choose("privacy", { mode: "local" }, { probe: false });
+  await s.choose("frontdesk", { kind: "agent" }, { probe: false });
+  await s.choose("stt", { id: "faster-whisper" }, { probe: false });
+  await s.choose("tts", { id: "kokoro" }, { probe: false });
+  const hd = await s.detect("helper", deps);
+  expect((await s.choose("helper", { id: "model", runtime: "ollama", model: "gemma4:e2b-it-qat" }, { deps, detected: hd, probe: false })).accepted).toBe(true);
+  await s.choose("stt", { id: "audiocpp" }, { probe: false });
+  const flipped = await s.choose("tts", { id: "audiocpp" }, { probe: false });
+  expect(flipped.invalidated).toEqual([{ id: "helper", reason: expect.stringContaining("cannot hold even Gemma 4 E2B") }]);
+  expect(s.draft.llm).toBeUndefined();
+});
+
 test("local mode on a machine too small for E2B: no helper recommended, a listed model is refused with the fit reason", async () => {
   const detected = await detectHelper(ctx("local", [], undefined, fixtureSystem("cuda4")), { fetcher: ollamaFetcher(["gemma4:e4b-it-qat"]) }, "python");
   expect(detected.fit?.localHelperImpossible).toBe(true);

@@ -1,6 +1,6 @@
 import { resolveOpenAiTarget } from "../backends/llm/openai";
 import { GEMMA_MODELS, fitWarnings, modelBudget, type FitPlan, type GemmaId, type GemmaModel, type SpeechKind } from "./fit";
-import { fitFor, recommendLocal, type FrontDeskChoice } from "./frontdesk";
+import { currentFit, fitFor, recommendLocal, type FrontDeskChoice } from "./frontdesk";
 import { LAYA_LANES_REQUIRED, type PickerDeps } from "./pickers";
 import { isLocal } from "./privacy";
 import { RUNTIME_ENDPOINTS, RUNTIME_IDS, listRuntimes, suggestListedModel, type RuntimeId, type RuntimeListing } from "./runtimes";
@@ -91,7 +91,8 @@ export function parseHelper(raw: unknown, ctx: StepContext): HelperChoice {
   const model = text(c.model, "model");
   if (c.compact !== undefined && typeof c.compact !== "boolean") throw new Error("Compress long conversations must be on or off");
   const detected = ctx.detected as HelperDetected | undefined;
-  if (isLocal(ctx) && detected?.fit?.localHelperImpossible) throw new Error(detected.fit.reason);
+  const fit = currentFit(ctx);
+  if (isLocal(ctx) && fit?.localHelperImpossible) throw new Error(fit.reason);
   const listing = detected?.runtimes?.[runtime];
   if (listing && (!listing.running || !listing.models.includes(model))) throw new Error("Start the runtime, load a model, and Re-check before choosing it");
   if (listing?.singleModel && front?.kind === "model" && front.runtime === runtime && front.model !== model)

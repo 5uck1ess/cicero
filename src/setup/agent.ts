@@ -1,5 +1,5 @@
 import { isKeylessHost } from "../backends/net";
-import { ACP_AGENTS, type AcpAgent } from "./acp-agents";
+import { ACP_AGENTS, acpProviderOf, isCloudAcpCommand, type AcpAgent } from "./acp-agents";
 export { ACP_AGENTS } from "./acp-agents";
 import { unsetEnvFor, type AccountsChoice } from "./accounts";
 import type { FrontDeskChoice } from "./frontdesk";
@@ -48,7 +48,9 @@ function acpCommand(raw: Record<string, unknown>): { acp: AcpAgent | null; raw: 
 
 function isCloud(parsed: ReturnType<typeof parseBrain>, acp: AcpAgent | null): boolean {
   if (acp) return acp.cloud;
-  if (parsed.id === "acp" || parsed.id === "ollama") return false; // an ACP harness reaches the cloud only through its own model
+  // A custom ACP command is cloud when it runs a known cloud adapter; any other harness reaches the cloud only through its own model.
+  if (parsed.id === "acp") { const p = parsed as { binary?: string; binary_args?: string[] }; return isCloudAcpCommand(p.binary, p.binary_args); }
+  if (parsed.id === "ollama") return false;
   if (parsed.id in CLOUD_CLIS) return true;
   if (parsed.id === "openai-compatible") {
     try { return !isKeylessHost(new URL(String((parsed as { base_url?: string }).base_url)).hostname); } catch { return true; }
@@ -72,7 +74,8 @@ export function parseAgent(raw: unknown, ctx: StepContext, deps: PickerDeps = {}
   const cloud = isCloud(parsed, acp);
   const allowCloud = c.allowCloud === true;
   if (cloud && isLocal(ctx) && !allowCloud) throw new Error(ALLOW_CLOUD_FIRST);
-  const provider = acp ? acp.provider : CLOUD_CLIS[parsed.id] ?? null;
+  const custom = parsed as { binary?: string; binary_args?: string[] };
+  const provider = acp ? acp.provider : parsed.id === "acp" ? acpProviderOf(custom.binary, custom.binary_args) : CLOUD_CLIS[parsed.id] ?? null;
   return { ...parsed, target, cloud, allowCloud: cloud && allowCloud, provider, ...(acp ? { acp: acp.id } : {}) };
 }
 

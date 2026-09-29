@@ -5,6 +5,9 @@ import type { SystemFacts, Tier } from "./system";
 import type { PickerDeps } from "./pickers";
 import type { Check, DoctorCheckOptions } from "../cli/doctor";
 
+/** Choices that shape the config; Accounts and Tasks have safe defaults and may be skipped. */
+export const REQUIRED_CHOICES: readonly string[] = ["privacy", "system", "frontdesk", "helper", "stt", "tts", "brain"];
+
 export interface ChoiceResult {
   accepted: boolean;
   probe?: { ok: boolean; message: string };
@@ -143,7 +146,14 @@ export class SetupSession {
     return this.checks === null || this.checksRevision !== this.revision ? null : this.checks;
   }
 
+  /** Titles of required steps with no stored choice, in step order. */
+  missingChoices(): string[] {
+    return REQUIRED_CHOICES.filter((id) => !this.choices.has(id)).map((id) => SETUP_STEPS.find((s) => s.id === id)!.title);
+  }
+
   writeGate(acknowledgeNotReady: boolean): { ok: true } | { ok: false; error: string } {
+    const missing = this.missingChoices();
+    if (missing.length) return { ok: false, error: `Choose ${missing.join(", ")} before writing` };
     const checks = this.currentChecks();
     if (checks === null) return { ok: false, error: "Run Check again before writing" };
     const groups = classifySetupChecks(checks);

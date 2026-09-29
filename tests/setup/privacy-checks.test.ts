@@ -28,6 +28,27 @@ test("local mode: a cloud agent needs allow: [agent]; cloud mode does not", () =
   expect(names(cfg({ privacy: { mode: "local" }, brain: { backend: "acp", mode: "subprocess", binary: "hermes", binary_args: ["acp"] } }))).toEqual([]);
 });
 
+test("endpoint warnings never print URL credentials", () => {
+  const checks = privacyChecks(cfg({ privacy: { mode: "local" },
+    brain: { backend: "openai-compatible", mode: "subprocess", base_url: "https://user:synthetic-password-marker@example.test/v1" },
+    llm: { backend: "openai", baseUrl: "https://u:synthetic-llm-marker@example.test/v1" },
+    web_voice: { tldr: { summarizer_url: "https://u:synthetic-helper-marker@example.test/v1" } } }));
+  expect(checks.map((c) => c.name)).toEqual(["privacy: brain endpoint", "privacy: llm endpoint", "privacy: helper endpoint"]);
+  expect(JSON.stringify(checks)).not.toMatch(/synthetic-(password|llm|helper)-marker/);
+});
+
+test("local mode: a remote model host warns like a remote URL", () => {
+  expect(names(cfg({ privacy: { mode: "local" }, llm: { backend: "ollama", host: "192.168.1.50" } }))).toEqual(["privacy: llm endpoint"]);
+  expect(names(cfg({ privacy: { mode: "local" }, llm: { backend: "ollama", host: "127.0.0.1" } }))).toEqual([]);});
+
+test("both modes: speech must stay on this machine", () => {
+  for (const mode of ["local", "cloud"]) {
+    expect(names(cfg({ privacy: { mode }, tts: { backend: "elevenlabs" } }))).toEqual(["privacy: speech"]);
+    expect(names(cfg({ privacy: { mode }, stt: { backend: "wyoming", host: "203.0.113.2", port: 10300 } }))).toEqual(["privacy: speech"]);
+    expect(names(cfg({ privacy: { mode }, stt: { backend: "faster-whisper" }, tts: { backend: "wyoming", host: "localhost", port: 10200 } }))).toEqual([]);
+  }
+});
+
 test("both modes: Telegram and board need their allowances", () => {
   expect(names(cfg({ privacy: { mode: "cloud" }, notify: { telegram: { bot_token: "x" } } }))).toEqual(["privacy: telegram"]);
   for (const mode of ["local", "cloud"]) {

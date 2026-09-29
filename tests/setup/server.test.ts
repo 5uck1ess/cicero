@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { certificateLanIPv4s, setupHandoff, startSetupServer, trustedSetupRequest, type SetupServer } from "../../src/setup/server";
 import { createDraft } from "../../src/setup/draft";
 import { writeDraft } from "../../src/setup/write";
+import { REQUIRED_ANSWERS, requiredDeps } from "./required";
 
 const servers: SetupServer[] = [];
 const homes: string[] = [];
@@ -147,7 +148,7 @@ describe("setup server auth", () => {
     }) as unknown as typeof Bun.serve;
     const dir = home();
     const server = await startSetupServer({
-      home: dir, port: 0, systemDeps, output: () => {}, serve,
+      home: dir, port: 0, systemDeps, output: () => {}, serve, pickerDeps: requiredDeps,
       check: async () => [
         { name: "config", level: "ok", detail: "valid" },
         { name: "stt (faster-whisper)", level: "fail", detail: "venv missing", hint: "install STT" },
@@ -160,6 +161,7 @@ describe("setup server auth", () => {
     const send = (path: string, body: object) => handler(new Request(`http://127.0.0.1:${server.port}${path}`, {
       method: "POST", headers: { host: `127.0.0.1:${server.port}`, "x-cicero-setup-token": server.token, "x-cicero-setup-csrf": "1" }, body: JSON.stringify(body),
     }));
+    for (const [id, choice] of REQUIRED_ANSWERS) expect((await send("/api/choice", { id, choice })).status).toBe(200);
     const checked = await send("/api/check", {});
     expect(checked.status).toBe(200);
     const state = await checked.json() as { canWrite: boolean; checkGroups: { notReady: unknown[]; blocking: unknown[] } };
@@ -187,7 +189,7 @@ describe("setup server auth", () => {
     let finishOldCheck!: (checks: { name: string; level: "ok"; detail: string }[]) => void;
     let checkCalls = 0;
     const server = await startSetupServer({
-      home: home(), systemDeps, output: () => {}, serve,
+      home: home(), systemDeps, output: () => {}, serve, pickerDeps: requiredDeps,
       check: async () => {
         checkCalls += 1;
         if (checkCalls > 1) return [{ name: "config", level: "ok", detail: "new draft" }];
@@ -200,6 +202,7 @@ describe("setup server auth", () => {
     const send = (path: string, body: object) => handler(new Request(`http://127.0.0.1:${server.port}${path}`, {
       method: "POST", headers, body: JSON.stringify(body),
     }));
+    for (const [id, choice] of REQUIRED_ANSWERS) expect((await send("/api/choice", { id, choice })).status).toBe(200);
     const pending = send("/api/check", {});
     await started;
     expect((await send("/api/choice", { id: "system", choice: "local-mlx" })).status).toBe(200);

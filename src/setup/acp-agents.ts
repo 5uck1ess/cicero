@@ -10,13 +10,22 @@ export const ACP_AGENTS: readonly AcpAgent[] = [
 ];
 
 // Package adapters that reach a cloud model, with or without a version pin (older names included).
-const CLOUD_ADAPTER_PACKAGES = ["@agentclientprotocol/codex-acp", "@agentclientprotocol/claude-agent-acp", "@zed-industries/codex-acp", "@zed-industries/claude-code-acp"];
+const CLOUD_ADAPTER_PACKAGES: Record<string, string> = {
+  "@agentclientprotocol/codex-acp": "codex", "@zed-industries/codex-acp": "codex",
+  "@agentclientprotocol/claude-agent-acp": "claude", "@zed-industries/claude-code-acp": "claude",
+};
 const unpinned = (spec: string) => spec.replace(/(.)@[^/@]*$/, "$1");
+
+/** The account provider a configured ACP command bills (codex, claude, grok), or null for a local or unknown agent. */
+export function acpProviderOf(binary: string | undefined, args: readonly string[] | undefined): string | null {
+  if (!binary) return null;
+  const argv = args ?? [];
+  if (binary === "grok" || binary.endsWith("/grok")) return argv[0] === "agent" ? "grok" : null;
+  for (const part of [binary, ...argv]) { const provider = CLOUD_ADAPTER_PACKAGES[unpinned(part)]; if (provider) return provider; }
+  return null;
+}
 
 /** True when a configured ACP command runs a known cloud adapter (a package adapter, or `grok agent`). */
 export function isCloudAcpCommand(binary: string | undefined, args: readonly string[] | undefined): boolean {
-  if (!binary) return false;
-  const argv = args ?? [];
-  if (binary === "grok" || binary.endsWith("/grok")) return argv[0] === "agent";
-  return [binary, ...argv].some((part) => CLOUD_ADAPTER_PACKAGES.includes(unpinned(part)));
+  return acpProviderOf(binary, args) !== null;
 }

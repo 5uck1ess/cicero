@@ -241,7 +241,8 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
       steps: SETUP_STEPS.map(({ id, title, explain, pipeline, available }) => ({ id, title, explain, pipeline, available })),
       current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, choiceLabel(choice)])), privacyAllow: (draft.privacy as { allow?: string[] } | undefined)?.allow ?? [], accountsChoice: (choices.get("accounts") as { useSubscription?: string[] } | undefined)?.useSubscription ?? null, frontdeskChoice: choices.get("frontdesk") ?? null, helperChoice: choices.get("helper") ?? null, storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
       written, finished, startCommand: handoff.startCommand, handoff,
-      canWrite: !written && checkGroups !== null && checkGroups.blocking.length === 0 && existing.status === "missing",
+      missingChoices: session.missingChoices(),
+      canWrite: !written && checkGroups !== null && checkGroups.blocking.length === 0 && existing.status === "missing" && session.missingChoices().length === 0,
       requiresNotReadyAcknowledgement: (checkGroups?.notReady.length ?? 0) > 0,
     };
   };

@@ -40,6 +40,13 @@ test("each picker parses valid input and rejects malformed input", () => {
   expect(parseSpeech("tts", { id: "elevenlabs", apiKey: "synthetic-key" }, c).id).toBe("elevenlabs");
   expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "" }, c)).toThrow();
   expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "x".repeat(1025) }, c)).toThrow();
+  // With a declared privacy mode (always, in the wizard), speech stays on this machine in both modes.
+  for (const mode of ["local", "cloud"] as const) {
+    const p = { ...c, draft: { ...c.draft, privacy: { mode } } } as typeof c;
+    expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "synthetic-key" }, p)).toThrow("Speech stays on this machine");
+    expect(() => parseSpeech("stt", { id: "wyoming", host: "192.168.1.2", port: 10300 }, p)).toThrow("Speech stays on this machine");
+    expect(parseSpeech("stt", { id: "wyoming", host: "127.0.0.1", port: 10300 }, p).host).toBe("127.0.0.1");
+  }
 });
 
 test("remote model list never reflects the supplied API key", async () => {

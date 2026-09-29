@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { connect, isIP } from "node:net";
 import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "../backends/llm/openai";
+import { isLocalHost } from "../backends/net";
 import { BOARD_COMMANDS, normalizeBoardList, type BoardPreset } from "../notify/board-presets";
 import { findVenvPython } from "../platform/python";
 import { audioCppLocalRuntimePaths } from "../backends/tts/audiocpp";
@@ -210,6 +211,10 @@ export async function defaultPortProbe(hostname: string, number: number): Promis
     socket.once("connect", () => done(true)); socket.once("error", () => done(false));
   });
 }
+/** Both privacy modes keep speech on this machine; the wizard enforces that once a mode is declared. */
+export const SPEECH_LOCAL = "Speech stays on this machine in both privacy modes";
+const speechLocal = (ctx: StepContext) => Boolean(ctx.draft.privacy);
+const localSpeechHost = (h: string) => isLocalHost(h) || /^127\./.test(h);
 const VENV: Record<string, string> = { "faster-whisper": ".venv-stt", "mlx-whisper": ".venv", kokoro: ".venv-kokoro", "pocket-tts": ".venv-pocket", "mlx-audio": ".venv" };
 export async function detectSpeech(kind: "stt" | "tts", ctx: StepContext, deps: PickerDeps = {}) {
   const options = kind === "stt" ? ["faster-whisper", ...(mlx(ctx) ? ["mlx-whisper"] : []), "wyoming", ...(cuda(ctx) ? ["audiocpp"] : [])]
@@ -233,15 +238,23 @@ export async function detectSpeech(kind: "stt" | "tts", ctx: StepContext, deps: 
   const audio = status.audiocpp;
   const ready = ctx.draft.deployment === "local-cuda" && audio?.installed && audio.modelPresent && (!audio.running || audio.modelLoaded === true);
   const recommended = ready ? "audiocpp" : kind === "stt" ? mlx(ctx) ? "mlx-whisper" : "faster-whisper" : mlx(ctx) ? "mlx-audio" : "kokoro";
-  return { options, recommended, status, reason: ctx.draft.deployment + " tier" };
+  const disabled: Record<string, string> = speechLocal(ctx) && kind === "tts" ? { elevenlabs: `${SPEECH_LOCAL}; ElevenLabs is a cloud service.` } : {};
+  return { options, recommended, status, reason: ctx.draft.deployment + " tier", disabled };
 }
 export function parseSpeech(kind: "stt" | "tts", raw: unknown, ctx: StepContext) {
   const c = choice(raw);
   const allowed = kind === "stt" ? ["faster-whisper", ...(mlx(ctx) ? ["mlx-whisper"] : []), "wyoming", ...(cuda(ctx) ? ["audiocpp"] : [])]
     : ["kokoro", "pocket-tts", ...(cuda(ctx) ? ["audiocpp"] : []), ...(mlx(ctx) ? ["mlx-audio"] : []), "elevenlabs", "wyoming"];
   const id = member(c.id, allowed, kind.toUpperCase());
-  if (id === "wyoming") return { id, host: host(c.host), port: port(c.port) };
-  if (id === "elevenlabs") return { id, apiKey: field(c.apiKey, "ElevenLabs API key", 1024) };
+  if (id === "wyoming") {
+    const h = host(c.host);
+    if (speechLocal(ctx) && !localSpeechHost(h)) throw new Error(`${SPEECH_LOCAL}: use a Wyoming server on localhost`);
+    return { id, host: h, port: port(c.port) };
+  }
+  if (id === "elevenlabs") {
+    if (speechLocal(ctx)) throw new Error(`${SPEECH_LOCAL}; ElevenLabs is a cloud service`);
+    return { id, apiKey: field(c.apiKey, "ElevenLabs API key", 1024) };
+  }
   if (kind === "stt" && id === "audiocpp") {
     if (c.streaming !== undefined && typeof c.streaming !== "boolean") throw new Error("Streaming must be a checkbox choice");
     return { id, streaming: c.streaming === true };

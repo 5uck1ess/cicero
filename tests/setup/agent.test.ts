@@ -46,6 +46,16 @@ test("local privacy: a cloud agent needs allowCloud, which adds agent to privacy
   expect(() => parseAgent({ id: "codex", allowCloud: "yes" }, c)).toThrow();
 });
 
+test("a custom ACP command running a known cloud adapter is cloud, with its provider, like the named adapter", () => {
+  const custom = { id: "acp", command: ["bunx", "@agentclientprotocol/codex-acp@2.0.0"] };
+  expect(() => parseAgent(custom, ctx("local", [modelFront]))).toThrow("Allow this agent to use the cloud first");
+  const allowed = parseAgent({ ...custom, allowCloud: true }, ctx("local", [modelFront]));
+  expect(allowed).toMatchObject({ cloud: true, allowCloud: true, provider: "codex" });
+  const withAccounts = ctx("local", [modelFront, ["accounts", { useSubscription: ["codex"] }]]);
+  expect(contributeAgent(withAccounts, allowed)).toMatchObject({ brain: { escalate: { unset_env: ["OPENAI_API_KEY"] } } });
+  expect(parseAgent({ id: "acp", command: ["hermes", "-p", "coder", "acp"] }, ctx("local", [modelFront]))).toMatchObject({ cloud: false, provider: null });
+});
+
 test("Accounts useSubscription writes unset_env on whichever key the agent lands in", () => {
   const accounts: [string, unknown] = ["accounts", { useSubscription: ["claude", "codex"] }];
   const brainCtx = ctx("cloud", [agentFront, accounts]);

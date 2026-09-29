@@ -923,6 +923,7 @@ function renderReview(step) {
     row.append(button('Back up old config and start fresh', '', async function () { state = await api('/api/backup', {}); state = await api('/api/check', {}); render(); }, row));
   }
   app.append(why(step));
+  if (state.missingChoices && state.missingChoices.length) app.append(h('div', { class: 'panel warn', role: 'status' }, [h('p', { text: 'Choose ' + state.missingChoices.join(', ') + ' before saving.' })]));
   var ack = null;
   if (state.requiresNotReadyAcknowledgement) {
     ack = h('input', { type: 'checkbox' });
