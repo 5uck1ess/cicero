@@ -1,6 +1,6 @@
 # Setup wizard v2, part 1: privacy, accounts and hardware-sized models
 
-Status: design, not implemented. Date: 2026-09-29. Revision 4, after three rounds of GPT-6 Astra's adversarial review.
+Status: design, not implemented. Date: 2026-09-29. Revision 5, after four rounds of GPT-6 Astra's adversarial review.
 Builds on: `2026-09-24-setup-wizard-design.md` (the current guided setup). This spec covers only what changes; the v1 rules stand unless a section below overrides them.
 Co-designed with GPT-6 Astra: an independent proposal, merged, then reviewed against the code.
 
@@ -45,7 +45,7 @@ The step asks one question: **What may leave this machine?**
   - **Agents:** a cloud coding agent (Claude Code, Codex, Grok) sends your prompts and the code it reads to that company.
   - **Notifications:** Telegram carries message text.
   - **Task boards:** a hosted board holds task text.
-- **Conversation may use cloud models.** Cloud is allowed for the front desk and agents; the helper and speech stay local.
+- **Conversation may use cloud models.** Cloud is allowed for the front desk and agents; the helper and speech stay local. Telegram and task boards still need their own allowance in this mode.
 
 The choice is written as `privacy: { mode: local | cloud, allow?: [agent | telegram | board] }`.
 
@@ -55,7 +55,7 @@ This is a **declared policy, not a firewall**. The wizard enforces it when optio
 - a Telegram block without `allow: [telegram]`;
 - an enabled task board (`notify.kanban`) without `allow: [board]`.
 
-`cloud` mode allows the front desk and agents, so its only check is the Telegram and board allowances.
+`cloud` mode allows the front desk and agents, so there doctor checks only the Telegram and board allowances.
 
 Doctor cannot see what a CLI agent does on the network, and the Privacy step says so. A config with no `privacy` key (every existing config) produces no privacy warnings.
 
@@ -94,7 +94,9 @@ The step detects accounts read-only and stores only the user's choices. It cover
 
 ### 4. Front desk (was Think)
 
-This is what answers when you talk. It writes **`brain`**, the key every conversation turn goes to (`src/web-voice/turn.ts:207`), using existing brain backends only. The v1 Provider step wrote `llm` instead, which only feeds the speech sidecar's summarizer (`src/sidecar/service.ts:10`). Part 1 stops showing that step, and existing `llm` keys are left alone.
+This is what answers when you talk. It writes **`brain`**, the key every conversation turn goes to (`src/web-voice/turn.ts:207`), using existing brain backends only. The v1 Provider step wrote `llm` instead, which feeds the speech sidecar's summarizer (`src/sidecar/service.ts:10`). Part 1 stops showing that step, and the Helper step now writes `llm` (see below).
+
+Cicero's managed MLX model (`llm.backend: mlx-lm`) has no brain backend (`src/brain/index.ts:312`), so it is not a front-desk option in part 1. Macs use Ollama or LM Studio for the front desk and helper.
 
 The step offers two kinds of front desk:
 - **A model** (fast, no tools; recommended). Written as `brain.backend: ollama` or an OpenAI-compatible backend with `base_url` and `model` (`src/setup/pickers.ts:233`, `src/brain/index.ts:193`).
@@ -115,11 +117,12 @@ One local model does background work:
 
 The step detects a running runtime with the existing Think probes (`src/setup/pickers.ts:123`), then lists that runtime's models: `/v1/models` for llama-swap, llama-server and LM Studio, and `/api/tags` for Ollama. The chosen helper model must appear in the list before the step turns green; a missing one gets its pull or download command.
 
-**Single-model runtimes.** The step does not try to tell llama-swap from a bare `llama-server`; both answer the same health probe. It counts the listed models instead. With exactly one model listed, it treats the runtime as single-model: the helper and a model front desk must be that same model, and the step offers llama-swap or Ollama for running two. With no runtime found, the step shows install steps. This keeps the v1 rule that Cicero does not install vendor runtimes. Cicero's own MLX provider, which starts one model from `.venv` (`src/backends/llm/mlx-lm.ts:127`), stays the front-desk option and is not used for the helper.
+**Single-model runtimes.** The step does not try to tell llama-swap from a bare `llama-server`; both answer the same health probe. It counts the listed models instead. With exactly one model listed, it treats the runtime as single-model: the helper and a model front desk must be that same model, and the step offers llama-swap or Ollama for running two. With no runtime found, the step shows install steps. This keeps the v1 rule that Cicero does not install vendor runtimes. Cicero's own MLX provider, which starts one model from `.venv` (`src/backends/llm/mlx-lm.ts:127`), is used for neither the front desk nor the helper in part 1.
 
 **Config it writes**, all through existing keys:
 
 - **When a helper is set:** `web_voice.tldr.summarizer_url` and `web_voice.tldr.summarizer_model`. Spoken codas and `summarizerClassifier` read these (`src/brain/index.ts:62`), which fixes the no-op LLM router.
+- **Always:** an explicit `llm` of `backend: openai` with the helper's `baseUrl` and `model`, or the cloud front desk's preset when there is no helper. An explicit `llm` stops the tier preset from adding its own model (`src/config.ts:1164`); the CUDA preset would otherwise launch a separate `llama-server` on port 8080. An `openai` provider starts no process (`src/backends/llm/openai.ts:205`), so no model escapes the budget.
 - **Checkbox "Compress long conversations":** `brain.history_compaction.enabled: true` (`src/daemon.ts:1178`), using the same endpoint.
 - **Call minutes** (`notify.call_minutes`, `src/daemon.ts:1680`) need Telegram. The wizard does not set up Telegram in part 1, so this checkbox waits for the Channels step.
 
@@ -145,20 +148,21 @@ This is today's step, with two changes.
 
 **Where the agent goes:**
 - If the front desk is **an agent**, this choice is written to `brain`, as in v1.
-- If the front desk is **a model**, the agent is written to `brain.escalate` (`src/brain/index.ts:236`). The front desk hands a turn to it when the user says one of its trigger phrases ("think hard", "ask the agent"). `brain.escalate` accepts ACP commands only, so the list shows ACP agents: `hermes acp`, `codex-acp` via `bunx`, and a Claude Code ACP adapter. Which adapters work for Claude and Grok is **verified during implementation**; unverified ones are not listed. The agent is optional; skipping it gives a talk-only setup.
+- If the front desk is **a model**, the agent is written to `brain.escalate` (`src/brain/index.ts:236`). The front desk hands a turn to it when the user says one of its trigger phrases ("think hard", "ask the agent").
+  - **Code change:** today the escalation wrapper is built only inside the `acp` primary branch (`src/brain/index.ts:208`), so a model front desk ignores `brain.escalate`. Part 1 moves the wrapping after backend selection, so `RoutingBrain` wraps any primary. It already takes any `Brain` (`src/brain/routing.ts:17`). Existing ACP configs behave the same. `brain.escalate` accepts ACP commands only, so the list shows ACP agents: `hermes acp`, `codex-acp` via `bunx`, and a Claude Code ACP adapter. Which adapters work for Claude and Grok is **verified during implementation**; unverified ones are not listed. The agent is optional; skipping it gives a talk-only setup.
 
 **Privacy:** in `local` mode, cloud CLI agents are disabled until the user ticks "Allow this agent to use the cloud", which adds `agent` to `privacy.allow`. A local agent (an ACP harness pointed at a local model) needs no exception.
 
 ### 9. Tasks
 
-This is today's step, with one change. The board probe (`src/setup/pickers.ts:275`) runs the board's CLI, which may send a request to a hosted board. In `local` mode, before the probe runs, the step asks "Allow task text to go to this board?"; ticking it adds `board` to `privacy.allow`. Without that tick the step can only choose "No board".
+This is today's step, with one change. The board probe (`src/setup/pickers.ts:275`) runs the board's CLI, which may send a request to a hosted board. In either privacy mode, before the probe runs, the step asks "Allow task text to go to this board?"; ticking it adds `board` to `privacy.allow`. Without that tick the step can only choose "No board".
 
 ### 10. Test (new)
 
 Test runs against the **engines already running**, on the user's click. It checks:
 
 1. **Hear:** a bundled 3-second WAV is sent to the configured STT endpoint, and the transcript is compared with the expected text.
-2. **Front desk:** one chat completion.
+2. **Front desk:** one chat completion when it is a model. An agent front desk or escalation agent is not run by Test, because a CLI turn spawns a process (`src/brain/subprocess-cli.ts:279`) and ACP needs an owned session (`src/brain/acp.ts:1594`). It shows the Agent step's existing `--version` check instead, labeled "installed; tested on first call".
 3. **Helper:** one summary of a bundled long reply.
 4. **Speak:** a sentence is synthesized and played in the browser (playback only; no microphone in part 1).
 5. **Memory (CUDA only):** per-process use from `nvidia-smi --query-compute-apps`, matched to the speech and runtime PIDs where possible. The rest shows as "other GPU use". This is how the reference box was measured. The existing aggregate telemetry (`src/platform/gpu.ts:21`) is the fallback, labeled "whole GPU". Mac measurement is deferred.
@@ -189,7 +193,7 @@ The v1 write rules are unchanged: write only when no config exists, and back up 
 | 26B-A4B | 15 GB (measured ~14–15) |
 | 31B | 20 GB (estimate) |
 
-**What these numbers assume.** The wizard does not configure external runtimes. For llama-swap it shows a copyable model entry with these settings. For Ollama and LM Studio, whose default context and cache differ, it shows the settings to change and labels every fit "estimate". An MLX front desk uses the GGUF row, also labeled "estimate". Only a CUDA Test measurement replaces an estimate; on a Mac everything stays an estimate in part 1.
+**What these numbers assume.** The wizard does not configure external runtimes. For llama-swap it shows a copyable model entry with these settings. For Ollama and LM Studio, whose default context and cache differ, it shows the settings to change and labels every fit "estimate". Only a CUDA Test measurement replaces an estimate; on a Mac everything stays an estimate in part 1.
 
 **Rules:**
 
@@ -217,7 +221,7 @@ The helper stays E4B even on big machines. On the reference box, over 8 spoken s
 - `google/gemma-4-26B-A4B-it-qat-q4_0-gguf`
 - `google/gemma-4-31B-it-qat-q4_0-gguf`
 
-Ollama tags and MLX conversions are **verified during implementation**. Where no verified tag exists, the step offers only the models it can confirm.
+Ollama and LM Studio tags are **verified during implementation**. Where no verified tag exists, the step offers only the models it can confirm.
 
 ## Config changes
 
