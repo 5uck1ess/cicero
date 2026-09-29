@@ -7,7 +7,7 @@ import type { FrontDeskDetected } from "./frontdesk";
 import type { HelperDetected } from "./helper";
 import type { PickerDeps } from "./pickers";
 import { runHeadlessProbes, type ProbeOptions, type ProbeResult } from "./probes";
-import { draftSecrets, envSecrets, publicChecks, redactStateValue } from "./server";
+import { envSecrets, publicChecks, redactStateValue, setupSecrets } from "./server";
 import { SetupSession } from "./session";
 import { CHOICE_STEP_IDS, SETUP_STEPS } from "./steps";
 import { detectSystem, type SystemDeps } from "./system";
@@ -34,7 +34,7 @@ const CLOUD_AGENTS = new Set(["claude-code", "codex", "gemini", "qwen", ...ACP_A
 
 /** Exact secret values this run could touch: draft keys plus every API key variable in the environment. */
 function secretsOf(draft: SetupDraft | null, env: Record<string, string | undefined> = process.env): string[] {
-  return [...(draft ? draftSecrets(draft) : []), ...envSecrets(env)];
+  return draft ? setupSecrets(draft, env) : envSecrets(env);
 }
 
 /**

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config";
 import { formatApplyResult, runSetup, SetupUsageError } from "../../src/cli/setup";
-import { applySetup, planSetup, validateAnswers, type AnswersFile } from "../../src/setup/headless";
+import { applySetup, planSetup, testSetup, validateAnswers, type AnswersFile } from "../../src/setup/headless";
 import { redactStateValue } from "../../src/setup/server";
 import type { PickerDeps } from "../../src/setup/pickers";
 import type { SystemDeps } from "../../src/setup/system";
@@ -152,6 +152,19 @@ test("not-ready engines need --acknowledge-not-ready", async () => {
     expect(refused).toMatchObject({ ok: false, error: "Acknowledge that runtime components are not ready yet before writing" });
     expect(existsSync(join(dir, "config.yaml"))).toBe(false);
     expect((await applySetup({ home: dir, answers: plan.recommended, acknowledgeNotReady: true, backupInvalid: false, systemDeps, pickerDeps: pickerDeps(), check: notReady })).ok).toBe(true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("--test redacts the value of a custom api_key_env the config names", async () => {
+  const dir = home();
+  try {
+    const marker = "customKey4821"; // short: only the exact-value list can catch it
+    writeFileSync(join(dir, "config.yaml"), "brain:\n  backend: openai-compatible\n  mode: subprocess\n  base_url: http://127.0.0.1:9000/v1\n  model: m\n  api_key_env: MY_CUSTOM_KEY\n");
+    const fetcher = (async () => Response.json({ choices: [{ message: { content: `echo ${marker}` } }] })) as typeof fetch;
+    const results = await testSetup({ home: dir, timeoutMs: 2000, deps: { env: { MY_CUSTOM_KEY: marker }, fetcher, probePort: async () => true, which: () => null, platform: "linux" } });
+    const front = results.find((r) => r.id === "frontdesk")!;
+    expect(front.state).toBe("ok");
+    expect(JSON.stringify(results)).not.toContain(marker);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -81,6 +81,25 @@ export function envSecrets(env: Record<string, string | undefined> = process.env
   return KEY_VARIABLES.map((name) => env[name]).filter((v): v is string => typeof v === "string" && v.length >= 8);
 }
 
+/**
+ * Every secret value setup output must never show: keys typed into the draft, preset key
+ * variables in the environment, and the value of any key variable the config itself names
+ * (`api_key_env`, `apiKeyEnv`), e.g. a custom endpoint's own variable.
+ */
+export function setupSecrets(draft: SetupDraft, env: Record<string, string | undefined> = process.env): string[] {
+  const named = new Set<string>();
+  const collect = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if ((key === "api_key_env" || key === "apiKeyEnv") && typeof child === "string") named.add(child);
+      else collect(child);
+    }
+  };
+  collect(draft);
+  const namedValues = [...named].map((name) => env[name]).filter((v): v is string => typeof v === "string" && v.length >= 8);
+  return [...new Set([...draftSecrets(draft), ...envSecrets(env), ...namedValues])];
+}
+
 export function publicChecks(checks: Check[] | null, draft: SetupDraft, extra: readonly string[] = []): Check[] | null {
   if (!checks) return null;
   const secrets = [...draftSecrets(draft), ...extra];
@@ -218,6 +237,8 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
   if (!/^[a-f0-9]{32,}$/.test(token)) throw new Error("setup token must contain at least 128 random bits in hexadecimal form");
   const system: SystemFacts = await detectSystem(options.systemDeps);
   const session = new SetupSession(system, undefined, options.pickerDeps);
+  // Every response is redacted with the current secrets: sample failures, provider lists and errors bypass view().
+  const reply = (value: unknown, status = 200): Response => json(redactStateValue(value, setupSecrets(session.draft, options.pickerDeps?.env ?? process.env)), status);
   let providerModels: ProviderModelList | null = null;
   /** Test-step results keyed to the draft revision they ran against, and one controller per running probe. */
   const testResults = new Map<ProbeId, { revision: number; result: ProbeResult }>();
@@ -240,7 +261,7 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
     const choices = session.choices;
     const current_checks = session.currentChecks();
     // Typed keys and keys from the environment: a probe or runtime reply can echo either.
-    const secrets = [...draftSecrets(draft), ...envSecrets(options.pickerDeps?.env ?? process.env)];
+    const secrets = setupSecrets(draft, options.pickerDeps?.env ?? process.env);
     const safeChecks = current_checks === null ? null : publicChecks(current_checks, draft, secrets);
     const checkGroups = safeChecks === null ? null : classifySetupChecks(safeChecks);
     const existing = inspectExistingConfig(home);
@@ -265,27 +286,27 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
     ...(tls ? { tls: { cert: tls.cert, key: tls.key } } : {}),
     async fetch(req) {
       try {
-        if (!trustedSetupRequest(req, { lan, port: server.port ?? 0, lanAddresses: addresses })) return json({ error: "Untrusted Host or Origin" }, 403);
+        if (!trustedSetupRequest(req, { lan, port: server.port ?? 0, lanAddresses: addresses })) return reply({ error: "Untrusted Host or Origin" }, 403);
         const url = new URL(req.url);
         const firstPage = req.method === "GET" && url.pathname === "/";
         const suppliedToken = firstPage ? url.searchParams.get("token") ?? req.headers.get("x-cicero-setup-token") : req.headers.get("x-cicero-setup-token");
-        if (suppliedToken !== token) return json({ error: "Setup token required" }, 401);
-        if (req.method !== "GET" && req.headers.get("x-cicero-setup-csrf") !== "1") return json({ error: "CSRF header required" }, 403);
+        if (suppliedToken !== token) return reply({ error: "Setup token required" }, 401);
+        if (req.method !== "GET" && req.headers.get("x-cicero-setup-csrf") !== "1") return reply({ error: "CSRF header required" }, 403);
         if (firstPage) return new Response(setupPage(), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } });
-        if (req.method === "GET" && url.pathname === "/api/state") return json(view());
-        if (req.method !== "POST") return json({ error: "Not found" }, 404);
+        if (req.method === "GET" && url.pathname === "/api/state") return reply(view());
+        if (req.method !== "POST") return reply({ error: "Not found" }, 404);
         const body = await readRequestJsonLimited(req, { maxBytes: 2048, timeoutMs: 5000 });
-        if (!body || typeof body !== "object" || Array.isArray(body)) return json({ error: "Expected JSON object" }, 400);
+        if (!body || typeof body !== "object" || Array.isArray(body)) return reply({ error: "Expected JSON object" }, 400);
         const data = body as Record<string, unknown>;
         if (url.pathname === "/api/test/cancel") {
           const id = data.probe as ProbeId;
-          if (!PROBE_IDS.includes(id)) return json({ error: "Unknown probe" }, 400);
+          if (!PROBE_IDS.includes(id)) return reply({ error: "Unknown probe" }, 400);
           testRuns.get(id)?.abort();
-          return json(view());
+          return reply(view());
         }
         if (url.pathname === "/api/test") {
           const id = data.probe as ProbeId;
-          if (!PROBE_IDS.includes(id)) return json({ error: "Unknown probe" }, 400);
+          if (!PROBE_IDS.includes(id)) return reply({ error: "Unknown probe" }, 400);
           testRuns.get(id)?.abort();
           const controller = new AbortController();
           testRuns.set(id, controller);
@@ -300,11 +321,11 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
           } finally {
             if (testRuns.get(id) === controller) testRuns.delete(id);
           }
-          return json(view());
+          return reply(view());
         }
         if (url.pathname === "/api/sample/cancel") {
           sample?.abort();
-          return json({ ok: true });
+          return reply({ ok: true });
         }
         if (url.pathname === "/api/sample") {
           const tts = (contributeSpeech("tts", parseSpeech("tts", data.tts, session.context())) as { tts: TTSProviderConfig }).tts;
@@ -313,7 +334,7 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
           sample = controller;
           try {
             const result = await synthesizeSample(tts, { signal: AbortSignal.any([controller.signal, closed.signal]), timeoutMs: SAMPLE_TIMEOUT_MS, deps: options.pickerDeps });
-            return json(result.ok ? { ok: true, mime: result.mime, audio: Buffer.from(result.audio).toString("base64") } : result);
+            return reply(result.ok ? { ok: true, mime: result.mime, audio: Buffer.from(result.audio).toString("base64") } : result);
           } finally {
             if (sample === controller) sample = null;
           }
@@ -324,15 +345,15 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
           const envKey = raw && !raw.apiKey && typeof raw.id === "string" && CLOUD_PRESETS.includes(raw.id) && !isLocal(session)
             ? (options.pickerDeps?.env ?? process.env)[resolveOpenAiTarget({ backend: raw.id }).apiKeyEnv] : undefined;
           providerModels = await probeRemoteProviderModels(envKey && raw ? { ...raw, apiKey: envKey } : data.choice, options.pickerDeps);
-          return json({ models: providerModels.models });
+          return reply({ models: providerModels.models });
         } else if (url.pathname === "/api/step") {
           const step = SETUP_STEPS.find((item) => item.id === data.id);
-          if (!step) return json({ error: "Unknown step" }, 400);
+          if (!step) return reply({ error: "Unknown step" }, 400);
           detected = await session.detect(step.id, options.pickerDeps);
           current = step.id;
           invalidated = [];
         } else if (url.pathname === "/api/choice") {
-          if (written) return json({ error: "Config already written" }, 409);
+          if (written) return reply({ error: "Config already written" }, 409);
           const id = typeof data.id === "string" ? data.id : "";
           const result = await session.choose(id, data.choice, {
             deps: { ...options.pickerDeps, allowedModels: providerModels },
@@ -340,13 +361,13 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
             probe: true,
           });
           if (result.probe) detected = { ...(detected && typeof detected === "object" ? detected : {}), probe: result.probe };
-          if (!result.accepted) return json(view());
+          if (!result.accepted) return reply(view());
           invalidated = result.invalidated;
         } else if (url.pathname === "/api/check") {
           try {
             await session.check(options.check ?? checkDraft, options.doctorOptions);
           } catch (error) {
-            if (error instanceof DraftChangedError) return json({ error: error.message }, 409);
+            if (error instanceof DraftChangedError) return reply({ error: error.message }, 409);
             throw error;
           }
           current = "check";
@@ -355,12 +376,12 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
           current = "write";
         } else if (url.pathname === "/api/write") {
           const gate = session.writeGate(data.acknowledgeNotReady === true);
-          if (!gate.ok) return json({ error: gate.error }, 409);
+          if (!gate.ok) return reply({ error: gate.error }, 409);
           writeDraft(home, session.draft);
           written = true;
           current = "handoff";
         } else if (url.pathname === "/api/handoff") {
-          if (!written) return json({ error: "Write config first" }, 409);
+          if (!written) return reply({ error: "Write config first" }, 409);
           finished = true;
           current = "handoff";
           if (handoffTimer === null) {
@@ -369,11 +390,11 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
               void stop();
             }, 500);
           }
-        } else return json({ error: "Not found" }, 404);
-        return json(view());
+        } else return reply({ error: "Not found" }, 404);
+        return reply(view());
       } catch (error) {
         const status = error instanceof RequestBodyTooLargeError ? 413 : error instanceof RequestBodyTimeoutError ? 408 : 400;
-        return json({ error: redactStateValue(redactSnapshotSecrets(error instanceof Error ? error.message : "Setup request failed"), draftSecrets(session.draft)) }, status);
+        return reply({ error: redactStateValue(redactSnapshotSecrets(error instanceof Error ? error.message : "Setup request failed"), draftSecrets(session.draft)) }, status);
       }
     },
   });

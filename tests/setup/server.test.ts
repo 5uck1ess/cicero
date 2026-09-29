@@ -62,6 +62,12 @@ describe("setup server auth", () => {
     expect(text).toContain("echo-");
     expect(text).not.toContain(marker);
   });
+  test("every handler response goes through the redacting reply, never a bare json()", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/setup/server.ts"), "utf8");
+    const handler = source.slice(source.indexOf("async fetch(req)"), source.indexOf("function stop(): Promise<void>"));
+    expect(handler.length).toBeGreaterThan(1000);
+    expect(handler).not.toMatch(/\bjson\(/);
+  });
   test("actions.yaml errors are shown without offering a config backup", async () => {
     let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
     const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop: () => {} }; }) as unknown as typeof Bun.serve;

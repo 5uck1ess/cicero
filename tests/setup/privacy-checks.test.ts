@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { isCloudAcpCommand } from "../../src/setup/acp-agents";
+import { setupSecrets } from "../../src/setup/server";
 import { privacyChecks } from "../../src/setup/privacy-checks";
 import type { CiceroConfig } from "../../src/types";
 
@@ -70,4 +71,10 @@ test("cloud ACP adapters are recognized with or without a version pin", () => {
   expect(isCloudAcpCommand("/usr/local/bin/gemini", ["--experimental-acp"])).toBe(true);
   expect(isCloudAcpCommand("qwen", ["--acp"])).toBe(true);
   expect(isCloudAcpCommand("openclaw", ["acp"])).toBe(false);
+});
+
+test("setupSecrets: typed keys, preset key variables, and any key variable the config names", () => {
+  const draft = { brain: { backend: "openai-compatible", api_key_env: "MY_CUSTOM_KEY", escalate: { binary: "x" } }, llm: { apiKeyEnv: "OTHER_KEY" }, tts: { api_key: "typed-key-123" } };
+  const env = { MY_CUSTOM_KEY: "customKey4821", OTHER_KEY: "otherKey73920", GROQ_API_KEY: "groqKey558210", SHORT: "abc", UNRELATED: "not-a-key-value" };
+  expect(setupSecrets(draft as never, env).sort()).toEqual(["customKey4821", "groqKey558210", "otherKey73920", "typed-key-123"]);
 });
