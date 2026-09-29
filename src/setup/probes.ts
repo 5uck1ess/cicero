@@ -9,6 +9,7 @@ import { probeNvidiaGpu, type GpuCommandRunner } from "../platform/gpu";
 import { runBoundedCommand } from "../process/bounded-command";
 import { detectAccounts } from "./accounts";
 import { acpProviderOf } from "./acp-agents";
+import { runtimeStartCommand } from "./runtimes";
 import { defaultPortProbe, type PickerDeps } from "./pickers";
 import { engineStartCommand } from "./sample";
 
@@ -159,6 +160,12 @@ async function agentCredential(backend: string, command: Record<string, unknown>
   return { installed, credential: status?.likely ?? "unknown" };
 }
 
+/** A model runtime that is not listening, with its start command when the port is a known runtime's. */
+function notRunning(id: "frontdesk" | "helper", base: string, note: string): ProbeResult {
+  const startCommand = runtimeStartCommand(base);
+  return { id, state: "not running", message: `Nothing is listening at ${base}. Start your model runtime.${note}`, ...(startCommand ? { startCommand } : {}) };
+}
+
 export function probeFrontDesk(config: Config, o: ProbeOptions): Promise<ProbeResult> {
   return bounded("frontdesk", o, async (signal) => {
     const deps = o.deps ?? {};
@@ -174,7 +181,7 @@ export function probeFrontDesk(config: Config, o: ProbeOptions): Promise<ProbeRe
     }
     const target = modelTarget(brain, deps.env ?? process.env);
     if (!target || !target.model) return { id: "frontdesk", state: "failed", message: "No front desk model is configured" };
-    if (!(await portOpen(target.base, deps))) return { id: "frontdesk", state: "not running", message: `Nothing is listening at ${target.base}. Start your model runtime.${escNote}` };
+    if (!(await portOpen(target.base, deps))) return notRunning("frontdesk", target.base, escNote);
     const started = Date.now();
     const reply = await chatOnce(target.base, target.model, "Reply with one short sentence: are you ready?", 40, signal, deps, target.apiKey);
     return { id: "frontdesk", state: "ok", message: `${target.model} answered in ${((Date.now() - started) / 1000).toFixed(1)} s: ${clip(reply)}${escNote}` };
@@ -187,7 +194,7 @@ export function probeHelper(config: Config, o: ProbeOptions): Promise<ProbeResul
     const tldr = record(record(config.web_voice).tldr);
     const base = str(tldr.summarizer_url);
     if (!base) return { id: "helper", state: "skipped", message: "No helper: long replies end with \"say details\"" };
-    if (!(await portOpen(base, deps))) return { id: "helper", state: "not running", message: `Nothing is listening at ${base}. Start your model runtime.` };
+    if (!(await portOpen(base, deps))) return notRunning("helper", base, "");
     const long = readFileSync(join(deps.assetsRoot ?? defaultAssets, "long-reply.txt"), "utf8");
     const started = Date.now();
     const summary = await chatOnce(base, str(tldr.summarizer_model) ?? "", `Summarize this reply in one short spoken sentence:\n\n${long}`, 60, signal, deps);

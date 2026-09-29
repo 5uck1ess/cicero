@@ -16,6 +16,21 @@ export const RUNTIME_ENDPOINTS: Record<RuntimeId, { list: string; baseUrl: strin
 };
 export const RUNTIME_IDS = Object.keys(RUNTIME_ENDPOINTS) as RuntimeId[];
 
+const RUNTIME_START: Record<RuntimeId, string> = {
+  "llama-cpp": "llama-server -m your-model.gguf --port 8080",
+  ollama: "ollama serve",
+  "lm-studio": "lms server start",
+};
+
+/** How to start the runtime a local base URL points at (matched by port on a loopback host), or null. */
+export function runtimeStartCommand(baseUrl: string): string | null {
+  let url: URL;
+  try { url = new URL(baseUrl); } catch { return null; }
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return null;
+  const id = RUNTIME_IDS.find((r) => new URL(RUNTIME_ENDPOINTS[r].baseUrl).port === url.port);
+  return id ? RUNTIME_START[id] : null;
+}
+
 export async function listRuntimes(deps: PickerDeps = {}): Promise<Record<RuntimeId, RuntimeListing>> {
   const fetcher = deps.fetcher ?? fetch;
   const which = deps.which ?? ((binary: string) => Bun.which(binary));

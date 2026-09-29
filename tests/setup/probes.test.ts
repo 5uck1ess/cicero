@@ -55,6 +55,18 @@ test("Front desk: a model answers one completion; a closed runtime port is 'not 
   expect((await probeFrontDesk({ brain: { backend: "ollama", ollama_model: "m" } }, { signal: signal(), deps: { ...open, fetcher: huge } })).state).toBe("failed");
 });
 
+test("a stopped model runtime names its start command for the front desk and helper", async () => {
+  const closed = { probePort: async () => false };
+  const fd = await probeFrontDesk({ brain: { backend: "ollama", ollama_model: "gemma4:e4b-it-qat" } }, { signal: signal(), deps: closed });
+  expect(fd).toMatchObject({ state: "not running", startCommand: "ollama serve" });
+  const helper = await probeHelper({ web_voice: { tldr: { summarizer_url: "http://127.0.0.1:1234/v1", summarizer_model: "m" } } }, { signal: signal(), deps: closed });
+  expect(helper).toMatchObject({ state: "not running", startCommand: "lms server start" });
+  const swap = await probeHelper({ web_voice: { tldr: { summarizer_url: "http://127.0.0.1:8080/v1", summarizer_model: "m" } } }, { signal: signal(), deps: closed });
+  expect(swap.startCommand).toContain("--port 8080");
+  const other = await probeHelper({ web_voice: { tldr: { summarizer_url: "http://127.0.0.1:9999/v1", summarizer_model: "m" } } }, { signal: signal(), deps: closed });
+  expect(other.startCommand).toBeUndefined();
+});
+
 test("Helper: skipped without a helper; one summary of the bundled long reply with one", async () => {
   expect(await probeHelper({}, { signal: signal() })).toMatchObject({ state: "skipped" });
   let prompt = "";
