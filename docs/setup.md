@@ -313,7 +313,7 @@ to say next is in [Using Cicero](using.md).
 
 ## Manual steps the wizard doesn't do yet
 
-The Channels and Install steps are previews: they are shown but not built.
+The wizard has no Channels or Install step yet, so these stay manual.
 
 - **Install the speech engines you chose.** Hear and Speak show the exact
   command for your choice, and `cicero doctor` repeats it. The common ones:

@@ -74,9 +74,10 @@ bun run src/index.ts setup --plan --json --privacy <local|cloud> --agent <id> > 
 - `blocked`: steps it could not fill, each with `reason` and `fix`.
 - `detected`: what each step found (runtimes, models, engines, agents).
 
-Show the person `recommended`, `reasons` and `blocked` in plain words. If
-`blocked` is not empty, show each `fix` and stop: the person (or you, with
-their OK) runs the fix, then you plan again.
+Show the person `recommended`, `reasons` and `blocked` in plain words, and
+get their OK on every plan before you write answers or apply. If `blocked` is
+not empty, show each `fix` and stop: the person (or you, with their OK) runs
+the fix, then you plan again and ask again.
 
 The wizard's steps, in order: Privacy, Machine, Accounts, Front desk, Helper,
 Hear, Speak, Agent, Tasks, Test, Check, Save, Hand-off. The answers file
@@ -86,8 +87,8 @@ take no answer.
 
 ## 4. Write the answers file
 
-Write `answers.json` = `plan.recommended`, changed only where the person asked
-for something different. Each change must be an existing choice shape taken
+Only after the person has said OK to the plan, write `answers.json` =
+`plan.recommended`, changed only where the person asked for something different. Each change must be an existing choice shape taken
 from `detected` for that step (for example a model name the runtime actually
 lists). Keep `privacy` at the top level equal to `steps.privacy`.
 
