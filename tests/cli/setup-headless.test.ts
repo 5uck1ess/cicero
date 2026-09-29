@@ -38,6 +38,17 @@ test("plan: fit-sized front desk and helper from Ollama's listing; every choice 
   expect(JSON.stringify(plan)).not.toContain("synthetic-anthropic-marker");
 });
 
+test("plan with a CLI --agent makes that agent the front desk instead of blocking on escalation", async () => {
+  const deps = { ...pickerDeps(), which: (b: string) => b === "claude" ? "/usr/bin/claude" : null };
+  for (const privacy of ["cloud", "local"] as const) {
+    const plan = await planSetup({ privacy, agent: "claude-code", systemDeps, pickerDeps: deps });
+    expect(plan.blocked).toEqual([]);
+    expect(plan.recommended.steps.frontdesk).toEqual({ kind: "agent" });
+    expect(plan.recommended.steps.brain).toEqual(privacy === "local" ? { id: "claude-code", allowCloud: true } : { id: "claude-code" });
+    expect(plan.reasons.frontdesk).toContain("claude-code");
+  }
+});
+
 test("plan with --agent in local mode allows that agent; no runtime blocks with install steps", async () => {
   const plan = await planSetup({ privacy: "local", agent: "codex-acp", systemDeps, pickerDeps: pickerDeps() });
   expect(plan.recommended.steps.brain).toEqual({ id: "codex-acp", allowCloud: true });

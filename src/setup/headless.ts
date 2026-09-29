@@ -74,6 +74,9 @@ export async function planSetup(o: PlanOptions): Promise<PlanOutput> {
     let rec = step.recommend?.(found, session.context(found)) ?? { choice: null, reason: "No recommendation" };
     if (id === "privacy") rec = { choice: { mode: o.privacy }, reason: o.privacy === "local" ? "Nothing leaves this machine unless allowed." : "The front desk and agents may use cloud services." };
     if (id === "board") rec = { choice: { id: "none" }, reason: "Sending task text to a board is your call: add { id, allowBoard: true } yourself." };
+    // A CLI agent can't sit behind a model front desk (escalation is ACP only), so it answers directly.
+    if (id === "frontdesk" && o.agent && !ACP_AGENTS.some((a) => a.id === o.agent) && o.agent !== "none")
+      rec = { choice: { kind: "agent" }, reason: `You chose ${o.agent}, which answers directly; a model front desk can only hand off to an ACP agent.` };
     if (id === "brain" && o.agent) {
       const needsAllow = o.privacy === "local" && CLOUD_AGENTS.has(o.agent);
       rec = { choice: { id: o.agent, ...(needsAllow ? { allowCloud: true } : {}) }, reason: `You chose ${o.agent}.${needsAllow ? " It reaches the cloud, so this adds \"agent\" to privacy.allow." : ""}` };
