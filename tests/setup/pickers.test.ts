@@ -8,7 +8,7 @@ import type { BoundedCommandResult } from "../../src/process/bounded-command";
 import { createDraft, renderDraft } from "../../src/setup/draft";
 import { mergeDraft, startSetupServer } from "../../src/setup/server";
 import { SETUP_STEPS, type StepContext } from "../../src/setup/steps";
-import { detectProvider, detectBrain, detectBoard, detectSpeech, parseProvider, parseBrain, parseBoard, parseSpeech, contributeBoard, contributeSpeech, probeBoard, probeRemoteProviderModels } from "../../src/setup/pickers";
+import { detectBrain, detectBoard, detectSpeech, parseBrain, parseBoard, parseSpeech, contributeBoard, contributeSpeech, probeBoard, probeRemoteProviderModels } from "../../src/setup/pickers";
 import { audioCppLocalRuntimePaths } from "../../src/backends/tts/audiocpp";
 import { audioCppModelPath } from "../../src/setup/audiocpp";
 import type { SystemFacts } from "../../src/setup/system";
@@ -22,15 +22,6 @@ test("each picker parses valid input and rejects malformed input", () => {
   const c = ctx();
   expect(pick("system").parseChoice("local-cpu", c)).toBe("local-cpu");
   expect(() => pick("system").parseChoice("bad", c)).toThrow();
-  expect(parseProvider({ id: "llama-cpp", model: "owner/repo:Q4_K_M" }, c).model).toBe("owner/repo:Q4_K_M");
-  expect(parseProvider({ id: "llama-cpp" }, c).model).toContain("GGUF");
-  const fileHome = mkdtempSync(join(tmpdir(), "cicero-gguf-"));
-  try { const path = join(fileHome, "local.gguf"); writeFileSync(path, "fixture"); expect(parseProvider({ id: "llama-cpp", model: path }, c).model).toBe(path); }
-  finally { rmSync(fileHome, { recursive: true, force: true }); }
-  for (const bad of ["repo", "owner/repo;rm", "owner/repo:bad:extra", "a/../b", "x".repeat(210)]) expect(() => parseProvider({ id: "llama-cpp", model: bad }, c)).toThrow();
-  expect(parseProvider({ id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "synthetic-key" }, c).apiKey).toBe("synthetic-key");
-  for (const bad of ["file:///tmp", "https://u:p@example.test/v1", "https://example.test/v1?key=secret", "x".repeat(513)]) expect(() => parseProvider({ id: "openai-compatible", baseUrl: bad, model: "m" }, c)).toThrow();
-  expect(() => parseProvider({ id: "ollama", model: "not-pulled" }, { ...c, detected: { runtimes: { ollama: { running: true, models: ["pulled"] } } } })).toThrow();
   expect(parseBrain({ id: "acp", command: ["hermes", "-p", "voice", "acp"] }, c).binary).toBe("hermes");
   expect(() => parseBrain({ id: "acp", command: "hermes -p voice acp" }, c)).toThrow();
   expect(() => parseBrain({ id: "acp", command: ["hermes", "$(id)"] }, c)).toThrow();
@@ -47,25 +38,6 @@ test("each picker parses valid input and rejects malformed input", () => {
   expect(parseSpeech("tts", { id: "elevenlabs", apiKey: "synthetic-key" }, c).id).toBe("elevenlabs");
   expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "" }, c)).toThrow();
   expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "x".repeat(1025) }, c)).toThrow();
-});
-
-test("provider probes run in parallel, cap lists, and prefer the first running runtime", async () => {
-  const seen: string[] = []; let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
-  const pending = detectProvider(ctx(), { fetcher: (async (input: RequestInfo | URL) => { seen.push(String(input)); await gate; return new Response(JSON.stringify({ models: [{ name: "pulled" }], data: [{ id: "loaded" }] })); }) as typeof fetch });
-  await Promise.resolve(); expect(seen).toHaveLength(3); release();
-  const up = await pending; expect(up.recommended).toBe("llama-cpp"); expect(up.runtimes.ollama.models).toEqual(["pulled"]); expect(up.runtimes["lm-studio"].models).toEqual(["loaded"]);
-  const down = await detectProvider(ctx(), { fetcher: (async () => new Response("down", { status: 503 })) as typeof fetch });
-  expect(down.recommended).toBe("ollama");
-  const ollamaOnly = await detectProvider(ctx(), { fetcher: (async (input: RequestInfo | URL) => String(input).includes("11434") ? Response.json({ models: [{ name: "pulled" }] }) : new Response("down", { status: 503 })) as typeof fetch });
-  expect(ollamaOnly.recommended).toBe("ollama");
-  const studioOnly = await detectProvider(ctx(), { fetcher: (async (input: RequestInfo | URL) => String(input).includes("1234") ? Response.json({ data: [{ id: "loaded" }] }) : new Response("down", { status: 503 })) as typeof fetch });
-  expect(studioOnly.recommended).toBe("lm-studio");
-  const malformed = await detectProvider(ctx(), { fetcher: (async () => new Response("{")) as typeof fetch });
-  expect(malformed.runtimes.ollama.running).toBe(false);
-  const oversized = await detectProvider(ctx(), { fetcher: (async () => new Response(JSON.stringify({ models: Array(201).fill({ name: "m" }), data: Array(201).fill({ id: "m" }) }))) as typeof fetch });
-  expect(oversized.runtimes.ollama.models).toHaveLength(200);
-  const huge = await detectProvider(ctx(), { fetcher: (async () => new Response("x".repeat(140000))) as typeof fetch });
-  expect(huge.runtimes.ollama.running).toBe(false);
 });
 
 test("remote model list never reflects the supplied API key", async () => {

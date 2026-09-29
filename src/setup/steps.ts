@@ -4,6 +4,7 @@ import { contributeBoard, contributeBrain, contributeSpeech, detectBoard, detect
 import { modelBudget, planFit, speechKind, type SpeechKind } from "./fit";
 import { isLocal } from "./privacy";
 import { detectAccounts, parseAccounts, type AccountsDetected } from "./accounts";
+import { contributeFrontDesk, detectFrontDesk, parseFrontDesk, probeFrontDesk, type FrontDeskChoice, type FrontDeskDetected } from "./frontdesk";
 import { PRIVACY_COPY, PRIVACY_MODES, parsePrivacy, type PrivacyChoice } from "./privacy";
 
 export interface StepContext { system: SystemFacts; draft: SetupDraft; detected?: unknown; choices?: ReadonlyMap<string, unknown> }
@@ -51,6 +52,12 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     recommend(detected) { const d = detected as AccountsDetected; return { choice: { useSubscription: d.recommended }, reason: d.reason }; },
     parseChoice(raw, ctx) { return parseAccounts(raw, ctx.detected as AccountsDetected | undefined); },
     contribute() { return {}; } },
+  { id: "frontdesk", title: "Front desk", available: true, pipeline: "brain",
+    explain: info("What answers when you talk: a model (fast, no tools) or an agent (slower, can use tools).", "A local model answers in about a second and hands coding work to your agent. In local privacy mode it must run on this machine.", "Lists models from llama-swap/llama.cpp, Ollama and LM Studio on their default ports. A model choice goes into brain; an agent choice leaves brain to the Agent step.", "docs/setup.md"),
+    async detect(ctx, deps) { return detectFrontDesk(ctx, deps, await plannedSpeechKind(ctx, deps)); },
+    recommend(detected) { const d = detected as FrontDeskDetected; return { choice: d.recommended, reason: d.reason }; },
+    parseChoice: parseFrontDesk, contribute(_ctx, c) { return contributeFrontDesk(c as FrontDeskChoice); },
+    probeChoice(c, deps) { return probeFrontDesk(c as FrontDeskChoice, deps); } },
   { id: "stt", title: "Hear", available: true, pipeline: "stt",
     explain: info("Speech-to-text turns microphone audio into words.", "The hardware tier determines the starting engine; installed venvs and ports are shown.", "Only checks installation and port readiness. The engine choice goes into stt.", "docs/setup.md"),
     detect(ctx, deps) { return detectSpeech("stt", ctx, deps); },

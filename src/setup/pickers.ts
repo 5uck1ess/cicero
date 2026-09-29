@@ -1,9 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { connect, isIP } from "node:net";
-import { TIER_PRESETS } from "../backends/tiers";
 import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "../backends/llm/openai";
-import { isHuggingFaceGgufRepo, localGgufProblem } from "../cli/doctor";
 import { BOARD_COMMANDS, normalizeBoardList, type BoardPreset } from "../notify/board-presets";
 import { findVenvPython } from "../platform/python";
 import { audioCppLocalRuntimePaths } from "../backends/tts/audiocpp";
@@ -102,7 +100,7 @@ async function boundedResponse(response: Response, max = 128 * 1024, signal?: Ab
     return JSON.parse(new TextDecoder().decode(bytes));
   } finally { signal?.removeEventListener("abort", cancel); cancel(); }
 }
-async function fetchLimited(fetcher: typeof fetch, address: string, json = true, headers?: HeadersInit, timeoutMs = 1500): Promise<{ running: boolean; models: string[] }> {
+export async function fetchLimited(fetcher: typeof fetch, address: string, json = true, headers?: HeadersInit, timeoutMs = 1500): Promise<{ running: boolean; models: string[] }> {
   const controller = new AbortController();
   let expire!: () => void;
   const deadline = new Promise<never>((_, reject) => { expire = () => reject(new Error("probe deadline")); });
@@ -122,17 +120,6 @@ async function fetchLimited(fetcher: typeof fetch, address: string, json = true,
   } catch { return { running: false, models: [] }; }
   finally { clearTimeout(timer); controller.abort(); }
 }
-export async function detectProvider(ctx: StepContext, deps: PickerDeps = {}) {
-  const fetcher = deps.fetcher ?? fetch;
-  const [llama, ollama, lmstudio] = await Promise.all([
-    fetchLimited(fetcher, "http://127.0.0.1:8080/health", false),
-    fetchLimited(fetcher, "http://127.0.0.1:11434/api/tags"),
-    fetchLimited(fetcher, "http://127.0.0.1:1234/v1/models"),
-  ]);
-  const recommended = llama.running ? "llama-cpp" : ollama.running ? "ollama" : lmstudio.running ? "lm-studio" : mlx(ctx) ? "mlx-lm" : ctx.draft.deployment === "local-cpu" ? "ollama" : "llama-cpp";
-  const which = deps.which ?? ((binary: string) => Bun.which(binary));
-  return { recommended, defaultModel: TIER_PRESETS["local-cuda"]?.llm?.model, reason: `${ctx.draft.deployment} tier; llama.cpp ${llama.running ? "running" : "offline"}, Ollama ${ollama.running ? "running" : "offline"}, LM Studio ${lmstudio.running ? "running" : "offline"}.`, runtimes: { "llama-cpp": llama, ollama, "lm-studio": lmstudio }, installed: { "llama-cpp": Boolean(which("llama-server")), ollama: Boolean(which("ollama")) }, cloudPresets: OPENAI_COMPATIBLE_BACKENDS.filter((id) => id !== "openai-compatible"), mlxAvailable: mlx(ctx) };
-}
 export async function probeRemoteProviderModels(raw: unknown, deps: PickerDeps = {}): Promise<ProviderModelList> {
   const c = choice(raw);
   const id = member(c.id, ["openai-compatible", ...OPENAI_COMPATIBLE_BACKENDS], "LLM provider");
@@ -143,37 +130,6 @@ export async function probeRemoteProviderModels(raw: unknown, deps: PickerDeps =
   const models = apiKey ? result.models.filter((listed) => !listed.includes(apiKey)) : result.models;
   if (!result.running || !models.length) throw new Error("Could not list models from that endpoint; check its URL, API key, and server status. Endpoints without /models need manual configuration");
   return { id, baseUrl, models };
-}
-export function parseProvider(raw: unknown, ctx: StepContext, deps: PickerDeps = {}) {
-  const c = choice(raw); const id = member(c.id, ["llama-cpp", "ollama", "lm-studio", "mlx-lm", "openai-compatible", ...OPENAI_COMPATIBLE_BACKENDS], "LLM provider");
-  if (id === "mlx-lm") { if (!mlx(ctx)) throw new Error("MLX requires Apple Silicon and macOS 14 or newer"); return { id }; }
-  if (id === "llama-cpp") {
-    const selected = model(c.model ?? TIER_PRESETS["local-cuda"]?.llm?.model);
-    if (selected.toLowerCase().endsWith(".gguf")) {
-      if (/[;&|`$<>]/.test(selected) || localGgufProblem(selected)) throw new Error("Choose an existing readable .gguf file");
-    } else if (!isHuggingFaceGgufRepo(selected)) throw new Error("Model must be a readable .gguf path or owner/repo[:quant]");
-    return { id, model: selected };
-  }
-  if (id === "ollama" || id === "lm-studio") {
-    const selected = model(c.model);
-    const detected = ctx.detected as { runtimes?: Record<string, { running: boolean; models: string[] }> } | undefined;
-    const runtime = detected?.runtimes?.[id];
-    if (runtime && (!runtime.running || !runtime.models.includes(selected))) throw new Error("Start the runtime, load a model, and Re-check before choosing it");
-    return { id, model: selected };
-  }
-  const baseUrl = id === "openai-compatible" ? url(c.baseUrl, "API base URL") : resolveOpenAiTarget({ backend: id }).baseUrl;
-  const selected = model(c.model);
-  if (deps.allowedModels !== undefined && (deps.allowedModels?.id !== id || deps.allowedModels.baseUrl !== baseUrl || !deps.allowedModels.models.includes(selected)))
-    throw new Error("List models from this endpoint and choose one of them");
-  const apiKey = optional(c.apiKey, "API key", 1024);
-  if (apiKey && baseUrl.includes(apiKey)) throw new Error("Keep the API key out of the endpoint URL");
-  return { id, baseUrl, model: selected, apiKey };
-}
-export function contributeProvider(c: ReturnType<typeof parseProvider>) {
-  if (c.id === "mlx-lm") return { llm: { backend: "mlx-lm" } };
-  if (c.id === "llama-cpp" || c.id === "ollama") return { llm: { backend: c.id, model: c.model } };
-  if (c.id === "lm-studio") return { llm: { backend: "openai", baseUrl: "http://127.0.0.1:1234/v1", model: c.model } };
-  return { llm: { backend: c.id, baseUrl: c.baseUrl, model: c.model, ...(c.apiKey ? { apiKey: c.apiKey } : {}) } };
 }
 export const LAYA_LANES_REQUIRED = "Needs office lanes (brain.lanes): Laya routes between employees. Add lanes, then set switchboard.intent_url — see docs/office.md.";
 const BRAINS = ["acp", "claude-code", "codex", "gemini", "qwen", "ollama", "openai-compatible", ...OPENAI_COMPATIBLE_BACKENDS.filter((id) => id !== "openai-compatible")] as const;

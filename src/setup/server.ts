@@ -12,6 +12,9 @@ import { detectSystem, type SystemDeps, type SystemFacts } from "./system";
 import { probeRemoteProviderModels, type PickerDeps, type ProviderModelList } from "./pickers";
 import { backupInvalidConfig, inspectExistingConfig, writeDraft } from "./write";
 import { DraftChangedError, SetupSession, mergeDraft } from "./session";
+import { CLOUD_PRESETS } from "./frontdesk";
+import { isLocal } from "./privacy";
+import { resolveOpenAiTarget } from "../backends/llm/openai";
 import type { Check, DoctorCheckOptions } from "../cli/doctor";
 import { redactSnapshotSecrets } from "../operational-state";
 import { ciceroHome } from "../platform/paths";
@@ -23,7 +26,9 @@ export { mergeDraft };
 function choiceLabel(choice: unknown): string | undefined {
   if (typeof choice === "string") return choice;
   if (!choice || typeof choice !== "object") return undefined;
-  const c = choice as { id?: unknown; mode?: unknown; kind?: unknown; useSubscription?: unknown };
+  const c = choice as { id?: unknown; mode?: unknown; kind?: unknown; useSubscription?: unknown; runtime?: unknown; preset?: unknown; model?: unknown };
+  if (c.kind === "agent") return "An agent";
+  if (c.kind === "model" && typeof c.model === "string") return `${c.runtime === "cloud" ? c.preset : c.runtime}: ${c.model}`;
   if (Array.isArray(c.useSubscription)) return c.useSubscription.length ? `Subscription: ${c.useSubscription.join(", ")}` : "As detected";
   return [c.id, c.mode, c.kind].find((value): value is string => typeof value === "string");
 }
@@ -217,7 +222,7 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
     const free = redactStateValue({ detected, providerModels, checks: safeChecks, checkGroups, existing, invalidated }, draftSecrets(draft)) as Record<string, unknown>;
     return {
       steps: SETUP_STEPS.map(({ id, title, explain, pipeline, available }) => ({ id, title, explain, pipeline, available })),
-      current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, choiceLabel(choice)])), privacyAllow: (choices.get("privacy") as { allow?: string[] } | undefined)?.allow ?? [], accountsChoice: (choices.get("accounts") as { useSubscription?: string[] } | undefined)?.useSubscription ?? null, storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
+      current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, choiceLabel(choice)])), privacyAllow: (choices.get("privacy") as { allow?: string[] } | undefined)?.allow ?? [], accountsChoice: (choices.get("accounts") as { useSubscription?: string[] } | undefined)?.useSubscription ?? null, frontdeskChoice: choices.get("frontdesk") ?? null, storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
       written, finished, startCommand: handoff.startCommand, handoff,
       canWrite: !written && checkGroups !== null && checkGroups.blocking.length === 0 && existing.status === "missing",
       requiresNotReadyAcknowledgement: (checkGroups?.notReady.length ?? 0) > 0,
@@ -243,10 +248,11 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
         if (!body || typeof body !== "object" || Array.isArray(body)) return json({ error: "Expected JSON object" }, 400);
         const data = body as Record<string, unknown>;
         if (url.pathname === "/api/provider-models") {
-          const prior = session.choices.get("frontdesk") as { preset?: string; apiKey?: string } | undefined;
           const raw = data.choice && typeof data.choice === "object" && !Array.isArray(data.choice) ? data.choice as Record<string, unknown> : null;
-          const savedKey = prior && raw && raw.id === prior.preset && !raw.apiKey ? prior.apiKey : undefined;
-          providerModels = await probeRemoteProviderModels(savedKey && raw ? { ...raw, apiKey: savedKey } : data.choice, options.pickerDeps);
+          // A cloud front desk lists with the preset's key from Cicero's environment; the key is sent only to that provider.
+          const envKey = raw && !raw.apiKey && typeof raw.id === "string" && CLOUD_PRESETS.includes(raw.id) && !isLocal(session)
+            ? (options.pickerDeps?.env ?? process.env)[resolveOpenAiTarget({ backend: raw.id }).apiKeyEnv] : undefined;
+          providerModels = await probeRemoteProviderModels(envKey && raw ? { ...raw, apiKey: envKey } : data.choice, options.pickerDeps);
           return json({ models: providerModels.models });
         } else if (url.pathname === "/api/step") {
           const step = SETUP_STEPS.find((item) => item.id === data.id);

@@ -61,3 +61,13 @@ test("the Privacy screen states it is a declared policy, not a firewall", () => 
   expect(page).toContain("This is a declared policy, not a firewall.");
   expect(page).toContain("if (view === 'privacy') renderPrivacy(step);");
 });
+
+test("the Front desk screen offers model or agent, never MLX, and a no-key cloud list", () => {
+  const page = setupPage();
+  expect(page).toContain("if (view === 'frontdesk') renderFrontDesk(step);");
+  expect(page).toContain("A model");
+  expect(page).toContain("An agent");
+  expect(page).toContain("Not sized for this machine");
+  expect(page).toContain("api('/api/provider-models', { choice: { id: fields.preset.value } })");
+  expect(page).not.toContain("id === 'provider'");
+});

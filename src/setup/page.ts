@@ -199,11 +199,12 @@ var state = null;
 var view = 'overview';
 var app = document.getElementById('app');
 
-var ORDER = ['privacy', 'system', 'accounts', 'stt', 'tts', 'brain', 'board', 'review'];
+var ORDER = ['privacy', 'system', 'accounts', 'frontdesk', 'stt', 'tts', 'brain', 'board', 'review'];
 var STEP = {
   privacy:  { short: 'Privacy', title: 'What may leave this machine?', lede: 'Choose what Cicero may send off this machine. Later steps ask before anything else leaves.', sub: 'Data policy' },
   system:   { short: 'Machine', title: 'This machine', lede: 'Cicero picks a starting preset from your hardware. You can change it.', sub: 'Runs everything' },
   accounts: { short: 'Accounts', title: 'Which accounts pay?', lede: 'Cicero checks which login or API key each agent will use. Nothing secret is read or stored.', sub: 'Logins and keys' },
+  frontdesk:{ short: 'Front desk', title: 'What answers when you talk?', lede: 'A model answers in about a second and hands coding work to your agent. An agent answers everything itself, slower, with tools.', sub: 'Model or agent' },
   stt:      { short: 'Hear',    title: 'How should Cicero hear you?', lede: 'Speech-to-text turns your voice into words.', sub: 'Speech-to-text' },
   brain:    { short: 'Agent',   title: 'Which coding agent does the work?', lede: 'Cicero is the voice. Your agent reads code, runs tools and opens PRs.', sub: 'Coding agent' },
   tts:      { short: 'Speak',   title: 'How should Cicero speak?', lede: 'Text-to-speech turns replies into audio.', sub: 'Text-to-speech' },
@@ -525,6 +526,94 @@ function renderAccounts(step) {
   }, row));
   app.append(row);
 }
+var RUNTIME_NAMES = { 'llama-cpp': 'llama-swap / llama.cpp', 'ollama': 'Ollama', 'lm-studio': 'LM Studio', 'cloud': 'Cloud provider' };
+function renderFrontDesk(step) {
+  var f = state.detected || {};
+  var saved = state.frontdeskChoice;
+  var rec = f.recommended;
+  var kind = (saved && saved.kind) || 'model';
+  var runtimeIds = ['llama-cpp', 'ollama', 'lm-studio', 'cloud'];
+  var runtime = (saved && saved.runtime) || (rec && rec.runtime) || (f.cloudSuggestion ? 'cloud' : runtimeIds.find(function (r) { return f.runtimes && f.runtimes[r] && f.runtimes[r].running; }) || 'llama-cpp');
+  var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: STEP.frontdesk.title })]);
+  var detail = h('div');
+  var fields = {};
+  [['model', 'A model', 'Fast, no tools. Recommended.'], ['agent', 'An agent', 'Slower, can use tools. The Agent step picks which one.']].forEach(function (o) {
+    var input = h('input', { type: 'radio', name: 'pick-frontdesk', value: o[0] });
+    input.checked = o[0] === kind;
+    input.onchange = function () { kind = o[0]; drawDetail(); };
+    group.append(h('label', { class: 'choice' }, [input, h('span', { class: 'name', text: o[1] }), h('span', { class: 'note', text: o[2] }), o[0] === 'model' ? h('span', { class: 'badge', text: 'Recommended' }) : null]));
+  });
+  function fitLine() {
+    if (!f.fit) return h('p', { class: 'detail', text: 'Not sized for this machine: model sizing covers NVIDIA on Linux and Apple Silicon. A small model such as qwen3.5:0.8b in Ollama is a safe start.' });
+    var fd = f.fit.frontDesk;
+    return h('p', { class: 'detail', text: fd ? 'Fits this machine: ' + fd.label + ' (' + fd.footprintGb + ' GB, ' + fd.basis + '). ' + f.fit.reason + ' Every fit is an estimate.' : f.fit.reason });
+  }
+  function drawDetail() {
+    detail.replaceChildren(); fields = {};
+    if (kind === 'agent') { detail.append(h('p', { class: 'detail', text: 'Every reply goes to your agent. Expect several seconds before it speaks.' })); return; }
+    var box = h('div', { class: 'fields' });
+    var sel = h('select');
+    runtimeIds.forEach(function (r) {
+      var rt = f.runtimes && f.runtimes[r];
+      var label = RUNTIME_NAMES[r] + (r === 'cloud' ? '' : rt && rt.running ? ' (running, ' + rt.models.length + ' listed)' : ' (not running)');
+      var o = h('option', { value: r, text: label });
+      if (r === 'cloud' && f.disabled && f.disabled.cloud) { o.disabled = true; o.textContent = RUNTIME_NAMES.cloud + ': ' + f.disabled.cloud; }
+      if (r === runtime) o.selected = true;
+      sel.append(o);
+    });
+    sel.onchange = function () { runtime = sel.value; drawDetail(); };
+    box.append(field('Runs on', sel));
+    if (runtime === 'cloud') {
+      var presets = (f.cloudPresets || []).filter(function (p) { return f.cloudKeys && f.cloudKeys[p] === 'found'; });
+      if (!presets.length) { detail.append(box, h('div', { class: 'panel warn' }, [h('h2', { text: 'No cloud model key found' }), h('p', { text: 'Set a provider key such as XAI_API_KEY or GROQ_API_KEY in the environment Cicero runs in, then check again.' })])); return; }
+      fields.preset = selectOf(presets, (saved && saved.preset) || f.cloudSuggestion);
+      fields.model = selectOf(state.providerModels && state.providerModels.id === fields.preset.value ? state.providerModels.models : (saved && saved.model ? [saved.model] : []));
+      box.append(field('Provider (key found in your environment)', fields.preset), field('Model', fields.model));
+      var listRow = h('div', { class: 'actions' });
+      listRow.append(button('Load models', 'small', async function () {
+        var listed = await api('/api/provider-models', { choice: { id: fields.preset.value } });
+        fields.model.replaceChildren(); listed.models.forEach(function (m) { fields.model.append(h('option', { value: m, text: m })); });
+      }, listRow));
+      box.append(listRow);
+      detail.append(box); return;
+    }
+    var rt = f.runtimes && f.runtimes[runtime];
+    if (rt && rt.running && rt.models.length) {
+      var pick = (saved && saved.runtime === runtime && saved.model) || (rec && rec.runtime === runtime && rec.model) || rt.models[0];
+      fields.model = selectOf(rt.models, pick);
+      box.append(field('Model', fields.model));
+      if (rec && rec.runtime === runtime) box.append(h('small', { text: 'Recommended: ' + rec.model }));
+    }
+    detail.append(box, fitLine());
+    if (rec && rec.runtime === runtime && f.reason) detail.append(h('p', { class: 'detail', text: f.reason }));
+    if (runtime === 'ollama' || runtime === 'lm-studio') detail.append(h('p', { class: 'detail', text: 'Set context to 65536 and a q8 KV cache in ' + RUNTIME_NAMES[runtime] + ' so the fit above holds.' }));
+    var hint = (f.install || []).find(function (i) { return i.runtime === runtime; });
+    if (!rt || !rt.running || hint) {
+      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: rt && rt.running ? 'The recommended model is not listed' : RUNTIME_NAMES[runtime] + ' is not running' })]);
+      if (hint) panel.append(h('p', { text: hint.hint }));
+      if (hint && hint.entry) panel.append(cmd(hint.entry));
+      var again = h('div', { class: 'actions' });
+      again.append(button('Check again', 'small', async function () { state = await api('/api/step', { id: 'frontdesk' }); render(); }, again));
+      panel.append(again);
+      detail.append(panel);
+    }
+    var failed = blockedByProbe(state);
+    if (failed && tried.frontdesk) detail.append(h('div', { class: 'panel warn', role: 'alert' }, [h('h2', { text: 'That check failed' }), h('p', { text: failed })]));
+  }
+  drawDetail();
+  app.append(group, detail, why(step));
+  var row = h('div', { class: 'actions' });
+  row.append(button('Continue', 'primary', async function () {
+    var c = kind === 'agent' ? { kind: 'agent' } : runtime === 'cloud'
+      ? { kind: 'model', runtime: 'cloud', preset: fields.preset && fields.preset.value, model: fields.model && fields.model.value }
+      : { kind: 'model', runtime: runtime, model: fields.model && fields.model.value };
+    tried.frontdesk = true;
+    state = await api('/api/choice', { id: 'frontdesk', choice: c });
+    if (blockedByProbe(state)) { render(); return; }
+    await go(next('frontdesk'));
+  }, row));
+  app.append(row);
+}
 function invalidatedBanner() {
   var list = state.invalidated || [];
   if (!list.length) return null;
@@ -536,10 +625,7 @@ function invalidatedBanner() {
 function renderPicker(id, step) {
   var f = state.detected || {};
   var options, extra = null;
-  if (id === 'provider') {
-    options = ['llama-cpp', 'ollama', 'lm-studio'].concat(f.mlxAvailable ? ['mlx-lm'] : []).concat(['cloud']);
-    extra = { key: 'cloud', items: ['openai-compatible'].concat(f.cloudPresets || []) };
-  } else if (id === 'brain') {
+  if (id === 'brain') {
     var all = f.options || [];
     var clis = ['claude-code', 'codex', 'gemini', 'qwen', 'acp'].filter(function (o) { return all.indexOf(o) >= 0; });
     options = clis.concat(['api']);
@@ -583,24 +669,9 @@ function renderPicker(id, step) {
     if (extra && picked === extra.key) {
       var sel = selectOf(extra.items, extra.value);
       sel.onchange = function () { extra.value = sel.value; drawDetail(); };
-      box.append(field(id === 'provider' ? 'Provider' : 'Model API', sel));
+      box.append(field('Model API', sel));
     }
     var rt = f.runtimes && f.runtimes[o];
-    if (id === 'provider' && o === 'llama-cpp') fields.model = textInput(f.defaultModel), box.append(field('Model (GGUF file path or Hugging Face repo)', fields.model));
-    if (id === 'provider' && (o === 'ollama' || o === 'lm-studio') && rt && rt.models.length) fields.model = selectOf(rt.models), box.append(field('Model', fields.model));
-    var remote = id === 'provider' && ['llama-cpp', 'ollama', 'lm-studio', 'mlx-lm'].indexOf(o) < 0;
-    if (remote) {
-      if (o === 'openai-compatible') fields.baseUrl = textInput(state.providerModels && state.providerModels.id === o ? state.providerModels.baseUrl : 'http://127.0.0.1:8000/v1', 'url'), box.append(field('API base URL', fields.baseUrl));
-      fields.apiKey = textInput('', 'password'); box.append(field('API key (optional for local servers)', fields.apiKey));
-      fields.model = selectOf(state.providerModels && state.providerModels.id === o ? state.providerModels.models : []);
-      box.append(field('Model', fields.model));
-      var listRow = h('div', { class: 'actions' });
-      listRow.append(button('Load models', 'small', async function () {
-        var listed = await api('/api/provider-models', { choice: { id: o, baseUrl: fields.baseUrl && fields.baseUrl.value, apiKey: fields.apiKey.value } });
-        fields.model.replaceChildren(); listed.models.forEach(function (m) { fields.model.append(h('option', { value: m, text: m })); });
-      }, listRow));
-      box.append(listRow);
-    }
     if (id === 'brain') {
       if (o === 'acp') fields.command = textInput('["hermes","-p","voice","acp"]'), box.append(field('Command (JSON list of arguments)', fields.command));
       if (o === 'openai-compatible') { fields.baseUrl = textInput('', 'url'); fields.model = textInput(''); fields.apiKey = textInput('', 'password'); box.append(field('API base URL', fields.baseUrl), field('Model', fields.model), field('API key (optional)', fields.apiKey)); }
@@ -759,6 +830,7 @@ function render() {
   if (view === 'privacy') renderPrivacy(step);
   else if (view === 'system') renderSystem(step);
   else if (view === 'accounts') renderAccounts(step);
+  else if (view === 'frontdesk') renderFrontDesk(step);
   else if (view === 'review') renderReview(step);
   else renderPicker(view, step);
 }
