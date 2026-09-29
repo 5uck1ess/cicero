@@ -28,6 +28,7 @@ function choiceLabel(choice: unknown): string | undefined {
   if (!choice || typeof choice !== "object") return undefined;
   const c = choice as { id?: unknown; mode?: unknown; kind?: unknown; useSubscription?: unknown; runtime?: unknown; preset?: unknown; model?: unknown };
   if (c.kind === "agent") return "An agent";
+  if (typeof (choice as { acp?: unknown }).acp === "string") return (choice as { acp: string }).acp;
   if ((c.kind === "model" || c.id === "model") && typeof c.model === "string") return `${c.runtime === "cloud" ? c.preset : c.runtime}: ${c.model}`;
   if (Array.isArray(c.useSubscription)) return c.useSubscription.length ? `Subscription: ${c.useSubscription.join(", ")}` : "As detected";
   return [c.id, c.mode, c.kind].find((value): value is string => typeof value === "string");

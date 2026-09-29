@@ -47,4 +47,15 @@ test("unknown and no-choice steps are rejected", async () => {
   }
 });
 
-test.todo("a later privacy flip invalidates a stored cloud agent (enabled with the Agent step)");
+test("a later privacy flip invalidates a stored cloud agent", async () => {
+  const s = new SetupSession(fixtureSystem("cuda24"), undefined, { env: {}, which: () => null, readFile: () => null, homeDir: () => "/fixture/home" });
+  await s.choose("privacy", { mode: "cloud" }, { probe: false });
+  await s.choose("frontdesk", { kind: "agent" }, { probe: false });
+  await s.choose("brain", { id: "codex" }, { probe: false });
+  expect(s.draft.brain.backend).toBe("codex");
+  const flipped = await s.choose("privacy", { mode: "local" }, { probe: false });
+  expect(flipped.invalidated).toEqual([{ id: "brain", reason: "Allow this agent to use the cloud first" }]);
+  expect(s.choices.has("brain")).toBe(false);
+  await s.choose("brain", { id: "codex", allowCloud: true }, { probe: false });
+  expect(s.draft.privacy).toEqual({ mode: "local", allow: ["agent"] });
+});

@@ -215,7 +215,7 @@ var STEP = {
   review:   { short: 'Save',    title: 'Review and save', lede: 'Cicero checks your choices before writing the config.', sub: 'Check and write' }
 };
 var NAMES = {'llm':'LLM prompt (default)','laya':'Laya sidecar (checkpoint required)','llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'OpenAI-compatible URL','claude-code':'Claude Code','codex':'Codex','gemini':'Gemini CLI','qwen':'Qwen Code','acp':'ACP agent','faster-whisper':'faster-whisper','mlx-whisper':'MLX Whisper','audiocpp':'audio.cpp','kokoro':'Kokoro','pocket-tts':'Pocket TTS (Python)','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming server','hermes':'Hermes','multica':'Multica','paperclip':'Paperclip','none':'No board','cloud':'Cloud or custom API','api':'Model API','local-cuda':'NVIDIA GPU','local-mlx':'Apple Silicon','local-cpu':'CPU only'};
-function optionName(stepId, option) { return option === 'audiocpp' ? (stepId === 'stt' ? 'Nemotron (audio.cpp)' : 'Pocket TTS (audio.cpp)') : (NAMES[option] || option); }
+function optionName(stepId, option) { if (stepId === 'brain' && option === 'none') return 'No agent (talk only)'; if (stepId === 'brain' && option === 'acp') return 'Other ACP command'; return option === 'audiocpp' ? (stepId === 'stt' ? 'Nemotron (audio.cpp)' : 'Pocket TTS (audio.cpp)') : (NAMES[option] || option); }
 var NOTES = {
   'llm':'Routes with the conversational LLM; no separate checkpoint needed.',
   'laya':'Base Laya does not route zero-shot. A fine-tuned switchboard checkpoint is required: bring-your-own for now. A public checkpoint trained on synthetic data only plus the fine-tuning recipe are a planned follow-up.',
@@ -697,9 +697,17 @@ function renderPicker(id, step) {
   var options, extra = null;
   if (id === 'brain') {
     var all = f.options || [];
-    var clis = ['claude-code', 'codex', 'gemini', 'qwen', 'acp'].filter(function (o) { return all.indexOf(o) >= 0; });
-    options = clis.concat(['api']);
-    extra = { key: 'api', items: all.filter(function (o) { return clis.indexOf(o) < 0; }) };
+    var acpIds = (f.acp || []).map(function (a) { NAMES[a.id] = a.label; NOTES[a.id] = (a.cloud ? 'Reaches the cloud. ' : 'Whether it reaches the cloud depends on its model. ') + 'ACP: ' + a.status + '.'; return a.id; });
+    f.installed = Object.assign({}, f.installed || {}, Object.fromEntries((f.acp || []).map(function (a) { return [a.id, a.found]; })));
+    if (f.target === 'escalate') {
+      options = acpIds.concat(['acp', 'none']);
+      app.append(h('p', { class: 'detail', text: 'Your front desk hands a turn to this agent when you say "think hard". That suits one-off deep questions, not follow-ups. Only ACP agents can take these turns.' }));
+    } else {
+      var clis = ['claude-code', 'codex', 'gemini', 'qwen'].filter(function (o) { return all.indexOf(o) >= 0; });
+      options = clis.concat(acpIds, ['acp', 'api']);
+      extra = { key: 'api', items: all.filter(function (o) { return clis.indexOf(o) < 0 && o !== 'acp'; }) };
+      app.append(h('p', { class: 'detail', text: 'Your agent answers everything you say.' }));
+    }
   } else if (id === 'board') {
     options = ['hermes', 'multica', 'paperclip', 'none'];
   } else {
@@ -746,6 +754,8 @@ function renderPicker(id, step) {
       if (o === 'acp') fields.command = textInput('["hermes","-p","voice","acp"]'), box.append(field('Command (JSON list of arguments)', fields.command));
       if (o === 'openai-compatible') { fields.baseUrl = textInput('', 'url'); fields.model = textInput(''); fields.apiKey = textInput('', 'password'); box.append(field('API base URL', fields.baseUrl), field('Model', fields.model), field('API key (optional)', fields.apiKey)); }
       else if (extra && picked === extra.key && o !== 'openai-compatible') { fields.model = textInput(o === 'ollama' ? 'qwen3.5:0.8b' : ''); box.append(field('Model', fields.model)); if (o !== 'ollama') { fields.apiKey = textInput('', 'password'); box.append(field('API key', fields.apiKey)); } }
+      var cloudy = f.cloud && (f.cloud[o] || (extra && picked === extra.key && o !== 'ollama' && o !== 'openai-compatible'));
+      if (f.localOnly && cloudy) { fields.allowCloud = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.allowCloud, document.createTextNode('Allow this agent to use the cloud (adds "agent" to your privacy policy)')])); }
       if (o === 'claude-code' && f.localTerminal) { fields.tab = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.tab, document.createTextNode('Type into my open Claude Code terminal tab instead of running it in the background')])); }
     }
     if (id === 'board' && o === 'paperclip' && !f.paperclipEnv) fields.companyId = textInput(''), box.append(field('Paperclip company ID (blank uses your paperclipai context)', fields.companyId));
@@ -794,6 +804,7 @@ function renderPicker(id, step) {
     for (var k in fields) {
       var el = fields[k];
       if (k === 'tab') { if (el.checked) c.mode = 'tab-inject'; }
+      else if (k === 'allowCloud') c.allowCloud = el.checked;
       else if (k === 'streaming') c.streaming = el.checked;
       else if (k === 'command') { try { c.command = JSON.parse(el.value); } catch (e) { throw new Error('The command must be a JSON list, like ["hermes","acp"].'); } }
       else if (k === 'port') c.port = Number(el.value);

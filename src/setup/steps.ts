@@ -1,6 +1,7 @@
 import type { SetupDraft } from "./draft";
 import type { SystemFacts, Tier } from "./system";
-import { contributeBoard, contributeBrain, contributeSpeech, detectBoard, detectBrain, detectSpeech, parseBoard, parseBrain, parseSpeech, probeBoard, type PickerDeps } from "./pickers";
+import { contributeBoard, contributeSpeech, detectBoard, detectSpeech, parseBoard, parseSpeech, probeBoard, type PickerDeps } from "./pickers";
+import { contributeAgent, detectAgent, parseAgent, type AgentChoice } from "./agent";
 import { modelBudget, planFit, speechKind, type SpeechKind } from "./fit";
 import { isLocal } from "./privacy";
 import { detectAccounts, parseAccounts, type AccountsDetected } from "./accounts";
@@ -76,10 +77,10 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     recommend(detected) { return { choice: { id: (detected as { recommended: string }).recommended }, reason: "Recommended for this machine." }; },
     parseChoice(raw, ctx) { return parseSpeech("tts", raw, ctx); }, contribute(_ctx, c) { return contributeSpeech("tts", c as ReturnType<typeof parseSpeech>); } },
   { id: "brain", title: "Agent", available: true, pipeline: "brain",
-    explain: info("A coding agent handles coding work while Cicero carries your voice.", "Installed CLIs are recommended first; model-only brains cannot edit files.", "Checks PATH and --version. Your choice configures brain.", "docs/brains.md"),
-    detect: detectBrain,
-    recommend(detected) { return { choice: { id: (detected as { recommended: string }).recommended }, reason: "The first installed coding agent." }; },
-    parseChoice: parseBrain, contribute(_ctx, c) { return contributeBrain(c as ReturnType<typeof parseBrain>); } },
+    explain: info("A coding agent handles coding work while Cicero carries your voice.", "With a model front desk, the front desk hands a turn to this agent when you say \"think hard\"; that suits one-off deep questions, not follow-ups. With an agent front desk, this agent answers everything.", "Checks PATH and --version; ACP agents stay unverified until their first call. Your choice goes into brain, or brain.escalate with a model front desk.", "docs/brains.md"),
+    detect: detectAgent,
+    recommend(detected) { const d = detected as Awaited<ReturnType<typeof detectAgent>>; return { choice: { id: d.recommended }, reason: d.reason }; },
+    parseChoice: parseAgent, contribute(ctx, c) { return contributeAgent(ctx, c as AgentChoice); } },
   { id: "board", title: "Tasks", available: true, pipeline: "brain",
     explain: info("An optional external board supplies task notifications.", "An installed board CLI is suggested; only one board can be watched.", "A bounded read-only list probe runs; the preset argv goes into notify.kanban.", "docs/notifications.md"),
     detect: detectBoard,

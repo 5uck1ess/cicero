@@ -112,7 +112,7 @@ test("audio.cpp installed, model, and loaded status drive CUDA recommendations",
 
 test("all picker contributions preserve defaults and round-trip through loadConfig", () => {
   const c = ctx(); let draft = c.draft;
-  const choices: Record<string, unknown> = { brain: { id: "codex" }, board: { id: "hermes" }, stt: { id: "faster-whisper" }, tts: { id: "kokoro" } };
+  const choices: Record<string, unknown> = { brain: { id: "codex", allowCloud: true }, board: { id: "hermes" }, stt: { id: "faster-whisper" }, tts: { id: "kokoro" } };
   for (const id of ["brain", "board", "stt", "tts"]) { const step = pick(id); const choice = step.parseChoice(choices[id], { ...c, draft }, { env: {} }); draft = mergeDraft(draft, step.contribute({ ...c, draft }, choice)); }
   expect(draft.brain.mode).toBe("subprocess");
   const home = mkdtempSync(join(tmpdir(), "cicero-pickers-"));
@@ -129,16 +129,16 @@ test("API state masks stored API keys", async () => {
     const send = (path: string, body?: object) => handler(new Request(`http://127.0.0.1:9999${path}`, { method: body ? "POST" : "GET", headers: { host: "127.0.0.1:9999", "x-cicero-setup-token": server.token, ...(body ? { "x-cicero-setup-csrf": "1" } : {}) }, body: body ? JSON.stringify(body) : undefined }));
     const listed = await (await send("/api/provider-models", { choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", apiKey: "synthetic-super-secret" } })).json() as { models: string[] };
     expect(listed.models).toEqual(["m", "m2"]);
-    const response = await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "synthetic-super-secret" } });
+    const response = await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "synthetic-super-secret", allowCloud: true } });
     expect(response.status).toBe(200);
     expect(await response.text()).not.toContain("synthetic-super-secret");
     expect(await (await send("/api/state")).text()).not.toContain("synthetic-super-secret");
-    const retained = await (await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m2", apiKey: "" } })).json() as { storedSecrets: { brain: boolean }; yaml: string };
+    const retained = await (await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m2", apiKey: "", allowCloud: true } })).json() as { storedSecrets: { brain: boolean }; yaml: string };
     expect(retained.storedSecrets.brain).toBe(true);
     expect(retained.yaml).toContain("api_key: set");
     expect(await (await send("/api/check", {})).text()).not.toContain("synthetic-super-secret");
     await send("/api/step", { id: "brain" });
-    const shortKey = await (await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "check" } })).json() as { steps: { id: string }[]; selectedChoices: Record<string, string>; yaml: string };
+    const shortKey = await (await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "check", allowCloud: true } })).json() as { steps: { id: string }[]; selectedChoices: Record<string, string>; yaml: string };
     expect(shortKey.steps.map((step) => step.id)).toContain("check");
     expect(shortKey.selectedChoices.brain).toBe("openai-compatible");
     expect((await send("/api/step", { id: "check" })).status).toBe(200);

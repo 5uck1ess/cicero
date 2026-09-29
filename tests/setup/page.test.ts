@@ -72,6 +72,14 @@ test("the Front desk screen offers model or agent, never MLX, and a no-key cloud
   expect(page).not.toContain("id === 'provider'");
 });
 
+test("the Agent screen explains think-hard escalation and asks before a cloud agent in local mode", () => {
+  const page = setupPage();
+  expect(page).toContain("That suits one-off deep questions, not follow-ups.");
+  expect(page).toContain("Allow this agent to use the cloud");
+  expect(page).toContain("else if (k === 'allowCloud') c.allowCloud = el.checked;");
+  expect(page).toContain("No agent (talk only)");
+});
+
 test("the Helper screen offers compaction, a skip note, and Laya only as a disabled Advanced row", () => {
   const page = setupPage();
   expect(page).toContain("if (view === 'helper') renderHelper(step);");

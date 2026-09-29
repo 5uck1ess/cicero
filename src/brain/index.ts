@@ -154,9 +154,18 @@ export function createBrain(config: RuntimeConfig, terminal?: TerminalAdapter, h
 }
 
 function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: BrainHooks = {}): Brain {
-  const { backend, mode, target_tab, auto_approve_tools, confirm_tools, confirm_retry, max_queue_bytes, max_response_bytes, max_pending_turns, session_resume, session_resume_max_age_hours, binary, binary_args, ollama_port, ollama_model, base_url, model, api_key, api_key_env, max_tokens, timeout_ms, unset_env, headers, session_header } = config.brain;
+  const onConfirmationPending = confirmationHook(config, hooks);
+  const primary = buildPrimary(config, terminal, hooks, onConfirmationPending);
+  const esc = config.brain.escalate;
+  const front = esc?.binary || esc?.binary_args ? new RoutingBrain(primary, buildEscalation(config, hooks, onConfirmationPending), esc.triggers) : primary;
+  return config.brain.backend === "acp" ? wrapLanes(config, front, hooks, onConfirmationPending) : front;
+}
+
+type ConfirmationHook = ((summary: string, nonce: string) => Promise<void>) | undefined;
+
+function confirmationHook(config: RuntimeConfig, hooks: BrainHooks): ConfirmationHook {
   const telegram = config.notify?.telegram;
-  const onConfirmationPending = telegram || hooks.onConfirmationPending
+  return telegram || hooks.onConfirmationPending
     ? async (summary: string, nonce: string): Promise<void> => {
         if (hooks.onConfirmationPending) {
           try {
@@ -174,6 +183,92 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
         }
       }
     : undefined;
+}
+
+/**
+ * Optional think lane: "think hard about…" routes the turn to a second,
+ * heavier ACP agent. It wraps any front desk, not only an ACP one.
+ */
+function buildEscalation(config: RuntimeConfig, hooks: BrainHooks, onConfirmationPending: ConfirmationHook): Brain {
+  const { auto_approve_tools, confirm_tools, confirm_retry, max_queue_bytes, max_response_bytes, max_pending_turns, session_resume, session_resume_max_age_hours, binary, unset_env } = config.brain;
+  const esc = config.brain.escalate!;
+  return new AcpBrain({
+    binary: esc.binary ?? binary ?? "hermes",
+    args: esc.binary_args ?? ["acp"],
+    cwd: process.cwd(),
+    sessionFile: acpSessionFilePath("escalation"),
+    sessionResume: esc.session_resume ?? session_resume,
+    sessionResumeMaxAgeHours: esc.session_resume_max_age_hours ?? session_resume_max_age_hours,
+    mcpServers: resolveAcpMcpServers(esc.mcp_servers),
+    unsetEnv: esc.unset_env ?? unset_env,
+    autoApproveTools: auto_approve_tools ?? false,
+    confirmTools: confirm_tools,
+    confirmRetry: confirm_retry ?? true,
+    maxQueuedBytes: max_queue_bytes,
+    maxResponseBytes: max_response_bytes,
+    maxPendingTurns: max_pending_turns,
+    onConfirmationPending,
+    onNudgeReply: hooks.onNudgeReply,
+  });
+}
+
+/** Optional lane switchboard (acp only): named employees wrapping the front desk. */
+function wrapLanes(config: RuntimeConfig, front: Brain, hooks: BrainHooks, onConfirmationPending: ConfirmationHook): Brain {
+  const { auto_approve_tools, confirm_tools, confirm_retry, max_queue_bytes, max_response_bytes, max_pending_turns, session_resume, session_resume_max_age_hours, binary, unset_env } = config.brain;
+  // Named employees ("let me talk to the coder"); lanes start lazily on first pin.
+  const laneDefs = config.brain.lanes;
+  if (laneDefs && Object.keys(laneDefs).length > 0) {
+    const lanes: Record<string, LaneDef> = {};
+    // codex lanes drive the Codex CLI directly (it has no ACP mode) and
+    // resume the same codex session across turns for continuity.
+    const makeLaneBrain = (d: { backend?: "acp" | "codex"; binary?: string; binary_args?: string[]; unset_env?: string[]; env?: Record<string, string>; mcp_servers?: AcpMcpServerConfig[]; session_resume?: boolean; session_resume_max_age_hours?: number }, laneName: string, tier: number): Brain =>
+      d.backend === "codex"
+        ? new CodexBrain(d.binary ?? "codex", d.binary_args ?? [], d.unset_env ?? [], { resume: true })
+        : new AcpBrain({
+            binary: d.binary ?? binary ?? "hermes",
+            args: d.binary_args ?? ["acp"],
+            cwd: process.cwd(),
+            sessionFile: acpSessionFilePath(`lane:${laneName}:tier:${tier}`),
+            sessionResume: d.session_resume ?? session_resume,
+            sessionResumeMaxAgeHours: d.session_resume_max_age_hours ?? session_resume_max_age_hours,
+            mcpServers: resolveAcpMcpServers(d.mcp_servers),
+            env: d.env,
+            unsetEnv: d.unset_env ?? unset_env,
+            autoApproveTools: auto_approve_tools ?? false,
+            confirmTools: confirm_tools,
+            confirmRetry: confirm_retry ?? true,
+            maxQueuedBytes: max_queue_bytes,
+            maxResponseBytes: max_response_bytes,
+            maxPendingTurns: max_pending_turns,
+            onConfirmationPending,
+            onNudgeReply: hooks.onNudgeReply,
+          });
+    for (const [name, l] of Object.entries(laneDefs)) {
+      const laneBrain: Brain = l.fallbacks?.length
+        ? new FallbackBrain([makeLaneBrain(l, name, 0), ...l.fallbacks.map((fallback, index) => makeLaneBrain(fallback, name, index + 1))], name)
+        : makeLaneBrain(l, name, 0);
+      lanes[name] = {
+        brain: laneBrain,
+        aliases: l.aliases,
+        voice: l.voice,
+        greeting: l.greeting,
+        persona: l.persona,
+      };
+    }
+    // Prefer the opt-in Laya sidecar; otherwise retain the summarizer prompt path.
+    const intentUrl = config.raw.switchboard?.intent_url;
+    return new SwitchboardBrain(front, lanes, intentUrl !== undefined
+      ? layaIntentClassifier(intentUrl) : summarizerClassifier(config.raw.web_voice?.tldr, true), {
+      intentTimeoutMs: config.raw.switchboard?.intent_timeout_ms,
+      intentMinConfidence: config.raw.switchboard?.intent_min_confidence,
+      frontDeskAliases: config.raw.switchboard?.front_desk_aliases,
+    });
+  }
+  return front;
+}
+
+function buildPrimary(config: RuntimeConfig, terminal: TerminalAdapter | undefined, hooks: BrainHooks, onConfirmationPending: ConfirmationHook): Brain {
+  const { backend, mode, target_tab, auto_approve_tools, confirm_tools, confirm_retry, max_queue_bytes, max_response_bytes, max_pending_turns, session_resume, session_resume_max_age_hours, binary, binary_args, ollama_port, ollama_model, base_url, model, api_key, api_key_env, max_tokens, timeout_ms, unset_env, headers, session_header } = config.brain;
 
   // tab-inject is Claude Code only — it relies on a CC interactive session in a terminal tab.
   if (mode === "tab-inject" && backend === "claude-code") {
@@ -231,82 +326,7 @@ function buildBrain(config: RuntimeConfig, terminal?: TerminalAdapter, hooks: Br
         },
       } : {}),
     });
-    // Optional think lane: "think hard about…" routes the turn to a second,
-    // heavier ACP agent (e.g. a profile on a bigger model).
-    const esc = config.brain.escalate;
-    let front: Brain = primary;
-    if (esc?.binary || esc?.binary_args) {
-      const escalation = new AcpBrain({
-        binary: esc.binary ?? binary ?? "hermes",
-        args: esc.binary_args ?? ["acp"],
-        cwd: process.cwd(),
-        sessionFile: acpSessionFilePath("escalation"),
-        sessionResume: esc.session_resume ?? session_resume,
-        sessionResumeMaxAgeHours: esc.session_resume_max_age_hours ?? session_resume_max_age_hours,
-        mcpServers: resolveAcpMcpServers(esc.mcp_servers),
-        unsetEnv: esc.unset_env ?? unset_env,
-        autoApproveTools: auto_approve_tools ?? false,
-        confirmTools: confirm_tools,
-        confirmRetry: confirm_retry ?? true,
-        maxQueuedBytes: max_queue_bytes,
-        maxResponseBytes: max_response_bytes,
-        maxPendingTurns: max_pending_turns,
-        onConfirmationPending,
-        onNudgeReply: hooks.onNudgeReply,
-      });
-      front = new RoutingBrain(primary, escalation, esc.triggers);
-    }
-    // Optional lane switchboard: named employees ("let me talk to the coder")
-    // wrapping the front desk. Lanes start lazily on first pin.
-    const laneDefs = config.brain.lanes;
-    if (laneDefs && Object.keys(laneDefs).length > 0) {
-      const lanes: Record<string, LaneDef> = {};
-      // codex lanes drive the Codex CLI directly (it has no ACP mode) and
-      // resume the same codex session across turns for continuity.
-      const makeLaneBrain = (d: { backend?: "acp" | "codex"; binary?: string; binary_args?: string[]; unset_env?: string[]; env?: Record<string, string>; mcp_servers?: AcpMcpServerConfig[]; session_resume?: boolean; session_resume_max_age_hours?: number }, laneName: string, tier: number): Brain =>
-        d.backend === "codex"
-          ? new CodexBrain(d.binary ?? "codex", d.binary_args ?? [], d.unset_env ?? [], { resume: true })
-          : new AcpBrain({
-              binary: d.binary ?? binary ?? "hermes",
-              args: d.binary_args ?? ["acp"],
-              cwd: process.cwd(),
-              sessionFile: acpSessionFilePath(`lane:${laneName}:tier:${tier}`),
-              sessionResume: d.session_resume ?? session_resume,
-              sessionResumeMaxAgeHours: d.session_resume_max_age_hours ?? session_resume_max_age_hours,
-              mcpServers: resolveAcpMcpServers(d.mcp_servers),
-              env: d.env,
-              unsetEnv: d.unset_env ?? unset_env,
-              autoApproveTools: auto_approve_tools ?? false,
-              confirmTools: confirm_tools,
-              confirmRetry: confirm_retry ?? true,
-              maxQueuedBytes: max_queue_bytes,
-              maxResponseBytes: max_response_bytes,
-              maxPendingTurns: max_pending_turns,
-              onConfirmationPending,
-              onNudgeReply: hooks.onNudgeReply,
-            });
-      for (const [name, l] of Object.entries(laneDefs)) {
-        const laneBrain: Brain = l.fallbacks?.length
-          ? new FallbackBrain([makeLaneBrain(l, name, 0), ...l.fallbacks.map((fallback, index) => makeLaneBrain(fallback, name, index + 1))], name)
-          : makeLaneBrain(l, name, 0);
-        lanes[name] = {
-          brain: laneBrain,
-          aliases: l.aliases,
-          voice: l.voice,
-          greeting: l.greeting,
-          persona: l.persona,
-        };
-      }
-      // Prefer the opt-in Laya sidecar; otherwise retain the summarizer prompt path.
-      const intentUrl = config.raw.switchboard?.intent_url;
-      return new SwitchboardBrain(front, lanes, intentUrl !== undefined
-        ? layaIntentClassifier(intentUrl) : summarizerClassifier(config.raw.web_voice?.tldr, true), {
-        intentTimeoutMs: config.raw.switchboard?.intent_timeout_ms,
-        intentMinConfidence: config.raw.switchboard?.intent_min_confidence,
-        frontDeskAliases: config.raw.switchboard?.front_desk_aliases,
-      });
-    }
-    return front;
+    return primary;
   }
 
   switch (backend) {
