@@ -1,6 +1,6 @@
 # Setup v2, part 1: wizard, docs and agent-assisted setup
 
-Status: design, not implemented. Date: 2026-09-29. Revision 8 (adds docs and agent-assisted setup), after six rounds of GPT-6 Astra's adversarial review.
+Status: design, not implemented. Date: 2026-09-29. Revision 9 (adds docs and agent-assisted setup), after six rounds of GPT-6 Astra's adversarial review.
 Builds on: `2026-09-24-setup-wizard-design.md` (the current guided setup). This spec covers only what changes; the v1 rules stand unless a section below overrides them.
 Co-designed with GPT-6 Astra: an independent proposal, merged, then reviewed against the code.
 
@@ -190,14 +190,14 @@ The v1 write rules are unchanged: write only when no config exists, and back up 
 
 ### One setup path
 - `docs/setup.md` becomes the only walkthrough, and it follows the v2 wizard step by step.
-- `README.md` shrinks to: the pitch, one diagram, a three-line quickstart (`bun install`, `cicero setup`, open the page), and links. Its copy of the wizard description and its hand-written config go.
+- `README.md` shrinks to: the pitch, one diagram, a short quickstart (`bun install`, `bun link`, `cicero setup`, open the page; without `bun link`, `bun run src/index.ts setup`, as `docs/setup.md:5` already says), and links. Its copy of the wizard description and its hand-written config go.
 - The "copy `config.yaml.example`" conflict is resolved: the wizard writes the config, and the example is labeled "reference: every option".
 - `docs/configuration.md` presents tier presets as legacy defaults that the wizard overrides.
 
 ### Diagrams (text-first)
 All diagrams are Mermaid in markdown, so GitHub, the docs site and AI agents all read the same source. The site gets a Mermaid plugin; which plugin is **verified during implementation** against the site build (`bun run docs:build`). There are three diagrams:
 1. **How a turn flows** (README and `docs/architecture.md`): Hear → Front desk → (optional escalation agent; lanes in part 2) → the helper shortens long replies → Speak.
-2. **What runs where**: each process, its port and what it costs, generated from a real config by the Test step's findings. The docs show the reference layout and its memory bar.
+2. **What runs where**: the configured layout, meaning each engine and agent, its port or command, and its footprint from the fit table, marked "estimate". Where Test measured a value on CUDA, the measured value replaces the estimate and is marked "measured". Anything Test can't see, such as agents it never starts or Mac memory, stays "estimate" or "unknown". The docs show the reference box's layout as an example.
 3. **The wizard**: the eleven steps and what each writes. This replaces `setup-overview.png`, and the screenshot is retaken from the v2 page.
 
 ### Owner-specific material moves back
@@ -223,13 +223,30 @@ An AI agent (Claude Code, Codex or any other) can install Cicero for a user thro
   - apply it;
   - run doctor.
   It must never invent config keys and never copy another user's config.
-- **`cicero setup --plan --json`**: runs the wizard's detection (Machine, Accounts, runtimes, fit rules) and prints the recommended choices and reasons as JSON. It reads only, and credentials are shown only as "found or not found".
-- **`cicero setup --apply <answers.json>`**: validates the answers through the same step parsers (`src/setup/pickers.ts`) and writes through the same write rules (`src/setup/write.ts:207`). An existing config is never overwritten, as in the wizard.
+- **`cicero setup --plan --json --privacy local|cloud [--agent <id>]`**: runs the wizard's detection (Machine, Accounts, runtimes, fit rules) for the given privacy mode and agent. It prints:
+  - `detected`: each step's detection output;
+  - `recommended`: an answers object, ready to apply;
+  - `reasons`: one line per choice.
+
+  It reads only; credentials show only as "found" or "not found". It runs no Test probes; those need running engines.
+- **The answers file** is `{ version: 1, privacy: {…}, steps: { <stepId>: <choice> } }`. Each `<choice>` is exactly the object the setup page posts for that step today, so there is one schema.
+  - Every available step must be present.
+  - Steps that can be skipped take their existing "none" choice.
+  - Preview steps (Channels, Install) are not accepted.
+- **`cicero setup --apply <answers.json>`** never trusts saved detection. It re-runs detection, then parses each step with that fresh context through the same parsers (`src/setup/pickers.ts`). For example, a model that is no longer listed fails with the parser's own message (`src/setup/pickers.ts:155`). It then follows the page's save rules (`src/setup/server.ts:305`):
+  - It runs the same Check.
+  - Blocking failures exit non-zero.
+  - Not-ready components need `--acknowledge-not-ready`.
+  - It writes through `writeDraft` with the v1 write rules (`src/setup/write.ts:207`), so an existing config is never overwritten.
+  - An invalid existing config is backed up only with `--backup-invalid`, mirroring the page's explicit Back up button.
+- **`cicero setup --test --json`** runs Test's headless probes against running engines: Hear WAV, front desk, helper and CUDA memory. It reports Speak playback as "skipped (no browser)".
 - **`cicero doctor --json`**: the same checks as `cicero doctor`, including the privacy warnings, as JSON.
 
 ### Keeping docs true
-- A docs test extends `tests/onboarding-contract.test.ts`. Every YAML block tagged as a Cicero config in `README.md`, `docs/setup.md` and `INSTALL.md` must pass config validation.
-- The README, `docs/setup.md` and `INSTALL.md` must list the same wizard steps as `src/setup/steps.ts`.
+The docs test extends `tests/onboarding-contract.test.ts`:
+- **Configs:** a fenced block opened with ```` ```yaml cicero-config ```` is a complete config and must pass config validation. Fragments use plain ```` ```yaml ```` and are not validated. This applies to `docs/setup.md`, `INSTALL.md` and `config.yaml.example`.
+- **README assertion replaced:** the README no longer carries a config, so its quickstart-YAML assertion (`tests/onboarding-contract.test.ts:17`) is replaced by one checking that the README links `docs/setup.md`. The setup guide and example keep theirs.
+- **Step lists:** `docs/setup.md` and `INSTALL.md` must list the available (non-preview) step titles from `src/setup/steps.ts`, in order. The README lists none.
 
 ## Model fit rules
 
