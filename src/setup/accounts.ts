@@ -1,9 +1,12 @@
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "../backends/llm/openai";
 import { runBoundedCommand } from "../process/bounded-command";
 import type { PickerDeps } from "./pickers";
+import { readBoundedText } from "./read-bounded";
+
+// Presence checks only; a real credential file is a few KB.
+const CREDENTIAL_FILE_LIMIT = 1024 * 1024;
 
 /**
  * Read-only account detection for the Accounts step. It reports only whether a
@@ -43,7 +46,7 @@ function has(env: Record<string, string | undefined>, name: string): boolean {
 
 function readText(deps: PickerDeps, path: string): string | null {
   if (deps.readFile) return deps.readFile(path);
-  try { return readFileSync(path, "utf8"); } catch { return null; }
+  try { return readBoundedText(path, CREDENTIAL_FILE_LIMIT); } catch { return null; }
 }
 
 function without(env: Record<string, string | undefined>, name: string): Record<string, string | undefined> {

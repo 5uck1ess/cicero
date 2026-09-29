@@ -1,8 +1,8 @@
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ciceroHome } from "../platform/paths";
 import { waitForShutdown } from "../process-lifecycle";
 import { startSetupServer } from "../setup/server";
+import { readBoundedText } from "../setup/read-bounded";
 
 export interface SetupCliOptions {
   home?: string; lan?: boolean; port?: string;
@@ -30,9 +30,7 @@ export async function runSetup(options: SetupCliOptions, write: (line: string) =
   if (options.apply !== undefined) {
     let answers: unknown;
     try {
-      const text = readFileSync(options.apply, "utf8");
-      if (text.length > ANSWERS_LIMIT) throw new Error("the answers file is larger than 256 KB");
-      answers = JSON.parse(text);
+      answers = JSON.parse(readBoundedText(options.apply, ANSWERS_LIMIT, "the answers file"));
     } catch (error) { throw new SetupUsageError(`Cannot read ${options.apply}: ${error instanceof Error ? error.message : String(error)}`); }
     const { applySetup } = await import("../setup/headless");
     const result = await applySetup({ home, answers, acknowledgeNotReady: options.acknowledgeNotReady === true, backupInvalid: options.backupInvalid === true });
