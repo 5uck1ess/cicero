@@ -30,9 +30,12 @@ export async function runSetup(options: SetupCliOptions, write: (line: string) =
   }
   if (options.apply !== undefined) {
     let answers: unknown;
-    try {
-      answers = JSON.parse(readBoundedText(options.apply, ANSWERS_LIMIT, "the answers file"));
-    } catch (error) { throw new SetupUsageError(`Cannot read ${options.apply}: ${error instanceof Error ? error.message : String(error)}`); }
+    let text: string;
+    try { text = readBoundedText(options.apply, ANSWERS_LIMIT, "the answers file"); }
+    catch (error) { throw new SetupUsageError(`Cannot read ${options.apply}: ${error instanceof Error ? error.message : String(error)}`); }
+    // The parser's message quotes the file's text, which may hold a key: never echo it.
+    try { answers = JSON.parse(text); }
+    catch { throw new SetupUsageError(`Cannot read ${options.apply}: the answers file is not valid JSON`); }
     const { applySetup } = await import("../setup/headless");
     const result = await applySetup({ home, answers, acknowledgeNotReady: options.acknowledgeNotReady === true, backupInvalid: options.backupInvalid === true });
     if (options.json) write(JSON.stringify(result, null, 2));

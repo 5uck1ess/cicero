@@ -31,6 +31,14 @@ test("setup --apply refuses an oversized answers file before parsing it", () => 
   await expect(runSetup({ apply: path })).rejects.toThrow("larger than 256 KB");
 }));
 
+test("setup --apply never echoes answers-file text from a JSON syntax error", () => withDir(async (dir) => {
+  const path = join(dir, "answers.json");
+  writeFileSync(path, '{"version": 1, "steps": SYNTHETIC_KEY_12345678901234567890}');
+  const error = await runSetup({ apply: path }).then(() => null, (e: unknown) => e as Error);
+  expect(error?.message).toContain("is not valid JSON");
+  expect(error?.message).not.toContain("SYNTHETIC_KEY");
+}));
+
 test.skipIf(process.platform === "win32")("a credential path that is a FIFO reads as not found instead of hanging", () => withDir(async (dir) => {
   const claude = join(dir, ".claude");
   Bun.spawnSync(["mkdir", claude]);

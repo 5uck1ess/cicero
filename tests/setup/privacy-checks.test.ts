@@ -65,4 +65,9 @@ test("cloud ACP adapters are recognized with or without a version pin", () => {
   expect(isCloudAcpCommand("npx", ["@agentclientprotocol/claude-agent-acp"])).toBe(true);
   expect(isCloudAcpCommand("grok", ["agent", "stdio"])).toBe(true);
   expect(isCloudAcpCommand("hermes", ["-p", "coder", "acp"])).toBe(false);
+  // Cloud CLIs with their own ACP mode (docs/brains.md): always cloud, by binary name or path.
+  expect(isCloudAcpCommand("gemini", ["--acp"])).toBe(true);
+  expect(isCloudAcpCommand("/usr/local/bin/gemini", ["--experimental-acp"])).toBe(true);
+  expect(isCloudAcpCommand("qwen", ["--acp"])).toBe(true);
+  expect(isCloudAcpCommand("openclaw", ["acp"])).toBe(false);
 });

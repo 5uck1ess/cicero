@@ -14,18 +14,24 @@ const CLOUD_ADAPTER_PACKAGES: Record<string, string> = {
   "@agentclientprotocol/codex-acp": "codex", "@zed-industries/codex-acp": "codex",
   "@agentclientprotocol/claude-agent-acp": "claude", "@zed-industries/claude-code-acp": "claude",
 };
+// Coding CLIs that speak ACP themselves and always use their vendor's cloud models (docs/brains.md).
+const CLOUD_ACP_CLIS: Record<string, string> = { gemini: "gemini", qwen: "qwen" };
 const unpinned = (spec: string) => spec.replace(/(.)@[^/@]*$/, "$1");
 
-/** The account provider a configured ACP command bills (codex, claude, grok), or null for a local or unknown agent. */
+/** The provider a configured ACP command bills (codex, claude, grok, gemini, qwen), or null for a local or unknown agent. */
 export function acpProviderOf(binary: string | undefined, args: readonly string[] | undefined): string | null {
   if (!binary) return null;
   const argv = args ?? [];
-  if (binary === "grok" || binary.endsWith("/grok")) return argv[0] === "agent" ? "grok" : null;
+  const name = binary.split(/[\\/]/).pop()!.replace(/\.(exe|cmd)$/i, "");
+  if (name === "grok") return argv[0] === "agent" ? "grok" : null;
+  // Cloud CLIs with their own ACP mode: they reach their vendor's models whatever the flags.
+  const cli = CLOUD_ACP_CLIS[name];
+  if (cli) return cli;
   for (const part of [binary, ...argv]) { const provider = CLOUD_ADAPTER_PACKAGES[unpinned(part)]; if (provider) return provider; }
   return null;
 }
 
-/** True when a configured ACP command runs a known cloud adapter (a package adapter, or `grok agent`). */
+/** True when a configured ACP command runs a known cloud adapter (a package adapter, `grok agent`, or a cloud CLI such as gemini). */
 export function isCloudAcpCommand(binary: string | undefined, args: readonly string[] | undefined): boolean {
   return acpProviderOf(binary, args) !== null;
 }
