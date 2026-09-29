@@ -54,6 +54,10 @@ test("plan with --agent in local mode allows that agent; no runtime blocks with 
   expect(plan.recommended.steps.brain).toEqual({ id: "codex-acp", allowCloud: true });
   expect(plan.recommended.privacy).toEqual({ mode: "local", allow: ["agent"] });
   const empty = await planSetup({ privacy: "local", systemDeps, pickerDeps: pickerDeps([]) });
+  const waiting = await planSetup({ privacy: "local", agent: "none", systemDeps, pickerDeps: pickerDeps([]) });
+  const brain = waiting.blocked.find((b) => b.step === "brain")!;
+  expect(brain.reason).toStartWith("Waits for the Front desk step");
+  expect(brain.fix).toEqual(["Fix the frontdesk step first, then run --plan again."]);
   const front = empty.blocked.find((b) => b.step === "frontdesk")!;
   expect(front.reason).toContain("No local model runtime");
   expect(front.fix.join("\n")).toContain("ollama pull gemma4:26b-a4b-it-qat");

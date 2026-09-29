@@ -82,13 +82,17 @@ export async function planSetup(o: PlanOptions): Promise<PlanOutput> {
       rec = { choice: { id: o.agent, ...(needsAllow ? { allowCloud: true } : {}) }, reason: `You chose ${o.agent}.${needsAllow ? " It reaches the cloud, so this adds \"agent\" to privacy.allow." : ""}` };
     }
     reasons[id] = rec.reason;
-    if (rec.choice === null || rec.choice === undefined) { blocked.push({ step: id, reason: rec.reason, fix: fixesFor(id, found) }); continue; }
+    // The Agent step's options depend on the front desk; with that blocked, its error is only a consequence.
+    const block = (reason: string) => id === "brain" && !steps.frontdesk
+      ? blocked.push({ step: id, reason: `Waits for the Front desk step (${reason})`, fix: ["Fix the frontdesk step first, then run --plan again."] })
+      : blocked.push({ step: id, reason, fix: fixesFor(id, found) });
+    if (rec.choice === null || rec.choice === undefined) { block(rec.reason); continue; }
     try {
       const result = await session.choose(id, rec.choice, { deps: o.pickerDeps, detected: found, probe: false });
-      if (!result.accepted) { blocked.push({ step: id, reason: result.probe?.message ?? "Rejected", fix: fixesFor(id, found) }); continue; }
+      if (!result.accepted) { block(result.probe?.message ?? "Rejected"); continue; }
       steps[id] = rec.choice;
     } catch (error) {
-      blocked.push({ step: id, reason: error instanceof Error ? error.message : String(error), fix: fixesFor(id, found) });
+      block(error instanceof Error ? error.message : String(error));
     }
   }
   const privacy = (session.draft.privacy as AnswersFile["privacy"] | undefined) ?? { mode: o.privacy };
