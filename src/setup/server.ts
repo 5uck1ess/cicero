@@ -4,26 +4,27 @@ import { join, posix, win32 } from "node:path";
 import { readRequestJsonLimited, RequestBodyTooLargeError, RequestBodyTimeoutError } from "../http-request-body";
 import { assertWebTlsPolicy, ensureTls, type TlsMaterial } from "../web-voice/tls";
 import { ensurePrivateDirectorySync } from "../platform/secure-storage";
-import { checkDraft, createDraft, renderDraft, type SetupDraft } from "./draft";
+import { checkDraft, renderDraft, type SetupDraft } from "./draft";
 import { classifySetupChecks } from "./checks";
 import { setupPage } from "./page";
 import { SETUP_STEPS } from "./steps";
 import { detectSystem, type SystemDeps, type SystemFacts } from "./system";
 import { probeRemoteProviderModels, type PickerDeps, type ProviderModelList } from "./pickers";
 import { backupInvalidConfig, inspectExistingConfig, writeDraft } from "./write";
+import { DraftChangedError, SetupSession, mergeDraft } from "./session";
 import type { Check, DoctorCheckOptions } from "../cli/doctor";
 import { redactSnapshotSecrets } from "../operational-state";
 import { ciceroHome } from "../platform/paths";
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);
-export function mergeDraft<T extends Record<string, unknown>>(base: T, contribution: Record<string, unknown>): T {
-  const merged: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(contribution)) {
-    const previous = merged[key];
-    merged[key] = value && typeof value === "object" && !Array.isArray(value) && previous && typeof previous === "object" && !Array.isArray(previous)
-      ? mergeDraft(previous as Record<string, unknown>, value as Record<string, unknown>) : value;
-  }
-  return merged as T;
+export { mergeDraft };
+
+/** The short identifier the page shows for a stored choice. */
+function choiceLabel(choice: unknown): string | undefined {
+  if (typeof choice === "string") return choice;
+  if (!choice || typeof choice !== "object") return undefined;
+  const c = choice as { id?: unknown; mode?: unknown; kind?: unknown };
+  return [c.id, c.mode, c.kind].find((value): value is string => typeof value === "string");
 }
 
 function publicDraft(draft: SetupDraft): SetupDraft {
@@ -191,14 +192,11 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
   const token = options.token ?? randomBytes(32).toString("hex");
   if (!/^[a-f0-9]{32,}$/.test(token)) throw new Error("setup token must contain at least 128 random bits in hexadecimal form");
   const system: SystemFacts = await detectSystem(options.systemDeps);
-  let draft: SetupDraft = createDraft(system.recommendedTier);
-  const choices = new Map<string, unknown>();
+  const session = new SetupSession(system, undefined, options.pickerDeps);
   let providerModels: ProviderModelList | null = null;
-  let draftRevision = 0;
-  let current = "system";
-  let detected: unknown = await SETUP_STEPS[0]!.detect({ system, draft }, options.systemDeps);
-  let checks: Check[] | null = null;
-  let checksRevision: number | null = null;
+  let current = SETUP_STEPS[0]!.id;
+  let detected: unknown = await session.detect(current, options.pickerDeps);
+  let invalidated: { id: string; reason: string }[] = [];
   let written = false;
   let finished = false;
   let stopped = false;
@@ -208,14 +206,17 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
   const handoff = setupHandoff(home, options.defaultHome, options.platform, options.cliAvailable);
 
   const view = () => {
-    const safeChecks = checks === null || checksRevision !== draftRevision ? null : publicChecks(checks, draft);
+    const draft = session.draft;
+    const choices = session.choices;
+    const current_checks = session.currentChecks();
+    const safeChecks = current_checks === null ? null : publicChecks(current_checks, draft);
     const checkGroups = safeChecks === null ? null : classifySetupChecks(safeChecks);
     const existing = inspectExistingConfig(home);
     // Only free text and remote-derived values can echo a secret; structural fields stay exact.
-    const free = redactStateValue({ detected, providerModels, checks: safeChecks, checkGroups, existing }, draftSecrets(draft)) as Record<string, unknown>;
+    const free = redactStateValue({ detected, providerModels, checks: safeChecks, checkGroups, existing, invalidated }, draftSecrets(draft)) as Record<string, unknown>;
     return {
       steps: SETUP_STEPS.map(({ id, title, explain, pipeline, available }) => ({ id, title, explain, pipeline, available })),
-      current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, typeof choice === "string" ? choice : (choice as { id?: string }).id])), storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
+      current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, choiceLabel(choice)])), privacyAllow: (choices.get("privacy") as { allow?: string[] } | undefined)?.allow ?? [], storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
       written, finished, startCommand: handoff.startCommand, handoff,
       canWrite: !written && checkGroups !== null && checkGroups.blocking.length === 0 && existing.status === "missing",
       requiresNotReadyAcknowledgement: (checkGroups?.notReady.length ?? 0) > 0,
@@ -241,74 +242,43 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
         if (!body || typeof body !== "object" || Array.isArray(body)) return json({ error: "Expected JSON object" }, 400);
         const data = body as Record<string, unknown>;
         if (url.pathname === "/api/provider-models") {
-          const prior = choices.get("provider") as { id?: string; apiKey?: string } | undefined;
+          const prior = session.choices.get("frontdesk") as { preset?: string; apiKey?: string } | undefined;
           const raw = data.choice && typeof data.choice === "object" && !Array.isArray(data.choice) ? data.choice as Record<string, unknown> : null;
-          const savedKey = prior && raw && raw.id === prior.id && !raw.apiKey ? prior.apiKey : undefined;
+          const savedKey = prior && raw && raw.id === prior.preset && !raw.apiKey ? prior.apiKey : undefined;
           providerModels = await probeRemoteProviderModels(savedKey && raw ? { ...raw, apiKey: savedKey } : data.choice, options.pickerDeps);
           return json({ models: providerModels.models });
         } else if (url.pathname === "/api/step") {
           const step = SETUP_STEPS.find((item) => item.id === data.id);
           if (!step) return json({ error: "Unknown step" }, 400);
-          detected = await step.detect({ system, draft }, options.pickerDeps);
+          detected = await session.detect(step.id, options.pickerDeps);
           current = step.id;
+          invalidated = [];
         } else if (url.pathname === "/api/choice") {
           if (written) return json({ error: "Config already written" }, 409);
-          const step = SETUP_STEPS.find((item) => item.id === data.id && item.available && !["check", "write", "handoff"].includes(item.id));
-          if (!step) return json({ error: "Unknown setup choice" }, 400);
-          const prior = choices.get(step.id);
-          let rawChoice = data.choice;
-          if (rawChoice && typeof rawChoice === "object" && !Array.isArray(rawChoice)
-            && prior && typeof prior === "object"
-            && (rawChoice as { id?: string }).id === (prior as { id?: string }).id) {
-            if (!(rawChoice as { companyId?: unknown }).companyId && typeof (prior as { companyId?: unknown }).companyId === "string")
-              rawChoice = { ...(rawChoice as Record<string, unknown>), companyId: (prior as { companyId: string }).companyId };
-            const priorKey = (prior as Record<string, unknown>).apiKey ?? (prior as Record<string, unknown>).api_key;
-            if (!(rawChoice as { apiKey?: unknown }).apiKey && typeof priorKey === "string") rawChoice = { ...(rawChoice as Record<string, unknown>), apiKey: priorKey };
-          }
-          const parsed = step.parseChoice(rawChoice, { system, draft, ...(current === step.id ? { detected } : {}) }, { ...options.pickerDeps, allowedModels: providerModels });
-          if (parsed && typeof parsed === "object" && prior && typeof prior === "object"
-            && (parsed as { id?: string }).id === (prior as { id?: string }).id) {
-            for (const key of ["apiKey", "api_key"] as const) {
-              if (!(parsed as Record<string, unknown>)[key] && (prior as Record<string, unknown>)[key])
-                (parsed as Record<string, unknown>)[key] = (prior as Record<string, unknown>)[key];
-            }
-          }
-          let probe: { ok: boolean; message: string } | undefined;
-          if (step.probeChoice) {
-            probe = await step.probeChoice(parsed, options.pickerDeps);
-            detected = { ...(detected && typeof detected === "object" ? detected : {}), probe };
-          }
-          if (probe?.ok === false) return json(view());
-          choices.set(step.id, parsed);
-          draft = createDraft((choices.get("system") as SetupDraft["deployment"] | undefined) ?? system.recommendedTier, draft.web_voice.token);
-          for (const item of SETUP_STEPS) {
-            if (!choices.has(item.id)) continue;
-            draft = mergeDraft(draft, item.contribute({ system, draft }, choices.get(item.id))) as SetupDraft;
-          }
-          draftRevision += 1;
-          checks = null;
-          checksRevision = null;
+          const id = typeof data.id === "string" ? data.id : "";
+          const result = await session.choose(id, data.choice, {
+            deps: { ...options.pickerDeps, allowedModels: providerModels },
+            ...(current === id ? { detected } : {}),
+            probe: true,
+          });
+          if (result.probe) detected = { ...(detected && typeof detected === "object" ? detected : {}), probe: result.probe };
+          if (!result.accepted) return json(view());
+          invalidated = result.invalidated;
         } else if (url.pathname === "/api/check") {
-          const revision = draftRevision;
-          const checkedDraft = draft;
-          checks = null;
-          checksRevision = null;
-          const result = await (options.check ?? checkDraft)(checkedDraft, options.doctorOptions);
-          if (revision !== draftRevision) return json({ error: "Draft changed during Check. Run Check again" }, 409);
-          checks = result;
-          checksRevision = revision;
+          try {
+            await session.check(options.check ?? checkDraft, options.doctorOptions);
+          } catch (error) {
+            if (error instanceof DraftChangedError) return json({ error: error.message }, 409);
+            throw error;
+          }
           current = "check";
         } else if (url.pathname === "/api/backup") {
           backupInvalidConfig(home, options.now);
           current = "write";
         } else if (url.pathname === "/api/write") {
-          if (checks === null || checksRevision !== draftRevision) return json({ error: "Run Check again before writing" }, 409);
-          const groups = classifySetupChecks(checks);
-          if (groups.blocking.length > 0) return json({ error: "Resolve config validity failures before writing" }, 409);
-          if (groups.notReady.length > 0 && data.acknowledgeNotReady !== true) {
-            return json({ error: "Acknowledge that runtime components are not ready yet before writing" }, 409);
-          }
-          writeDraft(home, draft);
+          const gate = session.writeGate(data.acknowledgeNotReady === true);
+          if (!gate.ok) return json({ error: gate.error }, 409);
+          writeDraft(home, session.draft);
           written = true;
           current = "handoff";
         } else if (url.pathname === "/api/handoff") {
@@ -325,7 +295,7 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
         return json(view());
       } catch (error) {
         const status = error instanceof RequestBodyTooLargeError ? 413 : error instanceof RequestBodyTimeoutError ? 408 : 400;
-        return json({ error: redactStateValue(redactSnapshotSecrets(error instanceof Error ? error.message : "Setup request failed"), draftSecrets(draft)) }, status);
+        return json({ error: redactStateValue(redactSnapshotSecrets(error instanceof Error ? error.message : "Setup request failed"), draftSecrets(session.draft)) }, status);
       }
     },
   });

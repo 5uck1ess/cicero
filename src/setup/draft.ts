@@ -21,6 +21,9 @@ export function createDraft(tier: Tier, token = randomBytes(32).toString("hex"))
 }
 
 const EXPLANATIONS: Record<string, string> = {
+  privacy: "What may leave this machine. A declared policy the wizard and cicero doctor enforce, not a firewall.",
+  "privacy.mode": "local: nothing leaves unless allowed below. cloud: the front desk and agents may use cloud services.",
+  "privacy.allow": "Single items allowed to leave: agent (a cloud coding agent), telegram (message text), board (task text).",
   deployment: "Starting preset for the local speech and language engines.",
   headless: "Uses the browser microphone and speaker instead of local audio devices.",
   brain: "Configures the coding agent Cicero will voice.",

@@ -193,12 +193,11 @@ var state = null;
 var view = 'overview';
 var app = document.getElementById('app');
 
-var ORDER = ['system', 'stt', 'provider', 'router', 'brain', 'tts', 'board', 'review'];
+var ORDER = ['privacy', 'system', 'stt', 'tts', 'brain', 'board', 'review'];
 var STEP = {
+  privacy:  { short: 'Privacy', title: 'What may leave this machine?', lede: 'Choose what Cicero may send off this machine. Later steps ask before anything else leaves.', sub: 'Data policy' },
   system:   { short: 'Machine', title: 'This machine', lede: 'Cicero picks a starting preset from your hardware. You can change it.', sub: 'Runs everything' },
   stt:      { short: 'Hear',    title: 'How should Cicero hear you?', lede: 'Speech-to-text turns your voice into words.', sub: 'Speech-to-text' },
-  provider: { short: 'Think',   title: 'Which model handles conversation?', lede: 'A language model answers everyday talk quickly. Coding work goes to the agent.', sub: 'Language model' },
-  router:   { short: 'Route',   title: 'How should Cicero route requests?', lede: 'Use the LLM prompt, or a local Laya sidecar with your fine-tuned switchboard checkpoint.', sub: 'Intent router' },
   brain:    { short: 'Agent',   title: 'Which coding agent does the work?', lede: 'Cicero is the voice. Your agent reads code, runs tools and opens PRs.', sub: 'Coding agent' },
   tts:      { short: 'Speak',   title: 'How should Cicero speak?', lede: 'Text-to-speech turns replies into audio.', sub: 'Text-to-speech' },
   board:    { short: 'Tasks',   title: 'Where do your tasks live?', lede: 'Optional. Cicero can announce when tasks on your board finish or get stuck.', sub: 'Optional board' },
@@ -275,7 +274,6 @@ function cmd(text) {
   return h('div', { class: 'cmd' }, [h('code', { text: text }), copy]);
 }
 function isDone(id) {
-  if (id === 'system') return !!(state.selectedChoices && state.selectedChoices.system);
   if (id === 'review') return !!state.written;
   return !!(state.selectedChoices && state.selectedChoices[id]);
 }
@@ -283,7 +281,6 @@ function valueFor(id) {
   if (id === 'system') return NAMES[state.tier] || state.tier;
   if (id === 'review') return state.written ? 'Saved' : 'Not saved yet';
   var c = state.selectedChoices && state.selectedChoices[id];
-  if (id === 'router' && c) return c === 'laya' ? 'Laya sidecar' : 'LLM prompt';
   return c ? optionName(id, c) : 'Choose';
 }
 function gib(n) { return n == null ? 'unknown' : (n / 1073741824).toFixed(0) + ' GB'; }
@@ -305,20 +302,21 @@ async function goInner(id) {
 // A choice whose probe failed was not added to the draft: keep the operator on that step.
 function blockedByProbe(s) { var p = s && s.detected && s.detected.probe; return p && p.ok === false ? (p.message || 'The check failed.') : null; }
 var tried = {};
-var routerUrl = '';
 function next(id) { var i = ORDER.indexOf(id); return ORDER[Math.min(i + 1, ORDER.length - 1)]; }
 
 /* ---------- Overview diagram ---------- */
 function diagram(layout) {
   var wide = layout === 'wide';
-  var W = wide ? 1140 : 360, H = wide ? 420 : 952;
   var nw = wide ? 180 : 250, nh = 92;
-  var pos = wide ? {
-    stt: [150, 20], provider: [410, 20], router: [670, 20], brain: [910, 20],
-    tts: [280, 190], board: [910, 190], system: [150, 324], review: [910, 324]
-  } : {
-    system: [55, 0], stt: [55, 120], provider: [55, 240], router: [55, 360], brain: [55, 480], board: [55, 600], tts: [55, 720], review: [55, 860]
-  };
+  // Every step has a fixed seat; only steps in ORDER are drawn.
+  var seats = wide ? {
+    privacy: [150, 20], system: [410, 20], accounts: [670, 20], review: [910, 20],
+    stt: [150, 170], frontdesk: [410, 170], helper: [670, 170], tts: [910, 170],
+    brain: [410, 320], board: [670, 320], test: [910, 320]
+  } : null;
+  var pos = {};
+  ORDER.forEach(function (id, i) { pos[id] = wide ? seats[id] : [55, i * 120]; });
+  var W = wide ? 1140 : 360, H = wide ? 420 : ORDER.length * 120 - 28;
   var root = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'group', 'aria-label': 'Cicero voice loop. Choose a part to set it up.', class: wide ? 'wide' : 'tall' });
   function mid(id, side) {
     var p = pos[id], x = p[0], y = p[1], w = nw;
@@ -329,25 +327,23 @@ function diagram(layout) {
     root.append(svg('path', { d: 'M' + a[0] + ' ' + a[1] + ' L' + b[0] + ' ' + b[1], class: 'edge' + (soft ? ' soft' : ''), 'marker-end': 'url(#arrow-' + layout + ')' }));
     if (label) root.append(svg('text', { x: lx, y: ly, class: 'edge-label', 'text-anchor': 'middle', text: label }));
   }
+  function link(a, b, sa, sb, soft, label) {
+    if (!pos[a] || !pos[b]) return;
+    var p = mid(a, sa), q = mid(b, sb);
+    edge(p, q, soft, label, (p[0] + q[0]) / 2, (p[1] + q[1]) / 2 - 8);
+  }
   root.append(svg('defs', {}, [svg('marker', { id: 'arrow-' + layout, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, [svg('path', { d: 'M0 0 L10 5 L0 10 z', fill: 'var(--muted)' })])]));
   if (wide) {
-    root.append(svg('circle', { cx: 56, cy: 66, r: 34, class: 'person' }));
-    root.append(svg('text', { x: 56, y: 71, 'text-anchor': 'middle', class: 'person-label', text: 'You' }));
-    edge([90, 66], mid('stt', 'l'), false, 'talk', 120, 56);
-    edge(mid('stt', 'r'), mid('provider', 'l'), false, 'words', 370, 56);
-    edge(mid('provider', 'r'), mid('router', 'l'), false, 'route', 630, 56);
-    edge(mid('router', 'r'), mid('brain', 'l'), false, 'code', 880, 56);
-    edge([480, 112], [400, 190], false, 'reply', 462, 158);
-    edge(mid('brain', 'b'), mid('board', 't'), true, 'tasks', 1030, 156);
-    edge(mid('tts', 'l'), [72, 96], false, 'hear it', 150, 170);
+    root.append(svg('circle', { cx: 56, cy: 216, r: 34, class: 'person' }));
+    root.append(svg('text', { x: 56, y: 221, 'text-anchor': 'middle', class: 'person-label', text: 'You' }));
+    if (pos.stt) edge([90, 216], mid('stt', 'l'), false, 'talk', 120, 206);
+    link('privacy', 'system', 'r', 'l', true); link('system', 'accounts', 'r', 'l', true);
+    link('stt', 'frontdesk', 'r', 'l', false, 'words'); link('frontdesk', 'helper', 'r', 'l', false, 'reply');
+    link('helper', 'tts', 'r', 'l', false, 'shorter'); link('frontdesk', 'brain', 'b', 't', true, 'think hard');
+    link('brain', 'board', 'r', 'l', true, 'tasks'); link('board', 'test', 'r', 'l', true);
+    if (!pos.frontdesk) link('stt', 'tts', 'r', 'l', false, 'reply');
   } else {
-    edge(mid('system', 'b'), mid('stt', 't'), true);
-    edge(mid('stt', 'b'), mid('provider', 't'), false);
-    edge(mid('provider', 'b'), mid('router', 't'), false);
-    edge(mid('router', 'b'), mid('brain', 't'), false);
-    edge(mid('brain', 'b'), mid('board', 't'), true);
-    edge(mid('board', 'b'), mid('tts', 't'), false);
-    edge(mid('tts', 'b'), mid('review', 't'), true);
+    for (var i = 1; i < ORDER.length; i++) link(ORDER[i - 1], ORDER[i], 'b', 't', true);
   }
   Object.keys(pos).forEach(function (id) {
     var p = pos[id], w = nw, done = isDone(id);
@@ -369,7 +365,7 @@ function renderOverview() {
     h('h1', { text: 'Set up your voice loop' }),
     h('p', { class: 'lede', text: 'Click any part to set it up. Nothing is written until you save.' }),
     h('div', { class: 'diagram' }, [diagram('wide'), diagram('tall')]),
-    h('div', { class: 'cta-row' }, [button(isDone('system') ? 'Continue setup' : 'Start with this machine', 'primary', function () { return go(firstOpen); })])
+    h('div', { class: 'cta-row' }, [button(isDone(ORDER[0]) ? 'Continue setup' : 'Start setup', 'primary', function () { return go(firstOpen); })])
   );
 }
 
@@ -433,6 +429,43 @@ function renderSystem(step) {
   app.append(row);
 }
 
+function renderPrivacy(step) {
+  var f = state.detected || {};
+  var saved = state.selectedChoices && state.selectedChoices.privacy;
+  var picked = saved || f.recommended || 'local';
+  var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: 'What may leave this machine?' })]);
+  (f.options || ['local', 'cloud']).forEach(function (m) {
+    var input = h('input', { type: 'radio', name: 'privacy', value: m });
+    input.checked = m === picked;
+    input.onchange = function () { picked = m; };
+    var mode = (f.modes || {})[m] || { title: m, detail: '' };
+    group.append(h('label', { class: 'choice' }, [input, h('span', { class: 'name', text: mode.title }), h('span', { class: 'note', text: mode.detail }), m === f.recommended ? h('span', { class: 'badge', text: 'Recommended' }) : null]));
+  });
+  var copy = f.copy || {};
+  var list = h('ul', { class: 'rows' });
+  Object.keys(copy).forEach(function (k) { list.append(h('li', {}, [h('p', { class: 'detail', text: copy[k] })])); });
+  var telegram = h('input', { type: 'checkbox' });
+  telegram.checked = !!(state.privacyAllow && state.privacyAllow.indexOf('telegram') >= 0);
+  app.append(group,
+    h('h2', { class: 'section-h2', text: 'What each allowance sends' }), list,
+    h('label', { class: 'check-inline' }, [telegram, document.createTextNode('Allow Telegram to carry message text (only matters if you add Telegram later)')]),
+    h('p', { class: 'detail', text: 'This is a declared policy, not a firewall. Cicero and cicero doctor enforce it; doctor cannot see what a CLI agent does on the network.' }),
+    why(step));
+  var row = h('div', { class: 'actions' });
+  row.append(button('Continue', 'primary', async function () {
+    state = await api('/api/choice', { id: 'privacy', choice: { mode: picked, allow: telegram.checked ? ['telegram'] : [] } });
+    await go(next('privacy'));
+  }, row));
+  app.append(row);
+}
+function invalidatedBanner() {
+  var list = state.invalidated || [];
+  if (!list.length) return null;
+  var panel = h('div', { class: 'panel warn', role: 'status' }, [h('h2', { text: 'Some earlier choices were cleared' })]);
+  list.forEach(function (i) { panel.append(h('p', { text: (STEP[i.id] ? STEP[i.id].short : i.id) + ': ' + i.reason })); });
+  return panel;
+}
+
 function renderPicker(id, step) {
   var f = state.detected || {};
   var options, extra = null;
@@ -486,11 +519,6 @@ function renderPicker(id, step) {
       box.append(field(id === 'provider' ? 'Provider' : 'Model API', sel));
     }
     var rt = f.runtimes && f.runtimes[o];
-    if (id === 'router' && o === 'laya') {
-      fields.url = textInput(routerUrl || f.defaultUrl, 'url');
-      fields.url.oninput = function () { routerUrl = this.value; };
-      box.append(field('Laya sidecar URL', fields.url));
-    }
     if (id === 'provider' && o === 'llama-cpp') fields.model = textInput(f.defaultModel), box.append(field('Model (GGUF file path or Hugging Face repo)', fields.model));
     if (id === 'provider' && (o === 'ollama' || o === 'lm-studio') && rt && rt.models.length) fields.model = selectOf(rt.models), box.append(field('Model', fields.model));
     var remote = id === 'provider' && ['llama-cpp', 'ollama', 'lm-studio', 'mlx-lm'].indexOf(o) < 0;
@@ -522,7 +550,7 @@ function renderPicker(id, step) {
     var s = stateLabel(o, f);
     var speechStatus = f.status && f.status[o];
     var guide = o === 'audiocpp' && speechStatus && speechStatus.installed ? null : GUIDES[o];
-    if ((s && !s[1] && o !== 'none') || o === 'laya') {
+    if (s && !s[1] && o !== 'none') {
       var panel = h('div', { class: 'panel warn' }, [h('h2', { text: optionName(id, o) + ': ' + (s ? s[0] : 'Checkpoint required') })]);
       if (guide) {
         var list = h('ol');
@@ -660,7 +688,9 @@ function render() {
   var step = state.steps.find(function (s) { return s.id === serverId; });
   app.append(chain(view));
   if (!(view === 'review' && state.written)) app.append(h('h1', { text: STEP[view].title }), h('p', { class: 'lede', text: STEP[view].lede }));
-  if (view === 'system') renderSystem(step);
+  var banner = invalidatedBanner(); if (banner) app.append(banner);
+  if (view === 'privacy') renderPrivacy(step);
+  else if (view === 'system') renderSystem(step);
   else if (view === 'review') renderReview(step);
   else renderPicker(view, step);
 }

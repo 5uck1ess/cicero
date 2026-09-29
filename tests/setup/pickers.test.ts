@@ -8,18 +8,13 @@ import type { BoundedCommandResult } from "../../src/process/bounded-command";
 import { createDraft, renderDraft } from "../../src/setup/draft";
 import { mergeDraft, startSetupServer } from "../../src/setup/server";
 import { SETUP_STEPS, type StepContext } from "../../src/setup/steps";
-import { LAYA_LANES_REQUIRED, detectProvider, detectBrain, detectBoard, detectSpeech, parseProvider, parseBrain, parseBoard, parseSpeech, contributeBoard, contributeSpeech, probeBoard, probeRemoteProviderModels } from "../../src/setup/pickers";
+import { detectProvider, detectBrain, detectBoard, detectSpeech, parseProvider, parseBrain, parseBoard, parseSpeech, contributeBoard, contributeSpeech, probeBoard, probeRemoteProviderModels } from "../../src/setup/pickers";
 import { audioCppLocalRuntimePaths } from "../../src/backends/tts/audiocpp";
 import { audioCppModelPath } from "../../src/setup/audiocpp";
 import type { SystemFacts } from "../../src/setup/system";
 
 const facts = (platform = "linux", gpu = false): SystemFacts => ({ platform, arch: platform === "darwin" ? "arm64" : "x64", release: platform === "darwin" ? "23.0.0" : "6.8", appleSilicon: platform === "darwin", mlxSupported: platform === "darwin", ramTotalBytes: 32e9, ramFreeBytes: 16e9, disks: { checkout: { path: "/repo", freeBytes: 1e9 }, huggingface: { path: "/hf", freeBytes: 1e9 } }, gpu: gpu ? { status: "ok", name: "NVIDIA", freeMiB: 16000, totalMiB: 24000, doctorDetail: "NVIDIA" } : { status: "absent" }, recommendedTier: platform === "darwin" ? "local-mlx" : gpu ? "local-cuda" : "local-cpu", reason: "fixture" });
 const ctx = (platform = "linux", gpu = false): StepContext => ({ system: facts(platform, gpu), draft: createDraft(platform === "darwin" ? "local-mlx" : gpu ? "local-cuda" : "local-cpu", "x".repeat(64)) });
-const officeCtx = (): StepContext => {
-  const c = ctx();
-  c.draft.brain.lanes = { coder: { backend: "claude-code" } };
-  return c;
-};
 const command = (stdout: string, exitCode = 0): BoundedCommandResult => { const out = { text: stdout, receivedBytes: stdout.length, capturedBytes: stdout.length, limitBytes: 262144, truncated: false }; return { command: [], exitCode, durationMs: 1, stdout: out, stderr: { ...out, text: "" }, combined: { receivedBytes: stdout.length, capturedBytes: stdout.length, limitBytes: 266240, truncated: false } }; };
 const pick = (id: string) => SETUP_STEPS.find((s) => s.id === id)!;
 
@@ -145,8 +140,8 @@ test("audio.cpp installed, model, and loaded status drive CUDA recommendations",
 
 test("all picker contributions preserve defaults and round-trip through loadConfig", () => {
   const c = ctx(); let draft = c.draft;
-  const choices: Record<string, unknown> = { provider: { id: "ollama", model: "qwen3.5:0.8b" }, brain: { id: "codex" }, board: { id: "hermes" }, stt: { id: "faster-whisper" }, tts: { id: "kokoro" } };
-  for (const id of ["provider", "brain", "board", "stt", "tts"]) { const step = pick(id); const choice = step.parseChoice(choices[id], { ...c, draft }, { env: {} }); draft = mergeDraft(draft, step.contribute({ ...c, draft }, choice)); }
+  const choices: Record<string, unknown> = { brain: { id: "codex" }, board: { id: "hermes" }, stt: { id: "faster-whisper" }, tts: { id: "kokoro" } };
+  for (const id of ["brain", "board", "stt", "tts"]) { const step = pick(id); const choice = step.parseChoice(choices[id], { ...c, draft }, { env: {} }); draft = mergeDraft(draft, step.contribute({ ...c, draft }, choice)); }
   expect(draft.brain.mode).toBe("subprocess");
   const home = mkdtempSync(join(tmpdir(), "cicero-pickers-"));
   try { writeFileSync(join(home, "config.yaml"), renderDraft(draft)); const loaded = loadConfig({}, { home }); expect(loaded.brain.backend).toBe("codex"); expect(loaded.llmBackend.backend).toBe("ollama"); expect(loaded.notify.kanban?.preset).toBe("hermes"); }
@@ -162,14 +157,13 @@ test("API state masks stored API keys", async () => {
     const send = (path: string, body?: object) => handler(new Request(`http://127.0.0.1:9999${path}`, { method: body ? "POST" : "GET", headers: { host: "127.0.0.1:9999", "x-cicero-setup-token": server.token, ...(body ? { "x-cicero-setup-csrf": "1" } : {}) }, body: body ? JSON.stringify(body) : undefined }));
     const listed = await (await send("/api/provider-models", { choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", apiKey: "synthetic-super-secret" } })).json() as { models: string[] };
     expect(listed.models).toEqual(["m", "m2"]);
-    expect((await send("/api/choice", { id: "provider", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "unlisted", apiKey: "synthetic-super-secret" } })).status).toBe(400);
-    const response = await send("/api/choice", { id: "provider", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "synthetic-super-secret" } });
+    const response = await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "synthetic-super-secret" } });
     expect(response.status).toBe(200);
     expect(await response.text()).not.toContain("synthetic-super-secret");
     expect(await (await send("/api/state")).text()).not.toContain("synthetic-super-secret");
-    const retained = await (await send("/api/choice", { id: "provider", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m2", apiKey: "" } })).json() as { storedSecrets: { provider: boolean }; yaml: string };
-    expect(retained.storedSecrets.provider).toBe(true);
-    expect(retained.yaml).toContain("apiKey: set");
+    const retained = await (await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m2", apiKey: "" } })).json() as { storedSecrets: { brain: boolean }; yaml: string };
+    expect(retained.storedSecrets.brain).toBe(true);
+    expect(retained.yaml).toContain("api_key: set");
     expect(await (await send("/api/check", {})).text()).not.toContain("synthetic-super-secret");
     await send("/api/step", { id: "brain" });
     const shortKey = await (await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "check" } })).json() as { steps: { id: string }[]; selectedChoices: Record<string, string>; yaml: string };
@@ -181,119 +175,5 @@ test("API state masks stored API keys", async () => {
     const failedProbe = await (await send("/api/choice", { id: "board", choice: { id: "hermes" } })).json() as { detected: { probe: { ok: boolean } }; yaml: string };
     expect(failedProbe.detected.probe.ok).toBe(false);
     expect(failedProbe.yaml).not.toContain("kanban:");
-  } finally { await server.stop(); rmSync(home, { recursive: true, force: true }); }
-});
-
-test("router rejects Laya without office lanes and leaves the LLM default available", async () => {
-  const step = pick("router");
-  for (const lanes of [undefined, {}, []]) {
-    const c = ctx();
-    c.draft.brain.lanes = lanes;
-    expect(await step.detect(c)).toMatchObject({
-      options: ["llm"], recommended: "llm", disabled: { laya: LAYA_LANES_REQUIRED },
-    });
-    expect(() => step.parseChoice({ id: "laya" }, c)).toThrow(LAYA_LANES_REQUIRED);
-    expect(step.contribute(c, step.parseChoice({ id: "llm" }, c))).toEqual({});
-  }
-});
-
-test("router step defaults to the LLM prompt and contributes only an opt-in Laya URL", async () => {
-  const step = pick("router"); const c = officeCtx();
-  expect(SETUP_STEPS[SETUP_STEPS.findIndex((s) => s.id === "provider") + 1]).toBe(step);
-  expect(step).toMatchObject({ title: "Intent router", pipeline: "brain", available: true });
-  expect(await step.detect(c)).toMatchObject({ options: ["llm", "laya"], disabled: {}, recommended: "llm", defaultUrl: "http://127.0.0.1:8096" });
-  const llm = step.parseChoice({ id: "llm" }, c);
-  expect(step.contribute(c, llm)).toEqual({});
-  const laya = step.parseChoice({ id: "laya" }, c);
-  expect(step.contribute(c, laya)).toEqual({ switchboard: { intent_url: "http://127.0.0.1:8096" } });
-  expect(step.contribute(c, step.parseChoice({ id: "laya", url: "https://example.test/router/" }, c)))
-    .toEqual({ switchboard: { intent_url: "https://example.test/router" } });
-  for (const raw of [{ id: "unknown" }, { id: "laya", url: "" }, { id: "laya", url: 42 },
-    ...["file:///tmp/router", "http://example.test/?", "http://example.test/#", "http://example.test/?token=synthetic-secret", "http://user:synthetic-secret@example.test"].map((url) => ({ id: "laya", url }))]) {
-    expect(() => step.parseChoice(raw, c)).toThrow();
-  }
-  const explain = Object.values(step.explain).join(" ");
-  for (const text of ["does not route zero-shot", "fine-tuned switchboard checkpoint", "bring-your-own", "synthetic data only", "fine-tuning recipe", "planned follow-up", "sidecars/laya-switchboard/README.md"]) expect(explain).toContain(text);
-});
-
-test("router probes only Laya health with GET and reports the device", async () => {
-  const step = pick("router"); const c = officeCtx();
-  const seen: string[] = []; let signal: AbortSignal | undefined;
-  const deps = { fetcher: (async (input: RequestInfo | URL, init?: RequestInit) => {
-    seen.push(String(input)); expect(init?.method).toBe("GET"); signal = init?.signal ?? undefined;
-    return Response.json({ ok: true, device: "cuda" });
-  }) as typeof fetch };
-  expect(await step.probeChoice!(step.parseChoice({ id: "llm" }, c), deps)).toMatchObject({ ok: true });
-  expect(seen).toEqual([]);
-  expect(await step.probeChoice!(step.parseChoice({ id: "laya", url: "http://example.test/router/" }, c), deps))
-    .toEqual({ ok: true, message: "Laya sidecar ready on cuda" });
-  expect(seen).toEqual(["http://example.test/router/health"]);
-  expect(signal?.aborted).toBe(true);
-});
-
-test("router health fails closed for not-ready, malformed, oversized and unreachable responses", async () => {
-  const step = pick("router"); const choice = step.parseChoice({ id: "laya" }, officeCtx());
-  const replies = [() => Response.json({ ok: false, device: "cpu" }), () => Response.json({ ok: "true" }),
-    () => Response.json(null), () => Response.json({}), () => new Response("bad json"),
-    () => new Response("unavailable", { status: 503 }), () => new Response("x".repeat(8193)),
-    () => { throw new Error("synthetic-private-provider-error"); }];
-  for (const reply of replies) {
-    const result = await step.probeChoice!(choice, { fetcher: (async () => reply()) as typeof fetch });
-    expect(result.ok).toBe(false);
-    expect(result.message).toContain("sidecar is not reachable");
-    expect(result.message).toContain("sidecars/laya-switchboard/README.md");
-    expect(result.message).not.toContain("synthetic-private");
-  }
-});
-
-test("router health deadline cancels a stalled body", async () => {
-  const step = pick("router"); let cancelled = false; let signal: AbortSignal | undefined;
-  const result = await step.probeChoice!(step.parseChoice({ id: "laya" }, officeCtx()), {
-    fetcher: (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      signal = init?.signal ?? undefined;
-      return new Response(new ReadableStream({ cancel() { cancelled = true; } }));
-    }) as typeof fetch,
-  });
-  expect(result.ok).toBe(false);
-  expect(signal?.aborted).toBe(true);
-  expect(cancelled).toBe(true);
-});
-
-test("router health deadline also bounds an unresponsive fetcher", async () => {
-  const step = pick("router"); let signal: AbortSignal | undefined;
-  const result = await step.probeChoice!(step.parseChoice({ id: "laya" }, officeCtx()), {
-    fetcher: ((_input: RequestInfo | URL, init?: RequestInit) => {
-      signal = init?.signal ?? undefined;
-      return new Promise<Response>(() => {});
-    }) as typeof fetch,
-  });
-  expect(result.ok).toBe(false);
-  expect(signal?.aborted).toBe(true);
-});
-
-test("setup API rejects Laya on a fresh draft before probing and accepts LLM", async () => {
-  let handler: (req: Request) => Response | Promise<Response> = () => new Response();
-  const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop() {} }; }) as unknown as typeof Bun.serve;
-  const home = mkdtempSync(join(tmpdir(), "cicero-router-setup-"));
-  let probes = 0;
-  const server = await startSetupServer({ home, serve, output: () => {},
-    systemDeps: { platform: () => "linux", arch: () => "x64", release: () => "6.8", which: () => null, exists: () => true, statfs: () => ({ bavail: 1, bsize: 1 }) as ReturnType<typeof import("node:fs")["statfsSync"]> },
-    pickerDeps: { fetcher: (async () => { probes++; return Response.json({ ok: true, device: "cpu" }); }) as typeof fetch },
-  });
-  try {
-    const send = async (path: string, body: object, status = 200) => {
-      const response = await handler(new Request(`http://127.0.0.1:9999${path}`, { method: "POST", headers: {
-        host: "127.0.0.1:9999", "x-cicero-setup-token": server.token, "x-cicero-setup-csrf": "1",
-      }, body: JSON.stringify(body) }));
-      expect(response.status).toBe(status);
-      return await response.json() as { error?: string; selectedChoices: Record<string, string>; yaml: string; detected: { probe?: { ok: boolean } } };
-    };
-    await send("/api/step", { id: "router" });
-    const rejected = await send("/api/choice", { id: "router", choice: { id: "laya" } }, 400);
-    expect(rejected.error).toBe(LAYA_LANES_REQUIRED);
-    expect(probes).toBe(0);
-    const reset = await send("/api/choice", { id: "router", choice: { id: "llm" } });
-    expect(reset.yaml).not.toContain("intent_url:");
-    expect(reset.selectedChoices.router).toBe("llm");
   } finally { await server.stop(); rmSync(home, { recursive: true, force: true }); }
 });
