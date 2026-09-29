@@ -1700,3 +1700,17 @@ test("switchboard intent_url accepts HTTP(S) bases and rejects invalid or path-u
     try { load(); } catch (error) { expect(String(error)).not.toContain("SYNTHETIC_SECRET_VALUE"); }
   }
 });
+
+describe("privacy policy key", () => {
+  test("accepts local and cloud with known allowances", () => {
+    expect(loadYaml("privacy: { mode: local }\n")().raw.privacy).toEqual({ mode: "local" });
+    expect(loadYaml("privacy: { mode: cloud, allow: [telegram, board] }\n")().raw.privacy).toEqual({ mode: "cloud", allow: ["telegram", "board"] });
+  });
+  test("requires mode and rejects unknown values", () => {
+    expect(loadYaml("privacy: {}\n")).toThrow(/privacy.mode must be local or cloud/);
+    expect(loadYaml("privacy: { mode: hybrid }\n")).toThrow(/privacy.mode must be local or cloud/);
+    expect(loadYaml("privacy: { mode: local, allow: [email] }\n")).toThrow(/privacy.allow must be a list of agent, telegram, board/);
+    expect(loadYaml("privacy: { mode: local, allow: agent }\n")).toThrow(/privacy.allow must be a list/);
+    expect(loadYaml("privacy: { mode: local, extra: 1 }\n")).toThrow(/privacy.extra/);
+  });
+});

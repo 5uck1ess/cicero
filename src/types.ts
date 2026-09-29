@@ -2,7 +2,11 @@ import type { BoardRealtimeConfig } from "./notify/board-realtime";
 import type { BoardPreset } from "./notify/board-presets";
 // Core types for Cicero voice assistant
 
+/** Declared data-egress policy written by the setup wizard; doctor warns on violations. */
+export interface PrivacyConfig { mode: "local" | "cloud"; allow?: ("agent" | "telegram" | "board")[] }
+
 export interface CiceroConfig {
+  privacy?: PrivacyConfig;
   switchboard?: { intent_url?: string; intent_timeout_ms?: number; intent_min_confidence?: number; front_desk_aliases?: string[] };
   /** Lexical fast-paths answered instantly without a brain turn (see src/brain/quick-intents.ts). */
   quick_intents?: Array<{ phrases?: string[]; pattern?: string; reply: string }>;

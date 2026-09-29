@@ -1,5 +1,6 @@
 import { test, expect, afterEach } from "bun:test";
 import { OpenAiCompatibleBrain } from "../src/brain/openai-compatible";
+import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "../src/backends/llm/openai";
 
 const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -82,4 +83,10 @@ test("sendStream yields streamed deltas", async () => {
   let out = "";
   for await (const t of brain.sendStream("hi")) out += t;
   expect(out).toBe("Hello world");
+});
+
+test("cerebras and xai are OpenAI-compatible presets", () => {
+  expect(OPENAI_COMPATIBLE_BACKENDS).toEqual(expect.arrayContaining(["cerebras", "xai"]));
+  expect(resolveOpenAiTarget({ backend: "cerebras" })).toEqual({ baseUrl: "https://api.cerebras.ai/v1", apiKeyEnv: "CEREBRAS_API_KEY" });
+  expect(resolveOpenAiTarget({ backend: "xai" })).toEqual({ baseUrl: "https://api.x.ai/v1", apiKeyEnv: "XAI_API_KEY" });
 });
