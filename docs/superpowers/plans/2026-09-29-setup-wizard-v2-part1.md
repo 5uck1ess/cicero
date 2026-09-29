@@ -108,7 +108,7 @@ for r in E2B E4B 12B 26B-A4B 31B; do curl -s -o /dev/null -w "google/gemma-4-$r-
 
 Any tag without a 200 is recorded as `null`. The Helper step then offers that model on that runtime only if it is already listed by the running runtime.
 
-- [ ] **Step 5: Mermaid plugin.** Try `vitepress-plugin-mermaid` with `mermaid` in a throwaway branch of the worktree. Wrap the config with `withMermaid(defineConfig(...))`, run `bun run docs:build`, and grep the built README page for `class="mermaid"`. Record the versions that build. If it fails, try a markdown-it fence renderer that emits `<pre class="mermaid">` plus a client-side `mermaid` import in `docs/.vitepress/theme/index.ts`, and record which one worked.
+- [x] **Step 5: Mermaid plugin** (done: see the verification record; the plugin is committed in b0060de). Try `vitepress-plugin-mermaid` with `mermaid` in a throwaway branch of the worktree. Wrap the config with `withMermaid(defineConfig(...))`, run `bun run docs:build`, and grep the built README page for `class="mermaid"`. Record the versions that build. If it fails, try a markdown-it fence renderer that emits `<pre class="mermaid">` plus a client-side `mermaid` import in `docs/.vitepress/theme/index.ts`, and record which one worked.
 
 - [ ] **Step 6: GPU process attribution.** Run `nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits` and `ss -ltnpH 'sport = :8092'` (and :8080), and confirm the PIDs match. Record whether `ss` shows PIDs without root. If it doesn't, PID matching is "unavailable" and memory shows as "other GPU use".
 
@@ -851,6 +851,7 @@ bun run src/index.ts setup     # or: bun link, then cicero setup
 - Create: `docs/using.md`, covering what to say; how to interrupt (barge-in); "details" after a shortened reply; the escalation triggers from `DEFAULT_TRIGGERS` (the test in Task 16 reads them from `src/brain/routing.ts`); what `local` vs `cloud` privacy means day to day (a `#privacy` anchor, which the Privacy step links); and `cicero status` / `cicero doctor [--json]`.
 - Modify: `docs/configuration.md`. The "Deployment tier" section becomes "Tier presets (legacy defaults)": the wizard writes explicit `stt`/`tts`/`llm`, which override the preset. It documents `privacy`, the `cerebras`/`xai` presets, and `brain.escalate` on any front desk.
 - Modify: `config.yaml.example`, whose header reads "Reference: every option. The wizard (`cicero setup`) writes your config; you do not need to copy this file." It gains a commented `privacy:` example.
+- Create: `docs/concepts.md` (spec addendum, "Two layers"). A short page with one Mermaid diagram: layer 1 is Cicero (voice loop, wizard, office framework, defaults; the same for everyone), and layer 2 is your office (employees and personalities, agent profiles, models, hardware; it lives in your config and never in product defaults; office packs come in part 2). It states the default rule: coding work → the agent's native harness (Claude Code, Codex), and personalities that remember and learn → Hermes on any model. It is honest about what ships today: lanes exist (`brain.lanes`), templates and the office pack are part 2, and per-employee memory is part 3. The owner's office appears only as a labeled layer-2 example linking to `docs/advanced.md`. It is linked from the README directly after the pitch, from `docs/setup.md`, from `INSTALL.md` and from `llms.txt`, and gets a sidebar entry under "Understand it".
 - Create: `docs/advanced.md`, "Advanced / example deployment". It links `reference-deployment.md`, `office.md` (Hermes, lanes, personalities), `channels.md`, and the Laya sidecar README, and says "needs a checkpoint trained on your roster".
 - Modify: `docs/.vitepress/config.ts` sidebar:
   - "Have your first conversation" → Setup, Using Cicero, Choosing a brain, Configuration.
@@ -877,7 +878,8 @@ bun run src/index.ts setup     # or: bun link, then cicero setup
 1. The rules: never invent config keys, never copy another user's config, never `bun link` in a scratch clone, and never overwrite `~/.cicero/config.yaml` (apply refuses; tell the user instead).
 2. Prerequisites check: `bun --version` against `packageManager` in `package.json`, and `bun install`.
 3. Ask the user two questions, verbatim: the Privacy question with its two options, and which agent (if any), listing the ids `--plan` accepts.
-4. `bun run src/index.ts setup --plan --json --privacy <mode> [--agent <id>] > plan.json`. Show the user `recommended` + `reasons` + `blocked`, and get their OK. For `blocked`, show `fix` and stop.
+4. Point the user at `docs/concepts.md` so they know which layer they are setting up (Cicero itself, not someone else's office).
+4a. `bun run src/index.ts setup --plan --json --privacy <mode> [--agent <id>] > plan.json`. Show the user `recommended` + `reasons` + `blocked`, and get their OK. For `blocked`, show `fix` and stop.
 5. Write `answers.json` = `plan.recommended`, with only the user's requested edits, each an existing choice shape from `plan.detected`.
 6. `bun run src/index.ts setup --apply answers.json [--acknowledge-not-ready only if the user agrees]`.
 7. `bun run src/index.ts doctor --json`, then summarize the fails and warnings for the user.
@@ -932,6 +934,13 @@ test("setup guide and example keep the headless Claude Code line", () => {
   expect(read("docs/setup.md")).toMatch(/brain: \{ backend: claude-code, mode: subprocess \}/);
   expect(read("config.yaml.example")).toMatch(/brain: \{ backend: claude-code, mode: subprocess \}/);
 });
+test("concepts page exists and is linked from README, setup guide and INSTALL", () => {
+  expect(read("docs/concepts.md")).toContain("```mermaid");
+  expect(read("README.md")).toContain("docs/concepts.md");
+  expect(read("docs/setup.md")).toMatch(/\]\((\.\/)?concepts\.md/);
+  expect(read("INSTALL.md")).toContain("docs/concepts.md");
+  expect(read("llms.txt")).toContain("docs/concepts.md");
+});
 test("using.md lists the real escalation triggers", () => {
   const using = read("docs/using.md");
   for (const t of DEFAULT_TRIGGERS) expect(using).toContain(t);
@@ -975,7 +984,7 @@ test -f "$T/home/.cicero/config.yaml" && bun run src/index.ts doctor --json   # 
 ```
 
 Codex variant: `env HOME="$T/home" CODEX_HOME="$HOME/.codex" codex exec -m gpt-6-sol -C "$T/cicero" "set up Cicero for me using INSTALL.md"`, then `codex exec resume --last "…same answer…"`. Report pass/fail per agent: whether it asked the Privacy question, ran `--plan`, showed the plan, applied, ran doctor, and whether `$T/home/.cicero/config.yaml` loads. Include a short transcript summary. HOME is swapped so `~/.cicero` and `~/.bun/bin` are never touched. Auth comes through `CLAUDE_CONFIG_DIR`/`CODEX_HOME`. Delete `$T` afterwards.
-- [ ] **Step 4: Astra check (Tym's request).** Write `q.md` in the job tmp dir. It asks for a section-by-section check of `git diff origin/main...HEAD` against the spec (every section including "Docs and agent-assisted setup" and "Keeping docs true"), with a READY / NOT READY verdict and findings as `file:line`, severity, spec section, and the failing scenario. Paste the `bun run docs:build` result and the gate outputs into `q.md`, since a read-only sandbox can't run them. Then run:
+- [ ] **Step 4: Astra check (Tym's request).** Write `q.md` in the job tmp dir. It asks for a section-by-section check of `git diff origin/main...HEAD` against the spec (every section including "Docs and agent-assisted setup", the "Two layers" addendum with `docs/concepts.md`, and "Keeping docs true"), with a READY / NOT READY verdict and findings as `file:line`, severity, spec section, and the failing scenario. Paste the `bun run docs:build` result and the gate outputs into `q.md`, since a read-only sandbox can't run them. Then run:
   `codex exec -m gpt-6-astra -c model_reasoning_effort="high" -s read-only --skip-git-repo-check -C /home/ryzen/LocalDev/cicero-wt/wizard-v2 < q.md`
   Don't edit the tree while it reads. Check each finding against the code (an UNSUPPORTED from Codex is the edge of its sandbox, not a disproof), fix the real ones with tests, re-run the gates, and repeat until READY.
 - [ ] **Step 5: PR.** Push the branch. Open ONE ready PR with `gh pr create --repo 5uck1ess/cicero --base main --head spec/wizard-v2-basics`, titled "Setup v2 part 1: wizard, docs, diagrams and agent-assisted setup". The body: "Closes #143", a summary per spec section, the "unknown/unverified" list from Task 1, gate results, the live-run and acceptance summaries, and "Apple Silicon: needs your test". No attribution lines.

@@ -200,6 +200,14 @@ All diagrams are Mermaid in markdown, so GitHub, the docs site and AI agents all
 2. **What runs where**: the configured layout, meaning each engine and agent, its port or command, and its footprint from the fit table, marked "estimate". Where Test measured a value on CUDA, the measured value replaces the estimate and is marked "measured". Anything Test can't see, such as agents it never starts or Mac memory, stays "estimate" or "unknown". The docs show the reference box's layout as an example.
 3. **The wizard**: the eleven steps and what each writes. This replaces `setup-overview.png`, and the screenshot is retaken from the v2 page.
 
+### Two layers: Cicero and your office (addendum, Tym, 2026-09-29)
+A new short page, `docs/concepts.md`, names the two layers explicitly, with one Mermaid diagram. It is linked from the README right after the pitch, and from `docs/setup.md`, `INSTALL.md` and `llms.txt`.
+- **Layer 1: Cicero**, the universal product. It is the same for everyone: the voice loop, the setup wizard, the office framework (employees, routing, memory) and sensible defaults.
+- **Layer 2: your office.** This is one user's employees and personalities, agent profiles, models and hardware choices. It lives in their config, never in product defaults. It becomes shareable later as an office pack (part 2).
+- **Default rule for employees:** coding work goes to the agent's native harness (Claude Code, Codex). Personalities that should remember and learn over time go to Hermes, running any model.
+- The owner's office (Hermes profiles, named characters, the reference box) appears only as a labeled example of layer 2, under Advanced.
+- The page is honest about what ships today. Employees and routing exist as ACP office lanes (`brain.lanes`). Employee templates and the office pack are part 2, and per-employee memory is part 3.
+
 ### Owner-specific material moves back
 - Hermes, Laya, lane personalities and `reference-deployment.md` move to an "Advanced / example deployment" section.
 - The README stops calling Hermes the default. It lists supported agents neutrally.
@@ -247,6 +255,7 @@ The docs test extends `tests/onboarding-contract.test.ts`:
 - **Configs:** a fenced block opened with ```` ```yaml cicero-config ```` is a complete config and must pass config validation. Fragments use plain ```` ```yaml ```` and are not validated. This applies to `docs/setup.md` and `INSTALL.md`. `config.yaml.example` has no fences and is validated as a whole file.
 - **README assertion replaced:** the README no longer carries a config, so its quickstart-YAML assertion (`tests/onboarding-contract.test.ts:17`) is replaced by one checking that the README links `docs/setup.md`. The setup guide and example keep theirs.
 - **Step lists:** `docs/setup.md` and `INSTALL.md` must list the available (non-preview) step titles from `src/setup/steps.ts`, in order. The README lists none.
+- **Concepts page:** `docs/concepts.md` exists and is linked from `README.md`, `docs/setup.md` and `INSTALL.md`.
 
 ## Model fit rules
 
