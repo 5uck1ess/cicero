@@ -77,6 +77,7 @@ export function renderDraft(draft: object): string {
   const lines: string[] = [];
   function visit(object: Record<string, unknown>, prefix = "", depth = 0): void {
     for (const [key, value] of Object.entries(object)) {
+      if (value === undefined) continue; // YAML has no undefined; an unset optional is simply absent
       const path = prefix ? `${prefix}.${key}` : key;
       const indent = "  ".repeat(depth);
       lines.push(`${indent}# ${EXPLANATIONS[path] ?? `Configures ${path.replaceAll("_", " ")}.`}`);

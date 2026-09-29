@@ -156,11 +156,12 @@ export function parseBrain(raw: unknown, _ctx: StepContext, deps: PickerDeps = {
     const base_url = url(c.baseUrl, "brain API base URL");
     const api_key = optional(c.apiKey, "API key", 1024);
     if (api_key && base_url.includes(api_key)) throw new Error("Keep the API key out of the endpoint URL");
-    return { id, mode: "subprocess", base_url, model: model(c.model), api_key };
+    return { id, mode: "subprocess", base_url, model: model(c.model), ...(api_key ? { api_key } : {}) };
   }
   if (id === "ollama") return { id, mode: "subprocess", ollama_model: model(c.model) };
   if (id in CLI_BINS) return { id, mode: tab ? "tab-inject" : "subprocess" };
-  return { id, mode: "subprocess", model: model(c.model), api_key: optional(c.apiKey, "API key", 1024) };
+  const api_key = optional(c.apiKey, "API key", 1024);
+  return { id, mode: "subprocess", model: model(c.model), ...(api_key ? { api_key } : {}) };
 }
 export function contributeBrain(c: ReturnType<typeof parseBrain>) {
   const { id, ...rest } = c;

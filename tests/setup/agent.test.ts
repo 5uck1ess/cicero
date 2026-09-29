@@ -90,3 +90,9 @@ test("ollama front desk + codex-acp escalation validates through loadConfig", as
   const config = loadDraft(s.draft);
   expect(config.brain).toMatchObject({ backend: "ollama", ollama_model: "gemma4:26b-a4b-it-qat", escalate: { binary: "bunx", binary_args: ["@agentclientprotocol/codex-acp@2.0.0"] } });
 });
+
+test("a keyless openai-compatible agent front desk renders a config that loads", () => {
+  const c = ctx("local", [agentFront]);
+  const written = contributeAgent(c, parseAgent({ id: "openai-compatible", baseUrl: "http://localhost:8642/v1", model: "local-agent" }, c)) as { brain: Record<string, unknown> };
+  expect("api_key" in written.brain).toBe(false);
+});

@@ -164,3 +164,9 @@ test("writing a Laya router annotates the checkpoint requirement and preserves t
   expect(parseYaml(text)).toEqual(draft);
   expect(loadConfig({}, { home: join(path, "..") }).raw.switchboard?.intent_url).toBe("http://127.0.0.1:8096");
 });
+
+test("renderDraft leaves out undefined values instead of writing invalid YAML", () => {
+  const text = renderDraft({ brain: { backend: "openai-compatible", base_url: "http://localhost:8642/v1", model: "local-agent", api_key: undefined } });
+  expect(parseYaml(text)).toEqual({ brain: { backend: "openai-compatible", base_url: "http://localhost:8642/v1", model: "local-agent" } });
+  expect(text).not.toContain("api_key");
+});
