@@ -34,6 +34,7 @@ const EXPLANATIONS: Record<string, string> = {
   "brain.base_url": "OpenAI-compatible endpoint for the brain.",
   "brain.model": "Model requested by the brain endpoint.",
   "brain.api_key": "Private authentication key for the brain endpoint.",
+  "brain.unset_env": "Removed from the agent's environment so it uses your subscription login instead of a per-token API key.",
   "brain.ollama_model": "Local Ollama model used by the brain.",
   llm: "Configures the conversational language model.",
   "llm.backend": "Selects the language model runtime or API.",

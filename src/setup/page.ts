@@ -193,10 +193,11 @@ var state = null;
 var view = 'overview';
 var app = document.getElementById('app');
 
-var ORDER = ['privacy', 'system', 'stt', 'tts', 'brain', 'board', 'review'];
+var ORDER = ['privacy', 'system', 'accounts', 'stt', 'tts', 'brain', 'board', 'review'];
 var STEP = {
   privacy:  { short: 'Privacy', title: 'What may leave this machine?', lede: 'Choose what Cicero may send off this machine. Later steps ask before anything else leaves.', sub: 'Data policy' },
   system:   { short: 'Machine', title: 'This machine', lede: 'Cicero picks a starting preset from your hardware. You can change it.', sub: 'Runs everything' },
+  accounts: { short: 'Accounts', title: 'Which accounts pay?', lede: 'Cicero checks which login or API key each agent will use. Nothing secret is read or stored.', sub: 'Logins and keys' },
   stt:      { short: 'Hear',    title: 'How should Cicero hear you?', lede: 'Speech-to-text turns your voice into words.', sub: 'Speech-to-text' },
   brain:    { short: 'Agent',   title: 'Which coding agent does the work?', lede: 'Cicero is the voice. Your agent reads code, runs tools and opens PRs.', sub: 'Coding agent' },
   tts:      { short: 'Speak',   title: 'How should Cicero speak?', lede: 'Text-to-speech turns replies into audio.', sub: 'Text-to-speech' },
@@ -458,6 +459,44 @@ function renderPrivacy(step) {
   }, row));
   app.append(row);
 }
+var AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', grok: 'Grok' };
+var BILLING = { 'subscription': 'Your subscription', 'per-token key': 'Per-token API billing', 'unknown': 'Unknown' };
+function renderAccounts(step) {
+  var f = state.detected || {};
+  var chosen = {};
+  (state.accountsChoice || f.recommended || []).forEach(function (p) { chosen[p] = true; });
+  var ul = h('ul', { class: 'rows' });
+  (f.agents || []).forEach(function (a) {
+    var login = a.login === 'found' ? 'Login found' + (a.loginUnvalidated ? ' (not validated)' : '') : a.login === 'unknown' ? 'Login unknown' : 'No login';
+    var key = a.key === 'found' ? a.keyVariable + ' is set' : a.keyVariable + ' not set';
+    var li = h('li', {}, [
+      h('div', { class: 'head' }, [h('span', { class: 'name', text: AGENT_NAMES[a.provider] || a.provider })]),
+      h('p', { class: 'detail', text: login + ' · ' + key + ' · Likely billing: ' + (BILLING[a.likely] || a.likely) })
+    ]);
+    if (a.keyOverridesLogin === true) {
+      var box = h('input', { type: 'checkbox' });
+      box.checked = !!chosen[a.provider];
+      box.onchange = function () { chosen[a.provider] = box.checked; };
+      li.append(h('label', { class: 'check-inline' }, [box, document.createTextNode('Use my subscription (removes ' + a.keyVariable + ' from this agent only; it falls back to your login)')]));
+    } else if (a.keyOverridesLogin === 'unknown') {
+      li.append(h('p', { class: 'detail', text: 'Both a login and ' + a.keyVariable + ' exist; which one this CLI bills is unknown.' }));
+    }
+    ul.append(li);
+  });
+  var keys = f.cloudKeys || {};
+  var found = Object.keys(keys).filter(function (k) { return keys[k] === 'found'; });
+  app.append(ul,
+    h('h2', { class: 'section-h2', text: 'Cloud model keys' }),
+    h('p', { class: 'detail', text: found.length ? 'Found: ' + found.join(', ') + '. These can run a cloud front desk if Privacy allows it.' : 'No cloud model API keys found in this environment.' }),
+    why(step));
+  var row = h('div', { class: 'actions' });
+  row.append(button('Continue', 'primary', async function () {
+    var list = Object.keys(chosen).filter(function (p) { return chosen[p]; });
+    state = await api('/api/choice', { id: 'accounts', choice: { useSubscription: list } });
+    await go(next('accounts'));
+  }, row));
+  app.append(row);
+}
 function invalidatedBanner() {
   var list = state.invalidated || [];
   if (!list.length) return null;
@@ -691,6 +730,7 @@ function render() {
   var banner = invalidatedBanner(); if (banner) app.append(banner);
   if (view === 'privacy') renderPrivacy(step);
   else if (view === 'system') renderSystem(step);
+  else if (view === 'accounts') renderAccounts(step);
   else if (view === 'review') renderReview(step);
   else renderPicker(view, step);
 }

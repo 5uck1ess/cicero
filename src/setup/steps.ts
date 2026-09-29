@@ -1,6 +1,7 @@
 import type { SetupDraft } from "./draft";
 import type { SystemFacts, Tier } from "./system";
 import { contributeBoard, contributeBrain, contributeSpeech, detectBoard, detectBrain, detectSpeech, parseBoard, parseBrain, parseSpeech, probeBoard, type PickerDeps } from "./pickers";
+import { detectAccounts, parseAccounts, type AccountsDetected } from "./accounts";
 import { PRIVACY_COPY, PRIVACY_MODES, parsePrivacy, type PrivacyChoice } from "./privacy";
 
 export interface StepContext { system: SystemFacts; draft: SetupDraft; detected?: unknown; choices?: ReadonlyMap<string, unknown> }
@@ -38,6 +39,12 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     recommend(_detected, { system }) { return { choice: system.recommendedTier, reason: system.reason }; },
     parseChoice(raw) { if (!["local-mlx", "local-cuda", "local-cpu"].includes(raw as string)) throw new Error("Choose a supported tier"); return raw as Tier; },
     contribute(_ctx, choice) { return { deployment: choice }; } },
+  { id: "accounts", title: "Accounts", available: true, pipeline: "brain",
+    explain: info("Shows which login or API key each agent will most likely use, and who bills it.", "An API key in your environment can silently override a subscription login. \"Use my subscription\" removes that key from the agent's environment only, so it falls back to your login.", "Read-only: logins and keys are reported as found or not found, never read or stored. Only your choice is kept.", "docs/setup.md"),
+    detect(_ctx, deps) { return detectAccounts(deps); },
+    recommend(detected) { const d = detected as AccountsDetected; return { choice: { useSubscription: d.recommended }, reason: d.reason }; },
+    parseChoice(raw, ctx) { return parseAccounts(raw, ctx.detected as AccountsDetected | undefined); },
+    contribute() { return {}; } },
   { id: "stt", title: "Hear", available: true, pipeline: "stt",
     explain: info("Speech-to-text turns microphone audio into words.", "The hardware tier determines the starting engine; installed venvs and ports are shown.", "Only checks installation and port readiness. The engine choice goes into stt.", "docs/setup.md"),
     detect(ctx, deps) { return detectSpeech("stt", ctx, deps); },

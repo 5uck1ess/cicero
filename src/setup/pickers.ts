@@ -21,6 +21,10 @@ export interface PickerDeps {
   env?: Record<string, string | undefined>;
   localTerminal?: boolean;
   allowedModels?: ProviderModelList | null;
+  homeDir?: () => string;
+  /** File reader for read-only account detection; null when the file is absent. */
+  readFile?: (path: string) => string | null;
+  platform?: string;
 }
 export interface ProviderModelList { id: string; baseUrl: string; models: string[] }
 const LIMIT = 160;
