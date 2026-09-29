@@ -247,7 +247,7 @@ test("injected context is prepended once and completed turns become bounded hist
   const operational = inspect.prompt("where is my brief?", "briefing: delivered");
   expect(operational).toContain("Host operational context");
   expect(operational).toContain("briefing: delivered");
-  expect(operational.indexOf("briefing: delivered")).toBeLessThan(operational.indexOf("Current user request:"));
+  expect(operational.indexOf("Current user request:")).toBeLessThan(operational.indexOf("briefing: delivered"));
 });
 
 test("contextBuffer caps at 50 entries", () => {

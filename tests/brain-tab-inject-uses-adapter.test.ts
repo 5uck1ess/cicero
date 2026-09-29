@@ -61,3 +61,18 @@ test("dedicated tab bypasses Claude tool permissions when auto-approve is enable
   expect(terminal.spawned).toHaveLength(1);
   expect(terminal.spawned[0]?.command).toBe("claude --dangerously-skip-permissions");
 });
+
+test("tab-inject keeps a full reply when turn context is injected (#144 review)", () => {
+  const brain = new TabInjectBrain(new RecordingTerminal(), "cicero-brain");
+  const internals = brain as unknown as {
+    buildPrompt(message: string, systemContext?: string): string;
+    extractResponse(screenText: string, command: string): string;
+  };
+  const prompt = internals.buildPrompt("hi", "briefing delivered");
+  const reply = Array.from({ length: 50 }, (_, i) => `reply line ${i + 1}`);
+  const screen = [`❯ ${prompt}`, ...reply, "❯"].join("\n");
+  const extracted = internals.extractResponse(screen, prompt);
+  const lines = extracted.split("\n");
+  expect(lines).toContain("reply line 1");
+  expect(lines).toContain("reply line 50");
+});

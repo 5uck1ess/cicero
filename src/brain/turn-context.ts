@@ -30,6 +30,10 @@ const COMPACTION_TIMEOUT_MS = 30_000;
 const SYSTEM_CONTEXT_LABEL =
   "Host operational context for this invocation only (not conversation memory):";
 const SUMMARY_LABEL = "Summary of earlier conversation:";
+/** Wraps Cicero-injected per-turn context in text prompts (stable: memory providers match on it). */
+export const CONTEXT_OPEN = "<cicero-context>";
+export const CONTEXT_CLOSE = "</cicero-context>";
+const CONTEXT_PREAMBLE = "Background from Cicero for this turn only. The user did not say this; their request is above.";
 
 function tail(value: string, max: number): string {
   return value.length <= max ? value : `[earlier content truncated]\n${value.slice(-max)}`;
@@ -329,7 +333,17 @@ export class BrainTurnContext {
     this.summary = boundSummary(summary);
   }
 
-  buildTextPrompt(message: string, includeHistory: boolean, systemContext?: string): string {
+  /**
+   * `contextPlacement: "before"` keeps the legacy layout (context, then the request) for
+   * adapters that locate their reply by matching the prompt's first line on screen
+   * (tab-inject). Everything else puts the user's words first (#144).
+   */
+  buildTextPrompt(
+    message: string,
+    includeHistory: boolean,
+    systemContext?: string,
+    options: { contextPlacement?: "before" | "after" } = {},
+  ): string {
     const sections: string[] = [];
     if (includeHistory && this.summary) sections.push(`${SUMMARY_LABEL}\n${this.summary}`);
     if (includeHistory && this.history.length > 0) {
@@ -339,13 +353,23 @@ export class BrainTurnContext {
           .join("\n\n"),
       );
     }
+    // Per-turn injected context goes AFTER the user's words, inside a stable tag.
+    // Agents with long-term memory (e.g. Hermes + Mnemosyne) persist the prompt
+    // as the user's turn and often keep only its first few hundred characters;
+    // context first meant they stored Cicero's plumbing and cut off what the
+    // user actually said (#144). The tag lets memory providers strip it.
+    const injected: string[] = [];
     const pending = this.takePending();
-    if (pending) sections.push(`Context for this turn:\n${pending}`);
+    if (pending) injected.push(`Context for this turn:\n${pending}`);
     const operational = boundedSystemContext(systemContext);
-    if (operational) sections.push(`${SYSTEM_CONTEXT_LABEL}\n${operational}`);
-    if (sections.length === 0) return message;
-    sections.push(`Current user request:\n${message}`);
-    return sections.join("\n\n");
+    if (operational) injected.push(`${SYSTEM_CONTEXT_LABEL}\n${operational}`);
+    if (sections.length === 0 && injected.length === 0) return message;
+    if (options.contextPlacement === "before") {
+      return [...sections, ...injected, `Current user request:\n${message}`].join("\n\n");
+    }
+    const request = sections.length > 0 ? [...sections, `Current user request:\n${message}`].join("\n\n") : message;
+    if (injected.length === 0) return request;
+    return `${request}\n\n${CONTEXT_OPEN}\n${CONTEXT_PREAMBLE}\n\n${injected.join("\n\n")}\n${CONTEXT_CLOSE}`;
   }
 
   buildChatMessages(message: string, systemPrompt?: string, systemContext?: string): BrainChatMessage[] {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { BrainTurnContext, MAX_SYSTEM_CONTEXT_CHARS } from "../../src/brain/turn-context";
+import { BrainTurnContext, CONTEXT_OPEN, CONTEXT_CLOSE, MAX_SYSTEM_CONTEXT_CHARS } from "../../src/brain/turn-context";
 
 describe("BrainTurnContext", () => {
   test("injected context is one-shot", () => {
@@ -39,12 +39,28 @@ describe("BrainTurnContext", () => {
     expect(messages[1]!.content).toContain("snapshot A");
   });
 
-  test("text prompts frame host context immediately before the current request", () => {
+  test("text prompts put the request before tagged host context", () => {
     const context = new BrainTurnContext();
     context.remember("old question", "old answer");
     const prompt = context.buildTextPrompt("current question", true, "snapshot B");
-    expect(prompt.indexOf("Conversation so far:")).toBeLessThan(prompt.indexOf("Host operational context"));
-    expect(prompt.indexOf("snapshot B")).toBeLessThan(prompt.indexOf("Current user request:"));
+    expect(prompt.indexOf("Conversation so far:")).toBeLessThan(prompt.indexOf("Current user request:"));
+    expect(prompt.indexOf("current question")).toBeLessThan(prompt.indexOf(CONTEXT_OPEN));
+    expect(prompt.indexOf(CONTEXT_OPEN)).toBeLessThan(prompt.indexOf("snapshot B"));
+    expect(prompt.trimEnd().endsWith(CONTEXT_CLOSE)).toBe(true);
+  });
+
+  test("without history the prompt starts with the user's own words (#144)", () => {
+    const context = new BrainTurnContext();
+    context.inject("System note: the user just ran a roll call — " + "x".repeat(600));
+    const prompt = context.buildTextPrompt("hey thor, what's next?", false, "snapshot C");
+    // Memory layers that keep only a prefix (Mnemosyne: 500 chars) must keep the request.
+    expect(prompt.startsWith("hey thor, what's next?")).toBe(true);
+    expect(prompt.slice(0, 500)).toContain("hey thor, what's next?");
+    expect(prompt.indexOf("hey thor")).toBeLessThan(prompt.indexOf("Context for this turn:"));
+    expect(prompt).toContain(`${CONTEXT_OPEN}\n`);
+    expect(prompt).toContain("roll call");
+    expect(prompt).toContain("snapshot C");
+    expect(prompt).not.toContain("Current user request:");
   });
 
   test("system context is bounded and never retained in history", () => {

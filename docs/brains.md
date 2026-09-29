@@ -146,6 +146,19 @@ Every brain sees the same two context layers:
 - `injectContext()` attaches bounded, one-shot operational context to the next real brain turn. Lexical control replies may defer it, but it is never silently replayed on every later turn or copied into an idle lane.
 - Stateful adapters (ACP, tab-inject, and resumed Codex lanes) keep their conversation in the underlying agent session. Stateless CLI and HTTP adapters retain a bounded transcript of completed turns and send it with the next request.
 
+In text prompts (ACP, tab-inject, stateless CLIs), the user's words come first. Injected context follows inside a `<cicero-context>…</cicero-context>` block that says the user did not write it. Agents with long-term memory often save the prompt as the user's turn and keep only its opening. Hermes with Mnemosyne, for example, keeps 500 characters, so this order keeps what the user actually said.
+
+Some warmup turns are entirely Cicero's own text: the daemon's warmup ping, the restart recap and the office roster. To keep them out of memory, add patterns like these to the agent's memory ignore list. For Hermes, that is `memory.mnemosyne.ignore_patterns` in each profile's `config.yaml`:
+
+```yaml
+memory:
+  mnemosyne:
+    ignore_patterns:
+      - 'warmup ping'
+      - 'Office roster: the user can be transferred'
+      - 'That is where the conversation left off\. When the user returns'
+```
+
 `restart()` clears both pending injected context and Cicero-managed transcript memory. Fallback tiers receive the same one-shot context only while retrying that turn, and the escalation/switchboard wrappers deliver it only to the brain that actually receives the request. This is the compatibility contract custom `Brain` adapters should preserve.
 
 Tab-inject's response deadline is a hard failure boundary: if Claude Code does not return to a stable idle prompt within two minutes, Cicero throws a timeout instead of returning terminal text that may be a partial answer. It then sends a bounded Escape and verifies stable idle before accepting another turn; if that verification is uncertain, the tab is quarantined until recovery is confirmed.
