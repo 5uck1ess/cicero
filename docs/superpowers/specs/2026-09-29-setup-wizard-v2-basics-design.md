@@ -1,6 +1,6 @@
-# Setup wizard v2, part 1: privacy, accounts and hardware-sized models
+# Setup v2, part 1: wizard, docs and agent-assisted setup
 
-Status: design, not implemented. Date: 2026-09-29. Revision 7, after six rounds of GPT-6 Astra's adversarial review.
+Status: design, not implemented. Date: 2026-09-29. Revision 8 (adds docs and agent-assisted setup), after six rounds of GPT-6 Astra's adversarial review.
 Builds on: `2026-09-24-setup-wizard-design.md` (the current guided setup). This spec covers only what changes; the v1 rules stand unless a section below overrides them.
 Co-designed with GPT-6 Astra: an independent proposal, merged, then reviewed against the code.
 
@@ -13,6 +13,9 @@ Cicero has to install cleanly for anyone, on their own hardware and accounts. Th
 - **Choosing "LLM" routing in the wizard writes nothing** (`src/setup/pickers.ts:192`). Without a summarizer URL the LLM classifier is absent (`src/brain/index.ts:62`), so a fresh install gets lexical routing only.
 - **Which account pays is invisible.** `claude` prefers `ANTHROPIC_API_KEY` over the logged-in subscription (`src/brain/claude-code.ts:19`). The Grok CLI's bundled README says "The API key takes precedence over browser credentials" (`~/.grok/README.md`, installed CLI).
 - **Nothing asks what may leave the machine.**
+- **The docs teach the owner's setup, three times over.** Setup is written up in the README, in `docs/setup.md` "Your first conversation", and again in its Linux detail section. They disagree: the README says not to copy `config.yaml.example`, while `docs/setup.md` says to copy it. All of it describes the v1 wizard. Hermes is the "recommended default", and personalities and Laya appear up front.
+- **The diagrams are out of date.** The README Mermaid diagram, the `docs/architecture.md` ASCII pipeline and `docs/images/setup-overview.png` all show Laya as the router and faster-whisper STT. None shows escalation or the summarizer. The docs site (VitePress) has no Mermaid plugin, so the README diagram shows as raw code there.
+- **An AI agent can't set Cicero up for someone.** `AGENTS.md` covers contributing only. `cicero setup` only serves a browser page (`src/index.ts:97`). `cicero doctor` has no machine-readable output.
 
 The full v2 is split into three specs, and this is part 1.
 - **Part 2 (employees):** templates, any agent as an employee, clean memory, routing for arbitrary names, a shareable office pack, and editing an existing config.
@@ -180,6 +183,53 @@ Both are unchanged from v1: still unbuilt preview steps (`src/setup/steps.ts:49`
 ### 11. Save
 
 The v1 write rules are unchanged: write only when no config exists, and back up an invalid one only by explicit choice (`src/setup/write.ts:207`). Editing an existing config moves to part 2, where adding employees needs it.
+
+## Docs and agent-assisted setup (ships with part 1)
+
+**Goal:** someone who has never seen Cicero, or an AI agent working for them, gets from clone to a first spoken reply by following one path, and understands what they built.
+
+### One setup path
+- `docs/setup.md` becomes the only walkthrough, and it follows the v2 wizard step by step.
+- `README.md` shrinks to: the pitch, one diagram, a three-line quickstart (`bun install`, `cicero setup`, open the page), and links. Its copy of the wizard description and its hand-written config go.
+- The "copy `config.yaml.example`" conflict is resolved: the wizard writes the config, and the example is labeled "reference: every option".
+- `docs/configuration.md` presents tier presets as legacy defaults that the wizard overrides.
+
+### Diagrams (text-first)
+All diagrams are Mermaid in markdown, so GitHub, the docs site and AI agents all read the same source. The site gets a Mermaid plugin; which plugin is **verified during implementation** against the site build (`bun run docs:build`). There are three diagrams:
+1. **How a turn flows** (README and `docs/architecture.md`): Hear → Front desk → (optional escalation agent; lanes in part 2) → the helper shortens long replies → Speak.
+2. **What runs where**: each process, its port and what it costs, generated from a real config by the Test step's findings. The docs show the reference layout and its memory bar.
+3. **The wizard**: the eleven steps and what each writes. This replaces `setup-overview.png`, and the screenshot is retaken from the v2 page.
+
+### Owner-specific material moves back
+- Hermes, Laya, lane personalities and `reference-deployment.md` move to an "Advanced / example deployment" section.
+- The README stops calling Hermes the default. It lists supported agents neutrally.
+- The unlinked `reference-deployment.md` and `channels.md` are linked from that section or removed.
+
+### Using Cicero
+A new one-page `docs/using.md` covers:
+- what to say;
+- how to interrupt;
+- "details" after a shortened reply;
+- the escalation trigger phrases;
+- what the privacy mode means day to day;
+- how to check what is running (`cicero status`, `cicero doctor`).
+
+### Agent-assisted setup
+An AI agent (Claude Code, Codex or any other) can install Cicero for a user through the same code the wizard uses. No separate logic.
+- **`INSTALL.md`** at the repo root, linked from `AGENTS.md` and a root `llms.txt`. It tells an agent to:
+  - ask the user the Privacy question and agent choice;
+  - run the plan command below;
+  - show the user the plan and get their OK;
+  - apply it;
+  - run doctor.
+  It must never invent config keys and never copy another user's config.
+- **`cicero setup --plan --json`**: runs the wizard's detection (Machine, Accounts, runtimes, fit rules) and prints the recommended choices and reasons as JSON. It reads only, and credentials are shown only as "found or not found".
+- **`cicero setup --apply <answers.json>`**: validates the answers through the same step parsers (`src/setup/pickers.ts`) and writes through the same write rules (`src/setup/write.ts:207`). An existing config is never overwritten, as in the wizard.
+- **`cicero doctor --json`**: the same checks as `cicero doctor`, including the privacy warnings, as JSON.
+
+### Keeping docs true
+- A docs test extends `tests/onboarding-contract.test.ts`. Every YAML block tagged as a Cicero config in `README.md`, `docs/setup.md` and `INSTALL.md` must pass config validation.
+- The README, `docs/setup.md` and `INSTALL.md` must list the same wizard steps as `src/setup/steps.ts`.
 
 ## Model fit rules
 
