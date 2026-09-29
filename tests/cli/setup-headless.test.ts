@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { loadConfig } from "../../src/config";
 import { runSetup, SetupUsageError } from "../../src/cli/setup";
 import { applySetup, planSetup, validateAnswers, type AnswersFile } from "../../src/setup/headless";
+import { redactStateValue } from "../../src/setup/server";
 import type { PickerDeps } from "../../src/setup/pickers";
 import type { SystemDeps } from "../../src/setup/system";
 
@@ -47,6 +48,14 @@ test("plan in local mode on a 4 GB card blocks the front desk and helper with th
     expect(b.fix).toEqual([expect.stringContaining("switch Privacy to cloud")]);
   }
   expect(plan.recommended.steps.helper).toBeUndefined();
+});
+
+test("plan redacts an exact key value even inside the recommended answers", async () => {
+  const deps = pickerDeps(["gemma4:e4b-it-qat", "gemma4:26b-a4b-it-qat-synthetic-anthropic-marker"]);
+  const plan = await planSetup({ privacy: "local", systemDeps, pickerDeps: deps });
+  expect(JSON.stringify(plan)).not.toContain("synthetic-anthropic-marker");
+  expect(redactStateValue({ id: "keep-synthetic-anthropic-marker", options: ["synthetic-anthropic-marker"] }, ["synthetic-anthropic-marker"]))
+    .toEqual({ id: "keep-synthetic-anthropic-marker", options: ["synthetic-anthropic-marker"] });
 });
 
 test("plan with a CLI --agent makes that agent the front desk instead of blocking on escalation", async () => {

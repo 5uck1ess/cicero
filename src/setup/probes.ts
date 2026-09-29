@@ -252,14 +252,19 @@ export function attributeMemory(apps: Map<number, number>, listeners: Map<number
 }
 
 export function probeMemory(config: Config, o: ProbeOptions & { platform?: string }): Promise<ProbeResult> {
-  return bounded("memory", o, async () => {
+  return bounded("memory", o, async (signal) => {
     const deps = o.deps ?? {};
     const platform = o.platform ?? deps.platform ?? process.platform;
     if (platform === "darwin") return { id: "memory", state: "skipped", message: "Mac measurement is deferred; the fit shown is an estimate" };
     const which = deps.which ?? ((b: string) => Bun.which(b));
     const smi = which("nvidia-smi");
     if (platform !== "linux" || !smi) return { id: "memory", state: "skipped", message: "No NVIDIA GPU to measure" };
-    const run = deps.gpuRunner ?? runBoundedCommand;
+    const base = deps.gpuRunner ?? runBoundedCommand;
+    // Every command gets the probe's signal, and none starts after a cancel or timeout.
+    const run: GpuCommandRunner = (command, options) => {
+      if (signal.aborted) return Promise.reject(new ProbeAbort());
+      return base(command, { ...options, signal });
+    };
     const limits = { timeoutMs: 3000, stdoutLimitBytes: 64 * 1024, stderrLimitBytes: 1024, totalLimitBytes: 65 * 1024, outputLimitBehavior: "error" as const };
     const readFile = deps.readFile ?? ((path: string) => { try { return readFileSync(path, "utf8"); } catch { return null; } });
     let apps: Map<number, number> | null = null;

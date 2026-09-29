@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { STTProvider } from "../../src/backends/stt/provider";
+import type { BoundedCommandOptions } from "../../src/process/bounded-command";
 import { attributeMemory, parseComputeApps, parseListeners, probeFrontDesk, probeHear, probeHelper, probeMemory, runHeadlessProbes, wordOverlap } from "../../src/setup/probes";
 
 const signal = () => new AbortController().signal;
@@ -75,6 +76,26 @@ test("Memory: per-process GPU use is attributed to engine ports, directly or via
   expect(result.state).toBe("ok");
   expect(result.message).toContain("Hear + Speak (audiocpp) 3.4 GB");
   expect((await probeMemory({}, { signal: signal(), platform: "darwin" })).message).toContain("Mac measurement is deferred");
+});
+
+test("Memory: cancel reaches the running nvidia-smi and no later command starts", async () => {
+  const calls: string[] = [];
+  let signalled: AbortSignal | undefined;
+  let finish = () => {};
+  const run = ((command: readonly string[], options?: BoundedCommandOptions) => {
+    calls.push(command[0]!);
+    if (command[0] === "/usr/bin/nvidia-smi") { signalled = options?.signal; return new Promise((resolve) => { finish = () => resolve(out("777, 3480\n")); }); }
+    return Promise.resolve(out(""));
+  }) as never;
+  const controller = new AbortController();
+  const pending = probeMemory({}, { signal: controller.signal, platform: "linux", deps: { which: (b) => `/usr/bin/${b}`, gpuRunner: run, readFile: () => null } });
+  await Bun.sleep(5);
+  controller.abort();
+  expect(await pending).toMatchObject({ state: "cancelled" });
+  expect(signalled?.aborted).toBe(true);
+  finish();
+  await Bun.sleep(5);
+  expect(calls).toEqual(["/usr/bin/nvidia-smi"]);
 });
 
 test("headless probes include the browser-only Speak row as skipped", async () => {

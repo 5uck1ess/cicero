@@ -67,7 +67,9 @@ const IDENTIFIER_KEYS = new Set(["id", "options", "recommended", "cloudPresets",
 export function redactStateValue(value: unknown, secrets: readonly string[]): unknown {
   if (typeof value === "string") return secrets.reduce((text, secret) => secret ? text.replaceAll(secret, "<redacted>") : text, value);
   if (Array.isArray(value)) return value.map((item) => redactStateValue(item, secrets));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, IDENTIFIER_KEYS.has(key) ? item : redactStateValue(item, secrets)]));
+  // Identifier keys keep a plain id or list of ids; an object under one (a recommended choice, an answers file) is still redacted.
+  const identifier = (item: unknown) => typeof item === "string" || (Array.isArray(item) && item.every((x) => typeof x === "string"));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, IDENTIFIER_KEYS.has(key) && identifier(item) ? item : redactStateValue(item, secrets)]));
   return value;
 }
 
