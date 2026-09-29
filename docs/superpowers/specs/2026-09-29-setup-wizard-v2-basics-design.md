@@ -1,6 +1,6 @@
 # Setup wizard v2, part 1: privacy, accounts and hardware-sized models
 
-Status: design, not implemented. Date: 2026-09-29. Revision 5, after four rounds of GPT-6 Astra's adversarial review.
+Status: design, not implemented. Date: 2026-09-29. Revision 6, after five rounds of GPT-6 Astra's adversarial review.
 Builds on: `2026-09-24-setup-wizard-design.md` (the current guided setup). This spec covers only what changes; the v1 rules stand unless a section below overrides them.
 Co-designed with GPT-6 Astra: an independent proposal, merged, then reviewed against the code.
 
@@ -122,7 +122,7 @@ The step detects a running runtime with the existing Think probes (`src/setup/pi
 **Config it writes**, all through existing keys:
 
 - **When a helper is set:** `web_voice.tldr.summarizer_url` and `web_voice.tldr.summarizer_model`. Spoken codas and `summarizerClassifier` read these (`src/brain/index.ts:62`), which fixes the no-op LLM router.
-- **Always:** an explicit `llm` of `backend: openai` with the helper's `baseUrl` and `model`, or the cloud front desk's preset when there is no helper. An explicit `llm` stops the tier preset from adding its own model (`src/config.ts:1164`); the CUDA preset would otherwise launch a separate `llama-server` on port 8080. An `openai` provider starts no process (`src/backends/llm/openai.ts:205`), so no model escapes the budget.
+- **Always:** an explicit `llm` of `backend: openai` with the helper's `baseUrl` and `model`, or, with no helper, the cloud model front desk's preset and model. A no-helper setup therefore requires a model front desk; the "agent" front-desk choice is disabled there, with the reason. An explicit `llm` stops the tier preset from adding its own model (`src/config.ts:1164`); the CUDA preset would otherwise launch a separate `llama-server` on port 8080. An `openai` provider starts no process (`src/backends/llm/openai.ts:205`), so no model escapes the budget.
 - **Checkbox "Compress long conversations":** `brain.history_compaction.enabled: true` (`src/daemon.ts:1178`), using the same endpoint.
 - **Call minutes** (`notify.call_minutes`, `src/daemon.ts:1680`) need Telegram. The wizard does not set up Telegram in part 1, so this checkbox waits for the Channels step.
 
@@ -148,8 +148,8 @@ This is today's step, with two changes.
 
 **Where the agent goes:**
 - If the front desk is **an agent**, this choice is written to `brain`, as in v1.
-- If the front desk is **a model**, the agent is written to `brain.escalate` (`src/brain/index.ts:236`). The front desk hands a turn to it when the user says one of its trigger phrases ("think hard", "ask the agent").
-  - **Code change:** today the escalation wrapper is built only inside the `acp` primary branch (`src/brain/index.ts:208`), so a model front desk ignores `brain.escalate`. Part 1 moves the wrapping after backend selection, so `RoutingBrain` wraps any primary. It already takes any `Brain` (`src/brain/routing.ts:17`). Existing ACP configs behave the same. `brain.escalate` accepts ACP commands only, so the list shows ACP agents: `hermes acp`, `codex-acp` via `bunx`, and a Claude Code ACP adapter. Which adapters work for Claude and Grok is **verified during implementation**; unverified ones are not listed. The agent is optional; skipping it gives a talk-only setup.
+- If the front desk is **a model**, the agent is written to `brain.escalate` (`src/brain/index.ts:236`). The front desk hands a turn to it when the user says a trigger phrase; the defaults are "think hard", "think deeply", "think carefully" and "think it through" (`src/brain/routing.ts:15`). Routing is per utterance and the two keep separate conversations, so the step says the agent suits one-off deep questions, not follow-ups in the same thread.
+  - **Code change:** today the escalation wrapper is built only inside the `acp` primary branch (`src/brain/index.ts:208`), so a model front desk ignores `brain.escalate`. Part 1 moves the wrapping after backend selection, so `RoutingBrain` wraps any primary. It already takes any `Brain` (`src/brain/routing.ts:17`). Existing ACP configs behave the same. `brain.escalate` accepts ACP commands only, so the list shows ACP agents: `hermes acp`, `codex-acp` via `bunx`, and a Claude Code ACP adapter. Which adapters work for Claude and Grok is **verified during implementation**; unverified ones are not listed. The existing detection checks only the Claude, Codex, Gemini and Qwen binaries (`src/setup/pickers.ts:220`), so part 1 adds a `which` check for each ACP entry's first command (`hermes`, `bunx`). An entry shows "found" or "not found"; whether the adapter package itself runs stays "unverified until first call". The agent is optional; skipping it gives a talk-only setup.
 
 **Privacy:** in `local` mode, cloud CLI agents are disabled until the user ticks "Allow this agent to use the cloud", which adds `agent` to `privacy.allow`. A local agent (an ACP harness pointed at a local model) needs no exception.
 
@@ -162,7 +162,7 @@ This is today's step, with one change. The board probe (`src/setup/pickers.ts:27
 Test runs against the **engines already running**, on the user's click. It checks:
 
 1. **Hear:** a bundled 3-second WAV is sent to the configured STT endpoint, and the transcript is compared with the expected text.
-2. **Front desk:** one chat completion when it is a model. An agent front desk or escalation agent is not run by Test, because a CLI turn spawns a process (`src/brain/subprocess-cli.ts:279`) and ACP needs an owned session (`src/brain/acp.ts:1594`). It shows the Agent step's existing `--version` check instead, labeled "installed; tested on first call".
+2. **Front desk:** one chat completion when it is a model. An agent front desk or escalation agent is not run by Test, because a CLI turn spawns a process (`src/brain/subprocess-cli.ts:279`) and ACP needs an owned session (`src/brain/acp.ts:1594`). It shows the Agent step's install check instead (see step 8), labeled "installed; tested on first call".
 3. **Helper:** one summary of a bundled long reply.
 4. **Speak:** a sentence is synthesized and played in the browser (playback only; no microphone in part 1).
 5. **Memory (CUDA only):** per-process use from `nvidia-smi --query-compute-apps`, matched to the speech and runtime PIDs where possible. The rest shows as "other GPU use". This is how the reference box was measured. The existing aggregate telemetry (`src/platform/gpu.ts:21`) is the fallback, labeled "whole GPU". Mac measurement is deferred.
