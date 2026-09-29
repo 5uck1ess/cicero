@@ -122,7 +122,7 @@ llm: { backend: moonshot,  model: kimi-k2 }         # MOONSHOT_API_KEY   (Kimi)
 llm: { backend: zhipu,     model: glm-4 }           # ZHIPUAI_API_KEY    (GLM)
 ```
 
-Presets: `openai`, `openrouter`, `groq`, `together`, `deepseek`, `dashscope` / `qwen-api`, `moonshot` / `kimi`, `zhipu` / `glm`, `minimax`. For anything else (another cloud, a local vLLM, …) use `openai-compatible` with an explicit URL:
+Presets: `openai`, `openrouter`, `groq`, `together`, `cerebras`, `xai`, `deepseek`, `dashscope` / `qwen-api`, `moonshot` / `kimi`, `zhipu` / `glm`, `minimax`. For anything else (another cloud, a local vLLM, …) use `openai-compatible` with an explicit URL:
 
 ```yaml
 llm: { backend: openai-compatible, baseUrl: https://host/v1, model: ..., apiKeyEnv: MY_KEY }

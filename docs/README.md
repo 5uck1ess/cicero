@@ -8,18 +8,28 @@ are provenance, not guidance.
 
 | Read | For |
 |---|---|
-| [Project README](/) | What Cicero is, what it feels like, and what you need |
-| [Architecture](architecture.md) | The three runtime shapes and how a spoken turn flows through them |
+| [Project README](/) | What Cicero is, what it feels like, and the quickstart |
+| [Concepts](concepts.md) | The two layers: Cicero itself, and your office in your own config |
+| [Architecture](architecture.md) | How a spoken turn flows, and what runs where |
 | [Why not full-duplex](duplex.md) | The core design decision: honest turn-taking with fast barge-in |
-| [The office](office.md) | Lanes: several agents with their own voices behind one call |
 
 ## Have your first conversation
 
 | Read | For |
 |---|---|
-| [Setup](setup.md) | The canonical install path — prerequisites to first spoken reply, per platform |
+| [Setup](setup.md) | The one install path: the setup wizard, step by step, to the first spoken reply |
+| [Using Cicero](using.md) | What to say, interrupting, "details", "think hard", privacy day to day, checking what runs |
 | [Choosing a brain](brains.md) | Which agent to plug in (Claude Code, Codex, Gemini, ACP, any OpenAI-compatible endpoint) and how |
-| [Configuration](configuration.md) | Deployment tiers, the config schema, quick intents, custom voice actions — with [`config.yaml.example`](https://github.com/5uck1ess/cicero/blob/main/config.yaml.example) as the annotated reference |
+| [Configuration](configuration.md) | Privacy, escalation, tier presets, the config schema, quick intents, custom voice actions — with [`config.yaml.example`](https://github.com/5uck1ess/cicero/blob/main/config.yaml.example) as the annotated reference |
+
+## Advanced / example deployment
+
+| Read | For |
+|---|---|
+| [Advanced overview](advanced.md) | One owner's office as an example: what it is and what it is not |
+| [Reference deployment](reference-deployment.md) | The owner's always-on box, as a worked example |
+| [The office](office.md) | Lanes: several agents with their own voices behind one call |
+| [Channels](channels.md) | How voice and text reach Cicero, and adding a new channel |
 
 ## Operate it
 

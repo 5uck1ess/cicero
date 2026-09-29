@@ -82,7 +82,7 @@ export function createSTTProvider(config: RuntimeConfig): STTProvider {
   return provider;
 }
 
-function buildSTTProvider(sttConfig: STTProviderConfig, configKey: string): STTProvider {
+export function buildSTTProvider(sttConfig: STTProviderConfig, configKey: string): STTProvider {
   switch (sttConfig.backend) {
     case "mlx-whisper":
       return new MlxWhisperProvider(sttConfig);
@@ -119,7 +119,7 @@ export function createTTSProvider(config: RuntimeConfig): TTSProvider {
   return primary;
 }
 
-function buildTTSProvider(ttsConfig: TTSProviderConfig, configKey: string): TTSProvider {
+export function buildTTSProvider(ttsConfig: TTSProviderConfig, configKey: string): TTSProvider {
   const voiceContract = voiceProviderContractForBackend(ttsConfig.backend);
   if (voiceContract) return buildVoiceTTSProvider(voiceContract, ttsConfig);
   switch (ttsConfig.backend) {

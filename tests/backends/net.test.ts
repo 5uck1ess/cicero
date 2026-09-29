@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { isLocalHost, isPrivateLanHost, isKeylessHost, httpBase } from "../../src/backends/net";
+import { isLocalHost, isLoopbackHost, isPrivateLanHost, isKeylessHost, httpBase } from "../../src/backends/net";
 
 test("isLocalHost is true for the loopback set and unset host, false otherwise", () => {
   for (const h of [undefined, "", "localhost", "127.0.0.1", "::1", "0.0.0.0"]) {
@@ -52,4 +52,9 @@ test("httpBase builds host:port, defaulting host to localhost", () => {
   expect(httpBase("192.168.1.50", 8080)).toBe("http://192.168.1.50:8080");
   expect(httpBase(undefined, 9119)).toBe("http://localhost:9119");
   expect(httpBase("fd00::5", 8080)).toBe("http://[fd00::5]:8080");
+});
+
+test("isLoopbackHost: the loopback set and any 127/8 address, never a DNS name that looks like one", () => {
+  for (const h of ["localhost", "127.0.0.1", "127.8.9.10", "::1", "[::1]"]) expect(isLoopbackHost(h)).toBe(true);
+  for (const h of ["127.example.com", "127.0.0.1.nip.io", "192.168.1.5", "10.0.0.2", "example.com"]) expect(isLoopbackHost(h)).toBe(false);
 });

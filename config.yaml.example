@@ -1,10 +1,21 @@
-# Cicero configuration — copy to ~/.cicero/config.yaml and edit.
+# Reference: every option. The wizard (`cicero setup`) writes your config; you
+# do not need to copy this file. See docs/setup.md.
 #
-#   mkdir -p ~/.cicero && cp config.yaml.example ~/.cicero/config.yaml
-#
-# This example is the flagship shape: a headless box serving the web-voice
-# page, local STT + TTS, and an ACP agent as the brain. Every section has
-# commented alternates. Run `cicero doctor` to check configured prerequisites.
+# This example is one shape: a headless box serving the web-voice page, local
+# STT + TTS, and an ACP agent as the brain. Every section has commented
+# alternates. Run `cicero doctor` to check configured prerequisites.
+
+# ---------------------------------------------------------------------------
+# Privacy: what may leave this machine (the wizard's first question). This is
+# a declared policy, not a firewall: the wizard offers only what it allows, and
+# `cicero doctor` warns when the config drifts from it.
+#   local: the front desk, helper and speech run here; a cloud agent, Telegram
+#          or a task board must be listed in allow.
+#   cloud: the front desk and agents may be cloud services; Telegram and task
+#          boards still need their allowance.
+# privacy:
+#   mode: local
+#   allow: [agent]   # any of: agent, telegram, board
 
 # ---------------------------------------------------------------------------
 # Headless: no local mic/speakers — browsers (and phone calls) are the audio

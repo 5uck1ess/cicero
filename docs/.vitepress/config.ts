@@ -1,10 +1,11 @@
 import { defineConfig } from "vitepress";
+import { withMermaid } from "vitepress-plugin-mermaid";
 import { fileURLToPath } from "node:url";
 
 const repository = "https://github.com/5uck1ess/cicero";
 const assets = fileURLToPath(new URL("../../assets/", import.meta.url));
 
-export default defineConfig({
+export default withMermaid(defineConfig({
   title: "Cicero",
   description: "Self-hosted voice layer for coding agents",
   base: "/cicero/",
@@ -12,6 +13,7 @@ export default defineConfig({
   srcExclude: [
     "AGENTS.md",
     "CLAUDE.md",
+    "INSTALL.md",
     "bench/**",
     "requirements/**",
     "sidecars/**",
@@ -36,6 +38,7 @@ export default defineConfig({
           `${repository}/blob/main/sidecars/telegram-call/README.md`,
         ],
         ["LICENSE", `${repository}/blob/main/LICENSE`],
+        ["INSTALL.md", `${repository}/blob/main/INSTALL.md`],
       ]);
 
       md.core.ruler.after("inline", "cicero-homepage-links", (state) => {
@@ -75,17 +78,27 @@ export default defineConfig({
         text: "Understand it",
         items: [
           { text: "Project README", link: "/" },
+          { text: "Concepts: Cicero and your office", link: "/concepts" },
           { text: "Architecture", link: "/architecture" },
           { text: "Why not full-duplex", link: "/duplex" },
-          { text: "The office", link: "/office" },
         ],
       },
       {
         text: "Have your first conversation",
         items: [
           { text: "Setup", link: "/setup" },
+          { text: "Using Cicero", link: "/using" },
           { text: "Choosing a brain", link: "/brains" },
           { text: "Configuration", link: "/configuration" },
+        ],
+      },
+      {
+        text: "Advanced / example deployment",
+        items: [
+          { text: "Advanced overview", link: "/advanced" },
+          { text: "Reference deployment", link: "/reference-deployment" },
+          { text: "The office", link: "/office" },
+          { text: "Channels", link: "/channels" },
         ],
       },
       {
@@ -138,4 +151,4 @@ export default defineConfig({
       },
     ],
   },
-});
+}));

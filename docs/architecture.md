@@ -10,31 +10,28 @@ All modes share the same summarization + TTS core.
 
 ## The turn pipeline (web-voice)
 
+```mermaid
+flowchart LR
+    Y((you)) -->|speech| B["browser / PWA<br/>or Telegram call"]
+    B -->|audio| H["Hear<br/>your STT engine"]
+    H -->|text| Q{"switchboard<br/>transfers · quick intents"}
+    Q --> F["Front desk<br/>a model or an agent"]
+    F -.->|"'think hard …'"| E["optional escalation agent<br/>any ACP agent"]
+    E -.-> R
+    F --> R{"long reply?"}
+    R -->|yes| HL["Helper<br/>shortens it · say 'details' for the rest"]
+    R -->|no| S
+    HL --> S["Speak<br/>your TTS engine · sanitized text"]
+    S -->|"audio, sentence by sentence"| B
+    Q -.-> L["office lanes<br/>opt-in"]
 ```
- browser / PWA / Telegram call
-        │ audio (WebSocket, TLS)
-        ▼
- ┌──────────────────────────── Cicero daemon ────────────────────────────┐
- │                                                                       │
- │  STT provider ─text──▶ quick intents / switchboard                    │
- │                        ├╌╌╌▶ Laya router sidecar (opt-in)             │
- │                        │     ~30 ms · checkpoint required             │
- │  (local managed or      │ instant: transfers, roll call,              │
- │   configured remote)    │ user-defined phrases (microseconds)         │
- │                        ▼ everything else                              │
- │                     brain lane (ACP agent — front desk,               │
- │                     or whichever colleague the call is pinned to)     │
- │                        │ streamed tokens                              │
- │                        ▼ sentence boundaries                          │
- │                     TTS sanitizer (markdown/typography → speech)      │
- │                        ▼                                              │
- │                     TTS provider (cloned voice per lane;              │
- │                     local/remote, fallback engine on error)            │
- └────────────────────────│──────────────────────────────────────────────┘
-                          │ audio, sentence-by-sentence
-                          ▼
-                    browser plays it — barge-in cancels mid-stream
-```
+
+Audio reaches the daemon over a TLS WebSocket. Speech-to-text turns it into
+words, the switchboard handles transfers and your own quick phrases instantly,
+and everything else goes to the front desk. With a model front desk, "think
+hard" hands one turn to the escalation agent. Replies are cut at sentence
+boundaries, flattened from markdown into speech, and synthesized one sentence
+at a time; the browser plays them and barge-in cancels the rest.
 
 Key properties:
 
@@ -45,6 +42,30 @@ Key properties:
 - **Speech is sanitized, text is not.** Markdown, code fences, list markers, and em-dashes are flattened to natural speech before TTS; the chat log keeps the rich text. Shouting is tamed at the same layer (repeated `!!!` collapse, ALL-CAPS words flatten — punctuation is a volume knob to a TTS engine), and LLM delivery tags like `[excited]` are stripped for engines that can't act on them, kept for ones that can.
 - **Local model servers are supervised children.** The daemon launches and owns supported local STT/TTS/LLM processes. A configured remote or cloud provider is probed but not launched. A TTS fallback engine takes over per-sentence if the primary errors.
 - **Conversation survives restarts.** Completed turns land in a JSONL history in `~/.cicero`; on boot, a recap primes the fresh agent session (colleague turns attributed to the colleague, so personas never leak across a restart).
+
+## What runs where
+
+The wizard sizes the front desk and helper to a **model budget**: total GPU
+memory minus the speech engines and 1.5 GB of headroom. This is the reference
+Linux box's layout, **as an example** (one NVIDIA RTX 3090, 24 GB):
+
+```mermaid
+flowchart TB
+    subgraph GPU["Example: reference box · RTX 3090 · 24 GB"]
+        direction TB
+        A["audio.cpp · Nemotron STT + Pocket TTS<br/>port 8092 · 3.5 GB · measured"]
+        HL["llama-swap · Gemma 4 E4B helper<br/>port 8080 · 4.0 GB · measured"]
+        F["llama-swap · Gemma 4 26B-A4B front desk<br/>port 8080 · ~15 GB · measured"]
+    end
+    E["escalation agent · bunx codex-acp<br/>a command, not a port · unknown (not measured)"]
+    F -.->|"'think hard'"| E
+```
+
+The footprints come from the wizard's fit table. On NVIDIA, the Test step
+measures what each engine and model actually uses with `nvidia-smi` and
+shows those numbers in its Memory row, next to the fit-table values. Footprints
+are measured on NVIDIA only; on a Mac every value is labeled an estimate, and agents are never started during setup, so their footprint is
+unknown.
 
 ## Components
 

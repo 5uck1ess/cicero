@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { certificateLanIPv4s, setupHandoff, startSetupServer, trustedSetupRequest, type SetupServer } from "../../src/setup/server";
 import { createDraft } from "../../src/setup/draft";
 import { writeDraft } from "../../src/setup/write";
+import { REQUIRED_ANSWERS, requiredDeps } from "./required";
 
 const servers: SetupServer[] = [];
 const homes: string[] = [];
@@ -46,6 +47,26 @@ describe("setup server auth", () => {
     expect(state.handoff.sourceConfigPath).toBe(join(trialHome, "config.yaml"));
     expect(state.handoff.defaultConfigPath).toBe(join(defaultHome, "config.yaml"));
     expect(state.handoff.copyCommand).toContain("cp -n");
+  });
+  test("an API key from the environment is redacted from page state even when a runtime echoes it", async () => {
+    let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
+    const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop: () => {} }; }) as unknown as typeof Bun.serve;
+    const marker = "synthetic-xai-marker-0123456789";
+    const pickerDeps = { ...requiredDeps, env: { XAI_API_KEY: marker },
+      fetcher: (async (input: RequestInfo | URL) => String(input).includes("11434/api/tags") ? Response.json({ models: [{ name: `echo-${marker}` }] }) : new Response("down", { status: 503 })) as typeof fetch };
+    const server = await startSetupServer({ home: home(), systemDeps, output: () => {}, serve, pickerDeps });
+    servers.push(server);
+    const headers = { host: `127.0.0.1:${server.port}`, "x-cicero-setup-token": server.token, "x-cicero-setup-csrf": "1" };
+    const step = await handler(new Request(`http://127.0.0.1:${server.port}/api/step`, { method: "POST", headers, body: JSON.stringify({ id: "frontdesk" }) }));
+    const text = await step.text();
+    expect(text).toContain("echo-");
+    expect(text).not.toContain(marker);
+  });
+  test("every handler response goes through the redacting reply, never a bare json()", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/setup/server.ts"), "utf8");
+    const handler = source.slice(source.indexOf("async fetch(req)"), source.indexOf("function stop(): Promise<void>"));
+    expect(handler.length).toBeGreaterThan(1000);
+    expect(handler).not.toMatch(/\bjson\(/);
   });
   test("actions.yaml errors are shown without offering a config backup", async () => {
     let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
@@ -147,7 +168,7 @@ describe("setup server auth", () => {
     }) as unknown as typeof Bun.serve;
     const dir = home();
     const server = await startSetupServer({
-      home: dir, port: 0, systemDeps, output: () => {}, serve,
+      home: dir, port: 0, systemDeps, output: () => {}, serve, pickerDeps: requiredDeps,
       check: async () => [
         { name: "config", level: "ok", detail: "valid" },
         { name: "stt (faster-whisper)", level: "fail", detail: "venv missing", hint: "install STT" },
@@ -160,6 +181,7 @@ describe("setup server auth", () => {
     const send = (path: string, body: object) => handler(new Request(`http://127.0.0.1:${server.port}${path}`, {
       method: "POST", headers: { host: `127.0.0.1:${server.port}`, "x-cicero-setup-token": server.token, "x-cicero-setup-csrf": "1" }, body: JSON.stringify(body),
     }));
+    for (const [id, choice] of REQUIRED_ANSWERS) expect((await send("/api/choice", { id, choice })).status).toBe(200);
     const checked = await send("/api/check", {});
     expect(checked.status).toBe(200);
     const state = await checked.json() as { canWrite: boolean; checkGroups: { notReady: unknown[]; blocking: unknown[] } };
@@ -187,7 +209,7 @@ describe("setup server auth", () => {
     let finishOldCheck!: (checks: { name: string; level: "ok"; detail: string }[]) => void;
     let checkCalls = 0;
     const server = await startSetupServer({
-      home: home(), systemDeps, output: () => {}, serve,
+      home: home(), systemDeps, output: () => {}, serve, pickerDeps: requiredDeps,
       check: async () => {
         checkCalls += 1;
         if (checkCalls > 1) return [{ name: "config", level: "ok", detail: "new draft" }];
@@ -200,6 +222,7 @@ describe("setup server auth", () => {
     const send = (path: string, body: object) => handler(new Request(`http://127.0.0.1:${server.port}${path}`, {
       method: "POST", headers, body: JSON.stringify(body),
     }));
+    for (const [id, choice] of REQUIRED_ANSWERS) expect((await send("/api/choice", { id, choice })).status).toBe(200);
     const pending = send("/api/check", {});
     await started;
     expect((await send("/api/choice", { id: "system", choice: "local-mlx" })).status).toBe(200);

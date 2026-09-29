@@ -1,6 +1,6 @@
 # Reference deployment — an always-on personal Cicero
 
-The [first conversation](setup.md#your-first-conversation) gets you a working
+[Setup](setup.md#start-and-pair) gets you a working
 voice loop in a terminal you're watching. This runbook turns that into the
 thing the README promises: a box that's *always* there — browser or PWA from
 any device on your network, Telegram texts, a real phone call, a morning

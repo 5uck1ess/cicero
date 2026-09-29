@@ -18,6 +18,15 @@ export function isLocalHost(host: string | undefined): boolean {
   return host === undefined || LOCAL_HOSTS.has(addressWithoutZone(host));
 }
 
+/**
+ * True only for this machine: the loopback names and any literal 127/8 address.
+ * A DNS name is never loopback here, even one spelled like `127.example.com`.
+ */
+export function isLoopbackHost(host: string): boolean {
+  const h = addressWithoutZone(host);
+  return (h !== "" && LOCAL_HOSTS.has(h) && h !== "0.0.0.0") || (isIP(h) === 4 && h.startsWith("127."));
+}
+
 const MDNS_HOST = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+local$/i;
 
 function isPrivateV4(host: string): boolean {

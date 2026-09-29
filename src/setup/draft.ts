@@ -21,6 +21,9 @@ export function createDraft(tier: Tier, token = randomBytes(32).toString("hex"))
 }
 
 const EXPLANATIONS: Record<string, string> = {
+  privacy: "What may leave this machine. A declared policy the wizard and cicero doctor enforce, not a firewall.",
+  "privacy.mode": "local: nothing leaves unless allowed below. cloud: the front desk and agents may use cloud services.",
+  "privacy.allow": "Single items allowed to leave: agent (a cloud coding agent), telegram (message text), board (task text).",
   deployment: "Starting preset for the local speech and language engines.",
   headless: "Uses the browser microphone and speaker instead of local audio devices.",
   brain: "Configures the coding agent Cicero will voice.",
@@ -31,11 +34,18 @@ const EXPLANATIONS: Record<string, string> = {
   "brain.base_url": "OpenAI-compatible endpoint for the brain.",
   "brain.model": "Model requested by the brain endpoint.",
   "brain.api_key": "Private authentication key for the brain endpoint.",
+  "web_voice.tldr": "Long replies: the first sentences are spoken, the rest shows in the chat pane (say \"details\" to hear it).",
+  "web_voice.tldr.summarizer_url": "The helper model's OpenAI-compatible endpoint; it writes the one spoken summary line.",
+  "web_voice.tldr.summarizer_model": "The helper model that summarizes long replies.",
+  llm: "The conversational model Cicero itself uses. Set explicitly so the hardware tier adds no model of its own.",
+  "llm.backend": "openai: any OpenAI-compatible endpoint, local or cloud.",
+  "llm.baseUrl": "Where that endpoint listens.",
+  "llm.model": "The model name that endpoint lists.",
+  "llm.apiKeyEnv": "The environment variable holding the API key. The key itself is never written here.",
+  "brain.history_compaction": "Summarizes older conversation through the helper instead of dropping it.",
+  "brain.history_compaction.enabled": "On: long sessions keep a summary of older turns.",
+  "brain.unset_env": "Removed from the agent's environment so it uses your subscription login instead of a per-token API key.",
   "brain.ollama_model": "Local Ollama model used by the brain.",
-  llm: "Configures the conversational language model.",
-  "llm.backend": "Selects the language model runtime or API.",
-  "llm.model": "Model to load or request.",
-  "llm.baseUrl": "Base URL of the OpenAI-compatible language model API.",
   "llm.apiKey": "Private authentication key for the language model API.",
   switchboard: "Configures intent routing before the brain.",
   "switchboard.intent_url": "Base Laya does not route zero-shot; a fine-tuned switchboard checkpoint is required, bring-your-own for now. A public checkpoint trained on synthetic data only plus the fine-tuning recipe are a planned follow-up.",
@@ -67,6 +77,7 @@ export function renderDraft(draft: object): string {
   const lines: string[] = [];
   function visit(object: Record<string, unknown>, prefix = "", depth = 0): void {
     for (const [key, value] of Object.entries(object)) {
+      if (value === undefined) continue; // YAML has no undefined; an unset optional is simply absent
       const path = prefix ? `${prefix}.${key}` : key;
       const indent = "  ".repeat(depth);
       lines.push(`${indent}# ${EXPLANATIONS[path] ?? `Configures ${path.replaceAll("_", " ")}.`}`);

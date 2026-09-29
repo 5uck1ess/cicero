@@ -1,15 +1,41 @@
 # Configuration
 
-Config lives at `~/.cicero/config.yaml`. CLI flags override config file values. Start from [`config.yaml.example`](https://github.com/5uck1ess/cicero/blob/main/config.yaml.example) — it documents every block — and run `cicero doctor` after editing to verify the whole chain.
+Config lives at `~/.cicero/config.yaml`. The [setup wizard](setup.md) writes it, with a comment on every key it sets. CLI flags override config file values. [`config.yaml.example`](https://github.com/5uck1ess/cicero/blob/main/config.yaml.example) is the reference for every option; you do not need to copy it. Run `cicero doctor` after editing to verify the whole chain.
 
-## Deployment tier (one line, everything else inferred)
+## Privacy
 
 ```yaml
-# Mac (default — no config needed, MLX everywhere)
+privacy:
+  mode: local          # or cloud
+  allow: [agent]       # optional: agent, telegram, board
+```
 
-deployment: local-cuda    # RTX 30/40/50 series
+`mode` is required when `privacy` is present; `allow` lists what may reach the network in `local` mode (Telegram and board need their entry in either mode). It is a declared policy, not a firewall: the wizard offers only what it allows, and `cicero doctor` (and `cicero doctor --json`) warns on a non-loopback `brain`, `llm` or helper endpoint in `local` mode, a cloud CLI or ACP agent without `agent`, Telegram without `telegram`, and an enabled `notify.kanban` without `board`. What it means day to day is in [Using Cicero](using.md#privacy).
+
+## Escalation on any front desk
+
+`brain.escalate` adds a second, heavier ACP agent that takes a turn when you say "think hard" (the phrases are in [Using Cicero](using.md#thinking-harder); override them with `triggers`). The front desk can be any brain, including a local model:
+
+```yaml
+brain:
+  backend: ollama
+  mode: subprocess
+  ollama_model: gemma4:26b-a4b-it-qat
+  escalate:
+    binary: bunx
+    binary_args: ["@agentclientprotocol/codex-acp@2.0.0"]
+    # unset_env: [OPENAI_API_KEY]   # use your subscription login, not a per-token key
+```
+
+## Tier presets (legacy defaults)
+
+```yaml
+deployment: local-cuda    # NVIDIA GPU
+deployment: local-mlx     # Apple Silicon (the default with no config on a Mac)
 deployment: local-cpu     # CPU only
 ```
+
+A tier preset fills in any `stt`, `tts` and `llm` block you leave out. The wizard writes those blocks explicitly, and an explicit block always overrides the preset, so the stacks below are what a hand-written config with only `deployment:` gets.
 
 ## Full example
 
@@ -97,7 +123,7 @@ Health probes use a fixed 5-second deadline. Successful JSON is capped at 8 MiB,
 audio at 64 MiB, and diagnostic error prefixes at 16 KiB; streamed LLM tokens
 remain incremental rather than being buffered into the JSON cap.
 
-## Default model stack
+## Default model stack (tier presets)
 
 ### macOS 14+ on Apple Silicon (MLX, default)
 

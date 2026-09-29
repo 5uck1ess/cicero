@@ -75,3 +75,8 @@ brain state, lanes, or transports into a multi-tenant contract.
 - Keep PRs focused and preserve unrelated changes in a dirty worktree.
 - Do not commit `.DS_Store`, local audio, credentials, generated model assets,
   virtualenvs, or benchmark output ignored by `.gitignore`.
+
+## Installing Cicero for a user
+
+If you are asked to set Cicero up for someone (not to change its code), follow
+[`INSTALL.md`](INSTALL.md) instead of the contributor guidance above.

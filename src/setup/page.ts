@@ -84,6 +84,12 @@ h1{font-size:30px;line-height:1.15;letter-spacing:-.02em;font-weight:700;margin:
 .edge{stroke:var(--line);stroke-width:2;fill:none}
 .edge.soft{stroke-dasharray:5 6}
 .edge-label{font-size:12px;fill:var(--muted)}
+.budget{display:flex;height:34px;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:8px 0 6px;background:var(--surface)}
+.budget span{display:flex;align-items:center;padding:0 8px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-right:1px solid var(--line)}
+.budget .speech{background:var(--accent-soft)}
+.budget .model{background:var(--ok-soft)}
+.budget .reserve{color:var(--muted)}
+.budget-legend{color:var(--muted);font-size:13px;margin:0 0 18px}
 .person{fill:var(--accent-soft);stroke:var(--accent-line);stroke-width:1.5}
 .person-label{font-size:13px;font-weight:600;fill:var(--ink)}
 .cta-row{display:flex;justify-content:flex-end;margin-top:28px;gap:12px;flex-wrap:wrap}
@@ -130,6 +136,8 @@ details.why{margin:0 0 28px;max-width:720px}
 details.why summary{cursor:pointer;color:var(--accent-text);font-weight:600;padding:4px 0}
 details.why div{padding:12px 0 0;color:var(--muted)}
 details.why p{margin:0 0 10px}
+details.advanced{margin:0 0 20px;max-width:720px}
+details.advanced summary{cursor:pointer;color:var(--muted);font-weight:600;padding:4px 0}
 .cmd{display:flex;align-items:center;gap:10px;margin:8px 0 0;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-ctl);padding:8px 8px 8px 12px}
 .cmd code{flex:1;font:13.5px/1.5 var(--mono);overflow-x:auto;white-space:pre}
 .facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:20px 0;margin:0 0 32px}
@@ -146,6 +154,8 @@ details.why p{margin:0 0 10px}
 .pill.ok{color:var(--ok);border-color:var(--ok);background:var(--ok-soft)}
 .pill.todo{color:var(--accent-text);border-color:var(--accent-line);background:var(--accent-soft)}
 .pill.bad{color:var(--bad);border-color:var(--bad);background:var(--bad-soft)}
+table.mem{border-collapse:collapse;margin:8px 0 0;font-size:14px}
+table.mem td{padding:4px 16px 4px 0;color:var(--muted);font-variant-numeric:tabular-nums}
 .rows{list-style:none;margin:0 0 28px;padding:0;max-width:760px;border:1px solid var(--line);border-radius:var(--r-outer);background:var(--surface)}
 .rows li{padding:14px 18px;border-top:1px solid var(--line)}
 .rows li:first-child{border-top:0}
@@ -193,19 +203,22 @@ var state = null;
 var view = 'overview';
 var app = document.getElementById('app');
 
-var ORDER = ['system', 'stt', 'provider', 'router', 'brain', 'tts', 'board', 'review'];
+var ORDER = ['privacy', 'system', 'accounts', 'frontdesk', 'helper', 'stt', 'tts', 'brain', 'board', 'test', 'review'];
 var STEP = {
+  privacy:  { short: 'Privacy', title: 'What may leave this machine?', lede: 'Choose what Cicero may send off this machine. Later steps ask before anything else leaves.', sub: 'Data policy' },
   system:   { short: 'Machine', title: 'This machine', lede: 'Cicero picks a starting preset from your hardware. You can change it.', sub: 'Runs everything' },
+  accounts: { short: 'Accounts', title: 'Which accounts pay?', lede: 'Cicero checks which login or API key each agent will use. Nothing secret is read or stored.', sub: 'Logins and keys' },
+  frontdesk:{ short: 'Front desk', title: 'What answers when you talk?', lede: 'A model answers in about a second and hands coding work to your agent. An agent answers everything itself, slower, with tools.', sub: 'Model or agent' },
+  helper:   { short: 'Helper', title: 'A small helper model', lede: 'It keeps spoken replies short and summarizes long conversations, on this machine.', sub: 'Summaries' },
   stt:      { short: 'Hear',    title: 'How should Cicero hear you?', lede: 'Speech-to-text turns your voice into words.', sub: 'Speech-to-text' },
-  provider: { short: 'Think',   title: 'Which model handles conversation?', lede: 'A language model answers everyday talk quickly. Coding work goes to the agent.', sub: 'Language model' },
-  router:   { short: 'Route',   title: 'How should Cicero route requests?', lede: 'Use the LLM prompt, or a local Laya sidecar with your fine-tuned switchboard checkpoint.', sub: 'Intent router' },
   brain:    { short: 'Agent',   title: 'Which coding agent does the work?', lede: 'Cicero is the voice. Your agent reads code, runs tools and opens PRs.', sub: 'Coding agent' },
   tts:      { short: 'Speak',   title: 'How should Cicero speak?', lede: 'Text-to-speech turns replies into audio.', sub: 'Text-to-speech' },
   board:    { short: 'Tasks',   title: 'Where do your tasks live?', lede: 'Optional. Cicero can announce when tasks on your board finish or get stuck.', sub: 'Optional board' },
+  test:     { short: 'Test',    title: 'Try it', lede: 'Each check runs one small request against an engine that is already running. None of them blocks saving.', sub: 'Live checks' },
   review:   { short: 'Save',    title: 'Review and save', lede: 'Cicero checks your choices before writing the config.', sub: 'Check and write' }
 };
 var NAMES = {'llm':'LLM prompt (default)','laya':'Laya sidecar (checkpoint required)','llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'OpenAI-compatible URL','claude-code':'Claude Code','codex':'Codex','gemini':'Gemini CLI','qwen':'Qwen Code','acp':'ACP agent','faster-whisper':'faster-whisper','mlx-whisper':'MLX Whisper','audiocpp':'audio.cpp','kokoro':'Kokoro','pocket-tts':'Pocket TTS (Python)','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming server','hermes':'Hermes','multica':'Multica','paperclip':'Paperclip','none':'No board','cloud':'Cloud or custom API','api':'Model API','local-cuda':'NVIDIA GPU','local-mlx':'Apple Silicon','local-cpu':'CPU only'};
-function optionName(stepId, option) { return option === 'audiocpp' ? (stepId === 'stt' ? 'Nemotron (audio.cpp)' : 'Pocket TTS (audio.cpp)') : (NAMES[option] || option); }
+function optionName(stepId, option) { if (stepId === 'brain' && option === 'none') return 'No agent (talk only)'; if (stepId === 'brain' && option === 'acp') return 'Other ACP command'; return option === 'audiocpp' ? (stepId === 'stt' ? 'Nemotron (audio.cpp)' : 'Pocket TTS (audio.cpp)') : (NAMES[option] || option); }
 var NOTES = {
   'llm':'Routes with the conversational LLM; no separate checkpoint needed.',
   'laya':'Base Laya does not route zero-shot. A fine-tuned switchboard checkpoint is required: bring-your-own for now. A public checkpoint trained on synthetic data only plus the fine-tuning recipe are a planned follow-up.',
@@ -217,6 +230,22 @@ var NOTES = {
   'hermes':'Live-tested.', 'multica':'Supported, not live-tested yet.', 'paperclip':'Supported, not live-tested yet.', 'none':'Skip task announcements.',
   'local-cuda':'Local speech and models on your NVIDIA card.', 'local-mlx':'Local speech and models on Apple Silicon.', 'local-cpu':'Works anywhere, slower.'
 };
+/** An ordered install/start guide: each step is [text, link or command]. */
+function guideList(guide) {
+  var list = h('ol');
+  guide.forEach(function (g) {
+    var li = h('li', {}, [document.createTextNode(g[0])]);
+    if (g[1] && g[1].indexOf('http') === 0) { li.append(document.createTextNode(': ')); li.append(h('a', { href: g[1], target: '_blank', rel: 'noopener noreferrer', text: g[1].replace(/^https?:[/][/]/, '') })); }
+    else if (g[1]) li.append(cmd(g[1]));
+    list.append(li);
+  });
+  return list;
+}
+/** Install and start steps for a model runtime that is not running; the fit hint replaces the generic "pull a model" step. */
+function runtimeGuide(runtime, hint) {
+  var guide = (GUIDES[runtime] || []).filter(function (g) { return !(hint && g[0] === 'Pull a model'); });
+  return guide.length ? guideList(guide) : null;
+}
 var GUIDES = {
   'laya':[['Base Laya does not route zero-shot. A fine-tuned switchboard checkpoint is required: bring-your-own for now. A public checkpoint trained on synthetic data only plus the fine-tuning recipe are a planned follow-up. Read the sidecar guide','https://github.com/5uck1ess/cicero/blob/main/sidecars/laya-switchboard/README.md'],['Start with your checkpoint','uv run --python 3.11 --with-requirements requirements/laya-switchboard.txt python sidecars/laya-switchboard/serve.py --ckpt /path/to/switchboard-checkpoint']],
   'llama-cpp':[['Build or install llama.cpp','https://github.com/ggml-org/llama.cpp'],['Start the server on port 8080','llama-server -m your-model.gguf --port 8080']],
@@ -275,7 +304,6 @@ function cmd(text) {
   return h('div', { class: 'cmd' }, [h('code', { text: text }), copy]);
 }
 function isDone(id) {
-  if (id === 'system') return !!(state.selectedChoices && state.selectedChoices.system);
   if (id === 'review') return !!state.written;
   return !!(state.selectedChoices && state.selectedChoices[id]);
 }
@@ -283,7 +311,6 @@ function valueFor(id) {
   if (id === 'system') return NAMES[state.tier] || state.tier;
   if (id === 'review') return state.written ? 'Saved' : 'Not saved yet';
   var c = state.selectedChoices && state.selectedChoices[id];
-  if (id === 'router' && c) return c === 'laya' ? 'Laya sidecar' : 'LLM prompt';
   return c ? optionName(id, c) : 'Choose';
 }
 function gib(n) { return n == null ? 'unknown' : (n / 1073741824).toFixed(0) + ' GB'; }
@@ -292,7 +319,15 @@ async function go(id) {
   app.setAttribute('aria-busy', 'true');
   try { await goInner(id); } finally { app.removeAttribute('aria-busy'); }
 }
+// The one Play sample in flight; leaving the page or pressing Cancel stops it on the server.
+var sampleRun = 0;
+function cancelSample() {
+  if (!sampleRun) return;
+  sampleRun = 0;
+  api('/api/sample/cancel', {}).catch(function () {});
+}
 async function goInner(id) {
+  cancelSample();
   if (location.hash.slice(1) !== (id === 'overview' ? '' : id)) history.pushState(null, '', id === 'overview' ? location.pathname : '#' + id);
   if (id === 'overview') { view = 'overview'; render(); return; }
   var serverId = id === 'review' ? 'check' : id;
@@ -305,20 +340,21 @@ async function goInner(id) {
 // A choice whose probe failed was not added to the draft: keep the operator on that step.
 function blockedByProbe(s) { var p = s && s.detected && s.detected.probe; return p && p.ok === false ? (p.message || 'The check failed.') : null; }
 var tried = {};
-var routerUrl = '';
 function next(id) { var i = ORDER.indexOf(id); return ORDER[Math.min(i + 1, ORDER.length - 1)]; }
 
 /* ---------- Overview diagram ---------- */
 function diagram(layout) {
   var wide = layout === 'wide';
-  var W = wide ? 1140 : 360, H = wide ? 420 : 952;
   var nw = wide ? 180 : 250, nh = 92;
-  var pos = wide ? {
-    stt: [150, 20], provider: [410, 20], router: [670, 20], brain: [910, 20],
-    tts: [280, 190], board: [910, 190], system: [150, 324], review: [910, 324]
-  } : {
-    system: [55, 0], stt: [55, 120], provider: [55, 240], router: [55, 360], brain: [55, 480], board: [55, 600], tts: [55, 720], review: [55, 860]
-  };
+  // Every step has a fixed seat; only steps in ORDER are drawn.
+  var seats = wide ? {
+    privacy: [150, 20], system: [410, 20], accounts: [670, 20], review: [910, 20],
+    stt: [150, 170], frontdesk: [410, 170], helper: [670, 170], tts: [910, 170],
+    brain: [410, 320], board: [670, 320], test: [910, 320]
+  } : null;
+  var pos = {};
+  ORDER.forEach(function (id, i) { pos[id] = wide ? seats[id] : [55, i * 120]; });
+  var W = wide ? 1140 : 360, H = wide ? 420 : ORDER.length * 120 - 28;
   var root = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'group', 'aria-label': 'Cicero voice loop. Choose a part to set it up.', class: wide ? 'wide' : 'tall' });
   function mid(id, side) {
     var p = pos[id], x = p[0], y = p[1], w = nw;
@@ -329,25 +365,23 @@ function diagram(layout) {
     root.append(svg('path', { d: 'M' + a[0] + ' ' + a[1] + ' L' + b[0] + ' ' + b[1], class: 'edge' + (soft ? ' soft' : ''), 'marker-end': 'url(#arrow-' + layout + ')' }));
     if (label) root.append(svg('text', { x: lx, y: ly, class: 'edge-label', 'text-anchor': 'middle', text: label }));
   }
+  function link(a, b, sa, sb, soft, label) {
+    if (!pos[a] || !pos[b]) return;
+    var p = mid(a, sa), q = mid(b, sb);
+    edge(p, q, soft, label, (p[0] + q[0]) / 2, (p[1] + q[1]) / 2 - 8);
+  }
   root.append(svg('defs', {}, [svg('marker', { id: 'arrow-' + layout, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, [svg('path', { d: 'M0 0 L10 5 L0 10 z', fill: 'var(--muted)' })])]));
   if (wide) {
-    root.append(svg('circle', { cx: 56, cy: 66, r: 34, class: 'person' }));
-    root.append(svg('text', { x: 56, y: 71, 'text-anchor': 'middle', class: 'person-label', text: 'You' }));
-    edge([90, 66], mid('stt', 'l'), false, 'talk', 120, 56);
-    edge(mid('stt', 'r'), mid('provider', 'l'), false, 'words', 370, 56);
-    edge(mid('provider', 'r'), mid('router', 'l'), false, 'route', 630, 56);
-    edge(mid('router', 'r'), mid('brain', 'l'), false, 'code', 880, 56);
-    edge([480, 112], [400, 190], false, 'reply', 462, 158);
-    edge(mid('brain', 'b'), mid('board', 't'), true, 'tasks', 1030, 156);
-    edge(mid('tts', 'l'), [72, 96], false, 'hear it', 150, 170);
+    root.append(svg('circle', { cx: 56, cy: 216, r: 34, class: 'person' }));
+    root.append(svg('text', { x: 56, y: 221, 'text-anchor': 'middle', class: 'person-label', text: 'You' }));
+    if (pos.stt) edge([90, 216], mid('stt', 'l'), false, 'talk', 120, 206);
+    link('privacy', 'system', 'r', 'l', true); link('system', 'accounts', 'r', 'l', true);
+    link('stt', 'frontdesk', 'r', 'l', false, 'words'); link('frontdesk', 'helper', 'r', 'l', false, 'reply');
+    link('helper', 'tts', 'r', 'l', false, 'shorter'); link('frontdesk', 'brain', 'b', 't', true, 'think hard');
+    link('brain', 'board', 'r', 'l', true, 'tasks'); link('board', 'test', 'r', 'l', true);
+    if (!pos.frontdesk) link('stt', 'tts', 'r', 'l', false, 'reply');
   } else {
-    edge(mid('system', 'b'), mid('stt', 't'), true);
-    edge(mid('stt', 'b'), mid('provider', 't'), false);
-    edge(mid('provider', 'b'), mid('router', 't'), false);
-    edge(mid('router', 'b'), mid('brain', 't'), false);
-    edge(mid('brain', 'b'), mid('board', 't'), true);
-    edge(mid('board', 'b'), mid('tts', 't'), false);
-    edge(mid('tts', 'b'), mid('review', 't'), true);
+    for (var i = 1; i < ORDER.length; i++) link(ORDER[i - 1], ORDER[i], 'b', 't', true);
   }
   Object.keys(pos).forEach(function (id) {
     var p = pos[id], w = nw, done = isDone(id);
@@ -369,7 +403,7 @@ function renderOverview() {
     h('h1', { text: 'Set up your voice loop' }),
     h('p', { class: 'lede', text: 'Click any part to set it up. Nothing is written until you save.' }),
     h('div', { class: 'diagram' }, [diagram('wide'), diagram('tall')]),
-    h('div', { class: 'cta-row' }, [button(isDone('system') ? 'Continue setup' : 'Start with this machine', 'primary', function () { return go(firstOpen); })])
+    h('div', { class: 'cta-row' }, [button(isDone(ORDER[0]) ? 'Continue setup' : 'Start setup', 'primary', function () { return go(firstOpen); })])
   );
 }
 
@@ -402,12 +436,38 @@ function stateLabel(option, f) {
 }
 function field(label, input) { return h('label', { class: 'field' }, [h('span', { text: label }), input]); }
 function textInput(value, type) { return h('input', { type: type || 'text', value: value || '', autocomplete: 'off' }); }
+/** A model list with no default: when nothing listed is recommended, the person must pick one on purpose. */
+function modelSelect(items, value) {
+  var s = selectOf(items, value);
+  if (!value) s.prepend(h('option', { value: '', text: 'Choose a model (none listed is known to fit)', selected: true }));
+  return s;
+}
 function selectOf(items, value) {
   var s = h('select');
   items.forEach(function (m) { var o = h('option', { value: m, text: NAMES[m] || m }); if (m === value) o.selected = true; s.append(o); });
   return s;
 }
 
+var SPEECH_LABEL = { audiocpp: 'audio.cpp speech', python: 'Python speech', mlx: 'MLX speech' };
+function fixed(n) { return (Math.round(n * 10) / 10) + ' GB'; }
+/** One segment per planned model on the memory models may use; estimates are labeled. */
+function budgetBar(b, fit) {
+  if (!b) return null;
+  var total = b.totalGb * (b.platform === 'mlx' ? 0.6 : 1);
+  var bar = h('div', { class: 'budget', role: 'img' });
+  var parts = [['speech', (SPEECH_LABEL[b.speech.kind] || 'Speech') + ' ' + fixed(b.speech.gb) + ' (' + b.speech.basis + ')', b.speech.gb]];
+  if (fit && fit.helper) parts.push(['model', 'Helper ' + fit.helper.label + ' ' + fixed(fit.helper.footprintGb) + ' (' + fit.helper.basis + ')', fit.helper.footprintGb]);
+  if (fit && fit.frontDesk && !fit.frontDeskReusesHelper) parts.push(['model', 'Front desk ' + fit.frontDesk.label + ' ' + fixed(fit.frontDesk.footprintGb) + ' (' + fit.frontDesk.basis + ')', fit.frontDesk.footprintGb]);
+  if (b.headroomGb) parts.push(['reserve', 'Headroom ' + fixed(b.headroomGb), b.headroomGb]);
+  var used = parts.reduce(function (n, p) { return n + p[2]; }, 0);
+  if (total > used) parts.push(['reserve', 'Free ' + fixed(total - used), total - used]);
+  parts.forEach(function (p) { bar.append(h('span', { class: p[0], style: 'flex:' + Math.max(p[2], 0.1), title: p[1], text: p[1] })); });
+  bar.setAttribute('aria-label', parts.map(function (p) { return p[1]; }).join(', '));
+  var legend = 'Budget ' + fixed(b.budgetGb) + ' for models' + (b.platform === 'mlx' ? ' (60% of unified memory, minus speech).' : ' (VRAM minus speech and headroom).');
+  if (b.inUseByOthersGb) legend += ' Other processes hold ' + fixed(b.inUseByOthersGb) + ' right now; that may be temporary and is not subtracted.';
+  if (fit && fit.reason) legend += ' ' + fit.reason;
+  return [bar, h('p', { class: 'budget-legend', text: legend })];
+}
 function renderSystem(step) {
   var f = state.detected || state.system;
   var gpu = f.gpu && f.gpu.status === 'ok' ? f.gpu.name : 'No NVIDIA GPU';
@@ -419,6 +479,8 @@ function renderSystem(step) {
     h('div', { class: 'fact' }, [h('b', { text: gib(f.disks && f.disks.checkout.freeBytes) }), h('small', { text: 'free disk' })])
   ]));
   if (f.gpuWarning) app.append(h('p', { class: 'warnline', text: f.gpuWarning }));
+  var bar = budgetBar(f.budget, f.fit);
+  if (bar) app.append(h('h2', { class: 'section-h2', text: 'Model budget' }), bar[0], bar[1]);
   var picked = state.tier;
   var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: 'Starting preset' })]);
   ['local-cuda', 'local-mlx', 'local-cpu'].forEach(function (t) {
@@ -433,24 +495,306 @@ function renderSystem(step) {
   app.append(row);
 }
 
+function renderPrivacy(step) {
+  var f = state.detected || {};
+  var saved = state.selectedChoices && state.selectedChoices.privacy;
+  var picked = saved || f.recommended || 'local';
+  var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: 'What may leave this machine?' })]);
+  (f.options || ['local', 'cloud']).forEach(function (m) {
+    var input = h('input', { type: 'radio', name: 'privacy', value: m });
+    input.checked = m === picked;
+    input.onchange = function () { picked = m; };
+    var mode = (f.modes || {})[m] || { title: m, detail: '' };
+    group.append(h('label', { class: 'choice' }, [input, h('span', { class: 'name', text: mode.title }), h('span', { class: 'note', text: mode.detail }), m === f.recommended ? h('span', { class: 'badge', text: 'Recommended' }) : null]));
+  });
+  var copy = f.copy || {};
+  var list = h('ul', { class: 'rows' });
+  Object.keys(copy).forEach(function (k) { list.append(h('li', {}, [h('p', { class: 'detail', text: copy[k] })])); });
+  var telegram = h('input', { type: 'checkbox' });
+  telegram.checked = !!(state.privacyAllow && state.privacyAllow.indexOf('telegram') >= 0);
+  app.append(group,
+    h('h2', { class: 'section-h2', text: 'What each allowance sends' }), list,
+    h('label', { class: 'check-inline' }, [telegram, document.createTextNode('Allow Telegram to carry message text (only matters if you add Telegram later)')]),
+    h('p', { class: 'detail', text: 'This is a declared policy, not a firewall. Cicero and cicero doctor enforce it; doctor cannot see what a CLI agent does on the network.' }),
+    why(step));
+  var row = h('div', { class: 'actions' });
+  row.append(button('Continue', 'primary', async function () {
+    state = await api('/api/choice', { id: 'privacy', choice: { mode: picked, allow: telegram.checked ? ['telegram'] : [] } });
+    await go(next('privacy'));
+  }, row));
+  app.append(row);
+}
+var AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', grok: 'Grok' };
+var BILLING = { 'subscription': 'Your subscription', 'per-token key': 'Per-token API billing', 'unknown': 'Unknown' };
+function renderAccounts(step) {
+  var f = state.detected || {};
+  var chosen = {};
+  (state.accountsChoice || f.recommended || []).forEach(function (p) { chosen[p] = true; });
+  var ul = h('ul', { class: 'rows' });
+  (f.agents || []).forEach(function (a) {
+    var login = a.login === 'found' ? 'Login found' + (a.loginUnvalidated ? ' (not validated)' : '') : a.login === 'unknown' ? 'Login unknown' : 'No login';
+    var key = a.key === 'found' ? a.keyVariable + ' is set' : a.keyVariable + ' not set';
+    var li = h('li', {}, [
+      h('div', { class: 'head' }, [h('span', { class: 'name', text: AGENT_NAMES[a.provider] || a.provider })]),
+      h('p', { class: 'detail', text: login + ' · ' + key + ' · Likely billing: ' + (BILLING[a.likely] || a.likely) })
+    ]);
+    if (a.keyOverridesLogin === true) {
+      var box = h('input', { type: 'checkbox' });
+      box.checked = !!chosen[a.provider];
+      box.onchange = function () { chosen[a.provider] = box.checked; };
+      li.append(h('label', { class: 'check-inline' }, [box, document.createTextNode('Use my subscription (removes ' + a.keyVariable + ' from this agent only; it falls back to your login)')]));
+    } else if (a.keyOverridesLogin === 'unknown') {
+      li.append(h('p', { class: 'detail', text: 'Both a login and ' + a.keyVariable + ' exist; which one this CLI bills is unknown.' }));
+    }
+    ul.append(li);
+  });
+  var keys = f.cloudKeys || {};
+  var found = Object.keys(keys).filter(function (k) { return keys[k] === 'found'; });
+  app.append(ul,
+    h('h2', { class: 'section-h2', text: 'Cloud model keys' }),
+    h('p', { class: 'detail', text: found.length ? 'Found: ' + found.join(', ') + '. These can run a cloud front desk if Privacy allows it.' : 'No cloud model API keys found in this environment.' }),
+    why(step));
+  var row = h('div', { class: 'actions' });
+  row.append(button('Continue', 'primary', async function () {
+    var list = Object.keys(chosen).filter(function (p) { return chosen[p]; });
+    state = await api('/api/choice', { id: 'accounts', choice: { useSubscription: list } });
+    await go(next('accounts'));
+  }, row));
+  app.append(row);
+}
+var RUNTIME_NAMES = { 'llama-cpp': 'llama-swap / llama.cpp', 'ollama': 'Ollama', 'lm-studio': 'LM Studio', 'cloud': 'Cloud provider' };
+function renderFrontDesk(step) {
+  var f = state.detected || {};
+  var saved = state.frontdeskChoice;
+  var rec = f.recommended;
+  var kind = (saved && saved.kind) || 'model';
+  var runtimeIds = ['llama-cpp', 'ollama', 'lm-studio', 'cloud'];
+  var runtime = (saved && saved.runtime) || (rec && rec.runtime) || (f.cloudSuggestion ? 'cloud' : runtimeIds.find(function (r) { return f.runtimes && f.runtimes[r] && f.runtimes[r].running; }) || 'llama-cpp');
+  var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: STEP.frontdesk.title })]);
+  var detail = h('div');
+  var fields = {};
+  var helperChoice = state.helperChoice;
+  var off = { model: f.disabled && f.disabled.model, agent: helperChoice && helperChoice.id === 'none' ? 'A no-helper setup needs a model front desk. Pick a helper first to use an agent.' : '' };
+  if (off[kind]) kind = kind === 'model' ? 'agent' : 'model';
+  [['model', 'A model', 'Fast, no tools. Recommended.'], ['agent', 'An agent', 'Slower, can use tools. The Agent step picks which one.']].forEach(function (o) {
+    var input = h('input', { type: 'radio', name: 'pick-frontdesk', value: o[0] });
+    input.disabled = !!off[o[0]];
+    input.checked = !input.disabled && o[0] === kind;
+    input.onchange = function () { kind = o[0]; drawDetail(); };
+    group.append(h('label', { class: 'choice' }, [input, h('span', { class: 'name', text: o[1] }), h('span', { class: 'note', text: off[o[0]] ? off[o[0]] + ' ' + o[2] : o[2] }), o[0] === 'model' && !off.model ? h('span', { class: 'badge', text: 'Recommended' }) : null]));
+  });
+  function fitLine() {
+    if (!f.fit) return h('p', { class: 'detail', text: 'Not sized for this machine: model sizing covers NVIDIA on Linux and Apple Silicon. A small model such as qwen3.5:0.8b in Ollama is a safe start.' });
+    var fd = f.fit.frontDesk;
+    return h('p', { class: 'detail', text: fd ? 'Fits this machine: ' + fd.label + ' (' + fd.footprintGb + ' GB, ' + fd.basis + '). ' + f.fit.reason + ' Every fit is an estimate.' : f.fit.reason });
+  }
+  function drawDetail() {
+    detail.replaceChildren(); fields = {};
+    if (kind === 'agent') { detail.append(h('p', { class: 'detail', text: 'Every reply goes to your agent. Expect several seconds before it speaks.' })); return; }
+    var box = h('div', { class: 'fields' });
+    var sel = h('select');
+    runtimeIds.forEach(function (r) {
+      var rt = f.runtimes && f.runtimes[r];
+      var label = RUNTIME_NAMES[r] + (r === 'cloud' ? '' : rt && rt.running ? ' (running, ' + rt.models.length + ' listed)' : ' (not running)');
+      var o = h('option', { value: r, text: label });
+      if (r === 'cloud' && f.disabled && f.disabled.cloud) { o.disabled = true; o.textContent = RUNTIME_NAMES.cloud + ': ' + f.disabled.cloud; }
+      if (r === runtime) o.selected = true;
+      sel.append(o);
+    });
+    sel.onchange = function () { runtime = sel.value; drawDetail(); };
+    box.append(field('Runs on', sel));
+    if (runtime === 'cloud') {
+      var presets = (f.cloudPresets || []).filter(function (p) { return f.cloudKeys && f.cloudKeys[p] === 'found'; });
+      if (!presets.length) { detail.append(box, h('div', { class: 'panel warn' }, [h('h2', { text: 'No cloud model key found' }), h('p', { text: 'Set a provider key such as XAI_API_KEY or GROQ_API_KEY in the environment Cicero runs in, then check again.' })])); return; }
+      fields.preset = selectOf(presets, (saved && saved.preset) || f.cloudSuggestion);
+      fields.model = selectOf(state.providerModels && state.providerModels.id === fields.preset.value ? state.providerModels.models : (saved && saved.model ? [saved.model] : []));
+      box.append(field('Provider (key found in your environment)', fields.preset), field('Model', fields.model));
+      var listRow = h('div', { class: 'actions' });
+      listRow.append(button('Load models', 'small', async function () {
+        var listed = await api('/api/provider-models', { choice: { id: fields.preset.value } });
+        fields.model.replaceChildren(); listed.models.forEach(function (m) { fields.model.append(h('option', { value: m, text: m })); });
+      }, listRow));
+      box.append(listRow);
+      detail.append(box); return;
+    }
+    var rt = f.runtimes && f.runtimes[runtime];
+    if (rt && rt.running && rt.models.length) {
+      var pick = (saved && saved.runtime === runtime && saved.model) || (rec && rec.runtime === runtime && rec.model);
+      fields.model = modelSelect(rt.models, pick);
+      box.append(field('Model', fields.model));
+      if (rec && rec.runtime === runtime) box.append(h('small', { text: 'Recommended: ' + rec.model }));
+    }
+    detail.append(box, fitLine());
+    if (rec && rec.runtime === runtime && f.reason) detail.append(h('p', { class: 'detail', text: f.reason }));
+    if (runtime === 'ollama' || runtime === 'lm-studio') detail.append(h('p', { class: 'detail', text: 'Set context to 65536 and a q8 KV cache in ' + RUNTIME_NAMES[runtime] + ' so the fit above holds.' }));
+    var hint = (f.install || []).find(function (i) { return i.runtime === runtime; });
+    if (!rt || !rt.running || hint) {
+      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: rt && rt.running ? 'The recommended model is not listed' : RUNTIME_NAMES[runtime] + ' is not running' })]);
+      if (!rt || !rt.running) { var g = runtimeGuide(runtime, hint); if (g) panel.append(g); }
+      if (hint) panel.append(h('p', { text: hint.hint }));
+      if (hint && hint.entry) panel.append(cmd(hint.entry));
+      var again = h('div', { class: 'actions' });
+      again.append(button('Check again', 'small', async function () { state = await api('/api/step', { id: 'frontdesk' }); render(); }, again));
+      panel.append(again);
+      detail.append(panel);
+    }
+    var failed = blockedByProbe(state);
+    if (failed && tried.frontdesk) detail.append(h('div', { class: 'panel warn', role: 'alert' }, [h('h2', { text: 'That check failed' }), h('p', { text: failed })]));
+  }
+  drawDetail();
+  app.append(group, detail, why(step));
+  var row = h('div', { class: 'actions' });
+  row.append(button('Continue', 'primary', async function () {
+    var c = kind === 'agent' ? { kind: 'agent' } : runtime === 'cloud'
+      ? { kind: 'model', runtime: 'cloud', preset: fields.preset && fields.preset.value, model: fields.model && fields.model.value }
+      : { kind: 'model', runtime: runtime, model: fields.model && fields.model.value };
+    tried.frontdesk = true;
+    state = await api('/api/choice', { id: 'frontdesk', choice: c });
+    if (blockedByProbe(state)) { render(); return; }
+    await go(next('frontdesk'));
+  }, row));
+  app.append(row);
+}
+function renderHelper(step) {
+  var f = state.detected || {};
+  var saved = state.helperChoice;
+  var rec = f.recommended;
+  var skip = saved ? saved.id === 'none' : !!(rec && rec.id === 'none');
+  var runtimeIds = ['llama-cpp', 'ollama', 'lm-studio'];
+  var runtime = (saved && saved.runtime) || (rec && rec.runtime) || runtimeIds.find(function (r) { return f.runtimes && f.runtimes[r] && f.runtimes[r].running; }) || 'ollama';
+  var fields = {};
+  var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: STEP.helper.title })]);
+  var detail = h('div');
+  [['model', 'Use a helper model', 'Recommended.'], ['none', 'Skip the helper', 'Long replies end with "say details" instead of a summary.']].forEach(function (o) {
+    var input = h('input', { type: 'radio', name: 'pick-helper', value: o[0] });
+    var off = f.disabled && f.disabled[o[0]];
+    input.disabled = !!off;
+    input.checked = !off && (o[0] === 'none') === skip;
+    input.onchange = function () { skip = o[0] === 'none'; drawDetail(); };
+    group.append(h('label', { class: 'choice' }, [input, h('span', { class: 'name', text: o[1] }), h('span', { class: 'note', text: off ? off : o[2] })]));
+  });
+  function drawDetail() {
+    detail.replaceChildren(); fields = {};
+    (f.warnings || []).forEach(function (w) { detail.append(h('div', { class: 'panel warn', role: 'status' }, [h('p', { text: w })])); });
+    if (skip) { detail.append(h('p', { class: 'detail', text: 'Skipped. Your cloud front desk also runs the conversation; long replies end with "say details".' })); return; }
+    var box = h('div', { class: 'fields' });
+    var sel = h('select');
+    runtimeIds.forEach(function (r) {
+      var rt = f.runtimes && f.runtimes[r];
+      var o = h('option', { value: r, text: RUNTIME_NAMES[r] + (rt && rt.running ? ' (running, ' + rt.models.length + ' listed)' : ' (not running)') });
+      if (r === runtime) o.selected = true;
+      sel.append(o);
+    });
+    sel.onchange = function () { runtime = sel.value; drawDetail(); };
+    box.append(field('Runs on', sel));
+    var rt = f.runtimes && f.runtimes[runtime];
+    if (rt && rt.running && rt.models.length) {
+      fields.model = modelSelect(rt.models, (saved && saved.runtime === runtime && saved.model) || (rec && rec.runtime === runtime && rec.model));
+      box.append(field('Model', fields.model));
+      if (rec && rec.runtime === runtime) box.append(h('small', { text: 'Recommended: ' + rec.model }));
+    }
+    fields.compact = h('input', { type: 'checkbox' });
+    fields.compact.checked = saved && saved.id === 'model' ? saved.compact : true;
+    box.append(h('label', { class: 'check-inline' }, [fields.compact, document.createTextNode('Compress long conversations (summarize older turns instead of dropping them)')]));
+    var hp = f.fit && f.fit.helper;
+    detail.append(box, h('p', { class: 'detail', text: hp ? 'Fits this machine: ' + hp.label + ' (' + hp.footprintGb + ' GB, ' + hp.basis + '). Every fit is an estimate.' : f.fit ? f.fit.reason : 'Not sized for this machine: model sizing covers NVIDIA on Linux and Apple Silicon.' }));
+    if (f.reason) detail.append(h('p', { class: 'detail', text: f.reason }));
+    var hint = (f.install || []).find(function (i) { return i.runtime === runtime; });
+    if (!rt || !rt.running || hint) {
+      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: rt && rt.running ? 'The recommended helper is not listed' : RUNTIME_NAMES[runtime] + ' is not running' })]);
+      if (!rt || !rt.running) { var g = runtimeGuide(runtime, hint); if (g) panel.append(g); }
+      if (hint) panel.append(h('p', { text: hint.hint }));
+      if (hint && hint.entry) panel.append(cmd(hint.entry));
+      var again = h('div', { class: 'actions' });
+      again.append(button('Check again', 'small', async function () { state = await api('/api/step', { id: 'helper' }); render(); }, again));
+      panel.append(again); detail.append(panel);
+    }
+    var failed = blockedByProbe(state);
+    if (failed && tried.helper) detail.append(h('div', { class: 'panel warn', role: 'alert' }, [h('h2', { text: 'That check failed' }), h('p', { text: failed })]));
+  }
+  var adv = h('details', { class: 'advanced' }, [h('summary', { text: 'Advanced' }),
+    h('label', { class: 'choice' }, [h('input', { type: 'radio', name: 'pick-helper-adv', disabled: true }), h('span', { class: 'name', text: 'Laya router' }), h('span', { class: 'note', text: (f.disabled && f.disabled.laya) || '' })])]);
+  drawDetail();
+  app.append(group, detail, adv, why(step));
+  var row = h('div', { class: 'actions' });
+  row.append(button('Continue', 'primary', async function () {
+    var c = skip ? { id: 'none' } : { id: 'model', runtime: runtime, model: fields.model && fields.model.value, compact: fields.compact.checked };
+    tried.helper = true;
+    state = await api('/api/choice', { id: 'helper', choice: c });
+    if (blockedByProbe(state)) { render(); return; }
+    await go(next('helper'));
+  }, row));
+  app.append(row);
+}
+var PROBE_ROWS = [['hear', 'Hear', 'Transcribes a bundled clip of “Cicero, what time is it in Tokyo?”'], ['frontdesk', 'Front desk', 'One short answer from your front desk model; an agent is only checked for install and login'], ['helper', 'Helper', 'One summary of a bundled long reply'], ['memory', 'Memory', 'GPU memory each engine is using right now']];
+function renderTest(step) {
+  if (state.testsCleared && !Object.keys(state.tests || {}).length) app.append(h('p', { class: 'note-line tight', text: 'Results were cleared because the draft changed.' }));
+  var ul = h('ul', { class: 'rows' });
+  PROBE_ROWS.forEach(function (p) {
+    var r = state.tests && state.tests[p[0]];
+    var pill = r ? h('span', { class: 'pill ' + (r.state === 'ok' ? 'ok' : r.state === 'skipped' || r.state.indexOf('installed') === 0 ? 'todo' : 'bad'), text: r.state }) : null;
+    var li = h('li', {}, [h('div', { class: 'head' }, [h('span', { class: 'name', text: p[1] }), pill]), h('p', { class: 'detail', text: r ? r.message : p[2] })]);
+    if (r && r.startCommand) li.append(cmd(r.startCommand));
+    if (p[0] === 'memory' && r && r.data && r.data.engines) {
+      var table = h('table', { class: 'mem' });
+      r.data.engines.forEach(function (e) { table.append(h('tr', {}, [h('td', { text: e.label }), h('td', { text: e.gb + ' GB (measured)' })])); });
+      table.append(h('tr', {}, [h('td', { text: 'Other GPU use' }), h('td', { text: r.data.otherGb + ' GB' })]));
+      li.append(table);
+    }
+    var row = h('div', { class: 'actions' });
+    var cancel = button('Cancel', 'small', async function () { state = await api('/api/test/cancel', { probe: p[0] }); }, row);
+    cancel.hidden = true;
+    row.append(button(r ? 'Run again' : 'Run', 'small', async function () {
+      cancel.hidden = false;
+      try { state = await api('/api/test', { probe: p[0] }); } finally { cancel.hidden = true; }
+      render();
+    }, row), cancel);
+    li.append(row);
+    ul.append(li);
+  });
+  var speak = h('li', {}, [h('div', { class: 'head' }, [h('span', { class: 'name', text: 'Speak' })]), h('p', { class: 'detail', text: 'Use Play sample on the Speak step to hear your voice engine.' })]);
+  ul.append(speak);
+  app.append(ul, why(step));
+  var next_ = h('div', { class: 'actions' });
+  next_.append(button('Continue', 'primary', async function () { await go('review'); }, next_));
+  app.append(next_);
+}
+function invalidatedBanner() {
+  var list = state.invalidated || [];
+  if (!list.length) return null;
+  var panel = h('div', { class: 'panel warn', role: 'status' }, [h('h2', { text: 'Some earlier choices were cleared' })]);
+  list.forEach(function (i) { panel.append(h('p', { text: (STEP[i.id] ? STEP[i.id].short : i.id) + ': ' + i.reason })); });
+  return panel;
+}
+
 function renderPicker(id, step) {
   var f = state.detected || {};
   var options, extra = null;
-  if (id === 'provider') {
-    options = ['llama-cpp', 'ollama', 'lm-studio'].concat(f.mlxAvailable ? ['mlx-lm'] : []).concat(['cloud']);
-    extra = { key: 'cloud', items: ['openai-compatible'].concat(f.cloudPresets || []) };
-  } else if (id === 'brain') {
+  if (id === 'brain') {
     var all = f.options || [];
-    var clis = ['claude-code', 'codex', 'gemini', 'qwen', 'acp'].filter(function (o) { return all.indexOf(o) >= 0; });
-    options = clis.concat(['api']);
-    extra = { key: 'api', items: all.filter(function (o) { return clis.indexOf(o) < 0; }) };
+    var acpIds = (f.acp || []).map(function (a) { NAMES[a.id] = a.label; NOTES[a.id] = (a.cloud ? 'Reaches the cloud. ' : 'Whether it reaches the cloud depends on its model. ') + 'ACP: ' + a.status + '.'; return a.id; });
+    f.installed = Object.assign({}, f.installed || {}, Object.fromEntries((f.acp || []).map(function (a) { return [a.id, a.found]; })));
+    if (f.target === 'escalate') {
+      options = acpIds.concat(['acp', 'none']);
+      app.append(h('p', { class: 'detail', text: 'Your front desk hands a turn to this agent when you say "think hard". That suits one-off deep questions, not follow-ups. Only ACP agents can take these turns.' }));
+    } else {
+      var clis = ['claude-code', 'codex', 'gemini', 'qwen'].filter(function (o) { return all.indexOf(o) >= 0; });
+      options = clis.concat(acpIds, ['acp', 'api']);
+      extra = { key: 'api', items: all.filter(function (o) { return clis.indexOf(o) < 0 && o !== 'acp'; }) };
+      app.append(h('p', { class: 'detail', text: 'Your agent answers everything you say.' }));
+    }
   } else if (id === 'board') {
     options = ['hermes', 'multica', 'paperclip', 'none'];
+    var allowBoard = h('input', { type: 'checkbox' });
+    allowBoard.checked = !!(state.privacyAllow && state.privacyAllow.indexOf('board') >= 0) || !!(blockedByProbe(state) && tried.board && tried.board !== 'none');
+    allowBoard.onchange = function () { if (!allowBoard.checked) picked = 'none'; draw(); drawDetail(); };
+    app.append(h('label', { class: 'check-inline' }, [allowBoard, document.createTextNode('Allow task text to go to this board? Cicero sends task titles and notes to the board CLI you pick.')]));
   } else {
     options = f.options || [];
   }
   var saved = state.selectedChoices && state.selectedChoices[id];
   var picked = (blockedByProbe(state) && tried[id]) || saved || f.recommended || options[0];
+  if (id === 'board' && picked !== 'none' && !allowBoard.checked) picked = 'none';
   if (extra && extra.items.indexOf(picked) >= 0) { extra.value = picked; picked = extra.key; }
   if (extra && !extra.value) extra.value = extra.items[0];
 
@@ -459,15 +803,15 @@ function renderPicker(id, step) {
   function realId() { return extra && picked === extra.key ? extra.value : picked; }
   function draw() {
     group.querySelectorAll('.choice').forEach(function (n) { n.remove(); });
-    options.concat(Object.keys(f.disabled || {})).forEach(function (o) {
+    options.concat(Object.keys(f.disabled || {}).filter(function (o) { return options.indexOf(o) < 0; })).forEach(function (o) {
       var input = h('input', { type: 'radio', name: 'pick-' + id, value: o });
-      input.disabled = !!(f.disabled && f.disabled[o]);
+      input.disabled = !!(f.disabled && f.disabled[o]) || (id === 'board' && o !== 'none' && !allowBoard.checked);
       input.checked = !input.disabled && o === picked;
       input.onchange = function () { picked = o; drawDetail(); };
       var s = stateLabel(o, f);
       var rt = f.runtimes && f.runtimes[o];
       var note = o === 'audiocpp' ? (id === 'stt' ? 'Fast, accurate English ASR with Nemotron’s streaming model on an NVIDIA GPU; needs the audio.cpp build.' : 'Voice cloning on an NVIDIA GPU; needs the audio.cpp build.') : (NOTES[o] || '');
-      if (input.disabled) note = f.disabled[o] + ' ' + note;
+      if (input.disabled) note = ((f.disabled && f.disabled[o]) || 'Tick the allowance above first.') + ' ' + note;
       if (rt && rt.running && rt.models && rt.models.length) note += ' ' + rt.models.length + ' models loaded.';
       group.append(h('label', { class: 'choice' }, [input,
         s ? h('span', { class: 'state' + (s[1] ? ' on' : '') }, [h('i'), document.createTextNode(s[0])]) : null,
@@ -483,56 +827,56 @@ function renderPicker(id, step) {
     if (extra && picked === extra.key) {
       var sel = selectOf(extra.items, extra.value);
       sel.onchange = function () { extra.value = sel.value; drawDetail(); };
-      box.append(field(id === 'provider' ? 'Provider' : 'Model API', sel));
+      box.append(field('Model API', sel));
     }
     var rt = f.runtimes && f.runtimes[o];
-    if (id === 'router' && o === 'laya') {
-      fields.url = textInput(routerUrl || f.defaultUrl, 'url');
-      fields.url.oninput = function () { routerUrl = this.value; };
-      box.append(field('Laya sidecar URL', fields.url));
-    }
-    if (id === 'provider' && o === 'llama-cpp') fields.model = textInput(f.defaultModel), box.append(field('Model (GGUF file path or Hugging Face repo)', fields.model));
-    if (id === 'provider' && (o === 'ollama' || o === 'lm-studio') && rt && rt.models.length) fields.model = selectOf(rt.models), box.append(field('Model', fields.model));
-    var remote = id === 'provider' && ['llama-cpp', 'ollama', 'lm-studio', 'mlx-lm'].indexOf(o) < 0;
-    if (remote) {
-      if (o === 'openai-compatible') fields.baseUrl = textInput(state.providerModels && state.providerModels.id === o ? state.providerModels.baseUrl : 'http://127.0.0.1:8000/v1', 'url'), box.append(field('API base URL', fields.baseUrl));
-      fields.apiKey = textInput('', 'password'); box.append(field('API key (optional for local servers)', fields.apiKey));
-      fields.model = selectOf(state.providerModels && state.providerModels.id === o ? state.providerModels.models : []);
-      box.append(field('Model', fields.model));
-      var listRow = h('div', { class: 'actions' });
-      listRow.append(button('Load models', 'small', async function () {
-        var listed = await api('/api/provider-models', { choice: { id: o, baseUrl: fields.baseUrl && fields.baseUrl.value, apiKey: fields.apiKey.value } });
-        fields.model.replaceChildren(); listed.models.forEach(function (m) { fields.model.append(h('option', { value: m, text: m })); });
-      }, listRow));
-      box.append(listRow);
-    }
     if (id === 'brain') {
       if (o === 'acp') fields.command = textInput('["hermes","-p","voice","acp"]'), box.append(field('Command (JSON list of arguments)', fields.command));
       if (o === 'openai-compatible') { fields.baseUrl = textInput('', 'url'); fields.model = textInput(''); fields.apiKey = textInput('', 'password'); box.append(field('API base URL', fields.baseUrl), field('Model', fields.model), field('API key (optional)', fields.apiKey)); }
       else if (extra && picked === extra.key && o !== 'openai-compatible') { fields.model = textInput(o === 'ollama' ? 'qwen3.5:0.8b' : ''); box.append(field('Model', fields.model)); if (o !== 'ollama') { fields.apiKey = textInput('', 'password'); box.append(field('API key', fields.apiKey)); } }
+      var cloudy = f.cloud && (f.cloud[o] || (extra && picked === extra.key && o !== 'ollama' && o !== 'openai-compatible'));
+      // A custom command or URL may leave this machine (a cloud adapter, a LAN or remote server); only the server can tell, and it ignores the tick when nothing leaves.
+      var custom = o === 'acp' || o === 'openai-compatible';
+      if (f.localOnly && (cloudy || custom)) { fields.allowCloud = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.allowCloud, document.createTextNode(custom ? 'Allow this agent to leave this machine if it does (a cloud adapter or a non-local URL; adds "agent" to your privacy policy)' : 'Allow this agent to use the cloud (adds "agent" to your privacy policy)')])); }
       if (o === 'claude-code' && f.localTerminal) { fields.tab = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.tab, document.createTextNode('Type into my open Claude Code terminal tab instead of running it in the background')])); }
     }
     if (id === 'board' && o === 'paperclip' && !f.paperclipEnv) fields.companyId = textInput(''), box.append(field('Paperclip company ID (blank uses your paperclipai context)', fields.companyId));
     if ((id === 'stt' || id === 'tts') && o === 'wyoming') { fields.host = textInput('127.0.0.1'); fields.port = textInput(id === 'stt' ? '10300' : '10200', 'number'); box.append(field('Server host', fields.host), field('Port', fields.port)); }
     if (id === 'stt' && o === 'audiocpp') { fields.streaming = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.streaming, document.createTextNode('Stream browser speech for live captions (requires Nemotron mode: streaming)')])); }
     if (o === 'elevenlabs') fields.apiKey = textInput('', 'password'), box.append(field('ElevenLabs API key', fields.apiKey));
+    var engine = f.status && f.status[o];
+    if (id === 'tts' && o !== 'elevenlabs' && engine && engine.running) {
+      var sampleRow = h('div', { class: 'actions' });
+      var sampleNote = h('small');
+      var cancelBtn = h('button', { type: 'button', class: 'btn small', text: 'Cancel', hidden: true });
+      cancelBtn.onclick = function () { cancelSample(); cancelBtn.hidden = true; sampleNote.textContent = 'Cancelled.'; };
+      sampleRow.append(button('Play sample', 'small', async function () {
+        var tts = { id: o };
+        if (fields.host) { tts.host = fields.host.value; tts.port = Number(fields.port.value); }
+        var run = sampleRun = Date.now();
+        sampleNote.textContent = 'Generating…';
+        cancelBtn.hidden = false;
+        try {
+          var r = await api('/api/sample', { tts: tts });
+          if (sampleRun !== run) return; // cancelled or left the page: never play late audio
+          if (r.ok) { sampleNote.textContent = ''; new Audio('data:' + r.mime + ';base64,' + r.audio).play(); }
+          else sampleNote.textContent = r.message + (r.startCommand ? ' ' + r.startCommand : '');
+        } finally {
+          if (sampleRun === run) { sampleRun = 0; cancelBtn.hidden = true; }
+        }
+      }, sampleRow), cancelBtn, sampleNote);
+      box.append(sampleRow);
+    }
     if (fields.apiKey && state.storedSecrets && state.storedSecrets[id] && saved === o) fields.apiKey.parentNode.append(h('small', { text: 'A key is saved. Leave blank to keep it.' }));
     if (box.childNodes.length) detail.append(box);
 
     var s = stateLabel(o, f);
     var speechStatus = f.status && f.status[o];
     var guide = o === 'audiocpp' && speechStatus && speechStatus.installed ? null : GUIDES[o];
-    if ((s && !s[1] && o !== 'none') || o === 'laya') {
+    if (s && !s[1] && o !== 'none') {
       var panel = h('div', { class: 'panel warn' }, [h('h2', { text: optionName(id, o) + ': ' + (s ? s[0] : 'Checkpoint required') })]);
       if (guide) {
-        var list = h('ol');
-        guide.forEach(function (g) {
-          var li = h('li', {}, [document.createTextNode(g[0])]);
-          if (g[1] && g[1].indexOf('http') === 0) { li.append(document.createTextNode(': ')); li.append(h('a', { href: g[1], target: '_blank', rel: 'noopener noreferrer', text: g[1].replace(/^https?:[/][/]/, '') })); }
-          else if (g[1]) li.append(cmd(g[1]));
-          list.append(li);
-        });
-        panel.append(list);
+        panel.append(guideList(guide));
       } else if ((id === 'stt' || id === 'tts') && o !== 'audiocpp') {
         panel.append(h('p', { text: 'You can pick it now. Cicero lists the install command on the Save screen.' }));
       }
@@ -555,9 +899,11 @@ function renderPicker(id, step) {
   var row = h('div', { class: 'actions' });
   row.append(button('Continue', 'primary', async function () {
     var c = { id: realId() };
+    if (id === 'board' && c.id !== 'none') c.allowBoard = allowBoard.checked;
     for (var k in fields) {
       var el = fields[k];
       if (k === 'tab') { if (el.checked) c.mode = 'tab-inject'; }
+      else if (k === 'allowCloud') c.allowCloud = el.checked;
       else if (k === 'streaming') c.streaming = el.checked;
       else if (k === 'command') { try { c.command = JSON.parse(el.value); } catch (e) { throw new Error('The command must be a JSON list, like ["hermes","acp"].'); } }
       else if (k === 'port') c.port = Number(el.value);
@@ -620,6 +966,7 @@ function renderReview(step) {
     row.append(button('Back up old config and start fresh', '', async function () { state = await api('/api/backup', {}); state = await api('/api/check', {}); render(); }, row));
   }
   app.append(why(step));
+  if (state.missingChoices && state.missingChoices.length) app.append(h('div', { class: 'panel warn', role: 'status' }, [h('p', { text: 'Choose ' + state.missingChoices.join(', ') + ' before saving.' })]));
   var ack = null;
   if (state.requiresNotReadyAcknowledgement) {
     ack = h('input', { type: 'checkbox' });
@@ -660,7 +1007,13 @@ function render() {
   var step = state.steps.find(function (s) { return s.id === serverId; });
   app.append(chain(view));
   if (!(view === 'review' && state.written)) app.append(h('h1', { text: STEP[view].title }), h('p', { class: 'lede', text: STEP[view].lede }));
-  if (view === 'system') renderSystem(step);
+  var banner = invalidatedBanner(); if (banner) app.append(banner);
+  if (view === 'privacy') renderPrivacy(step);
+  else if (view === 'system') renderSystem(step);
+  else if (view === 'accounts') renderAccounts(step);
+  else if (view === 'frontdesk') renderFrontDesk(step);
+  else if (view === 'helper') renderHelper(step);
+  else if (view === 'test') renderTest(step);
   else if (view === 'review') renderReview(step);
   else renderPicker(view, step);
 }

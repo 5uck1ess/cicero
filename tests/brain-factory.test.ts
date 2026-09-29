@@ -12,6 +12,9 @@ import { TabInjectBrain } from "../src/brain/tab-inject";
 import { KittyAdapter } from "../src/terminal/kitty";
 import { NullTerminalAdapter } from "../src/terminal/null";
 import { SwitchboardBrain } from "../src/brain/switchboard";
+import { RoutingBrain } from "../src/brain/routing";
+import { AcpBrain } from "../src/brain/acp";
+import type { Brain } from "../src/types";
 
 function cfg(
   backend: CiceroConfig["brain"]["backend"],
@@ -89,4 +92,29 @@ test("tab-inject requires a terminal that can own a real interactive tab", () =>
   expect(() => createBrain(config)).toThrow(/requires kitty, tmux, or WezTerm/);
   expect(() => createBrain(config, new NullTerminalAdapter())).toThrow(/brain\.mode: subprocess/);
   expect(createBrain(config, new KittyAdapter())).toBeInstanceOf(TabInjectBrain);
+});
+
+test("brain.escalate wraps a model front desk in a RoutingBrain", () => {
+  const brain = createBrain(cfg("ollama", { ollama_model: "gemma4:e4b-it-qat", escalate: { binary: "bunx", binary_args: ["@agentclientprotocol/codex-acp@2.0.0"] } }));
+  expect(brain).toBeInstanceOf(RoutingBrain);
+  expect((brain as unknown as { primary: Brain }).primary).toBeInstanceOf(OllamaBrain);
+  expect((brain as unknown as { escalation: Brain }).escalation).toBeInstanceOf(AcpBrain);
+});
+
+test("existing ACP escalation + lanes layering is unchanged: lanes wrap the routing front desk", () => {
+  const brain = createBrain(cfg("acp", {
+    binary: "hermes", binary_args: ["acp"],
+    escalate: { binary: "hermes", binary_args: ["-p", "think", "acp"] },
+    lanes: { coder: { binary: "hermes", binary_args: ["-p", "coder", "acp"] } },
+  }));
+  expect(brain).toBeInstanceOf(SwitchboardBrain);
+  const front = (brain as unknown as { primary: Brain }).primary;
+  expect(front).toBeInstanceOf(RoutingBrain);
+  expect((front as unknown as { primary: Brain }).primary).toBeInstanceOf(AcpBrain);
+});
+
+test("no escalate leaves the bare primary; lanes never wrap a non-ACP front desk", () => {
+  expect(createBrain(cfg("openai-compatible", { base_url: "http://127.0.0.1:8080/v1", model: "m" }))).toBeInstanceOf(OpenAiCompatibleBrain);
+  expect(createBrain(cfg("acp"))).toBeInstanceOf(AcpBrain);
+  expect(createBrain(cfg("ollama", { lanes: { coder: { backend: "acp" } } }))).toBeInstanceOf(OllamaBrain);
 });

@@ -8,18 +8,13 @@ import type { BoundedCommandResult } from "../../src/process/bounded-command";
 import { createDraft, renderDraft } from "../../src/setup/draft";
 import { mergeDraft, startSetupServer } from "../../src/setup/server";
 import { SETUP_STEPS, type StepContext } from "../../src/setup/steps";
-import { LAYA_LANES_REQUIRED, detectProvider, detectBrain, detectBoard, detectSpeech, parseProvider, parseBrain, parseBoard, parseSpeech, contributeBoard, contributeSpeech, probeBoard, probeRemoteProviderModels } from "../../src/setup/pickers";
+import { detectBrain, detectBoard, detectSpeech, parseBrain, parseBoard, parseSpeech, contributeBoard, contributeSpeech, probeBoard, probeRemoteProviderModels } from "../../src/setup/pickers";
 import { audioCppLocalRuntimePaths } from "../../src/backends/tts/audiocpp";
 import { audioCppModelPath } from "../../src/setup/audiocpp";
 import type { SystemFacts } from "../../src/setup/system";
 
 const facts = (platform = "linux", gpu = false): SystemFacts => ({ platform, arch: platform === "darwin" ? "arm64" : "x64", release: platform === "darwin" ? "23.0.0" : "6.8", appleSilicon: platform === "darwin", mlxSupported: platform === "darwin", ramTotalBytes: 32e9, ramFreeBytes: 16e9, disks: { checkout: { path: "/repo", freeBytes: 1e9 }, huggingface: { path: "/hf", freeBytes: 1e9 } }, gpu: gpu ? { status: "ok", name: "NVIDIA", freeMiB: 16000, totalMiB: 24000, doctorDetail: "NVIDIA" } : { status: "absent" }, recommendedTier: platform === "darwin" ? "local-mlx" : gpu ? "local-cuda" : "local-cpu", reason: "fixture" });
 const ctx = (platform = "linux", gpu = false): StepContext => ({ system: facts(platform, gpu), draft: createDraft(platform === "darwin" ? "local-mlx" : gpu ? "local-cuda" : "local-cpu", "x".repeat(64)) });
-const officeCtx = (): StepContext => {
-  const c = ctx();
-  c.draft.brain.lanes = { coder: { backend: "claude-code" } };
-  return c;
-};
 const command = (stdout: string, exitCode = 0): BoundedCommandResult => { const out = { text: stdout, receivedBytes: stdout.length, capturedBytes: stdout.length, limitBytes: 262144, truncated: false }; return { command: [], exitCode, durationMs: 1, stdout: out, stderr: { ...out, text: "" }, combined: { receivedBytes: stdout.length, capturedBytes: stdout.length, limitBytes: 266240, truncated: false } }; };
 const pick = (id: string) => SETUP_STEPS.find((s) => s.id === id)!;
 
@@ -27,24 +22,17 @@ test("each picker parses valid input and rejects malformed input", () => {
   const c = ctx();
   expect(pick("system").parseChoice("local-cpu", c)).toBe("local-cpu");
   expect(() => pick("system").parseChoice("bad", c)).toThrow();
-  expect(parseProvider({ id: "llama-cpp", model: "owner/repo:Q4_K_M" }, c).model).toBe("owner/repo:Q4_K_M");
-  expect(parseProvider({ id: "llama-cpp" }, c).model).toContain("GGUF");
-  const fileHome = mkdtempSync(join(tmpdir(), "cicero-gguf-"));
-  try { const path = join(fileHome, "local.gguf"); writeFileSync(path, "fixture"); expect(parseProvider({ id: "llama-cpp", model: path }, c).model).toBe(path); }
-  finally { rmSync(fileHome, { recursive: true, force: true }); }
-  for (const bad of ["repo", "owner/repo;rm", "owner/repo:bad:extra", "a/../b", "x".repeat(210)]) expect(() => parseProvider({ id: "llama-cpp", model: bad }, c)).toThrow();
-  expect(parseProvider({ id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "synthetic-key" }, c).apiKey).toBe("synthetic-key");
-  for (const bad of ["file:///tmp", "https://u:p@example.test/v1", "https://example.test/v1?key=secret", "x".repeat(513)]) expect(() => parseProvider({ id: "openai-compatible", baseUrl: bad, model: "m" }, c)).toThrow();
-  expect(() => parseProvider({ id: "ollama", model: "not-pulled" }, { ...c, detected: { runtimes: { ollama: { running: true, models: ["pulled"] } } } })).toThrow();
   expect(parseBrain({ id: "acp", command: ["hermes", "-p", "voice", "acp"] }, c).binary).toBe("hermes");
   expect(() => parseBrain({ id: "acp", command: "hermes -p voice acp" }, c)).toThrow();
   expect(() => parseBrain({ id: "acp", command: ["hermes", "$(id)"] }, c)).toThrow();
   expect(() => parseBrain({ id: "openai-compatible", baseUrl: "https://example.test/?token=x", model: "m" }, c)).toThrow();
   expect(() => parseBrain({ id: "claude-code", mode: "tab-inject" }, c)).toThrow();
   expect(parseBrain({ id: "claude-code", mode: "tab-inject" }, c, { localTerminal: true }).mode).toBe("tab-inject");
-  expect(parseBoard({ id: "paperclip", companyId: "company_1" }, c, { env: {} }).companyId).toBe("company_1");
-  for (const bad of ["a b", "a;rm", "$(id)", "x".repeat(81)]) expect(() => parseBoard({ id: "paperclip", companyId: bad }, c, { env: {} })).toThrow();
-  expect(parseBoard({ id: "paperclip" }, c, { env: {} })).toEqual({ id: "paperclip" });
+  expect(parseBoard({ id: "paperclip", allowBoard: true, companyId: "company_1" }, c, { env: {} }).companyId).toBe("company_1");
+  for (const bad of ["a b", "a;rm", "$(id)", "x".repeat(81)]) expect(() => parseBoard({ id: "paperclip", allowBoard: true, companyId: bad }, c, { env: {} })).toThrow();
+  expect(parseBoard({ id: "paperclip", allowBoard: true }, c, { env: {} })).toEqual({ id: "paperclip" });
+  expect(() => parseBoard({ id: "paperclip" }, c, { env: {} })).toThrow("Allow task text to go to this board first");
+  expect(parseBoard({ id: "none" }, c, { env: {} })).toEqual({ id: "none" });
   expect(parseSpeech("stt", { id: "wyoming", host: "192.168.1.2", port: 10300 }, c).host).toBe("192.168.1.2");
   for (const bad of ["http://localhost", "bad host", "999.999.999.999", "x".repeat(254)]) expect(() => parseSpeech("stt", { id: "wyoming", host: bad, port: 10300 }, c)).toThrow();
   expect(() => parseSpeech("stt", { id: "wyoming", host: "localhost", port: 70000 }, c)).toThrow();
@@ -52,25 +40,16 @@ test("each picker parses valid input and rejects malformed input", () => {
   expect(parseSpeech("tts", { id: "elevenlabs", apiKey: "synthetic-key" }, c).id).toBe("elevenlabs");
   expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "" }, c)).toThrow();
   expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "x".repeat(1025) }, c)).toThrow();
-});
-
-test("provider probes run in parallel, cap lists, and prefer the first running runtime", async () => {
-  const seen: string[] = []; let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
-  const pending = detectProvider(ctx(), { fetcher: (async (input: RequestInfo | URL) => { seen.push(String(input)); await gate; return new Response(JSON.stringify({ models: [{ name: "pulled" }], data: [{ id: "loaded" }] })); }) as typeof fetch });
-  await Promise.resolve(); expect(seen).toHaveLength(3); release();
-  const up = await pending; expect(up.recommended).toBe("llama-cpp"); expect(up.runtimes.ollama.models).toEqual(["pulled"]); expect(up.runtimes["lm-studio"].models).toEqual(["loaded"]);
-  const down = await detectProvider(ctx(), { fetcher: (async () => new Response("down", { status: 503 })) as typeof fetch });
-  expect(down.recommended).toBe("ollama");
-  const ollamaOnly = await detectProvider(ctx(), { fetcher: (async (input: RequestInfo | URL) => String(input).includes("11434") ? Response.json({ models: [{ name: "pulled" }] }) : new Response("down", { status: 503 })) as typeof fetch });
-  expect(ollamaOnly.recommended).toBe("ollama");
-  const studioOnly = await detectProvider(ctx(), { fetcher: (async (input: RequestInfo | URL) => String(input).includes("1234") ? Response.json({ data: [{ id: "loaded" }] }) : new Response("down", { status: 503 })) as typeof fetch });
-  expect(studioOnly.recommended).toBe("lm-studio");
-  const malformed = await detectProvider(ctx(), { fetcher: (async () => new Response("{")) as typeof fetch });
-  expect(malformed.runtimes.ollama.running).toBe(false);
-  const oversized = await detectProvider(ctx(), { fetcher: (async () => new Response(JSON.stringify({ models: Array(201).fill({ name: "m" }), data: Array(201).fill({ id: "m" }) }))) as typeof fetch });
-  expect(oversized.runtimes.ollama.models).toHaveLength(200);
-  const huge = await detectProvider(ctx(), { fetcher: (async () => new Response("x".repeat(140000))) as typeof fetch });
-  expect(huge.runtimes.ollama.running).toBe(false);
+  // With a declared privacy mode (always, in the wizard), speech stays on this machine in both modes.
+  for (const mode of ["local", "cloud"] as const) {
+    const p = { ...c, draft: { ...c.draft, privacy: { mode } } } as typeof c;
+    expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "synthetic-key" }, p)).toThrow("Speech stays on this machine");
+    expect(() => parseSpeech("stt", { id: "wyoming", host: "192.168.1.2", port: 10300 }, p)).toThrow("Speech stays on this machine");
+    expect(parseSpeech("stt", { id: "wyoming", host: "127.0.0.1", port: 10300 }, p).host).toBe("127.0.0.1");
+    expect(parseSpeech("stt", { id: "wyoming", host: "127.0.0.2", port: 10300 }, p).host).toBe("127.0.0.2");
+    // A DNS name that merely starts with 127. can resolve anywhere.
+    expect(() => parseSpeech("stt", { id: "wyoming", host: "127.example.com", port: 10300 }, p)).toThrow("Speech stays on this machine");
+  }
 });
 
 test("remote model list never reflects the supplied API key", async () => {
@@ -90,9 +69,9 @@ test("brain and board detection use injected PATH and bounded runner", async () 
   const board = await detectBoard(ctx(), { which: (bin) => bin === "multica" ? "/bin/multica" : null, env: {} });
   expect(board.recommended).toBe("multica");
   expect(BOARD_COMMANDS.hermes.command).toEqual(["hermes", "kanban", "list", "--json"]);
-  expect(contributeBoard(parseBoard({ id: "paperclip", companyId: "c1" }, ctx(), { env: {} })).notify?.kanban.command).toEqual(["paperclipai", "issue", "list", "-C", "c1", "--json"]);
-  expect(contributeBoard(parseBoard({ id: "paperclip", companyId: "c1" }, ctx(), { env: {} })).notify?.kanban.task_command).toEqual(["paperclipai", "issue", "get", "-C", "c1"]);
-  expect(contributeBoard(parseBoard({ id: "paperclip" }, ctx(), { env: { PAPERCLIP_COMPANY_ID: "c1" } })).notify?.kanban.command).toEqual(["paperclipai", "issue", "list", "--json"]);
+  expect(contributeBoard(parseBoard({ id: "paperclip", allowBoard: true, companyId: "c1" }, ctx(), { env: {} })).notify?.kanban.command).toEqual(["paperclipai", "issue", "list", "-C", "c1", "--json"]);
+  expect(contributeBoard(parseBoard({ id: "paperclip", allowBoard: true, companyId: "c1" }, ctx(), { env: {} })).notify?.kanban.task_command).toEqual(["paperclipai", "issue", "get", "-C", "c1"]);
+  expect(contributeBoard(parseBoard({ id: "paperclip", allowBoard: true }, ctx(), { env: { PAPERCLIP_COMPANY_ID: "c1" } })).notify?.kanban.command).toEqual(["paperclipai", "issue", "list", "--json"]);
   expect((await probeBoard({ id: "hermes" }, { runCommand: async () => command('[{"id":"1","status":"todo"}]') })).message).toBe("Found 1 tasks");
   expect((await probeBoard({ id: "hermes" }, { runCommand: async () => command("not-json") })).ok).toBe(false);
 });
@@ -145,8 +124,8 @@ test("audio.cpp installed, model, and loaded status drive CUDA recommendations",
 
 test("all picker contributions preserve defaults and round-trip through loadConfig", () => {
   const c = ctx(); let draft = c.draft;
-  const choices: Record<string, unknown> = { provider: { id: "ollama", model: "qwen3.5:0.8b" }, brain: { id: "codex" }, board: { id: "hermes" }, stt: { id: "faster-whisper" }, tts: { id: "kokoro" } };
-  for (const id of ["provider", "brain", "board", "stt", "tts"]) { const step = pick(id); const choice = step.parseChoice(choices[id], { ...c, draft }, { env: {} }); draft = mergeDraft(draft, step.contribute({ ...c, draft }, choice)); }
+  const choices: Record<string, unknown> = { brain: { id: "codex", allowCloud: true }, board: { id: "hermes", allowBoard: true }, stt: { id: "faster-whisper" }, tts: { id: "kokoro" } };
+  for (const id of ["brain", "board", "stt", "tts"]) { const step = pick(id); const choice = step.parseChoice(choices[id], { ...c, draft }, { env: {} }); draft = mergeDraft(draft, step.contribute({ ...c, draft }, choice)); }
   expect(draft.brain.mode).toBe("subprocess");
   const home = mkdtempSync(join(tmpdir(), "cicero-pickers-"));
   try { writeFileSync(join(home, "config.yaml"), renderDraft(draft)); const loaded = loadConfig({}, { home }); expect(loaded.brain.backend).toBe("codex"); expect(loaded.llmBackend.backend).toBe("ollama"); expect(loaded.notify.kanban?.preset).toBe("hermes"); }
@@ -162,138 +141,23 @@ test("API state masks stored API keys", async () => {
     const send = (path: string, body?: object) => handler(new Request(`http://127.0.0.1:9999${path}`, { method: body ? "POST" : "GET", headers: { host: "127.0.0.1:9999", "x-cicero-setup-token": server.token, ...(body ? { "x-cicero-setup-csrf": "1" } : {}) }, body: body ? JSON.stringify(body) : undefined }));
     const listed = await (await send("/api/provider-models", { choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", apiKey: "synthetic-super-secret" } })).json() as { models: string[] };
     expect(listed.models).toEqual(["m", "m2"]);
-    expect((await send("/api/choice", { id: "provider", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "unlisted", apiKey: "synthetic-super-secret" } })).status).toBe(400);
-    const response = await send("/api/choice", { id: "provider", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "synthetic-super-secret" } });
+    const response = await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "synthetic-super-secret", allowCloud: true } });
     expect(response.status).toBe(200);
     expect(await response.text()).not.toContain("synthetic-super-secret");
     expect(await (await send("/api/state")).text()).not.toContain("synthetic-super-secret");
-    const retained = await (await send("/api/choice", { id: "provider", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m2", apiKey: "" } })).json() as { storedSecrets: { provider: boolean }; yaml: string };
-    expect(retained.storedSecrets.provider).toBe(true);
-    expect(retained.yaml).toContain("apiKey: set");
+    const retained = await (await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m2", apiKey: "", allowCloud: true } })).json() as { storedSecrets: { brain: boolean }; yaml: string };
+    expect(retained.storedSecrets.brain).toBe(true);
+    expect(retained.yaml).toContain("api_key: set");
     expect(await (await send("/api/check", {})).text()).not.toContain("synthetic-super-secret");
     await send("/api/step", { id: "brain" });
-    const shortKey = await (await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "check" } })).json() as { steps: { id: string }[]; selectedChoices: Record<string, string>; yaml: string };
+    const shortKey = await (await send("/api/choice", { id: "brain", choice: { id: "openai-compatible", baseUrl: "https://example.test/v1", model: "m", apiKey: "check", allowCloud: true } })).json() as { steps: { id: string }[]; selectedChoices: Record<string, string>; yaml: string };
     expect(shortKey.steps.map((step) => step.id)).toContain("check");
     expect(shortKey.selectedChoices.brain).toBe("openai-compatible");
     expect((await send("/api/step", { id: "check" })).status).toBe(200);
     expect(shortKey.yaml).toContain("api_key: set");
     await send("/api/step", { id: "board" });
-    const failedProbe = await (await send("/api/choice", { id: "board", choice: { id: "hermes" } })).json() as { detected: { probe: { ok: boolean } }; yaml: string };
+    const failedProbe = await (await send("/api/choice", { id: "board", choice: { id: "hermes", allowBoard: true } })).json() as { detected: { probe: { ok: boolean } }; yaml: string };
     expect(failedProbe.detected.probe.ok).toBe(false);
     expect(failedProbe.yaml).not.toContain("kanban:");
-  } finally { await server.stop(); rmSync(home, { recursive: true, force: true }); }
-});
-
-test("router rejects Laya without office lanes and leaves the LLM default available", async () => {
-  const step = pick("router");
-  for (const lanes of [undefined, {}, []]) {
-    const c = ctx();
-    c.draft.brain.lanes = lanes;
-    expect(await step.detect(c)).toMatchObject({
-      options: ["llm"], recommended: "llm", disabled: { laya: LAYA_LANES_REQUIRED },
-    });
-    expect(() => step.parseChoice({ id: "laya" }, c)).toThrow(LAYA_LANES_REQUIRED);
-    expect(step.contribute(c, step.parseChoice({ id: "llm" }, c))).toEqual({});
-  }
-});
-
-test("router step defaults to the LLM prompt and contributes only an opt-in Laya URL", async () => {
-  const step = pick("router"); const c = officeCtx();
-  expect(SETUP_STEPS[SETUP_STEPS.findIndex((s) => s.id === "provider") + 1]).toBe(step);
-  expect(step).toMatchObject({ title: "Intent router", pipeline: "brain", available: true });
-  expect(await step.detect(c)).toMatchObject({ options: ["llm", "laya"], disabled: {}, recommended: "llm", defaultUrl: "http://127.0.0.1:8096" });
-  const llm = step.parseChoice({ id: "llm" }, c);
-  expect(step.contribute(c, llm)).toEqual({});
-  const laya = step.parseChoice({ id: "laya" }, c);
-  expect(step.contribute(c, laya)).toEqual({ switchboard: { intent_url: "http://127.0.0.1:8096" } });
-  expect(step.contribute(c, step.parseChoice({ id: "laya", url: "https://example.test/router/" }, c)))
-    .toEqual({ switchboard: { intent_url: "https://example.test/router" } });
-  for (const raw of [{ id: "unknown" }, { id: "laya", url: "" }, { id: "laya", url: 42 },
-    ...["file:///tmp/router", "http://example.test/?", "http://example.test/#", "http://example.test/?token=synthetic-secret", "http://user:synthetic-secret@example.test"].map((url) => ({ id: "laya", url }))]) {
-    expect(() => step.parseChoice(raw, c)).toThrow();
-  }
-  const explain = Object.values(step.explain).join(" ");
-  for (const text of ["does not route zero-shot", "fine-tuned switchboard checkpoint", "bring-your-own", "synthetic data only", "fine-tuning recipe", "planned follow-up", "sidecars/laya-switchboard/README.md"]) expect(explain).toContain(text);
-});
-
-test("router probes only Laya health with GET and reports the device", async () => {
-  const step = pick("router"); const c = officeCtx();
-  const seen: string[] = []; let signal: AbortSignal | undefined;
-  const deps = { fetcher: (async (input: RequestInfo | URL, init?: RequestInit) => {
-    seen.push(String(input)); expect(init?.method).toBe("GET"); signal = init?.signal ?? undefined;
-    return Response.json({ ok: true, device: "cuda" });
-  }) as typeof fetch };
-  expect(await step.probeChoice!(step.parseChoice({ id: "llm" }, c), deps)).toMatchObject({ ok: true });
-  expect(seen).toEqual([]);
-  expect(await step.probeChoice!(step.parseChoice({ id: "laya", url: "http://example.test/router/" }, c), deps))
-    .toEqual({ ok: true, message: "Laya sidecar ready on cuda" });
-  expect(seen).toEqual(["http://example.test/router/health"]);
-  expect(signal?.aborted).toBe(true);
-});
-
-test("router health fails closed for not-ready, malformed, oversized and unreachable responses", async () => {
-  const step = pick("router"); const choice = step.parseChoice({ id: "laya" }, officeCtx());
-  const replies = [() => Response.json({ ok: false, device: "cpu" }), () => Response.json({ ok: "true" }),
-    () => Response.json(null), () => Response.json({}), () => new Response("bad json"),
-    () => new Response("unavailable", { status: 503 }), () => new Response("x".repeat(8193)),
-    () => { throw new Error("synthetic-private-provider-error"); }];
-  for (const reply of replies) {
-    const result = await step.probeChoice!(choice, { fetcher: (async () => reply()) as typeof fetch });
-    expect(result.ok).toBe(false);
-    expect(result.message).toContain("sidecar is not reachable");
-    expect(result.message).toContain("sidecars/laya-switchboard/README.md");
-    expect(result.message).not.toContain("synthetic-private");
-  }
-});
-
-test("router health deadline cancels a stalled body", async () => {
-  const step = pick("router"); let cancelled = false; let signal: AbortSignal | undefined;
-  const result = await step.probeChoice!(step.parseChoice({ id: "laya" }, officeCtx()), {
-    fetcher: (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      signal = init?.signal ?? undefined;
-      return new Response(new ReadableStream({ cancel() { cancelled = true; } }));
-    }) as typeof fetch,
-  });
-  expect(result.ok).toBe(false);
-  expect(signal?.aborted).toBe(true);
-  expect(cancelled).toBe(true);
-});
-
-test("router health deadline also bounds an unresponsive fetcher", async () => {
-  const step = pick("router"); let signal: AbortSignal | undefined;
-  const result = await step.probeChoice!(step.parseChoice({ id: "laya" }, officeCtx()), {
-    fetcher: ((_input: RequestInfo | URL, init?: RequestInit) => {
-      signal = init?.signal ?? undefined;
-      return new Promise<Response>(() => {});
-    }) as typeof fetch,
-  });
-  expect(result.ok).toBe(false);
-  expect(signal?.aborted).toBe(true);
-});
-
-test("setup API rejects Laya on a fresh draft before probing and accepts LLM", async () => {
-  let handler: (req: Request) => Response | Promise<Response> = () => new Response();
-  const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop() {} }; }) as unknown as typeof Bun.serve;
-  const home = mkdtempSync(join(tmpdir(), "cicero-router-setup-"));
-  let probes = 0;
-  const server = await startSetupServer({ home, serve, output: () => {},
-    systemDeps: { platform: () => "linux", arch: () => "x64", release: () => "6.8", which: () => null, exists: () => true, statfs: () => ({ bavail: 1, bsize: 1 }) as ReturnType<typeof import("node:fs")["statfsSync"]> },
-    pickerDeps: { fetcher: (async () => { probes++; return Response.json({ ok: true, device: "cpu" }); }) as typeof fetch },
-  });
-  try {
-    const send = async (path: string, body: object, status = 200) => {
-      const response = await handler(new Request(`http://127.0.0.1:9999${path}`, { method: "POST", headers: {
-        host: "127.0.0.1:9999", "x-cicero-setup-token": server.token, "x-cicero-setup-csrf": "1",
-      }, body: JSON.stringify(body) }));
-      expect(response.status).toBe(status);
-      return await response.json() as { error?: string; selectedChoices: Record<string, string>; yaml: string; detected: { probe?: { ok: boolean } } };
-    };
-    await send("/api/step", { id: "router" });
-    const rejected = await send("/api/choice", { id: "router", choice: { id: "laya" } }, 400);
-    expect(rejected.error).toBe(LAYA_LANES_REQUIRED);
-    expect(probes).toBe(0);
-    const reset = await send("/api/choice", { id: "router", choice: { id: "llm" } });
-    expect(reset.yaml).not.toContain("intent_url:");
-    expect(reset.selectedChoices.router).toBe("llm");
   } finally { await server.stop(); rmSync(home, { recursive: true, force: true }); }
 });

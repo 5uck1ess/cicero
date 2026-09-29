@@ -304,6 +304,9 @@ function checkRegex(value: unknown, path: string, issues: string[]): void {
   }
 }
 
+/** What may leave the machine under `privacy.mode: local`, one item at a time. */
+export const PRIVACY_ALLOWANCES = ["agent", "telegram", "board"] as const;
+
 /**
  * Validate the operational parts of the merged runtime config before any
  * provider, subprocess, listener, or server is created.
@@ -324,8 +327,18 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     "voice_ref_text", "barge_in_enabled", "full_duplex", "aec", "silence_duration",
     "silence_threshold", "phonetic_aliases", "brain", "servers", "actions", "deployment", "stt",
     "stt_fallback", "tts", "tts_fallback", "llm", "classifier", "compute", "sidecar", "dashboard", "web_voice",
-    "notify", "headless", "turn", "tone", "clap", "vad", "earcons", "tts_coalesce", "intent_judge",
+    "notify", "headless", "turn", "tone", "clap", "vad", "earcons", "tts_coalesce", "intent_judge", "privacy",
   ], issues);
+
+  // A declared policy, not a firewall: the wizard and doctor enforce it.
+  if (config.privacy !== undefined && checkRecord(config.privacy, "privacy", issues)) {
+    checkKnownKeys(config.privacy, "privacy", ["mode", "allow"], issues);
+    if (config.privacy.mode !== "local" && config.privacy.mode !== "cloud") issues.push("privacy.mode must be local or cloud");
+    const allow = config.privacy.allow;
+    if (allow !== undefined && (!Array.isArray(allow) || allow.some((item) => !(PRIVACY_ALLOWANCES as readonly unknown[]).includes(item)))) {
+      issues.push(`privacy.allow must be a list of ${PRIVACY_ALLOWANCES.join(", ")}`);
+    }
+  }
 
   if (config.switchboard !== undefined && checkRecord(config.switchboard, "switchboard", issues)) {
     checkKnownKeys(config.switchboard, "switchboard", ["intent_url", "intent_timeout_ms", "intent_min_confidence", "front_desk_aliases"], issues);

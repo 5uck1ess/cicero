@@ -88,20 +88,35 @@ program
 program
   .command("doctor")
   .description("Check the configured setup end-to-end (engines, venvs, brain binaries, web voice) with fix hints")
-  .action(async () => {
+  .option("--json", "Print { version, checks, fails, warns } as JSON")
+  .action(async (opts) => {
     const { runDoctor } = await import("./cli/doctor");
-    process.exit(await runDoctor());
+    process.exit(await runDoctor({ json: opts.json === true }));
   });
 
 program
   .command("setup")
-  .description("Start the guided first-run setup preview")
+  .description("Start the guided first-run setup, or run it headless for an AI agent (--plan/--apply/--test)")
   .option("--home <dir>", "Use this Cicero home for the whole setup run")
   .option("--lan", "Serve setup over TLS on the local network")
   .option("--port <n>", "Setup port (default: random available port)")
+  .option("--plan", "Print detected facts and a recommended answers file (needs --json and --privacy)")
+  .option("--apply <file>", "Apply an answers file: validate, check, and write config.yaml")
+  .option("--test", "Probe the running engines of the written config (needs --json)")
+  .option("--json", "Print machine-readable JSON")
+  .option("--privacy <mode>", "For --plan: local or cloud")
+  .option("--agent <id>", "For --plan: the agent to recommend (e.g. codex, hermes, codex-acp)")
+  .option("--acknowledge-not-ready", "For --apply: write even if engines still need installing")
+  .option("--backup-invalid", "For --apply: back up an invalid existing config first")
   .action(async (opts) => {
-    const { runSetup } = await import("./cli/setup");
-    await runSetup(opts);
+    const { runSetup, SetupUsageError } = await import("./cli/setup");
+    try {
+      process.exitCode = await runSetup(opts);
+    } catch (error) {
+      if (!(error instanceof SetupUsageError)) throw error;
+      process.stderr.write(`${error.message}\n`);
+      process.exitCode = 2;
+    }
   });
 
 const hookCmd = program
