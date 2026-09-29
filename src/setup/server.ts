@@ -49,11 +49,14 @@ function publicDraft(draft: SetupDraft): SetupDraft {
   return copy;
 }
 
+// A redaction target shorter than this is a placeholder (x, none, EMPTY), not a key; replacing it would corrupt ordinary text.
+const MIN_SECRET_LENGTH = 8;
+
 export function draftSecrets(draft: SetupDraft): string[] {
   const secrets: string[] = [];
   function collect(value: Record<string, unknown>): void {
     for (const [key, child] of Object.entries(value)) {
-      if (["apiKey", "api_key", "token"].includes(key) && typeof child === "string") secrets.push(child);
+      if (["apiKey", "api_key", "token"].includes(key) && typeof child === "string" && child.length >= MIN_SECRET_LENGTH) secrets.push(child);
       else if (child && typeof child === "object" && !Array.isArray(child)) collect(child as Record<string, unknown>);
     }
   }
@@ -62,7 +65,8 @@ export function draftSecrets(draft: SetupDraft): string[] {
 }
 
 // Code-defined identifiers the page sends back; a short secret must never rewrite them.
-const IDENTIFIER_KEYS = new Set(["id", "options", "recommended", "cloudPresets", "status"]);
+// "audio" is a base64 sample payload: binary data, never text a secret could be echoed into.
+const IDENTIFIER_KEYS = new Set(["id", "options", "recommended", "cloudPresets", "status", "audio"]);
 
 export function redactStateValue(value: unknown, secrets: readonly string[]): unknown {
   if (typeof value === "string") return secrets.reduce((text, secret) => secret ? text.replaceAll(secret, "<redacted>") : text, value);
@@ -78,7 +82,7 @@ const KEY_VARIABLES = [...new Set([...OPENAI_COMPATIBLE_BACKENDS.map((id) => res
 
 /** API-key values present in the environment (8+ chars), so output can redact keys the wizard never saw typed. */
 export function envSecrets(env: Record<string, string | undefined> = process.env): string[] {
-  return KEY_VARIABLES.map((name) => env[name]).filter((v): v is string => typeof v === "string" && v.length >= 8);
+  return KEY_VARIABLES.map((name) => env[name]).filter((v): v is string => typeof v === "string" && v.length >= MIN_SECRET_LENGTH);
 }
 
 /**
@@ -96,7 +100,7 @@ export function setupSecrets(draft: SetupDraft, env: Record<string, string | und
     }
   };
   collect(draft);
-  const namedValues = [...named].map((name) => env[name]).filter((v): v is string => typeof v === "string" && v.length >= 8);
+  const namedValues = [...named].map((name) => env[name]).filter((v): v is string => typeof v === "string" && v.length >= MIN_SECRET_LENGTH);
   return [...new Set([...draftSecrets(draft), ...envSecrets(env), ...namedValues])];
 }
 

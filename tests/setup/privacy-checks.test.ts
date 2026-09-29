@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { isCloudAcpCommand } from "../../src/setup/acp-agents";
-import { setupSecrets } from "../../src/setup/server";
+import { redactStateValue, setupSecrets } from "../../src/setup/server";
 import { privacyChecks } from "../../src/setup/privacy-checks";
 import type { CiceroConfig } from "../../src/types";
 
@@ -71,6 +71,15 @@ test("cloud ACP adapters are recognized with or without a version pin", () => {
   expect(isCloudAcpCommand("/usr/local/bin/gemini", ["--experimental-acp"])).toBe(true);
   expect(isCloudAcpCommand("qwen", ["--acp"])).toBe(true);
   expect(isCloudAcpCommand("openclaw", ["acp"])).toBe(false);
+});
+
+test("short placeholder keys (x, none, EMPTY) are never redaction targets, and sample audio is never rewritten", () => {
+  for (const placeholder of ["x", "none", "EMPTY", "sk-1234"]) {
+    const draft = { brain: { backend: "openai-compatible", base_url: "http://127.0.0.1:8000/v1", model: "m", api_key: placeholder } };
+    expect(setupSecrets(draft as never, {})).toEqual([]);
+  }
+  const audio = Buffer.from("xxxxxxxx-real-secret-value-xxxxxxxx").toString("base64");
+  expect(redactStateValue({ ok: true, mime: "audio/wav", audio }, ["eHh4eHh4eHgtcmVhbC1zZWNyZXQ"])).toEqual({ ok: true, mime: "audio/wav", audio });
 });
 
 test("setupSecrets: typed keys, preset key variables, and any key variable the config names", () => {
