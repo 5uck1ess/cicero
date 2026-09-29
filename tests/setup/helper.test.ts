@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { loadConfig } from "../../src/config";
 import { createDraft, renderDraft, type SetupDraft } from "../../src/setup/draft";
 import { chosenFitWarnings, contributeHelper, detectHelper, gemmaOf, parseHelper, probeHelper, type HelperDetected } from "../../src/setup/helper";
+import { detectFrontDesk } from "../../src/setup/frontdesk";
 import type { RuntimeId, RuntimeListing } from "../../src/setup/runtimes";
 import { SetupSession } from "../../src/setup/session";
 import type { StepContext } from "../../src/setup/steps";
@@ -144,6 +145,17 @@ test("local mode on a machine too small for E2B: no helper recommended, a listed
   expect(detected.reason).toContain("cannot hold even Gemma 4 E2B");
   expect(detected.disabled.model).toContain("switch Privacy to cloud");
   expect(() => parseHelper({ id: "model", runtime: "ollama", model: "gemma4:e4b-it-qat" }, ctx("local", [], detected, fixtureSystem("cuda4")))).toThrow("cannot hold even Gemma 4 E2B");
+});
+
+test("cloud mode on a sized machine where nothing fits: no listed model is recommended for the helper or front desk", async () => {
+  const deps = { ...{ env: {}, which: () => null, readFile: () => null, homeDir: () => "/fixture/home" }, fetcher: ollamaFetcher(["gemma4:31b-it-qat"]) };
+  const c = ctx("cloud", [], undefined, fixtureSystem("cuda4"));
+  const helper = await detectHelper(c, deps, "python");
+  expect(helper.recommended).toBeNull();
+  expect(helper.reason).toContain("cannot hold a local helper");
+  const front = await detectFrontDesk(c, deps, "python");
+  expect(front.recommended).toBeNull();
+  expect(front.reason).toContain("cannot hold a local helper");
 });
 
 test("install hints name the fit helper for each runtime that does not list it", async () => {

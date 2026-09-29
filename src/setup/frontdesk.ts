@@ -96,7 +96,8 @@ export async function detectFrontDesk(ctx: StepContext, deps: PickerDeps = {}, s
   const cloudKeys = Object.fromEntries(CLOUD_PRESETS.map((id) => [id, accounts.cloudKeys[id] ?? "not found"])) as Record<string, "found" | "not found">;
   // Local mode on a machine that can't hold even the smallest model: no local model front desk (an agent still works).
   const tooSmall = mode === "local" && fit?.localHelperImpossible === true;
-  const local = tooSmall ? { choice: null, reason: fit!.reason } : recommendLocal(runtimes, fit?.frontDesk ?? null, fit?.helper ?? null);
+  // A sized machine where no model fits (either mode) gets no local pick: the unsized "first listed model" default must not apply.
+  const local = fit && !fit.helper ? { choice: null, reason: fit.reason } : recommendLocal(runtimes, fit?.frontDesk ?? null, fit?.helper ?? null);
   const recommended: FrontDeskChoice | null = local.choice ? { kind: "model", ...local.choice } : null;
   const cloudSuggestion = mode === "cloud" ? CLOUD_PRESETS.find((id) => cloudKeys[id] === "found") ?? null : null;
   const localReason = !fit && !recommended ? "Not sized for this machine. Start Ollama and run ollama pull qwen3.5:0.8b, then check again." : local.reason;

@@ -58,7 +58,8 @@ export async function detectHelper(ctx: StepContext, deps: PickerDeps = {}, spee
   const fit = fitFor(ctx, speech);
   const front = frontDeskOf(ctx);
   const cloudFront = front?.kind === "model" && front.runtime === "cloud";
-  const local = recommendLocal(runtimes, fit?.helper ?? null, GEMMA_MODELS.find((g) => g.id === "e2b") ?? null);
+  // A sized machine where no model fits (either mode) gets no local pick: the unsized "first listed model" default must not apply.
+  const local = fit && !fit.helper ? { choice: null, reason: fit.reason } : recommendLocal(runtimes, fit?.helper ?? null, GEMMA_MODELS.find((g) => g.id === "e2b") ?? null);
   let recommended: HelperChoice | null = local.choice ? { id: "model", ...local.choice, gemma: gemmaOf(local.choice.model), compact: true } : null;
   let reason = local.reason;
   if (!fit && !recommended) reason = `Not sized for this machine. Start Ollama and run ollama pull ${CPU_DEFAULT_MODEL}, then check again.`;
