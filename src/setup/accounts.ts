@@ -106,16 +106,21 @@ async function detectCodex(deps: PickerDeps, env: Record<string, string | undefi
     if (binary) {
       try {
         const result = await (deps.runCommand ?? runBoundedCommand)([binary, "login", "status"], { ...PROBE, env });
-        if (/^Logged in/m.test(result.stdout.text)) { login = "found"; loginSource = "codex login status"; }
+        if (/^Logged in/m.test(result.stdout.text)) {
+          login = "found"; loginSource = "codex login status";
+          mode = /^Logged in using ChatGPT/m.test(result.stdout.text) ? "chatgpt" : /^Logged in using an API key/m.test(result.stdout.text) ? "apikey" : null;
+        }
       } catch { login = "unknown"; }
     }
   }
-  const subscription = login === "found" && mode !== "apikey";
+  // Only the two known modes say how Codex bills; a malformed file or a new mode stays unknown.
+  const subscription = login === "found" && mode === "chatgpt";
+  const perToken = login === "found" && mode === "apikey";
   return {
     provider: "codex", login, loginSource, loginUnvalidated: login === "found",
     key: key ? "found" : "not found", keyVariable: "OPENAI_API_KEY",
     // Unverified whether OPENAI_API_KEY overrides a ChatGPT login at run time.
-    likely: key && login === "found" ? "unknown" : key ? "per-token key" : subscription ? "subscription" : login === "found" ? "per-token key" : "unknown",
+    likely: key && login === "found" ? "unknown" : key ? "per-token key" : subscription ? "subscription" : perToken ? "per-token key" : "unknown",
     keyOverridesLogin: key && login === "found" ? "unknown" : false,
   };
 }

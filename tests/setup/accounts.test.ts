@@ -83,3 +83,17 @@ test("Accounts is the third step and contributes nothing itself", async () => {
   await session.choose("accounts", { useSubscription: [] }, { probe: false });
   expect(JSON.stringify(session.draft)).toBe(before);
 });
+
+test("Codex billing is subscription only for a known ChatGPT login; a malformed or unknown auth mode stays unknown", async () => {
+  const codex = async (auth: string | null, status = "") => (await detectAccounts({ ...base, env: {}, readFile: files(auth === null ? {} : { "/h/.codex/auth.json": auth }),
+    which: (b: string) => b === "codex" ? "/usr/bin/codex" : null,
+    runCommand: (async () => ({ command: [], exitCode: 0, durationMs: 1, stdout: { text: status, receivedBytes: status.length, capturedBytes: status.length, limitBytes: 8192, truncated: false }, stderr: { text: "", receivedBytes: 0, capturedBytes: 0, limitBytes: 1024, truncated: false }, combined: { receivedBytes: status.length, capturedBytes: status.length, limitBytes: 9216, truncated: false } })) as never,
+  })).agents.find((a) => a.provider === "codex")!;
+  expect((await codex('{"auth_mode":"chatgpt"}')).likely).toBe("subscription");
+  expect((await codex('{"auth_mode":"apikey"}')).likely).toBe("per-token key");
+  expect((await codex("{not json")).likely).toBe("unknown");
+  expect((await codex('{"auth_mode":"something-new"}')).likely).toBe("unknown");
+  expect((await codex(null, "Logged in using ChatGPT\n")).likely).toBe("subscription");
+  expect((await codex(null, "Logged in using an API key - sk-***\n")).likely).toBe("per-token key");
+  expect((await codex(null, "Logged in\n")).likely).toBe("unknown");
+});
