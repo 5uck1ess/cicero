@@ -1,6 +1,6 @@
 # Setup wizard v2, part 1: privacy, accounts and hardware-sized models
 
-Status: design, not implemented. Date: 2026-09-29. Revision 2, after GPT-6 Astra's adversarial review.
+Status: design, not implemented. Date: 2026-09-29. Revision 3, after two rounds of GPT-6 Astra's adversarial review.
 Builds on: `2026-09-24-setup-wizard-design.md` (the current guided setup). This spec covers only what changes; the v1 rules stand unless a section below overrides them.
 Co-designed with GPT-6 Astra: an independent proposal, merged, then reviewed against the code.
 
@@ -69,7 +69,13 @@ The budget is recomputed whenever the Hear or Speak choice changes. It is shown 
 
 ### 3. Accounts (new)
 
-The step detects accounts read-only and stores only the user's choices. It covers a fixed list of supported providers: Anthropic, OpenAI, xAI, Cerebras, DeepSeek and OpenRouter.
+The step detects accounts read-only and stores only the user's choices. It covers two fixed lists:
+- **Agent logins:** Claude Code, Codex and Grok, shown in the table below.
+- **Cloud front-desk keys:** the existing OpenAI-compatible presets in `src/backends/llm/openai.ts:22` (OpenAI, OpenRouter, Groq, Together, DeepSeek and others), plus two new presets:
+  - `cerebras`: `https://api.cerebras.ai/v1`, key in `CEREBRAS_API_KEY`.
+  - `xai`: `https://api.x.ai/v1`, key in `XAI_API_KEY`.
+
+  Both are OpenAI-compatible chat endpoints. The reference box's Hermes profiles use them that way today. Anthropic is an agent only in part 1, because its API is not OpenAI-compatible and the `llm` backend has no Anthropic client.
 
 **Login detection** uses each CLI's own status command where one exists, falling back to known locations.
 
@@ -88,7 +94,7 @@ The step detects accounts read-only and stores only the user's choices. It cover
 This is the model that answers everyday talk.
 
 - **Local mode:** the Model fit rules below pick the largest front-desk model that fits alongside the helper, reusing the helper when nothing larger fits.
-- **Cloud mode:** also lists the cloud providers found in Accounts. The user picks one; there is no automatic speed ranking.
+- **Cloud mode:** also lists the cloud front-desk presets whose key was found in Accounts. The user picks one; there is no automatic speed ranking.
 
 ### 5. Helper (new; absorbs Router)
 
@@ -101,13 +107,15 @@ One local model does background work:
 - llama-swap or llama.cpp `llama-server` on CUDA;
 - Ollama or LM Studio on either platform.
 
-The step detects a running runtime (the existing Think probes) and picks or pulls the model there. With no runtime found, it shows install steps. This keeps the v1 rule that Cicero does not install vendor runtimes. Cicero's own MLX provider, which starts one model from `.venv` (`src/backends/llm/mlx-lm.ts:127`), stays the front-desk option and is not used for the helper.
+The step detects a running runtime with the existing Think probes (`src/setup/pickers.ts:123`), then lists that runtime's models: `/v1/models` for llama-swap, llama-server and LM Studio, and `/api/tags` for Ollama. The chosen helper model must appear in the list before the step turns green; a missing one gets its pull or download command.
+
+A bare `llama-server` lists only the one model it loaded, so it can host only one model. On that runtime the helper and front desk must be the same model, and the step offers llama-swap or Ollama for running two. With no runtime found, the step shows install steps. This keeps the v1 rule that Cicero does not install vendor runtimes. Cicero's own MLX provider, which starts one model from `.venv` (`src/backends/llm/mlx-lm.ts:127`), stays the front-desk option and is not used for the helper.
 
 **Config it writes**, all through existing keys:
 
 - **Always:** `web_voice.tldr.summarizer_url` and `web_voice.tldr.summarizer_model`. Spoken codas and `summarizerClassifier` read these (`src/brain/index.ts:62`), which fixes the no-op LLM router.
 - **Checkbox "Compress long conversations":** `brain.history_compaction.enabled: true` (`src/daemon.ts:1178`), using the same endpoint.
-- **Checkbox "Write call minutes":** `notify.call_minutes`. It is shown only when Telegram is configured and allowed (`src/daemon.ts:1680`).
+- **Call minutes** (`notify.call_minutes`, `src/daemon.ts:1680`) need Telegram. The wizard does not set up Telegram in part 1, so this checkbox waits for the Channels step.
 
 **Routing:**
 - Exact and fuzzy name match runs first, with no model.
@@ -135,13 +143,17 @@ Test runs against the **engines already running**, on the user's click. It check
 2. **Front desk:** one chat completion.
 3. **Helper:** one summary of a bundled long reply.
 4. **Speak:** a sentence is synthesized and played in the browser (playback only; no microphone in part 1).
-5. **Memory (CUDA only):** `nvidia-smi` total used, shown against the budget. Mac measurement is deferred.
+5. **Memory (CUDA only):** per-process use from `nvidia-smi --query-compute-apps`, matched to the speech and runtime PIDs where possible. The rest shows as "other GPU use". This is how the reference box was measured. The existing aggregate telemetry (`src/platform/gpu.ts:21`) is the fallback, labeled "whole GPU". Mac measurement is deferred.
 
 Rules:
 - Each probe has a timeout and a Cancel button. Nothing is started or stopped by Test.
 - An engine that isn't running is reported as "not running", with its start command, rather than as a failure.
 - Results are cleared when the draft changes.
 - Config errors still block saving, as today (`src/setup/draft.ts:86`). Probe failures can be acknowledged and saved past.
+
+### Channels and Install
+
+Both are unchanged from v1: still unbuilt preview steps (`src/setup/steps.ts:49`), with the manual instructions in `docs/setup.md`. On a fresh setup the Privacy step's `telegram` and `board` allowances therefore only matter when the user adds those by hand later. Doctor then warns if they are not allowed.
 
 ### 11. Save
 
@@ -165,7 +177,7 @@ The Test step replaces estimates with measurements on CUDA.
 
 1. **Helper:** E4B if it fits in the budget, else E2B.
    - In `local` mode, if even E2B doesn't fit, the step says this machine can't run the helper locally. The user must use a smaller speech preset or switch to `cloud` mode, where part 1 runs without a helper.
-2. **Local front desk:** the largest model in the table whose footprint fits in the budget minus the helper. If only the helper fits, the front desk reuses the helper.
+2. **Local front desk:** the largest model **larger than the helper** whose footprint fits in the budget minus the helper. If none fits, the front desk reuses the helper's own instance; a second copy of the same model is never loaded.
 
 **Worked examples:**
 
