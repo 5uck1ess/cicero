@@ -1,6 +1,8 @@
 import type { SetupDraft } from "./draft";
 import type { SystemFacts, Tier } from "./system";
 import { contributeBoard, contributeBrain, contributeSpeech, detectBoard, detectBrain, detectSpeech, parseBoard, parseBrain, parseSpeech, probeBoard, type PickerDeps } from "./pickers";
+import { modelBudget, planFit, speechKind, type SpeechKind } from "./fit";
+import { isLocal } from "./privacy";
 import { detectAccounts, parseAccounts, type AccountsDetected } from "./accounts";
 import { PRIVACY_COPY, PRIVACY_MODES, parsePrivacy, type PrivacyChoice } from "./privacy";
 
@@ -34,8 +36,12 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     parseChoice: (raw) => parsePrivacy(raw),
     contribute(_ctx, c) { const p = c as PrivacyChoice; return { privacy: p.allow.length ? p : { mode: p.mode } }; } },
   { id: "system", title: "Machine", available: true, pipeline: "mic",
-    explain: info("Checks platform, memory, disk, and GPU for a starting deployment preset.", "The recommended tier follows detected hardware; you can change it.", "Read-only hardware checks run. Your choice stays in memory until Save.", "docs/setup.md"),
-    async detect({ system }) { return system; },
+    explain: info("Checks platform, memory, disk, and GPU, and works out how much memory models may use at once.", "The recommended tier follows detected hardware; you can change it. The model budget sizes the helper and a local front desk.", "Read-only hardware checks run. Your choice stays in memory until Save.", "docs/setup.md"),
+    async detect(ctx, deps) {
+      const kind = await plannedSpeechKind(ctx, deps);
+      const budget = modelBudget(ctx.system, kind);
+      return { ...ctx.system, budget, fit: budget ? planFit(budget.budgetGb, isLocal(ctx) ? "local" : "cloud") : null };
+    },
     recommend(_detected, { system }) { return { choice: system.recommendedTier, reason: system.reason }; },
     parseChoice(raw) { if (!["local-mlx", "local-cuda", "local-cpu"].includes(raw as string)) throw new Error("Choose a supported tier"); return raw as Tier; },
     contribute(_ctx, choice) { return { deployment: choice }; } },
@@ -71,6 +77,18 @@ export const SETUP_STEPS: readonly SetupStep[] = [
   { id: "write", title: "Save", available: true, pipeline: "speaker", explain: info("Reviews and writes your private, annotated config.yaml.", "The comments explain each setting for later edits.", "Only a missing config may be written. An invalid existing config needs an explicit backup first.", "docs/setup.md"), ...noop },
   { id: "handoff", title: "Hand-off", available: true, pipeline: "speaker", explain: info("Start Cicero and pair a phone after setup exits.", "The stable web voice token survives daemon restarts.", "This page closes the setup server; it does not start the daemon.", "docs/setup.md"), ...noop },
 ];
+
+/**
+ * The speech stack the model budget reserves memory for: the chosen Hear and
+ * Speak engines once both are set, otherwise what those steps would recommend.
+ */
+export async function plannedSpeechKind(ctx: StepContext, deps?: PickerDeps): Promise<SpeechKind> {
+  const stt = (ctx.draft.stt as { backend?: string } | undefined)?.backend;
+  const tts = (ctx.draft.tts as { backend?: string } | undefined)?.backend;
+  if (stt && tts) return speechKind(ctx.draft.deployment, stt, tts);
+  const [hear, speak] = await Promise.all([detectSpeech("stt", ctx, deps), detectSpeech("tts", ctx, deps)]);
+  return speechKind(ctx.draft.deployment, stt ?? hear.recommended, tts ?? speak.recommended);
+}
 
 /** Steps that take no choice: they are never posted to /api/choice or listed in an answers file. */
 export const NO_CHOICE_STEP_IDS: readonly string[] = ["test", "check", "write", "handoff"];

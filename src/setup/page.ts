@@ -84,6 +84,12 @@ h1{font-size:30px;line-height:1.15;letter-spacing:-.02em;font-weight:700;margin:
 .edge{stroke:var(--line);stroke-width:2;fill:none}
 .edge.soft{stroke-dasharray:5 6}
 .edge-label{font-size:12px;fill:var(--muted)}
+.budget{display:flex;height:34px;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:8px 0 6px;background:var(--surface)}
+.budget span{display:flex;align-items:center;padding:0 8px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-right:1px solid var(--line)}
+.budget .speech{background:var(--accent-soft)}
+.budget .model{background:var(--ok-soft)}
+.budget .reserve{color:var(--muted)}
+.budget-legend{color:var(--muted);font-size:13px;margin:0 0 18px}
 .person{fill:var(--accent-soft);stroke:var(--accent-line);stroke-width:1.5}
 .person-label{font-size:13px;font-weight:600;fill:var(--ink)}
 .cta-row{display:flex;justify-content:flex-end;margin-top:28px;gap:12px;flex-wrap:wrap}
@@ -405,6 +411,26 @@ function selectOf(items, value) {
   return s;
 }
 
+var SPEECH_LABEL = { audiocpp: 'audio.cpp speech', python: 'Python speech', mlx: 'MLX speech' };
+function fixed(n) { return (Math.round(n * 10) / 10) + ' GB'; }
+/** One segment per planned model on the memory models may use; estimates are labeled. */
+function budgetBar(b, fit) {
+  if (!b) return null;
+  var total = b.totalGb * (b.platform === 'mlx' ? 0.6 : 1);
+  var bar = h('div', { class: 'budget', role: 'img' });
+  var parts = [['speech', (SPEECH_LABEL[b.speech.kind] || 'Speech') + ' ' + fixed(b.speech.gb) + ' (' + b.speech.basis + ')', b.speech.gb]];
+  if (fit && fit.helper) parts.push(['model', 'Helper ' + fit.helper.label + ' ' + fixed(fit.helper.footprintGb) + ' (' + fit.helper.basis + ')', fit.helper.footprintGb]);
+  if (fit && fit.frontDesk && !fit.frontDeskReusesHelper) parts.push(['model', 'Front desk ' + fit.frontDesk.label + ' ' + fixed(fit.frontDesk.footprintGb) + ' (' + fit.frontDesk.basis + ')', fit.frontDesk.footprintGb]);
+  if (b.headroomGb) parts.push(['reserve', 'Headroom ' + fixed(b.headroomGb), b.headroomGb]);
+  var used = parts.reduce(function (n, p) { return n + p[2]; }, 0);
+  if (total > used) parts.push(['reserve', 'Free ' + fixed(total - used), total - used]);
+  parts.forEach(function (p) { bar.append(h('span', { class: p[0], style: 'flex:' + Math.max(p[2], 0.1), title: p[1], text: p[1] })); });
+  bar.setAttribute('aria-label', parts.map(function (p) { return p[1]; }).join(', '));
+  var legend = 'Budget ' + fixed(b.budgetGb) + ' for models' + (b.platform === 'mlx' ? ' (60% of unified memory, minus speech).' : ' (VRAM minus speech and headroom).');
+  if (b.inUseByOthersGb) legend += ' Other processes hold ' + fixed(b.inUseByOthersGb) + ' right now; that may be temporary and is not subtracted.';
+  if (fit && fit.reason) legend += ' ' + fit.reason;
+  return [bar, h('p', { class: 'budget-legend', text: legend })];
+}
 function renderSystem(step) {
   var f = state.detected || state.system;
   var gpu = f.gpu && f.gpu.status === 'ok' ? f.gpu.name : 'No NVIDIA GPU';
@@ -416,6 +442,8 @@ function renderSystem(step) {
     h('div', { class: 'fact' }, [h('b', { text: gib(f.disks && f.disks.checkout.freeBytes) }), h('small', { text: 'free disk' })])
   ]));
   if (f.gpuWarning) app.append(h('p', { class: 'warnline', text: f.gpuWarning }));
+  var bar = budgetBar(f.budget, f.fit);
+  if (bar) app.append(h('h2', { class: 'section-h2', text: 'Model budget' }), bar[0], bar[1]);
   var picked = state.tier;
   var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: 'Starting preset' })]);
   ['local-cuda', 'local-mlx', 'local-cpu'].forEach(function (t) {
