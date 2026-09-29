@@ -92,3 +92,22 @@ test("a later privacy flip invalidates a stored cloud agent", async () => {
   await s.choose("brain", { id: "codex", allowCloud: true }, { probe: false });
   expect(s.draft.privacy).toEqual({ mode: "local", allow: ["agent"] });
 });
+
+test("a choice whose probe is still running when another choice lands is refused, not committed stale", async () => {
+  let release = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const deps = { ...requiredDeps, env: { XAI_API_KEY: "synthetic-xai-key" },
+    fetcher: (async (input: RequestInfo | URL) => { if (String(input).includes("api.x.ai")) { await gate; return Response.json({ data: [{ id: "grok-fast" }] }); } return requiredDeps.fetcher!(input); }) as typeof fetch };
+  const s = new SetupSession(fixtureSystem("cuda24"), undefined, deps);
+  await s.choose("privacy", { mode: "cloud" }, { probe: false });
+  const detected = await s.detect("frontdesk", deps);
+  const slow = s.choose("frontdesk", { kind: "model", runtime: "cloud", preset: "xai", model: "grok-fast" }, { deps, detected, probe: true });
+  await Bun.sleep(5);
+  await s.choose("privacy", { mode: "local" }, { probe: false });
+  release();
+  const result = await slow;
+  expect(result.accepted).toBe(false);
+  expect(result.probe?.message).toContain("changed while");
+  expect(s.draft.privacy).toEqual({ mode: "local" });
+  expect((s.draft.brain as { backend?: string } | undefined)?.backend).not.toBe("xai");
+});

@@ -48,6 +48,20 @@ describe("setup server auth", () => {
     expect(state.handoff.defaultConfigPath).toBe(join(defaultHome, "config.yaml"));
     expect(state.handoff.copyCommand).toContain("cp -n");
   });
+  test("an API key from the environment is redacted from page state even when a runtime echoes it", async () => {
+    let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
+    const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop: () => {} }; }) as unknown as typeof Bun.serve;
+    const marker = "synthetic-xai-marker-0123456789";
+    const pickerDeps = { ...requiredDeps, env: { XAI_API_KEY: marker },
+      fetcher: (async (input: RequestInfo | URL) => String(input).includes("11434/api/tags") ? Response.json({ models: [{ name: `echo-${marker}` }] }) : new Response("down", { status: 503 })) as typeof fetch };
+    const server = await startSetupServer({ home: home(), systemDeps, output: () => {}, serve, pickerDeps });
+    servers.push(server);
+    const headers = { host: `127.0.0.1:${server.port}`, "x-cicero-setup-token": server.token, "x-cicero-setup-csrf": "1" };
+    const step = await handler(new Request(`http://127.0.0.1:${server.port}/api/step`, { method: "POST", headers, body: JSON.stringify({ id: "frontdesk" }) }));
+    const text = await step.text();
+    expect(text).toContain("echo-");
+    expect(text).not.toContain(marker);
+  });
   test("actions.yaml errors are shown without offering a config backup", async () => {
     let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
     const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop: () => {} }; }) as unknown as typeof Bun.serve;

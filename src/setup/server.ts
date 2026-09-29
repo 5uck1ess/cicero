@@ -17,7 +17,7 @@ import { backupInvalidConfig, inspectExistingConfig, writeDraft } from "./write"
 import { DraftChangedError, SetupSession, mergeDraft } from "./session";
 import { CLOUD_PRESETS } from "./frontdesk";
 import { isLocal } from "./privacy";
-import { resolveOpenAiTarget } from "../backends/llm/openai";
+import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "../backends/llm/openai";
 import type { Check, DoctorCheckOptions } from "../cli/doctor";
 import { redactSnapshotSecrets } from "../operational-state";
 import { ciceroHome } from "../platform/paths";
@@ -73,9 +73,17 @@ export function redactStateValue(value: unknown, secrets: readonly string[]): un
   return value;
 }
 
-export function publicChecks(checks: Check[] | null, draft: SetupDraft): Check[] | null {
+// Every provider key variable a setup step may read from Cicero's environment.
+const KEY_VARIABLES = [...new Set([...OPENAI_COMPATIBLE_BACKENDS.map((id) => resolveOpenAiTarget({ backend: id }).apiKeyEnv), "ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY"])];
+
+/** API-key values present in the environment (8+ chars), so output can redact keys the wizard never saw typed. */
+export function envSecrets(env: Record<string, string | undefined> = process.env): string[] {
+  return KEY_VARIABLES.map((name) => env[name]).filter((v): v is string => typeof v === "string" && v.length >= 8);
+}
+
+export function publicChecks(checks: Check[] | null, draft: SetupDraft, extra: readonly string[] = []): Check[] | null {
   if (!checks) return null;
-  const secrets = draftSecrets(draft);
+  const secrets = [...draftSecrets(draft), ...extra];
   const hide = (line: string | undefined) => line === undefined ? undefined : secrets.reduce((text, secret) => secret ? text.replaceAll(secret, "<redacted>") : text, line);
   return checks.map((check) => ({ ...check, name: hide(check.name)!, detail: hide(check.detail)!, ...(check.hint ? { hint: hide(check.hint) } : {}) }));
 }
@@ -231,17 +239,19 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
     const draft = session.draft;
     const choices = session.choices;
     const current_checks = session.currentChecks();
-    const safeChecks = current_checks === null ? null : publicChecks(current_checks, draft);
+    // Typed keys and keys from the environment: a probe or runtime reply can echo either.
+    const secrets = [...draftSecrets(draft), ...envSecrets(options.pickerDeps?.env ?? process.env)];
+    const safeChecks = current_checks === null ? null : publicChecks(current_checks, draft, secrets);
     const checkGroups = safeChecks === null ? null : classifySetupChecks(safeChecks);
     const existing = inspectExistingConfig(home);
     // Only free text and remote-derived values can echo a secret; structural fields stay exact.
     // A probe result describes the draft it ran against; a later choice drops it.
     const liveTests = Object.fromEntries([...testResults].filter(([, r]) => r.revision === session.revision).map(([id, r]) => [id, r.result]));
     const testsCleared = [...testResults.values()].some((r) => r.revision !== session.revision);
-    const free = redactStateValue({ detected, providerModels, checks: safeChecks, checkGroups, existing, invalidated, tests: liveTests, testsCleared }, draftSecrets(draft)) as Record<string, unknown>;
+    const free = redactStateValue({ detected, providerModels, checks: safeChecks, checkGroups, existing, invalidated, tests: liveTests, testsCleared }, secrets) as Record<string, unknown>;
     return {
       steps: SETUP_STEPS.map(({ id, title, explain, pipeline, available }) => ({ id, title, explain, pipeline, available })),
-      current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, choiceLabel(choice)])), privacyAllow: (draft.privacy as { allow?: string[] } | undefined)?.allow ?? [], accountsChoice: (choices.get("accounts") as { useSubscription?: string[] } | undefined)?.useSubscription ?? null, frontdeskChoice: choices.get("frontdesk") ?? null, helperChoice: choices.get("helper") ?? null, storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
+      current, system, tier: draft.deployment, ...free, selectedChoices: redactStateValue(Object.fromEntries([...choices].map(([id, choice]) => [id, choiceLabel(choice)])), secrets), privacyAllow: (draft.privacy as { allow?: string[] } | undefined)?.allow ?? [], accountsChoice: (choices.get("accounts") as { useSubscription?: string[] } | undefined)?.useSubscription ?? null, frontdeskChoice: redactStateValue(choices.get("frontdesk") ?? null, secrets), helperChoice: redactStateValue(choices.get("helper") ?? null, secrets), storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), secrets),
       written, finished, startCommand: handoff.startCommand, handoff,
       missingChoices: session.missingChoices(),
       canWrite: !written && checkGroups !== null && checkGroups.blocking.length === 0 && existing.status === "missing" && session.missingChoices().length === 0,

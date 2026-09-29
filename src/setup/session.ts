@@ -7,6 +7,8 @@ import type { SystemFacts, Tier } from "./system";
 import type { PickerDeps } from "./pickers";
 import type { Check, DoctorCheckOptions } from "../cli/doctor";
 
+const STALE_CHOICE = "Another choice changed while this one was being checked. Choose it again.";
+
 /** Choices that shape the config; Accounts and Tasks have safe defaults and may be skipped. */
 export const REQUIRED_CHOICES: readonly string[] = ["privacy", "system", "frontdesk", "helper", "stt", "tts", "brain"];
 
@@ -89,7 +91,10 @@ export class SetupSession {
     }
     let probe: { ok: boolean; message: string } | undefined;
     if (options.probe && step.probeChoice) {
+      // The choice was parsed against this revision; one that lands while the probe runs makes it stale.
+      const parsedAt = this.revision;
       probe = await step.probeChoice(parsed, deps);
+      if (this.revision !== parsedAt) return { accepted: false, probe: { ok: false, message: STALE_CHOICE }, invalidated: [] };
       if (!probe.ok) return { accepted: false, probe, invalidated: [] };
     }
     this.choices.set(step.id, parsed);

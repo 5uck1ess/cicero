@@ -106,9 +106,11 @@ async function detectCodex(deps: PickerDeps, env: Record<string, string | undefi
     if (binary) {
       try {
         const result = await (deps.runCommand ?? runBoundedCommand)([binary, "login", "status"], { ...PROBE, env });
-        if (/^Logged in/m.test(result.stdout.text)) {
+        // Verified 2026-09-29: codex-cli 0.159.0 prints this status on stderr, with nothing on stdout.
+        const status = `${result.stdout.text}\n${result.stderr.text}`;
+        if (/^Logged in/m.test(status)) {
           login = "found"; loginSource = "codex login status";
-          mode = /^Logged in using ChatGPT/m.test(result.stdout.text) ? "chatgpt" : /^Logged in using an API key/m.test(result.stdout.text) ? "apikey" : null;
+          mode = /^Logged in using ChatGPT/m.test(status) ? "chatgpt" : /^Logged in using an API key/m.test(status) ? "apikey" : null;
         }
       } catch { login = "unknown"; }
     }

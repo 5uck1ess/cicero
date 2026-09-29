@@ -97,3 +97,11 @@ test("Codex billing is subscription only for a known ChatGPT login; a malformed 
   expect((await codex(null, "Logged in using an API key - sk-***\n")).likely).toBe("per-token key");
   expect((await codex(null, "Logged in\n")).likely).toBe("unknown");
 });
+
+test("a Codex keyring login reported on stderr is found (codex-cli 0.159 prints its status there)", async () => {
+  const status = "Logged in using ChatGPT\n";
+  const result = await detectAccounts({ ...base, env: {}, readFile: files({}), which: (b: string) => b === "codex" ? "/usr/bin/codex" : null,
+    runCommand: (async () => ({ command: [], exitCode: 0, durationMs: 1, stdout: { text: "", receivedBytes: 0, capturedBytes: 0, limitBytes: 8192, truncated: false }, stderr: { text: status, receivedBytes: status.length, capturedBytes: status.length, limitBytes: 1024, truncated: false }, combined: { receivedBytes: status.length, capturedBytes: status.length, limitBytes: 9216, truncated: false } })) as never });
+  const codex = result.agents.find((a) => a.provider === "codex")!;
+  expect(codex).toMatchObject({ login: "found", loginSource: "codex login status", likely: "subscription" });
+});
