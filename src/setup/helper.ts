@@ -3,7 +3,7 @@ import { GEMMA_MODELS, fitWarnings, modelBudget, type FitPlan, type GemmaId, typ
 import { currentFit, fitFor, recommendLocal, type FrontDeskChoice } from "./frontdesk";
 import { LAYA_LANES_REQUIRED, type PickerDeps } from "./pickers";
 import { isLocal } from "./privacy";
-import { RUNTIME_ENDPOINTS, RUNTIME_IDS, listRuntimes, suggestListedModel, type RuntimeId, type RuntimeListing } from "./runtimes";
+import { RUNTIME_ENDPOINTS, RUNTIME_IDS, installHint, listRuntimes, llamaSwapEntry, suggestListedModel, type RuntimeId, type RuntimeListing } from "./runtimes";
 import type { StepContext } from "./steps";
 
 /**
@@ -24,6 +24,8 @@ export interface HelperDetected {
   reason: string;
   disabled: Record<string, string>;
   warnings: string[];
+  /** How to get the fit helper onto each runtime that does not list it yet. */
+  install: { runtime: RuntimeId; hint: string; entry?: string }[];
 }
 
 function text(value: unknown, name: string, max = 200): string {
@@ -72,7 +74,10 @@ export async function detectHelper(ctx: StepContext, deps: PickerDeps = {}, spee
   }
   if (mode === "local") disabled.none = LOCAL_NEEDS_HELPER;
   else if (!cloudFront) disabled.none = NO_HELPER_NEEDS_MODEL;
-  return { mode, runtimes, fit, recommended, reason, disabled, warnings: chosenFitWarnings(ctx, speech) };
+  const target = disabled.model ? null : fit?.helper ?? null;
+  const install = target ? RUNTIME_IDS.filter((id) => !runtimes[id].running || !suggestListedModel(runtimes[id].models, target))
+    .map((id) => ({ runtime: id, hint: installHint(id, target), ...(id === "llama-cpp" ? { entry: llamaSwapEntry(target) } : {}) })) : [];
+  return { mode, runtimes, fit, recommended, reason, disabled, warnings: chosenFitWarnings(ctx, speech), install };
 }
 
 export function parseHelper(raw: unknown, ctx: StepContext): HelperChoice {

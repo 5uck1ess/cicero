@@ -145,3 +145,12 @@ test("local mode on a machine too small for E2B: no helper recommended, a listed
   expect(detected.disabled.model).toContain("switch Privacy to cloud");
   expect(() => parseHelper({ id: "model", runtime: "ollama", model: "gemma4:e4b-it-qat" }, ctx("local", [], detected, fixtureSystem("cuda4")))).toThrow("cannot hold even Gemma 4 E2B");
 });
+
+test("install hints name the fit helper for each runtime that does not list it", async () => {
+  const detected = await detectHelper(ctx("local"), { which: () => null, fetcher: ollamaFetcher(["gemma4:26b-a4b-it-qat"]) }, "audiocpp");
+  expect(detected.install.map((i) => i.runtime)).toEqual(["llama-cpp", "ollama", "lm-studio"]);
+  expect(detected.install.find((i) => i.runtime === "ollama")?.hint).toBe("ollama pull gemma4:e4b-it-qat");
+  expect(detected.install.find((i) => i.runtime === "llama-cpp")?.entry).toContain("gemma-4-E4B");
+  const listed = await detectHelper(ctx("local"), { which: () => null, fetcher: ollamaFetcher(["gemma4:e4b-it-qat"]) }, "audiocpp");
+  expect(listed.install.map((i) => i.runtime)).toEqual(["llama-cpp", "lm-studio"]);
+});

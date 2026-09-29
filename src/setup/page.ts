@@ -668,8 +668,11 @@ function renderHelper(step) {
     var hp = f.fit && f.fit.helper;
     detail.append(box, h('p', { class: 'detail', text: hp ? 'Fits this machine: ' + hp.label + ' (' + hp.footprintGb + ' GB, ' + hp.basis + '). Every fit is an estimate.' : f.fit ? f.fit.reason : 'Not sized for this machine: model sizing covers NVIDIA on Linux and Apple Silicon.' }));
     if (f.reason) detail.append(h('p', { class: 'detail', text: f.reason }));
-    if (!rt || !rt.running) {
-      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: RUNTIME_NAMES[runtime] + ' is not running' })]);
+    var hint = (f.install || []).find(function (i) { return i.runtime === runtime; });
+    if (!rt || !rt.running || hint) {
+      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: rt && rt.running ? 'The recommended helper is not listed' : RUNTIME_NAMES[runtime] + ' is not running' })]);
+      if (hint) panel.append(h('p', { text: hint.hint }));
+      if (hint && hint.entry) panel.append(cmd(hint.entry));
       var again = h('div', { class: 'actions' });
       again.append(button('Check again', 'small', async function () { state = await api('/api/step', { id: 'helper' }); render(); }, again));
       panel.append(again); detail.append(panel);
