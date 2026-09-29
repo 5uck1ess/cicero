@@ -3,6 +3,7 @@ import { ciceroHome } from "../platform/paths";
 import { waitForShutdown } from "../process-lifecycle";
 import { startSetupServer } from "../setup/server";
 import { readBoundedText } from "../setup/read-bounded";
+import type { ApplyOutput } from "../setup/headless";
 
 export interface SetupCliOptions {
   home?: string; lan?: boolean; port?: string;
@@ -35,7 +36,7 @@ export async function runSetup(options: SetupCliOptions, write: (line: string) =
     const { applySetup } = await import("../setup/headless");
     const result = await applySetup({ home, answers, acknowledgeNotReady: options.acknowledgeNotReady === true, backupInvalid: options.backupInvalid === true });
     if (options.json) write(JSON.stringify(result, null, 2));
-    else write(result.ok ? `Wrote ${result.written}${result.backup ? ` (backed up the invalid config to ${result.backup})` : ""}` : `Setup stopped${result.step ? ` at ${result.step}` : ""}: ${result.error}`);
+    else write(formatApplyResult(result));
     return result.ok ? 0 : 1;
   }
   if (options.test) {
@@ -51,4 +52,18 @@ export async function runSetup(options: SetupCliOptions, write: (line: string) =
   const server = await startSetupServer({ home, lan: options.lan, port });
   await waitForShutdown(server, process, server.closed);
   return 0;
+}
+
+/** Plain-text `--apply` result: the outcome, then every check that is not ok, with its fix. */
+export function formatApplyResult(result: ApplyOutput): string {
+  const lines = [result.ok
+    ? `Wrote ${result.written}${result.backup ? ` (backed up the invalid config to ${result.backup})` : ""}`
+    : `Setup stopped${result.step ? ` at ${result.step}` : ""}: ${result.error}`];
+  const groups = result.checks;
+  if (groups) {
+    for (const [label, checks] of [["Config error", groups.blocking], ["Not ready", groups.notReady], ["Warning", groups.warnings]] as const) {
+      for (const c of checks) lines.push(`${label}: ${c.name}: ${c.detail}${c.hint ? `\n  fix: ${c.hint}` : ""}`);
+    }
+  }
+  return lines.join("\n");
 }

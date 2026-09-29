@@ -59,6 +59,9 @@ test("setup guide and example keep the headless Claude Code line", () => {
 test("concepts page exists and is linked from README, setup guide, INSTALL and llms.txt", () => {
   expect(read("docs/concepts.md")).toContain("```mermaid");
   expect(read("README.md")).toContain("docs/concepts.md");
+  // Right after the pitch: before the first section heading.
+  const readme = read("README.md");
+  expect(readme.indexOf("docs/concepts.md")).toBeLessThan(readme.indexOf("\n## "));
   expect(read("docs/setup.md")).toMatch(/\]\((\.\/)?concepts\.md/);
   expect(read("INSTALL.md")).toContain("docs/concepts.md");
   expect(read("llms.txt")).toContain("docs/concepts.md");

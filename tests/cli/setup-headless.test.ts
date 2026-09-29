@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config";
-import { runSetup, SetupUsageError } from "../../src/cli/setup";
+import { formatApplyResult, runSetup, SetupUsageError } from "../../src/cli/setup";
 import { applySetup, planSetup, validateAnswers, type AnswersFile } from "../../src/setup/headless";
 import { redactStateValue } from "../../src/setup/server";
 import type { PickerDeps } from "../../src/setup/pickers";
@@ -153,6 +153,17 @@ test("not-ready engines need --acknowledge-not-ready", async () => {
     expect(existsSync(join(dir, "config.yaml"))).toBe(false);
     expect((await applySetup({ home: dir, answers: plan.recommended, acknowledgeNotReady: true, backupInvalid: false, systemDeps, pickerDeps: pickerDeps(), check: notReady })).ok).toBe(true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("plain --apply output lists every not-ready component with its fix", () => {
+  const text = formatApplyResult({ ok: false, error: "Acknowledge that runtime components are not ready yet before writing", checks: {
+    blocking: [], ok: [], warnings: [{ name: "memory fit", level: "warn", detail: "The chosen models no longer fit" }],
+    notReady: [{ name: "stt (faster-whisper)", level: "fail", detail: "venv missing", hint: "uv venv .venv-stt" }],
+  } });
+  expect(text).toContain("Setup stopped: Acknowledge");
+  expect(text).toContain("Not ready: stt (faster-whisper): venv missing\n  fix: uv venv .venv-stt");
+  expect(text).toContain("Warning: memory fit: The chosen models no longer fit");
+  expect(formatApplyResult({ ok: true, written: "/h/config.yaml", checks: null })).toBe("Wrote /h/config.yaml");
 });
 
 test("CLI usage errors never start the server", async () => {

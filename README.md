@@ -12,6 +12,8 @@
 
 **Cicero is a self-hosted voice interface for coding agents: you speak, it answers out loud, and your agent does the actual work.** Install it next to the agent you already use, then talk to that agent from any browser on your network, or over a real phone call with the optional Telegram sidecar. Say *"fix the failing auth test and open a PR"*: Cicero acknowledges in about a second, the work happens in the background (commands you've gated, like a `git push`, need your spoken yes), and it tells you when the PR is up. With local providers, your audio never leaves your machine.
 
+Cicero is [two layers](docs/concepts.md): Cicero itself, the same for everyone, and your office (your agents, models and hardware), which lives in your own config.
+
 ## What it feels like
 
 ```text
@@ -44,8 +46,6 @@ conversational — ask, answer, run, interrupt.
 - **Hears *how* you said it** — an optional speech-emotion sidecar ([emotion2vec](https://github.com/ddlBoJack/emotion2vec), CPU-only) classifies your tone in parallel with transcription and passes a confident non-neutral read to the agent — it knows the difference between "great" and *"great."* — at ~0 ms added latency, fully local.
 - **A whole office behind one call** — lanes give you a team of agents, each with its own voice and personality: *"let me talk to the coder"* transfers the call, *"roll call"* makes everyone check in. Cicero speaks up on its own too: task finished, morning briefing, quiet hours respected.
 - **Agent-agnostic by design** — the brain is a pluggable slot. Cicero owns the voice; your agent owns the doing.
-
-Cicero is [two layers](docs/concepts.md): Cicero itself, the same for everyone, and your office (your agents, models and hardware), which lives in your own config.
 
 ## How a turn flows
 

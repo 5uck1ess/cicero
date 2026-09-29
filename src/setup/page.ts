@@ -230,6 +230,22 @@ var NOTES = {
   'hermes':'Live-tested.', 'multica':'Supported, not live-tested yet.', 'paperclip':'Supported, not live-tested yet.', 'none':'Skip task announcements.',
   'local-cuda':'Local speech and models on your NVIDIA card.', 'local-mlx':'Local speech and models on Apple Silicon.', 'local-cpu':'Works anywhere, slower.'
 };
+/** An ordered install/start guide: each step is [text, link or command]. */
+function guideList(guide) {
+  var list = h('ol');
+  guide.forEach(function (g) {
+    var li = h('li', {}, [document.createTextNode(g[0])]);
+    if (g[1] && g[1].indexOf('http') === 0) { li.append(document.createTextNode(': ')); li.append(h('a', { href: g[1], target: '_blank', rel: 'noopener noreferrer', text: g[1].replace(/^https?:[/][/]/, '') })); }
+    else if (g[1]) li.append(cmd(g[1]));
+    list.append(li);
+  });
+  return list;
+}
+/** Install and start steps for a model runtime that is not running; the fit hint replaces the generic "pull a model" step. */
+function runtimeGuide(runtime, hint) {
+  var guide = (GUIDES[runtime] || []).filter(function (g) { return !(hint && g[0] === 'Pull a model'); });
+  return guide.length ? guideList(guide) : null;
+}
 var GUIDES = {
   'laya':[['Base Laya does not route zero-shot. A fine-tuned switchboard checkpoint is required: bring-your-own for now. A public checkpoint trained on synthetic data only plus the fine-tuning recipe are a planned follow-up. Read the sidecar guide','https://github.com/5uck1ess/cicero/blob/main/sidecars/laya-switchboard/README.md'],['Start with your checkpoint','uv run --python 3.11 --with-requirements requirements/laya-switchboard.txt python sidecars/laya-switchboard/serve.py --ckpt /path/to/switchboard-checkpoint']],
   'llama-cpp':[['Build or install llama.cpp','https://github.com/ggml-org/llama.cpp'],['Start the server on port 8080','llama-server -m your-model.gguf --port 8080']],
@@ -551,7 +567,7 @@ function renderFrontDesk(step) {
   var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: STEP.frontdesk.title })]);
   var detail = h('div');
   var fields = {};
-  var helperChoice = state.selectedChoices && state.selectedChoices.helper;
+  var helperChoice = state.helperChoice;
   var off = { model: f.disabled && f.disabled.model, agent: helperChoice && helperChoice.id === 'none' ? 'A no-helper setup needs a model front desk. Pick a helper first to use an agent.' : '' };
   if (off[kind]) kind = kind === 'model' ? 'agent' : 'model';
   [['model', 'A model', 'Fast, no tools. Recommended.'], ['agent', 'An agent', 'Slower, can use tools. The Agent step picks which one.']].forEach(function (o) {
@@ -608,6 +624,7 @@ function renderFrontDesk(step) {
     var hint = (f.install || []).find(function (i) { return i.runtime === runtime; });
     if (!rt || !rt.running || hint) {
       var panel = h('div', { class: 'panel warn' }, [h('h2', { text: rt && rt.running ? 'The recommended model is not listed' : RUNTIME_NAMES[runtime] + ' is not running' })]);
+      if (!rt || !rt.running) { var g = runtimeGuide(runtime, hint); if (g) panel.append(g); }
       if (hint) panel.append(h('p', { text: hint.hint }));
       if (hint && hint.entry) panel.append(cmd(hint.entry));
       var again = h('div', { class: 'actions' });
@@ -679,6 +696,7 @@ function renderHelper(step) {
     var hint = (f.install || []).find(function (i) { return i.runtime === runtime; });
     if (!rt || !rt.running || hint) {
       var panel = h('div', { class: 'panel warn' }, [h('h2', { text: rt && rt.running ? 'The recommended helper is not listed' : RUNTIME_NAMES[runtime] + ' is not running' })]);
+      if (!rt || !rt.running) { var g = runtimeGuide(runtime, hint); if (g) panel.append(g); }
       if (hint) panel.append(h('p', { text: hint.hint }));
       if (hint && hint.entry) panel.append(cmd(hint.entry));
       var again = h('div', { class: 'actions' });
@@ -811,7 +829,9 @@ function renderPicker(id, step) {
       if (o === 'openai-compatible') { fields.baseUrl = textInput('', 'url'); fields.model = textInput(''); fields.apiKey = textInput('', 'password'); box.append(field('API base URL', fields.baseUrl), field('Model', fields.model), field('API key (optional)', fields.apiKey)); }
       else if (extra && picked === extra.key && o !== 'openai-compatible') { fields.model = textInput(o === 'ollama' ? 'qwen3.5:0.8b' : ''); box.append(field('Model', fields.model)); if (o !== 'ollama') { fields.apiKey = textInput('', 'password'); box.append(field('API key', fields.apiKey)); } }
       var cloudy = f.cloud && (f.cloud[o] || (extra && picked === extra.key && o !== 'ollama' && o !== 'openai-compatible'));
-      if (f.localOnly && cloudy) { fields.allowCloud = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.allowCloud, document.createTextNode('Allow this agent to use the cloud (adds "agent" to your privacy policy)')])); }
+      // A custom command or URL may leave this machine (a cloud adapter, a LAN or remote server); only the server can tell, and it ignores the tick when nothing leaves.
+      var custom = o === 'acp' || o === 'openai-compatible';
+      if (f.localOnly && (cloudy || custom)) { fields.allowCloud = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.allowCloud, document.createTextNode(custom ? 'Allow this agent to leave this machine if it does (a cloud adapter or a non-local URL; adds "agent" to your privacy policy)' : 'Allow this agent to use the cloud (adds "agent" to your privacy policy)')])); }
       if (o === 'claude-code' && f.localTerminal) { fields.tab = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.tab, document.createTextNode('Type into my open Claude Code terminal tab instead of running it in the background')])); }
     }
     if (id === 'board' && o === 'paperclip' && !f.paperclipEnv) fields.companyId = textInput(''), box.append(field('Paperclip company ID (blank uses your paperclipai context)', fields.companyId));
@@ -850,14 +870,7 @@ function renderPicker(id, step) {
     if (s && !s[1] && o !== 'none') {
       var panel = h('div', { class: 'panel warn' }, [h('h2', { text: optionName(id, o) + ': ' + (s ? s[0] : 'Checkpoint required') })]);
       if (guide) {
-        var list = h('ol');
-        guide.forEach(function (g) {
-          var li = h('li', {}, [document.createTextNode(g[0])]);
-          if (g[1] && g[1].indexOf('http') === 0) { li.append(document.createTextNode(': ')); li.append(h('a', { href: g[1], target: '_blank', rel: 'noopener noreferrer', text: g[1].replace(/^https?:[/][/]/, '') })); }
-          else if (g[1]) li.append(cmd(g[1]));
-          list.append(li);
-        });
-        panel.append(list);
+        panel.append(guideList(guide));
       } else if ((id === 'stt' || id === 'tts') && o !== 'audiocpp') {
         panel.append(h('p', { text: 'You can pick it now. Cicero lists the install command on the Save screen.' }));
       }
