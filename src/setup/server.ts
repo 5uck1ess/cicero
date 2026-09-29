@@ -49,7 +49,7 @@ function publicDraft(draft: SetupDraft): SetupDraft {
   return copy;
 }
 
-function draftSecrets(draft: SetupDraft): string[] {
+export function draftSecrets(draft: SetupDraft): string[] {
   const secrets: string[] = [];
   function collect(value: Record<string, unknown>): void {
     for (const [key, child] of Object.entries(value)) {
@@ -64,14 +64,14 @@ function draftSecrets(draft: SetupDraft): string[] {
 // Code-defined identifiers the page sends back; a short secret must never rewrite them.
 const IDENTIFIER_KEYS = new Set(["id", "options", "recommended", "cloudPresets", "status"]);
 
-function redactStateValue(value: unknown, secrets: readonly string[]): unknown {
+export function redactStateValue(value: unknown, secrets: readonly string[]): unknown {
   if (typeof value === "string") return secrets.reduce((text, secret) => secret ? text.replaceAll(secret, "<redacted>") : text, value);
   if (Array.isArray(value)) return value.map((item) => redactStateValue(item, secrets));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, IDENTIFIER_KEYS.has(key) ? item : redactStateValue(item, secrets)]));
   return value;
 }
 
-function publicChecks(checks: Check[] | null, draft: SetupDraft): Check[] | null {
+export function publicChecks(checks: Check[] | null, draft: SetupDraft): Check[] | null {
   if (!checks) return null;
   const secrets = draftSecrets(draft);
   const hide = (line: string | undefined) => line === undefined ? undefined : secrets.reduce((text, secret) => secret ? text.replaceAll(secret, "<redacted>") : text, line);
