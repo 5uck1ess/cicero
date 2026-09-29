@@ -1,6 +1,6 @@
 # Setup wizard v2, part 1: privacy, accounts and hardware-sized models
 
-Status: design, not implemented. Date: 2026-09-29. Revision 3, after two rounds of GPT-6 Astra's adversarial review.
+Status: design, not implemented. Date: 2026-09-29. Revision 4, after three rounds of GPT-6 Astra's adversarial review.
 Builds on: `2026-09-24-setup-wizard-design.md` (the current guided setup). This spec covers only what changes; the v1 rules stand unless a section below overrides them.
 Co-designed with GPT-6 Astra: an independent proposal, merged, then reviewed against the code.
 
@@ -49,10 +49,13 @@ The step asks one question: **What may leave this machine?**
 
 The choice is written as `privacy: { mode: local | cloud, allow?: [agent | telegram | board] }`.
 
-This is a **declared policy, not a firewall**. The wizard enforces it when options are chosen: disallowed options are shown disabled, with the reason. `cicero doctor` checks what it can see:
-- A configured non-loopback model endpoint in `local` mode is a warning.
-- A cloud CLI agent without `allow: [agent]` is a warning.
-- A Telegram block without `allow: [telegram]` is a warning.
+This is a **declared policy, not a firewall**. The wizard enforces it when options are chosen: disallowed options are shown disabled, with the reason. In `local` mode, `cicero doctor` checks what it can see and warns on:
+- a non-loopback model endpoint (`brain`, `llm` or the helper);
+- a cloud CLI agent without `allow: [agent]`;
+- a Telegram block without `allow: [telegram]`;
+- an enabled task board (`notify.kanban`) without `allow: [board]`.
+
+`cloud` mode allows the front desk and agents, so its only check is the Telegram and board allowances.
 
 Doctor cannot see what a CLI agent does on the network, and the Privacy step says so. A config with no `privacy` key (every existing config) produces no privacy warnings.
 
@@ -91,10 +94,13 @@ The step detects accounts read-only and stores only the user's choices. It cover
 
 ### 4. Front desk (was Think)
 
-This is the model that answers everyday talk.
+This is what answers when you talk. It writes **`brain`**, the key every conversation turn goes to (`src/web-voice/turn.ts:207`), using existing brain backends only. The v1 Provider step wrote `llm` instead, which only feeds the speech sidecar's summarizer (`src/sidecar/service.ts:10`). Part 1 stops showing that step, and existing `llm` keys are left alone.
 
-- **Local mode:** the Model fit rules below pick the largest front-desk model that fits alongside the helper, reusing the helper when nothing larger fits.
-- **Cloud mode:** also lists the cloud front-desk presets whose key was found in Accounts. The user picks one; there is no automatic speed ranking.
+The step offers two kinds of front desk:
+- **A model** (fast, no tools; recommended). Written as `brain.backend: ollama` or an OpenAI-compatible backend with `base_url` and `model` (`src/setup/pickers.ts:233`, `src/brain/index.ts:193`).
+  - **Local mode:** the Model fit rules below pick it.
+  - **Cloud mode:** also lists the cloud presets whose key was found in Accounts. Adding `cerebras` and `xai` to the presets makes them valid brain backends too, because both lists come from the same `OPENAI_COMPATIBLE_BACKENDS` (`src/backends/llm/openai.ts:67`). The user picks one; there is no automatic speed ranking.
+- **An agent** (slower, can use tools). This is v1's behavior: the Agent step's choice becomes `brain` itself, and there is no separate front-desk model.
 
 ### 5. Helper (new; absorbs Router)
 
@@ -109,11 +115,11 @@ One local model does background work:
 
 The step detects a running runtime with the existing Think probes (`src/setup/pickers.ts:123`), then lists that runtime's models: `/v1/models` for llama-swap, llama-server and LM Studio, and `/api/tags` for Ollama. The chosen helper model must appear in the list before the step turns green; a missing one gets its pull or download command.
 
-A bare `llama-server` lists only the one model it loaded, so it can host only one model. On that runtime the helper and front desk must be the same model, and the step offers llama-swap or Ollama for running two. With no runtime found, the step shows install steps. This keeps the v1 rule that Cicero does not install vendor runtimes. Cicero's own MLX provider, which starts one model from `.venv` (`src/backends/llm/mlx-lm.ts:127`), stays the front-desk option and is not used for the helper.
+**Single-model runtimes.** The step does not try to tell llama-swap from a bare `llama-server`; both answer the same health probe. It counts the listed models instead. With exactly one model listed, it treats the runtime as single-model: the helper and a model front desk must be that same model, and the step offers llama-swap or Ollama for running two. With no runtime found, the step shows install steps. This keeps the v1 rule that Cicero does not install vendor runtimes. Cicero's own MLX provider, which starts one model from `.venv` (`src/backends/llm/mlx-lm.ts:127`), stays the front-desk option and is not used for the helper.
 
 **Config it writes**, all through existing keys:
 
-- **Always:** `web_voice.tldr.summarizer_url` and `web_voice.tldr.summarizer_model`. Spoken codas and `summarizerClassifier` read these (`src/brain/index.ts:62`), which fixes the no-op LLM router.
+- **When a helper is set:** `web_voice.tldr.summarizer_url` and `web_voice.tldr.summarizer_model`. Spoken codas and `summarizerClassifier` read these (`src/brain/index.ts:62`), which fixes the no-op LLM router.
 - **Checkbox "Compress long conversations":** `brain.history_compaction.enabled: true` (`src/daemon.ts:1178`), using the same endpoint.
 - **Call minutes** (`notify.call_minutes`, `src/daemon.ts:1680`) need Telegram. The wizard does not set up Telegram in part 1, so this checkbox waits for the Channels step.
 
@@ -121,6 +127,8 @@ A bare `llama-server` lists only the one model it loaded, so it can host only on
 - Exact and fuzzy name match runs first, with no model.
 - The helper classifier runs over the current roster second. It only takes effect with ACP office lanes (`src/brain/index.ts:259`), which is part 2.
 - The fine-tuned Laya sidecar moves under **Advanced**, labeled "needs a checkpoint trained on your roster".
+
+**No helper** (only possible in `cloud` mode; see fit rule 1): the step shows "Skipped" and writes no summarizer keys. The compaction checkbox is hidden, Test skips the Helper probe, and long replies end with the generic "say details" coda instead of a summary (`src/web-voice/turn.ts:529`).
 
 **The helper is local-only in part 1.** Both summarizer clients send only `Content-Type` (`src/brain/history-compactor.ts:25`, `src/brain/index.ts:71`), so a cloud helper would need an auth contract first.
 
@@ -133,7 +141,17 @@ A bare `llama-server` lists only the one model it loaded, so it can host only on
 
 ### 8. Agent (privacy-aware)
 
-This is today's step. In `local` mode, cloud CLI agents are disabled until the user ticks "Allow this agent to use the cloud", which adds `agent` to `privacy.allow`. A local agent (an ACP harness pointed at a local model) needs no exception.
+This is today's step, with two changes.
+
+**Where the agent goes:**
+- If the front desk is **an agent**, this choice is written to `brain`, as in v1.
+- If the front desk is **a model**, the agent is written to `brain.escalate` (`src/brain/index.ts:236`). The front desk hands a turn to it when the user says one of its trigger phrases ("think hard", "ask the agent"). `brain.escalate` accepts ACP commands only, so the list shows ACP agents: `hermes acp`, `codex-acp` via `bunx`, and a Claude Code ACP adapter. Which adapters work for Claude and Grok is **verified during implementation**; unverified ones are not listed. The agent is optional; skipping it gives a talk-only setup.
+
+**Privacy:** in `local` mode, cloud CLI agents are disabled until the user ticks "Allow this agent to use the cloud", which adds `agent` to `privacy.allow`. A local agent (an ACP harness pointed at a local model) needs no exception.
+
+### 9. Tasks
+
+This is today's step, with one change. The board probe (`src/setup/pickers.ts:275`) runs the board's CLI, which may send a request to a hosted board. In `local` mode, before the probe runs, the step asks "Allow task text to go to this board?"; ticking it adds `board` to `privacy.allow`. Without that tick the step can only choose "No board".
 
 ### 10. Test (new)
 
@@ -153,7 +171,7 @@ Rules:
 
 ### Channels and Install
 
-Both are unchanged from v1: still unbuilt preview steps (`src/setup/steps.ts:49`), with the manual instructions in `docs/setup.md`. On a fresh setup the Privacy step's `telegram` and `board` allowances therefore only matter when the user adds those by hand later. Doctor then warns if they are not allowed.
+Both are unchanged from v1: still unbuilt preview steps (`src/setup/steps.ts:49`), with the manual instructions in `docs/setup.md`. The Privacy step's `telegram` allowance therefore only matters when the user adds Telegram by hand later; doctor then warns if it is not allowed.
 
 ### 11. Save
 
@@ -161,7 +179,7 @@ The v1 write rules are unchanged: write only when no config exists, and back up 
 
 ## Model fit rules
 
-**Footprint** means resident memory with the helper settings: 64k context, q8 KV cache. The measured and estimated values:
+**Footprint** means resident memory in llama.cpp with 64k context and q8 KV cache. The measured and estimated values:
 
 | Model (Gemma 4, Google QAT q4_0 GGUF) | Footprint |
 |---|---|
@@ -171,7 +189,7 @@ The v1 write rules are unchanged: write only when no config exists, and back up 
 | 26B-A4B | 15 GB (measured ~14–15) |
 | 31B | 20 GB (estimate) |
 
-The Test step replaces estimates with measurements on CUDA.
+**What these numbers assume.** The wizard does not configure external runtimes. For llama-swap it shows a copyable model entry with these settings. For Ollama and LM Studio, whose default context and cache differ, it shows the settings to change and labels every fit "estimate". An MLX front desk uses the GGUF row, also labeled "estimate". Only a CUDA Test measurement replaces an estimate; on a Mac everything stays an estimate in part 1.
 
 **Rules:**
 
