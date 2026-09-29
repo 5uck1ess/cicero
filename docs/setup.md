@@ -68,6 +68,8 @@ flowchart TD
     SV --> HO["Hand-off<br/>the start command"]
 ```
 
+![The setup wizard's Machine step: detected GPU, RAM and disk, the model budget bar, and the recommended NVIDIA GPU preset](images/setup-wizard.png)
+
 Each step is one question with a few option cards. A card says whether the
 software is running, installed or not found, and the one that fits your
 machine is marked *Recommended*. If you pick something that is missing, the
