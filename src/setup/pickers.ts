@@ -170,8 +170,11 @@ export async function detectBoard(_ctx: StepContext, deps: PickerDeps = {}) {
   const installed = Object.fromEntries(Object.entries(BOARD_COMMANDS).map(([id, spec]) => [id, Boolean(which(spec.command[0]!))]));
   return { installed, recommended: Object.keys(installed).find((id) => installed[id]) ?? "none", reason: "A detected board CLI is suggested; no board is fine if you do not use one.", paperclipEnv: Boolean((deps.env ?? process.env).PAPERCLIP_COMPANY_ID), templates: BOARD_COMMANDS };
 }
+export const ALLOW_BOARD_FIRST = "Allow task text to go to this board first";
 export function parseBoard(raw: unknown, _ctx: StepContext, deps: PickerDeps = {}) {
   const c = choice(raw); const id = member(c.id, ["none", "hermes", "multica", "paperclip"], "board");
+  // Task text leaves Cicero for the board's CLI, so it needs an explicit allowance in either privacy mode.
+  if (id !== "none" && c.allowBoard !== true) throw new Error(ALLOW_BOARD_FIRST);
   if (id !== "paperclip") return { id };
   const envId = (deps.env ?? process.env).PAPERCLIP_COMPANY_ID;
   if (c.companyId) return { id, companyId: token(c.companyId) };

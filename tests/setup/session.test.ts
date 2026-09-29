@@ -47,6 +47,20 @@ test("unknown and no-choice steps are rejected", async () => {
   }
 });
 
+test("a board needs an explicit allowance: no probe runs without it, and the allowance lands in privacy.allow", async () => {
+  let probes = 0;
+  const runCommand = (async () => { probes += 1; const out = { text: "[]", receivedBytes: 2, capturedBytes: 2, limitBytes: 1024, truncated: false }; return { command: [], exitCode: 0, durationMs: 1, stdout: out, stderr: { ...out, text: "" }, combined: { receivedBytes: 2, capturedBytes: 2, limitBytes: 2048, truncated: false } }; }) as never;
+  for (const mode of ["local", "cloud"] as const) {
+    const s = new SetupSession(fixtureSystem("cuda24"), undefined, { runCommand });
+    await s.choose("privacy", { mode }, { probe: false });
+    await expect(s.choose("board", { id: "hermes" }, { probe: true })).rejects.toThrow("Allow task text to go to this board first");
+    expect(probes).toBe(0);
+    expect((await s.choose("board", { id: "hermes", allowBoard: true }, { probe: true })).accepted).toBe(true);
+    expect(s.draft.privacy).toEqual({ mode, allow: ["board"] });
+    probes = 0;
+  }
+});
+
 test("a later privacy flip invalidates a stored cloud agent", async () => {
   const s = new SetupSession(fixtureSystem("cuda24"), undefined, { env: {}, which: () => null, readFile: () => null, homeDir: () => "/fixture/home" });
   await s.choose("privacy", { mode: "cloud" }, { probe: false });

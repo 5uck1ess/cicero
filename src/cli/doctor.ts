@@ -178,6 +178,12 @@ function backendVenvHint(venv: string, root: string): string | undefined {
     : undefined;
 }
 
+/** The venv install command for a Python engine backend, or undefined for other backends. */
+export function engineVenvHint(backend: string, root: string = projectRoot): string | undefined {
+  const venv = VENV_BY_BACKEND[backend];
+  return venv ? backendVenvHint(venv, root) : undefined;
+}
+
 const HEALTH_PATH: Record<string, string> = {
   "faster-whisper": "/health",
   "pocket-tts": "/v1/models",

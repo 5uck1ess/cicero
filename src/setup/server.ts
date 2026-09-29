@@ -9,7 +9,9 @@ import { classifySetupChecks } from "./checks";
 import { setupPage } from "./page";
 import { SETUP_STEPS } from "./steps";
 import { detectSystem, type SystemDeps, type SystemFacts } from "./system";
-import { probeRemoteProviderModels, type PickerDeps, type ProviderModelList } from "./pickers";
+import { contributeSpeech, parseSpeech, probeRemoteProviderModels, type PickerDeps, type ProviderModelList } from "./pickers";
+import { synthesizeSample } from "./sample";
+import type { TTSProviderConfig } from "../backends/tts/provider";
 import { backupInvalidConfig, inspectExistingConfig, writeDraft } from "./write";
 import { DraftChangedError, SetupSession, mergeDraft } from "./session";
 import { CLOUD_PRESETS } from "./frontdesk";
@@ -184,6 +186,8 @@ function json(value: unknown, status = 200): Response {
   return Response.json(value, { status, headers: { "cache-control": "no-store" } });
 }
 
+const SAMPLE_TIMEOUT_MS = 20_000;
+
 export async function startSetupServer(options: SetupServerOptions): Promise<SetupServer> {
   const home = options.home;
   ensurePrivateDirectorySync(home);
@@ -201,6 +205,8 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
   const system: SystemFacts = await detectSystem(options.systemDeps);
   const session = new SetupSession(system, undefined, options.pickerDeps);
   let providerModels: ProviderModelList | null = null;
+  /** The one in-flight Play sample; a new sample or /api/sample/cancel aborts it. */
+  let sample: AbortController | null = null;
   let current = SETUP_STEPS[0]!.id;
   let detected: unknown = await session.detect(current, options.pickerDeps);
   let invalidated: { id: string; reason: string }[] = [];
@@ -248,6 +254,22 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
         const body = await readRequestJsonLimited(req, { maxBytes: 2048, timeoutMs: 5000 });
         if (!body || typeof body !== "object" || Array.isArray(body)) return json({ error: "Expected JSON object" }, 400);
         const data = body as Record<string, unknown>;
+        if (url.pathname === "/api/sample/cancel") {
+          sample?.abort();
+          return json({ ok: true });
+        }
+        if (url.pathname === "/api/sample") {
+          const tts = (contributeSpeech("tts", parseSpeech("tts", data.tts, session.context())) as { tts: TTSProviderConfig }).tts;
+          sample?.abort();
+          const controller = new AbortController();
+          sample = controller;
+          try {
+            const result = await synthesizeSample(tts, { signal: AbortSignal.any([controller.signal, closed.signal]), timeoutMs: SAMPLE_TIMEOUT_MS, deps: options.pickerDeps });
+            return json(result.ok ? { ok: true, mime: result.mime, audio: Buffer.from(result.audio).toString("base64") } : result);
+          } finally {
+            if (sample === controller) sample = null;
+          }
+        }
         if (url.pathname === "/api/provider-models") {
           const raw = data.choice && typeof data.choice === "object" && !Array.isArray(data.choice) ? data.choice as Record<string, unknown> : null;
           // A cloud front desk lists with the preset's key from Cicero's environment; the key is sent only to that provider.
@@ -316,6 +338,7 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
         (options.cancelScheduledStop ?? clearTimeout)(handoffTimer);
         handoffTimer = null;
       }
+      sample?.abort();
       try { await Promise.resolve(server.stop(true)); }
       finally { closed.abort(); }
     })();

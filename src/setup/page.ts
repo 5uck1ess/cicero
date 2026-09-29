@@ -710,11 +710,16 @@ function renderPicker(id, step) {
     }
   } else if (id === 'board') {
     options = ['hermes', 'multica', 'paperclip', 'none'];
+    var allowBoard = h('input', { type: 'checkbox' });
+    allowBoard.checked = !!(state.privacyAllow && state.privacyAllow.indexOf('board') >= 0) || !!(blockedByProbe(state) && tried.board && tried.board !== 'none');
+    allowBoard.onchange = function () { if (!allowBoard.checked) picked = 'none'; draw(); drawDetail(); };
+    app.append(h('label', { class: 'check-inline' }, [allowBoard, document.createTextNode('Allow task text to go to this board? Cicero sends task titles and notes to the board CLI you pick.')]));
   } else {
     options = f.options || [];
   }
   var saved = state.selectedChoices && state.selectedChoices[id];
   var picked = (blockedByProbe(state) && tried[id]) || saved || f.recommended || options[0];
+  if (id === 'board' && picked !== 'none' && !allowBoard.checked) picked = 'none';
   if (extra && extra.items.indexOf(picked) >= 0) { extra.value = picked; picked = extra.key; }
   if (extra && !extra.value) extra.value = extra.items[0];
 
@@ -725,7 +730,7 @@ function renderPicker(id, step) {
     group.querySelectorAll('.choice').forEach(function (n) { n.remove(); });
     options.concat(Object.keys(f.disabled || {})).forEach(function (o) {
       var input = h('input', { type: 'radio', name: 'pick-' + id, value: o });
-      input.disabled = !!(f.disabled && f.disabled[o]);
+      input.disabled = !!(f.disabled && f.disabled[o]) || (id === 'board' && o !== 'none' && !allowBoard.checked);
       input.checked = !input.disabled && o === picked;
       input.onchange = function () { picked = o; drawDetail(); };
       var s = stateLabel(o, f);
@@ -762,6 +767,20 @@ function renderPicker(id, step) {
     if ((id === 'stt' || id === 'tts') && o === 'wyoming') { fields.host = textInput('127.0.0.1'); fields.port = textInput(id === 'stt' ? '10300' : '10200', 'number'); box.append(field('Server host', fields.host), field('Port', fields.port)); }
     if (id === 'stt' && o === 'audiocpp') { fields.streaming = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.streaming, document.createTextNode('Stream browser speech for live captions (requires Nemotron mode: streaming)')])); }
     if (o === 'elevenlabs') fields.apiKey = textInput('', 'password'), box.append(field('ElevenLabs API key', fields.apiKey));
+    var engine = f.status && f.status[o];
+    if (id === 'tts' && o !== 'elevenlabs' && engine && engine.running) {
+      var sampleRow = h('div', { class: 'actions' });
+      var sampleNote = h('small');
+      sampleRow.append(button('Play sample', 'small', async function () {
+        var tts = { id: o };
+        if (fields.host) { tts.host = fields.host.value; tts.port = Number(fields.port.value); }
+        sampleNote.textContent = 'Generating…';
+        var r = await api('/api/sample', { tts: tts });
+        if (r.ok) { sampleNote.textContent = ''; new Audio('data:' + r.mime + ';base64,' + r.audio).play(); }
+        else sampleNote.textContent = r.message + (r.startCommand ? ' ' + r.startCommand : '');
+      }, sampleRow), sampleNote);
+      box.append(sampleRow);
+    }
     if (fields.apiKey && state.storedSecrets && state.storedSecrets[id] && saved === o) fields.apiKey.parentNode.append(h('small', { text: 'A key is saved. Leave blank to keep it.' }));
     if (box.childNodes.length) detail.append(box);
 
@@ -801,6 +820,7 @@ function renderPicker(id, step) {
   var row = h('div', { class: 'actions' });
   row.append(button('Continue', 'primary', async function () {
     var c = { id: realId() };
+    if (id === 'board' && c.id !== 'none') c.allowBoard = allowBoard.checked;
     for (var k in fields) {
       var el = fields[k];
       if (k === 'tab') { if (el.checked) c.mode = 'tab-inject'; }

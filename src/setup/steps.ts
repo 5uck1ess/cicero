@@ -3,7 +3,7 @@ import type { SystemFacts, Tier } from "./system";
 import { contributeBoard, contributeSpeech, detectBoard, detectSpeech, parseBoard, parseSpeech, probeBoard, type PickerDeps } from "./pickers";
 import { contributeAgent, detectAgent, parseAgent, type AgentChoice } from "./agent";
 import { modelBudget, planFit, speechKind, type SpeechKind } from "./fit";
-import { isLocal } from "./privacy";
+import { isLocal, withAllowance } from "./privacy";
 import { detectAccounts, parseAccounts, type AccountsDetected } from "./accounts";
 import { contributeFrontDesk, detectFrontDesk, parseFrontDesk, probeFrontDesk, type FrontDeskChoice, type FrontDeskDetected } from "./frontdesk";
 import { contributeHelper, detectHelper, parseHelper, probeHelper, type HelperChoice, type HelperDetected } from "./helper";
@@ -85,7 +85,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     explain: info("An optional external board supplies task notifications.", "An installed board CLI is suggested; only one board can be watched.", "A bounded read-only list probe runs; the preset argv goes into notify.kanban.", "docs/notifications.md"),
     detect: detectBoard,
     recommend() { return { choice: { id: "none" }, reason: "Sending task text to a board is your call; add one on the Tasks step." }; },
-    parseChoice: parseBoard, contribute(_ctx, c) { return contributeBoard(c as ReturnType<typeof parseBoard>); }, probeChoice: probeBoard },
+    parseChoice: parseBoard, contribute(ctx, c) { const board = c as ReturnType<typeof parseBoard>; return board.id === "none" ? {} : { ...withAllowance(ctx, "board"), ...contributeBoard(board) }; }, probeChoice: probeBoard },
   step("channels", "Channels", "Channels carry messages and calls beyond the browser.", "docs/channels.md", "speaker"),
   step("install", "Install", "Selected local engines need their runtime and model files.", "docs/setup.md"),
   { id: "check", title: "Check", available: true, pipeline: "speaker", explain: info("Runs the real Cicero doctor against a private temporary copy of the draft.", "Failures block writing; warnings show what still needs attention.", "The temporary copy is removed after checks finish.", "docs/setup.md"), ...noop },

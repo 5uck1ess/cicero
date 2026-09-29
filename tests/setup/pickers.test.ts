@@ -28,9 +28,11 @@ test("each picker parses valid input and rejects malformed input", () => {
   expect(() => parseBrain({ id: "openai-compatible", baseUrl: "https://example.test/?token=x", model: "m" }, c)).toThrow();
   expect(() => parseBrain({ id: "claude-code", mode: "tab-inject" }, c)).toThrow();
   expect(parseBrain({ id: "claude-code", mode: "tab-inject" }, c, { localTerminal: true }).mode).toBe("tab-inject");
-  expect(parseBoard({ id: "paperclip", companyId: "company_1" }, c, { env: {} }).companyId).toBe("company_1");
-  for (const bad of ["a b", "a;rm", "$(id)", "x".repeat(81)]) expect(() => parseBoard({ id: "paperclip", companyId: bad }, c, { env: {} })).toThrow();
-  expect(parseBoard({ id: "paperclip" }, c, { env: {} })).toEqual({ id: "paperclip" });
+  expect(parseBoard({ id: "paperclip", allowBoard: true, companyId: "company_1" }, c, { env: {} }).companyId).toBe("company_1");
+  for (const bad of ["a b", "a;rm", "$(id)", "x".repeat(81)]) expect(() => parseBoard({ id: "paperclip", allowBoard: true, companyId: bad }, c, { env: {} })).toThrow();
+  expect(parseBoard({ id: "paperclip", allowBoard: true }, c, { env: {} })).toEqual({ id: "paperclip" });
+  expect(() => parseBoard({ id: "paperclip" }, c, { env: {} })).toThrow("Allow task text to go to this board first");
+  expect(parseBoard({ id: "none" }, c, { env: {} })).toEqual({ id: "none" });
   expect(parseSpeech("stt", { id: "wyoming", host: "192.168.1.2", port: 10300 }, c).host).toBe("192.168.1.2");
   for (const bad of ["http://localhost", "bad host", "999.999.999.999", "x".repeat(254)]) expect(() => parseSpeech("stt", { id: "wyoming", host: bad, port: 10300 }, c)).toThrow();
   expect(() => parseSpeech("stt", { id: "wyoming", host: "localhost", port: 70000 }, c)).toThrow();
@@ -57,9 +59,9 @@ test("brain and board detection use injected PATH and bounded runner", async () 
   const board = await detectBoard(ctx(), { which: (bin) => bin === "multica" ? "/bin/multica" : null, env: {} });
   expect(board.recommended).toBe("multica");
   expect(BOARD_COMMANDS.hermes.command).toEqual(["hermes", "kanban", "list", "--json"]);
-  expect(contributeBoard(parseBoard({ id: "paperclip", companyId: "c1" }, ctx(), { env: {} })).notify?.kanban.command).toEqual(["paperclipai", "issue", "list", "-C", "c1", "--json"]);
-  expect(contributeBoard(parseBoard({ id: "paperclip", companyId: "c1" }, ctx(), { env: {} })).notify?.kanban.task_command).toEqual(["paperclipai", "issue", "get", "-C", "c1"]);
-  expect(contributeBoard(parseBoard({ id: "paperclip" }, ctx(), { env: { PAPERCLIP_COMPANY_ID: "c1" } })).notify?.kanban.command).toEqual(["paperclipai", "issue", "list", "--json"]);
+  expect(contributeBoard(parseBoard({ id: "paperclip", allowBoard: true, companyId: "c1" }, ctx(), { env: {} })).notify?.kanban.command).toEqual(["paperclipai", "issue", "list", "-C", "c1", "--json"]);
+  expect(contributeBoard(parseBoard({ id: "paperclip", allowBoard: true, companyId: "c1" }, ctx(), { env: {} })).notify?.kanban.task_command).toEqual(["paperclipai", "issue", "get", "-C", "c1"]);
+  expect(contributeBoard(parseBoard({ id: "paperclip", allowBoard: true }, ctx(), { env: { PAPERCLIP_COMPANY_ID: "c1" } })).notify?.kanban.command).toEqual(["paperclipai", "issue", "list", "--json"]);
   expect((await probeBoard({ id: "hermes" }, { runCommand: async () => command('[{"id":"1","status":"todo"}]') })).message).toBe("Found 1 tasks");
   expect((await probeBoard({ id: "hermes" }, { runCommand: async () => command("not-json") })).ok).toBe(false);
 });
@@ -112,7 +114,7 @@ test("audio.cpp installed, model, and loaded status drive CUDA recommendations",
 
 test("all picker contributions preserve defaults and round-trip through loadConfig", () => {
   const c = ctx(); let draft = c.draft;
-  const choices: Record<string, unknown> = { brain: { id: "codex", allowCloud: true }, board: { id: "hermes" }, stt: { id: "faster-whisper" }, tts: { id: "kokoro" } };
+  const choices: Record<string, unknown> = { brain: { id: "codex", allowCloud: true }, board: { id: "hermes", allowBoard: true }, stt: { id: "faster-whisper" }, tts: { id: "kokoro" } };
   for (const id of ["brain", "board", "stt", "tts"]) { const step = pick(id); const choice = step.parseChoice(choices[id], { ...c, draft }, { env: {} }); draft = mergeDraft(draft, step.contribute({ ...c, draft }, choice)); }
   expect(draft.brain.mode).toBe("subprocess");
   const home = mkdtempSync(join(tmpdir(), "cicero-pickers-"));
@@ -144,7 +146,7 @@ test("API state masks stored API keys", async () => {
     expect((await send("/api/step", { id: "check" })).status).toBe(200);
     expect(shortKey.yaml).toContain("api_key: set");
     await send("/api/step", { id: "board" });
-    const failedProbe = await (await send("/api/choice", { id: "board", choice: { id: "hermes" } })).json() as { detected: { probe: { ok: boolean } }; yaml: string };
+    const failedProbe = await (await send("/api/choice", { id: "board", choice: { id: "hermes", allowBoard: true } })).json() as { detected: { probe: { ok: boolean } }; yaml: string };
     expect(failedProbe.detected.probe.ok).toBe(false);
     expect(failedProbe.yaml).not.toContain("kanban:");
   } finally { await server.stop(); rmSync(home, { recursive: true, force: true }); }

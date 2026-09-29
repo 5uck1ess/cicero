@@ -80,6 +80,20 @@ test("the Agent screen explains think-hard escalation and asks before a cloud ag
   expect(page).toContain("No agent (talk only)");
 });
 
+test("Speak offers Play sample only for running local engines", () => {
+  const page = setupPage();
+  expect(page).toContain("if (id === 'tts' && o !== 'elevenlabs' && engine && engine.running)");
+  expect(page).toContain("api('/api/sample', { tts: tts })");
+  expect(page).toContain("new Audio('data:' + r.mime + ';base64,' + r.audio).play()");
+});
+
+test("the Tasks screen asks before task text goes to a board", () => {
+  const page = setupPage();
+  expect(page).toContain("Allow task text to go to this board?");
+  expect(page).toContain("(id === 'board' && o !== 'none' && !allowBoard.checked)");
+  expect(page).toContain("if (id === 'board' && c.id !== 'none') c.allowBoard = allowBoard.checked;");
+});
+
 test("the Helper screen offers compaction, a skip note, and Laya only as a disabled Advanced row", () => {
   const page = setupPage();
   expect(page).toContain("if (view === 'helper') renderHelper(step);");

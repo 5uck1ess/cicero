@@ -119,7 +119,7 @@ export function createTTSProvider(config: RuntimeConfig): TTSProvider {
   return primary;
 }
 
-function buildTTSProvider(ttsConfig: TTSProviderConfig, configKey: string): TTSProvider {
+export function buildTTSProvider(ttsConfig: TTSProviderConfig, configKey: string): TTSProvider {
   const voiceContract = voiceProviderContractForBackend(ttsConfig.backend);
   if (voiceContract) return buildVoiceTTSProvider(voiceContract, ttsConfig);
   switch (ttsConfig.backend) {
