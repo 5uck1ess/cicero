@@ -58,6 +58,14 @@ test("plan redacts an exact key value even inside the recommended answers", asyn
     .toEqual({ id: "keep-synthetic-anthropic-marker", options: ["synthetic-anthropic-marker"] });
 });
 
+test("apply redacts a key value echoed back by answers-file validation", async () => {
+  const deps = { ...pickerDeps(), env: { OPENAI_API_KEY: "synthetic-openai-marker-1234" } };
+  const plan = await planSetup({ privacy: "local", systemDeps, pickerDeps: pickerDeps() });
+  const result = await applySetup({ home: "/nonexistent", answers: { ...plan.recommended, steps: { ...plan.recommended.steps, "synthetic-openai-marker-1234": {} } }, acknowledgeNotReady: false, backupInvalid: false, systemDeps, pickerDeps: deps, check: okCheck });
+  expect(result.ok).toBe(false);
+  expect(JSON.stringify(result)).not.toContain("synthetic-openai-marker-1234");
+});
+
 test("plan with a CLI --agent makes that agent the front desk instead of blocking on escalation", async () => {
   const deps = { ...pickerDeps(), which: (b: string) => b === "claude" ? "/usr/bin/claude" : null };
   for (const privacy of ["cloud", "local"] as const) {

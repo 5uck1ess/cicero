@@ -35,8 +35,8 @@ const CLOUD_AGENTS = new Set(["claude-code", "codex", "gemini", "qwen", ...ACP_A
 const KEY_VARIABLES = [...new Set([...OPENAI_COMPATIBLE_BACKENDS.map((id) => resolveOpenAiTarget({ backend: id }).apiKeyEnv), "ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY"])];
 
 /** Exact secret values this run could touch: draft keys plus every API key variable in the environment. */
-function secretsOf(draft: SetupDraft, env: Record<string, string | undefined> = process.env): string[] {
-  return [...draftSecrets(draft), ...KEY_VARIABLES.map((name) => env[name]).filter((v): v is string => typeof v === "string" && v.length >= 8)];
+function secretsOf(draft: SetupDraft | null, env: Record<string, string | undefined> = process.env): string[] {
+  return [...(draft ? draftSecrets(draft) : []), ...KEY_VARIABLES.map((name) => env[name]).filter((v): v is string => typeof v === "string" && v.length >= 8)];
 }
 
 /**
@@ -108,7 +108,7 @@ export function validateAnswers(raw: unknown): AnswersFile {
   if (a.version !== 1) throw new Error("version must be 1");
   if (!a.steps || typeof a.steps !== "object" || Array.isArray(a.steps)) throw new Error("steps must be an object");
   const steps = a.steps as Record<string, unknown>;
-  for (const id of Object.keys(steps)) if (!CHOICE_STEP_IDS.includes(id)) throw new Error(`steps.${id} is not accepted`);
+  for (const id of Object.keys(steps)) if (!CHOICE_STEP_IDS.includes(id)) throw new Error(`steps.${id.slice(0, 64)} is not accepted`);
   for (const id of CHOICE_STEP_IDS) if (!(id in steps)) throw new Error(`steps.${id} is required`);
   const privacy = steps.privacy as { mode?: unknown; allow?: unknown };
   const top = a.privacy as { mode?: unknown; allow?: unknown } | undefined;
@@ -120,7 +120,8 @@ export function validateAnswers(raw: unknown): AnswersFile {
 export async function applySetup(o: ApplyOptions): Promise<ApplyOutput> {
   let answers: AnswersFile;
   try { answers = validateAnswers(o.answers); }
-  catch (error) { return { ok: false, checks: null, error: error instanceof Error ? error.message : String(error) }; }
+  // Validation errors can echo answers-file text back, so they are redacted like every other error.
+  catch (error) { return safe({ ok: false, checks: null, error: error instanceof Error ? error.message : String(error) }, secretsOf(null, o.pickerDeps?.env)); }
   const system = await detectSystem(o.systemDeps);
   const session = new SetupSession(system, undefined, o.pickerDeps);
   const fail = (step: string | undefined, error: unknown): ApplyOutput =>
