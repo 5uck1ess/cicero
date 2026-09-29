@@ -1,6 +1,6 @@
 # Setup wizard v2, part 1: privacy, accounts and hardware-sized models
 
-Status: design, not implemented. Date: 2026-09-29. Revision 6, after five rounds of GPT-6 Astra's adversarial review.
+Status: design, not implemented. Date: 2026-09-29. Revision 7, after six rounds of GPT-6 Astra's adversarial review.
 Builds on: `2026-09-24-setup-wizard-design.md` (the current guided setup). This spec covers only what changes; the v1 rules stand unless a section below overrides them.
 Co-designed with GPT-6 Astra: an independent proposal, merged, then reviewed against the code.
 
@@ -117,7 +117,7 @@ One local model does background work:
 
 The step detects a running runtime with the existing Think probes (`src/setup/pickers.ts:123`), then lists that runtime's models: `/v1/models` for llama-swap, llama-server and LM Studio, and `/api/tags` for Ollama. The chosen helper model must appear in the list before the step turns green; a missing one gets its pull or download command.
 
-**Single-model runtimes.** The step does not try to tell llama-swap from a bare `llama-server`; both answer the same health probe. It counts the listed models instead. With exactly one model listed, it treats the runtime as single-model: the helper and a model front desk must be that same model, and the step offers llama-swap or Ollama for running two. With no runtime found, the step shows install steps. This keeps the v1 rule that Cicero does not install vendor runtimes. Cicero's own MLX provider, which starts one model from `.venv` (`src/backends/llm/mlx-lm.ts:127`), is used for neither the front desk nor the helper in part 1.
+**Single-model runtimes.** The step does not try to tell llama-swap from a bare `llama-server`; both answer the same health probe. It counts the listed models instead. With exactly one model listed, it treats the runtime as single-model: a *local* model front desk on that runtime must be the helper's model (a cloud front desk is unaffected), and the step offers llama-swap or Ollama for running two. With no runtime found, the step shows install steps. This keeps the v1 rule that Cicero does not install vendor runtimes. Cicero's own MLX provider, which starts one model from `.venv` (`src/backends/llm/mlx-lm.ts:127`), is used for neither the front desk nor the helper in part 1.
 
 **Config it writes**, all through existing keys:
 
