@@ -38,6 +38,17 @@ test("plan: fit-sized front desk and helper from Ollama's listing; every choice 
   expect(JSON.stringify(plan)).not.toContain("synthetic-anthropic-marker");
 });
 
+test("plan in local mode on a 4 GB card blocks the front desk and helper with the fit reason, not a runtime hint", async () => {
+  const small: SystemDeps = { ...systemDeps, runCommand: (async () => out("Fixture GPU, 4096 MiB, 4096 MiB")) as never };
+  const plan = await planSetup({ privacy: "local", systemDeps: small, pickerDeps: pickerDeps() });
+  for (const step of ["frontdesk", "helper"]) {
+    const b = plan.blocked.find((x) => x.step === step)!;
+    expect(b.reason).toContain("cannot hold even Gemma 4 E2B");
+    expect(b.fix).toEqual([expect.stringContaining("switch Privacy to cloud")]);
+  }
+  expect(plan.recommended.steps.helper).toBeUndefined();
+});
+
 test("plan with a CLI --agent makes that agent the front desk instead of blocking on escalation", async () => {
   const deps = { ...pickerDeps(), which: (b: string) => b === "claude" ? "/usr/bin/claude" : null };
   for (const privacy of ["cloud", "local"] as const) {

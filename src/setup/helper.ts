@@ -65,6 +65,11 @@ export async function detectHelper(ctx: StepContext, deps: PickerDeps = {}, spee
     reason = fit && !fit.helper ? fit.reason : "No local model runtime is running; your cloud front desk also runs the conversation.";
   }
   const disabled: Record<string, string> = { laya: `Needs a checkpoint trained on your roster. ${LAYA_LANES_REQUIRED}` };
+  if (mode === "local" && fit?.localHelperImpossible) {
+    recommended = null;
+    reason = fit.reason;
+    disabled.model = fit.reason;
+  }
   if (mode === "local") disabled.none = LOCAL_NEEDS_HELPER;
   else if (!cloudFront) disabled.none = NO_HELPER_NEEDS_MODEL;
   return { mode, runtimes, fit, recommended, reason, disabled, warnings: chosenFitWarnings(ctx, speech) };
@@ -86,6 +91,7 @@ export function parseHelper(raw: unknown, ctx: StepContext): HelperChoice {
   const model = text(c.model, "model");
   if (c.compact !== undefined && typeof c.compact !== "boolean") throw new Error("Compress long conversations must be on or off");
   const detected = ctx.detected as HelperDetected | undefined;
+  if (isLocal(ctx) && detected?.fit?.localHelperImpossible) throw new Error(detected.fit.reason);
   const listing = detected?.runtimes?.[runtime];
   if (listing && (!listing.running || !listing.models.includes(model))) throw new Error("Start the runtime, load a model, and Re-check before choosing it");
   if (listing?.singleModel && front?.kind === "model" && front.runtime === runtime && front.model !== model)

@@ -69,7 +69,9 @@ export async function detectFrontDesk(ctx: StepContext, deps: PickerDeps = {}, s
   const [runtimes, accounts] = await Promise.all([listRuntimes(deps), detectAccounts(deps)]);
   const fit = fitFor(ctx, speech);
   const cloudKeys = Object.fromEntries(CLOUD_PRESETS.map((id) => [id, accounts.cloudKeys[id] ?? "not found"])) as Record<string, "found" | "not found">;
-  const local = recommendLocal(runtimes, fit?.frontDesk ?? null, fit?.helper ?? null);
+  // Local mode on a machine that can't hold even the smallest model: no local model front desk (an agent still works).
+  const tooSmall = mode === "local" && fit?.localHelperImpossible === true;
+  const local = tooSmall ? { choice: null, reason: fit!.reason } : recommendLocal(runtimes, fit?.frontDesk ?? null, fit?.helper ?? null);
   const recommended: FrontDeskChoice | null = local.choice ? { kind: "model", ...local.choice } : null;
   const cloudSuggestion = mode === "cloud" ? CLOUD_PRESETS.find((id) => cloudKeys[id] === "found") ?? null : null;
   const localReason = !fit && !recommended ? "Not sized for this machine. Start Ollama and run ollama pull qwen3.5:0.8b, then check again." : local.reason;
@@ -104,6 +106,7 @@ export function parseFrontDesk(raw: unknown, ctx: StepContext, deps: PickerDeps 
   const runtime = c.runtime as RuntimeId;
   const model = text(c.model, "model");
   const detected = ctx.detected as FrontDeskDetected | undefined;
+  if (isLocal(ctx) && detected?.fit?.localHelperImpossible) throw new Error(detected.fit.reason);
   const listing = detected?.runtimes?.[runtime];
   if (listing && (!listing.running || !listing.models.includes(model))) throw new Error("Start the runtime, load a model, and Re-check before choosing it");
   return { kind: "model", runtime, model };

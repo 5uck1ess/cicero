@@ -632,7 +632,7 @@ function renderHelper(step) {
   var detail = h('div');
   [['model', 'Use a helper model', 'Recommended.'], ['none', 'Skip the helper', 'Long replies end with "say details" instead of a summary.']].forEach(function (o) {
     var input = h('input', { type: 'radio', name: 'pick-helper', value: o[0] });
-    var off = o[0] === 'none' && f.disabled && f.disabled.none;
+    var off = f.disabled && f.disabled[o[0]];
     input.disabled = !!off;
     input.checked = !off && (o[0] === 'none') === skip;
     input.onchange = function () { skip = o[0] === 'none'; drawDetail(); };

@@ -4,9 +4,9 @@ const GIB = 1024 ** 3;
 const disks = { checkout: { path: "/fixture/repo", freeBytes: 100 * GIB }, huggingface: { path: "/fixture/.cache/huggingface", freeBytes: 100 * GIB } };
 
 /** Deterministic machines for setup tests: the spec's worked examples plus CPU. */
-export function fixtureSystem(kind: "cuda24" | "cuda16" | "mac32" | "mac64" | "cpu"): SystemFacts {
-  if (kind === "cuda24" || kind === "cuda16") {
-    const totalMiB = kind === "cuda24" ? 24576 : 16384;
+export function fixtureSystem(kind: "cuda24" | "cuda16" | "cuda4" | "mac32" | "mac64" | "cpu"): SystemFacts {
+  if (kind === "cuda24" || kind === "cuda16" || kind === "cuda4") {
+    const totalMiB = kind === "cuda24" ? 24576 : kind === "cuda16" ? 16384 : 4096;
     return {
       platform: "linux", arch: "x64", release: "6.8", appleSilicon: false, mlxSupported: false,
       ramTotalBytes: 64 * GIB, ramFreeBytes: 32 * GIB, disks,

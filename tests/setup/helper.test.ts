@@ -121,3 +121,12 @@ test("switching Privacy to local clears a no-helper choice and the cloud front d
   expect(flipped.invalidated.map((i) => i.id)).toEqual(["frontdesk", "helper"]);
   expect(s.draft.llm).toBeUndefined();
 });
+
+test("local mode on a machine too small for E2B: no helper recommended, a listed model is refused with the fit reason", async () => {
+  const detected = await detectHelper(ctx("local", [], undefined, fixtureSystem("cuda4")), { fetcher: ollamaFetcher(["gemma4:e4b-it-qat"]) }, "python");
+  expect(detected.fit?.localHelperImpossible).toBe(true);
+  expect(detected.recommended).toBeNull();
+  expect(detected.reason).toContain("cannot hold even Gemma 4 E2B");
+  expect(detected.disabled.model).toContain("switch Privacy to cloud");
+  expect(() => parseHelper({ id: "model", runtime: "ollama", model: "gemma4:e4b-it-qat" }, ctx("local", [], detected, fixtureSystem("cuda4")))).toThrow("cannot hold even Gemma 4 E2B");
+});

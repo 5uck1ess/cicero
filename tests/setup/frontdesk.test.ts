@@ -22,6 +22,17 @@ const listing = (id: RuntimeId, models: string[], running = true): RuntimeListin
 const runtimes = (over: Partial<Record<RuntimeId, RuntimeListing>> = {}) => ({ "llama-cpp": listing("llama-cpp", [], false), ollama: listing("ollama", [], false), "lm-studio": listing("lm-studio", [], false), ...over });
 const noAccounts = { env: {}, which: () => null, readFile: () => null, homeDir: () => "/fixture/home" };
 
+test("local mode on a machine too small for E2B: no local model front desk; an agent front desk still works", async () => {
+  const small = ctx("local", { system: fixtureSystem("cuda4") });
+  const fetcher = (async (input: RequestInfo | URL) => String(input).includes("11434") ? Response.json({ models: [{ name: "gemma4:e4b-it-qat" }] }) : new Response("down", { status: 503 })) as typeof fetch;
+  const detected = await detectFrontDesk(small, { ...noAccounts, fetcher }, "python");
+  expect(detected.recommended).toBeNull();
+  expect(detected.reason).toContain("cannot hold even Gemma 4 E2B");
+  const withDetected = ctx("local", { system: fixtureSystem("cuda4"), detected });
+  expect(() => parseFrontDesk({ kind: "model", runtime: "ollama", model: "gemma4:e4b-it-qat" }, withDetected)).toThrow("cannot hold even Gemma 4 E2B");
+  expect(parseFrontDesk({ kind: "agent" }, withDetected)).toEqual({ kind: "agent" });
+});
+
 test("runtime listing: parallel probes, llama-swap vs bare llama-server, Ollama tags, bounded lists", async () => {
   const seen: string[] = []; let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
   const pending = listRuntimes({ which: () => null, fetcher: (async (input: RequestInfo | URL) => {

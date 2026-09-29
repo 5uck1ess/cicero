@@ -53,6 +53,7 @@ function safe<T>(value: T, secrets: readonly string[]): T {
 function fixesFor(step: string, detected: unknown): string[] {
   if (step === "frontdesk" || step === "helper") {
     const d = detected as Partial<FrontDeskDetected & HelperDetected>;
+    if (d.mode === "local" && d.fit?.localHelperImpossible) return [d.fit.reason];
     const install = (d.install ?? []).map((i) => i.entry ? `${i.hint}\n${i.entry}` : i.hint);
     return install.length ? install : ["Start llama-swap, Ollama or LM Studio with a model loaded, then run --plan again."];
   }
