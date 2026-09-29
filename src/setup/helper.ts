@@ -1,6 +1,6 @@
 import { resolveOpenAiTarget } from "../backends/llm/openai";
 import { GEMMA_MODELS, fitWarnings, modelBudget, type FitPlan, type GemmaId, type GemmaModel, type SpeechKind } from "./fit";
-import { currentFit, fitFor, recommendLocal, type FrontDeskChoice } from "./frontdesk";
+import { currentFit, fitFor, recommendLocal, tooLargeReason, type FrontDeskChoice } from "./frontdesk";
 import { LAYA_LANES_REQUIRED, type PickerDeps } from "./pickers";
 import { isLocal } from "./privacy";
 import { RUNTIME_ENDPOINTS, RUNTIME_IDS, installHint, listRuntimes, llamaSwapEntry, suggestListedModel, type RuntimeId, type RuntimeListing } from "./runtimes";
@@ -99,6 +99,8 @@ export function parseHelper(raw: unknown, ctx: StepContext): HelperChoice {
   const detected = ctx.detected as HelperDetected | undefined;
   const fit = currentFit(ctx);
   if (isLocal(ctx) && fit?.localHelperImpossible) throw new Error(fit.reason);
+  const tooLarge = tooLargeReason(fit, model);
+  if (tooLarge) throw new Error(tooLarge);
   const listing = detected?.runtimes?.[runtime];
   if (listing && (!listing.running || !listing.models.includes(model))) throw new Error("Start the runtime, load a model, and Re-check before choosing it");
   if (listing?.singleModel && front?.kind === "model" && front.runtime === runtime && front.model !== model)

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { loadConfig } from "../../src/config";
 import { createDraft, renderDraft, type SetupDraft } from "../../src/setup/draft";
 import { chosenFitWarnings, contributeHelper, detectHelper, gemmaOf, parseHelper, probeHelper, type HelperDetected } from "../../src/setup/helper";
-import { detectFrontDesk } from "../../src/setup/frontdesk";
+import { detectFrontDesk, parseFrontDesk } from "../../src/setup/frontdesk";
 import type { RuntimeId, RuntimeListing } from "../../src/setup/runtimes";
 import { SetupSession } from "../../src/setup/session";
 import type { StepContext } from "../../src/setup/steps";
@@ -174,6 +174,17 @@ test("cloud mode on a sized machine where nothing fits: no listed model is recom
   const front = await detectFrontDesk(c, deps, "python");
   expect(front.recommended).toBeNull();
   expect(front.reason).toContain("cannot hold a local helper");
+});
+
+test("a listed Gemma larger than the whole model budget is refused as front desk and helper, in both modes", async () => {
+  const deps = { env: {}, which: () => null, readFile: () => null, homeDir: () => "/fixture/home", fetcher: ollamaFetcher(["gemma4:31b-it-qat"]) };
+  for (const mode of ["local", "cloud"] as const) {
+    const c = ctx(mode, [], undefined, fixtureSystem("cuda16"));
+    const fd = await detectFrontDesk(c, deps, "python");
+    expect(() => parseFrontDesk({ kind: "model", runtime: "ollama", model: "gemma4:31b-it-qat" }, { ...c, detected: fd })).toThrow("does not fit this machine");
+    const hd = await detectHelper(c, deps, "python");
+    expect(() => parseHelper({ id: "model", runtime: "ollama", model: "gemma4:31b-it-qat" }, { ...c, detected: hd })).toThrow("does not fit this machine");
+  }
 });
 
 test("install hints name the fit helper for each runtime that does not list it", async () => {

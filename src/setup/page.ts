@@ -436,6 +436,12 @@ function stateLabel(option, f) {
 }
 function field(label, input) { return h('label', { class: 'field' }, [h('span', { text: label }), input]); }
 function textInput(value, type) { return h('input', { type: type || 'text', value: value || '', autocomplete: 'off' }); }
+/** A model list with no default: when nothing listed is recommended, the person must pick one on purpose. */
+function modelSelect(items, value) {
+  var s = selectOf(items, value);
+  if (!value) s.prepend(h('option', { value: '', text: 'Choose a model (none listed is known to fit)', selected: true }));
+  return s;
+}
 function selectOf(items, value) {
   var s = h('select');
   items.forEach(function (m) { var o = h('option', { value: m, text: NAMES[m] || m }); if (m === value) o.selected = true; s.append(o); });
@@ -613,8 +619,8 @@ function renderFrontDesk(step) {
     }
     var rt = f.runtimes && f.runtimes[runtime];
     if (rt && rt.running && rt.models.length) {
-      var pick = (saved && saved.runtime === runtime && saved.model) || (rec && rec.runtime === runtime && rec.model) || rt.models[0];
-      fields.model = selectOf(rt.models, pick);
+      var pick = (saved && saved.runtime === runtime && saved.model) || (rec && rec.runtime === runtime && rec.model);
+      fields.model = modelSelect(rt.models, pick);
       box.append(field('Model', fields.model));
       if (rec && rec.runtime === runtime) box.append(h('small', { text: 'Recommended: ' + rec.model }));
     }
@@ -683,7 +689,7 @@ function renderHelper(step) {
     box.append(field('Runs on', sel));
     var rt = f.runtimes && f.runtimes[runtime];
     if (rt && rt.running && rt.models.length) {
-      fields.model = selectOf(rt.models, (saved && saved.runtime === runtime && saved.model) || (rec && rec.runtime === runtime && rec.model) || rt.models[0]);
+      fields.model = modelSelect(rt.models, (saved && saved.runtime === runtime && saved.model) || (rec && rec.runtime === runtime && rec.model));
       box.append(field('Model', fields.model));
       if (rec && rec.runtime === runtime) box.append(h('small', { text: 'Recommended: ' + rec.model }));
     }

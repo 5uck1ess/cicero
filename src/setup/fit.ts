@@ -70,6 +70,8 @@ export interface FitPlan {
   frontDeskReusesHelper: boolean;
   localHelperImpossible: boolean;
   reason: string;
+  /** The memory models may use together on this machine, in GB. */
+  budgetGb: number;
 }
 
 const fits = (need: number, have: number) => need <= have + EPSILON;
@@ -80,13 +82,13 @@ const gb = (n: number) => `${Math.round(n * 10) / 10} GB`;
  * Footprints were measured on CUDA; on any other platform every one is shown as an estimate.
  */
 export function planFit(budgetGb: number, mode: PrivacyMode, platform: Budget["platform"] = "cuda"): FitPlan {
-  const plan = planFitCuda(budgetGb, mode);
+  const plan = { ...planFitCuda(budgetGb, mode), budgetGb };
   if (platform === "cuda") return plan;
   const estimate = (m: GemmaModel | null) => m && { ...m, basis: "estimate" as const };
   return { ...plan, helper: estimate(plan.helper), frontDesk: estimate(plan.frontDesk) };
 }
 
-function planFitCuda(budgetGb: number, mode: PrivacyMode): FitPlan {
+function planFitCuda(budgetGb: number, mode: PrivacyMode): Omit<FitPlan, "budgetGb"> {
   const e4b = GEMMA_MODELS.find((m) => m.id === "e4b")!;
   const e2b = GEMMA_MODELS.find((m) => m.id === "e2b")!;
   const helper = fits(e4b.footprintGb, budgetGb) ? e4b : fits(e2b.footprintGb, budgetGb) ? e2b : null;

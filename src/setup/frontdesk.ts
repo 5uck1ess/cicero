@@ -56,6 +56,14 @@ function firstRunning(runtimes: Record<RuntimeId, RuntimeListing>): RuntimeListi
   return RUNTIME_IDS.map((id) => runtimes[id]).find((r) => r.running && r.models.length > 0) ?? null;
 }
 
+/** Why a listed Gemma cannot run here at all (larger than the whole model budget), or null; unknown models are not sized. */
+export function tooLargeReason(fit: FitPlan | null | undefined, model: string): string | null {
+  if (!fit) return null;
+  const g = GEMMA_MODELS.find((m) => suggestListedModel([model], m));
+  if (!g || g.footprintGb <= fit.budgetGb + 0.01) return null;
+  return `${g.label} (${g.footprintGb} GB) does not fit this machine: the model budget is ${Math.round(fit.budgetGb * 10) / 10} GB.`;
+}
+
 /** Recommend a listed model for a fit target, or a reuse/default when nothing matches. */
 export function recommendLocal(runtimes: Record<RuntimeId, RuntimeListing>, target: GemmaModel | null, fallback: GemmaModel | null): { choice: { runtime: RuntimeId; model: string } | null; reason: string } {
   for (const id of RUNTIME_IDS) {
@@ -134,6 +142,8 @@ export function parseFrontDesk(raw: unknown, ctx: StepContext, deps: PickerDeps 
   const detected = ctx.detected as FrontDeskDetected | undefined;
   const fit = currentFit(ctx);
   if (isLocal(ctx) && fit?.localHelperImpossible) throw new Error(fit.reason);
+  const tooLarge = tooLargeReason(fit, model);
+  if (tooLarge) throw new Error(tooLarge);
   const listing = detected?.runtimes?.[runtime];
   if (listing && (!listing.running || !listing.models.includes(model))) throw new Error("Start the runtime, load a model, and Re-check before choosing it");
   return { kind: "model", runtime, model };
