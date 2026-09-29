@@ -321,7 +321,7 @@ export class TabInjectBrain implements Brain {
       throw new Error(`Tab not found: "${tabName}". Available: ${tabs.map(t => t.title).join(", ")}`);
     }
 
-    const prompt = this.turnContext.buildTextPrompt(message, false, systemContext);
+    const prompt = this.buildPrompt(message, systemContext);
 
     this.previousTab = tabs.find(t => t.is_focused) || null;
 
@@ -868,6 +868,15 @@ export class TabInjectBrain implements Brain {
    * Extract Claude's response from the screen/scrollback text.
    * Uses fuzzy command matching and strips TUI chrome.
    */
+  /**
+   * Context before the request: extractResponse finds the reply by matching the
+   * prompt's first 60 chars on one screen line, which a short request followed by
+   * multiline context would break (the reply would fall back to its last 40 lines).
+   */
+  private buildPrompt(message: string, systemContext?: string): string {
+    return this.turnContext.buildTextPrompt(message, false, systemContext, { contextPlacement: "before" });
+  }
+
   private extractResponse(screenText: string, command: string): string {
     const lines = screenText.split("\n");
 

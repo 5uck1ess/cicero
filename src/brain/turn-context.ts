@@ -333,7 +333,17 @@ export class BrainTurnContext {
     this.summary = boundSummary(summary);
   }
 
-  buildTextPrompt(message: string, includeHistory: boolean, systemContext?: string): string {
+  /**
+   * `contextPlacement: "before"` keeps the legacy layout (context, then the request) for
+   * adapters that locate their reply by matching the prompt's first line on screen
+   * (tab-inject). Everything else puts the user's words first (#144).
+   */
+  buildTextPrompt(
+    message: string,
+    includeHistory: boolean,
+    systemContext?: string,
+    options: { contextPlacement?: "before" | "after" } = {},
+  ): string {
     const sections: string[] = [];
     if (includeHistory && this.summary) sections.push(`${SUMMARY_LABEL}\n${this.summary}`);
     if (includeHistory && this.history.length > 0) {
@@ -354,6 +364,9 @@ export class BrainTurnContext {
     const operational = boundedSystemContext(systemContext);
     if (operational) injected.push(`${SYSTEM_CONTEXT_LABEL}\n${operational}`);
     if (sections.length === 0 && injected.length === 0) return message;
+    if (options.contextPlacement === "before") {
+      return [...sections, ...injected, `Current user request:\n${message}`].join("\n\n");
+    }
     const request = sections.length > 0 ? [...sections, `Current user request:\n${message}`].join("\n\n") : message;
     if (injected.length === 0) return request;
     return `${request}\n\n${CONTEXT_OPEN}\n${CONTEXT_PREAMBLE}\n\n${injected.join("\n\n")}\n${CONTEXT_CLOSE}`;
