@@ -13,6 +13,7 @@ export default withMermaid(defineConfig({
   srcExclude: [
     "AGENTS.md",
     "CLAUDE.md",
+    "INSTALL.md",
     "bench/**",
     "requirements/**",
     "sidecars/**",
@@ -37,6 +38,7 @@ export default withMermaid(defineConfig({
           `${repository}/blob/main/sidecars/telegram-call/README.md`,
         ],
         ["LICENSE", `${repository}/blob/main/LICENSE`],
+        ["INSTALL.md", `${repository}/blob/main/INSTALL.md`],
       ]);
 
       md.core.ruler.after("inline", "cicero-homepage-links", (state) => {
@@ -76,17 +78,27 @@ export default withMermaid(defineConfig({
         text: "Understand it",
         items: [
           { text: "Project README", link: "/" },
+          { text: "Concepts: Cicero and your office", link: "/concepts" },
           { text: "Architecture", link: "/architecture" },
           { text: "Why not full-duplex", link: "/duplex" },
-          { text: "The office", link: "/office" },
         ],
       },
       {
         text: "Have your first conversation",
         items: [
           { text: "Setup", link: "/setup" },
+          { text: "Using Cicero", link: "/using" },
           { text: "Choosing a brain", link: "/brains" },
           { text: "Configuration", link: "/configuration" },
+        ],
+      },
+      {
+        text: "Advanced / example deployment",
+        items: [
+          { text: "Advanced overview", link: "/advanced" },
+          { text: "Reference deployment", link: "/reference-deployment" },
+          { text: "The office", link: "/office" },
+          { text: "Channels", link: "/channels" },
         ],
       },
       {

@@ -1,0 +1,18 @@
+# Cicero
+
+> Cicero is a self-hosted voice interface for coding agents: you speak, it answers out loud, and your agent (Claude Code, Codex, Gemini, Qwen, any ACP agent or an OpenAI-compatible model) does the work. A setup wizard (`cicero setup`, or headless `--plan`/`--apply` for AI agents) writes its config.
+
+## Setup
+
+- [INSTALL.md](https://github.com/5uck1ess/cicero/blob/main/INSTALL.md): step-by-step instructions for an AI agent setting Cicero up for a user
+- [docs/setup.md](https://github.com/5uck1ess/cicero/blob/main/docs/setup.md): the setup wizard, step by step
+- [docs/concepts.md](https://github.com/5uck1ess/cicero/blob/main/docs/concepts.md): the two layers, Cicero and your office
+
+## Use
+
+- [docs/using.md](https://github.com/5uck1ess/cicero/blob/main/docs/using.md): what to say, interrupting, "details", "think hard", privacy, checking what runs
+
+## Reference
+
+- [docs/configuration.md](https://github.com/5uck1ess/cicero/blob/main/docs/configuration.md): privacy, escalation, tier presets and the config schema
+- [config.yaml.example](https://github.com/5uck1ess/cicero/blob/main/config.yaml.example): every option, annotated

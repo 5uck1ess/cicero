@@ -4,9 +4,8 @@ The flagship shape: Cicero runs on a headless box (typically a GPU machine) and 
 
 ## Setup
 
-Follow the canonical [first-conversation setup](setup.md#your-first-conversation)
-for prerequisites, installation, minimal configuration, checks, startup, and
-the first spoken test. This guide begins with the web-voice-specific credential
+Follow [setup](setup.md) for prerequisites, the setup wizard, checks,
+startup, pairing, and the first spoken test. This guide begins with the web-voice-specific credential
 and connection behavior.
 
 When `web_voice.token` is omitted or blank, the one-run credential is printed

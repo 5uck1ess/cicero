@@ -1,54 +1,149 @@
 # Setup
 
-## Guided setup (preview)
+This is the one setup path: clone Cicero, run the setup wizard, start it, and
+talk. The wizard sets up [layer 1, Cicero itself](concepts.md), plus one front
+desk and one agent. Your own office of employees comes later.
 
-Run `cicero setup` (or `bun run src/index.ts setup` if `cicero` is not on your
-`PATH` yet). It starts a one-shot setup page and prints its URL with a one-time
-token; open that URL in a browser.
+Prefer to have an AI agent do it? Point Claude Code, Codex or any other coding
+agent at [`INSTALL.md`](https://github.com/5uck1ess/cicero/blob/main/INSTALL.md).
+It asks you two questions and drives the same wizard headlessly (see
+[Set it up with an AI agent](#set-it-up-with-an-ai-agent)).
 
-**How the page works.** The first screen is a diagram of Cicero's voice loop:
-you talk, **Hear** turns speech into words, **Think** (a small local model)
-answers everyday talk, **Agent** (your coding agent) does the real work and can
-file **Tasks** on a board, and **Speak** reads the reply back to you. Two more
-boxes sit beside the loop: **Machine** (your hardware) and **Save**. Click any
-box to set up that part; a box shows your pick and turns green once it is set.
+## Before you start
 
-![The setup page's voice-loop diagram](images/setup-overview.png)
+- **[Bun](https://bun.sh)**, the runtime (`curl -fsSL https://bun.sh/install | bash`).
+- **[uv](https://docs.astral.sh/uv/)**, which installs the Python speech
+  engines (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+- **ffmpeg and OpenSSL** (`sudo apt install ffmpeg openssl`, or brew/scoop).
+  OpenSSL creates the web page's HTTPS certificate once.
+- **A local model runtime** for the front desk and the helper, with a model
+  loaded: llama.cpp behind llama-swap (`:8080`), [Ollama](https://ollama.com)
+  (`:11434`) or LM Studio (`:1234`). The wizard tells you which model fits
+  your machine and how to pull it.
+- **A coding agent, if you want one**, installed and logged in: Claude Code,
+  Codex, Gemini, Qwen, or an ACP agent such as Hermes or `codex-acp`. See
+  [Choosing a brain](brains.md).
 
-Each part is one question on one screen. The options are cards that say whether
-the software is running, installed or not found, and the one that fits your
-machine is marked *Recommended*. If you pick something that is missing, the
-screen shows the steps to install it and a *Check again* button. *Why this?*
-opens the longer explanation and a link to the matching doc. The row of step
-names at the top jumps between parts, and the browser's Back button works.
-Nothing is written until you save.
+Linux with an NVIDIA GPU and macOS 14+ on Apple Silicon are the supported
+wizard paths. CPU-only Linux and Windows run the same wizard with their
+existing defaults.
 
-| Part | What it does |
-| --- | --- |
-| Machine | Detects OS, CPU architecture, RAM, free disk, Apple Silicon and NVIDIA VRAM, then recommends a starting preset (NVIDIA GPU, Apple Silicon or CPU only; `local-cuda`, `local-mlx` or `local-cpu` in the config). |
-| Hear | Speech-to-text options for your platform, with installed and running status for each engine. |
-| Think | Finds a running llama.cpp (`:8080`), Ollama (`:11434`) or LM Studio (`:1234`), and offers MLX on macOS or a cloud or custom OpenAI-compatible API. It lists the runtime's models to pick from. |
-| Agent | Detects the coding-agent CLIs on `PATH` (Claude Code, Codex, Gemini, Qwen, or an ACP harness), or a model API instead. A missing one gets its install and sign-in steps. |
-| Speak | Text-to-speech options, with the same installed and running status as Hear. |
-| Tasks | Optional. Detects `hermes`, `multica` or `paperclipai` and probes the board once. Cicero only watches the board; the board system owns the tasks. |
-| Save | Runs the same checks as `cicero doctor` against the draft. Config errors block saving. Engines that are not installed or running yet are listed with the command to fix them, and you confirm before saving. Then it writes a private, annotated `~/.cicero/config.yaml` with a comment on each key (only when no config exists; an invalid existing config is backed up only if you choose to) and shows the command to start Cicero. *Finish and close setup* stops the setup page. |
+## Start the wizard
 
-Options:
+```bash
+git clone https://github.com/5uck1ess/cicero && cd cicero
+bun install
+bun run src/index.ts setup     # or: bun link, then cicero setup
+```
+
+It prints a URL with a one-time token; open it in a browser. Nothing is
+written until you save, and it only writes when no config exists yet.
 
 - `--lan` serves the page over HTTPS to other devices on your network, for a
-  headless box. It uses a self-signed certificate, so accept the warning once.
-  If the box runs a firewall, pick a fixed `--port` and allow it from your
-  LAN first. With ufw, for example:
-  `sudo ufw allow from 192.168.1.0/24 to any port <port> proto tcp`. Delete
-  the rule when setup is done.
-- `--home <dir>` writes to another directory instead of `~/.cicero`, so you can
-  try setup without touching your real config. `cicero start` reads only the
-  default home, so the hand-off shows the copy command.
+  headless box. Accept the self-signed certificate once. If the box runs a
+  firewall, pick a fixed `--port` and allow it from your LAN first (with ufw:
+  `sudo ufw allow from 192.168.1.0/24 to any port <port> proto tcp`, deleted
+  again when setup is done).
+- `--home <dir>` writes to another directory instead of `~/.cicero`, so you
+  can try setup without touching your real config. `cicero start` reads only
+  the default home, so the hand-off shows the copy command.
 - `--port <n>` picks the port (default: a free port).
 
-Preview limits: the Channels step (Telegram bot and calls) and the Install
-step (creating engine venvs and downloading models) are not built yet. Use the
-manual steps below for those, then run `cicero doctor`.
+The wizard walks these steps in order. Each box says what the step writes into
+`~/.cicero/config.yaml`:
+
+```mermaid
+flowchart TD
+    P["Privacy<br/>privacy"] --> M["Machine<br/>deployment"]
+    M --> AC["Accounts<br/>nothing (read-only)"]
+    AC --> FD["Front desk<br/>brain (a model) or nothing (an agent)"]
+    FD --> HL["Helper<br/>web_voice.tldr · llm · brain.history_compaction"]
+    HL --> HR["Hear<br/>stt"]
+    HR --> SP["Speak<br/>tts"]
+    SP --> AG["Agent<br/>brain or brain.escalate · unset_env"]
+    AG --> TK["Tasks<br/>notify.kanban · privacy.allow"]
+    TK --> TS["Test<br/>nothing (probes only)"]
+    TS --> CK["Check<br/>nothing (cicero doctor on the draft)"]
+    CK --> SV["Save<br/>config.yaml"]
+    SV --> HO["Hand-off<br/>the start command"]
+```
+
+Each step is one question with a few option cards. A card says whether the
+software is running, installed or not found, and the one that fits your
+machine is marked *Recommended*. If you pick something that is missing, the
+step shows how to install it and a *Check again* button. *Why this?* opens the
+longer explanation.
+
+## Privacy
+
+**What may leave this machine?**
+
+- **Nothing, unless I allow it** (the default). The front desk, the helper and
+  speech must run here. A cloud coding agent or a hosted task board is offered
+  only after you allow it, one item at a time, with a sentence saying what
+  leaves.
+- **Conversation may use cloud models.** The front desk and agents may be
+  cloud services; the helper and speech still run here. Telegram and task
+  boards still need their own allowance.
+
+Writes `privacy: { mode: local | cloud, allow: [...] }`. This is a declared
+policy, not a firewall: the wizard enforces it when you choose, and
+`cicero doctor` warns when the config drifts from it. What each mode means day
+to day is in [Using Cicero](using.md#privacy).
+
+## Machine
+
+Detects OS, CPU, RAM, free disk, Apple Silicon and NVIDIA VRAM, and works out
+the **model budget**: how much memory the front desk and helper may use once
+speech and headroom are set aside. It recommends a starting preset (NVIDIA
+GPU, Apple Silicon or CPU only). Writes `deployment: local-cuda | local-mlx |
+local-cpu`.
+
+## Accounts
+
+Shows which login or API key each agent will most likely use, and who bills
+it. An API key in your environment can silently override a subscription login
+(`claude` prefers `ANTHROPIC_API_KEY`, for example). Ticking **Use my
+subscription** removes that key from the agent's environment only; the Agent
+step writes it as `unset_env`. Logins and keys are reported as found or not
+found, never read or stored. This step writes nothing itself.
+
+## Front desk
+
+What answers when you talk:
+
+- **A model** (fast, no tools). It answers in about a second and hands
+  coding work to your agent when you say "think hard". The wizard lists the
+  models loaded in llama-swap/llama.cpp, Ollama and LM Studio and recommends
+  one that fits the budget. With cloud privacy it can also be a cloud model
+  (the key stays in your environment, never in the config). Writes `brain`.
+- **An agent** (slower, uses tools). The agent you pick on the Agent step
+  answers everything. Writes nothing here.
+
+## Helper
+
+A small local model that shortens long spoken replies (say "details" for the
+rest) and summarizes old conversation history so long sessions keep their
+context. In local privacy mode it is required. Writes
+`web_voice.tldr.summarizer_url`/`summarizer_model`, `llm`, and
+`brain.history_compaction.enabled` when **Compress long conversations** is
+ticked. With no helper and a cloud front desk, `llm` points at the front
+desk's model instead.
+
+If a runtime isn't running, the step shows how to get the recommended model,
+for example `ollama pull gemma4:e4b-it-qat`, or a llama-swap entry with the
+settings the budget assumes (64k context, q8 KV cache).
+
+## Hear
+
+Speech-to-text. The hardware tier picks the starting engine, and each option
+shows whether its environment is installed and its port is up. Writes `stt`.
+
+## Speak
+
+Text-to-speech. Same checks as Hear, plus a **Play sample** button that
+speaks one sentence through the running engine (it never starts one). Writes
+`tts`. Voice cloning comes after setup: see [Voice cloning](voice-cloning.md).
 
 ### Speech choices on a CUDA box
 
@@ -79,92 +174,102 @@ server JSON is machine local and ignored by Git. If that file already uses a
 different port or model entry with the same ID, inspect and reconcile it
 manually before starting Cicero; setup preserves existing values.
 
-## Your first conversation
-
 The optional STT live streaming checkbox adds `stt.streaming: true` and writes
 Nemotron's model entry with `"mode": "streaming"`. When Nemotron already has an
 entry, setup updates its mode and preserves its other keys. Restart audio.cpp
 after changing the model mode. Live streaming affects browser voice only.
 
-This is the opinionated first-run path: Cicero runs on a Linux box (GPU or not),
-and you talk to it from a browser on your network. Linux is the reference path.
+## Agent
 
-### 1. Prerequisites
+The coding agent. What it does depends on the front desk:
 
-Install and authenticate the selected brain before the first start. The minimal
-configuration below expects the Claude Code CLI. Cicero ships no brain; see
-[Brains](brains.md) for the other documented brain choices.
+- **Model front desk:** the agent is an *escalation* agent. The front desk
+  hands it a turn when you say "think hard" (see
+  [Using Cicero](using.md#thinking-harder)). This needs an ACP agent (Hermes,
+  `codex-acp`, `claude-acp`, `grok-acp`, or your own ACP command), or none.
+  Writes `brain.escalate`.
+- **Agent front desk:** the agent answers everything: Claude Code, Codex,
+  Gemini, Qwen, an ACP agent, or a model API. Writes `brain`.
 
-Install the prerequisites (skip any you have):
+In local privacy mode, a cloud agent needs **Allow this agent to use the cloud**
+ticked, which adds `agent` to `privacy.allow`. ACP agents are checked on
+`PATH` and stay "unverified until first call".
 
-```bash
-curl -fsSL https://bun.sh/install | bash            # Bun
-curl -LsSf https://astral.sh/uv/install.sh | sh     # uv
-sudo apt install ffmpeg openssl                     # Debian/Ubuntu (brew/scoop elsewhere)
-curl -fsSL https://ollama.com/install.sh | sh       # Ollama (other platforms: https://ollama.com/download)
-```
+## Tasks
 
-The Cicero CLI runs anywhere Bun runs; full local voice support still depends
-on platform audio tools, provider runtimes, and (for the native hotkey/AEC
-helpers) macOS-specific code. Cicero launches and supervises supported local
-providers; a configured remote provider connects to a server you operate.
+Optional. Detects `hermes`, `multica` or `paperclipai` and probes the board
+once. A board holds your task text, so it needs **Allow task text to go to
+this board** ticked in either privacy mode, which adds `board` to
+`privacy.allow`. Writes `notify.kanban`. Cicero only watches the board; the
+board owns the tasks.
 
-### 2. Install Cicero and the speech servers
+## Test
 
-Clone this repository, `cd` into it, and run everything below from that checkout
-(the daemon launches and supervises the model servers itself):
+Tries each running part once. Each probe has its own Run button, a deadline
+and a Cancel button:
 
-```bash
-bun install
-bun link                    # expose the `cicero` CLI from this checkout
+- **Hear:** transcribes a bundled clip and compares the words.
+- **Front desk:** one short answer from a model front desk. An agent is never
+  run here; it shows as installed and is tested on your first call.
+- **Helper:** one summary.
+- **Speak:** use **Play sample** on the Speak step; the browser plays it.
+- **Memory:** on NVIDIA, measures what each engine and model really uses with
+  `nvidia-smi` and replaces the estimates. Mac memory stays an estimate.
 
-uv venv .venv-stt --python 3.10
-uv pip install --python .venv-stt -r requirements/faster-whisper.txt
-uv venv .venv-pocket --python 3.11
-uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
-ollama pull qwen3.5:4b
-```
+A later choice clears the results. Failures never block saving.
 
-### 3. Create the minimal config
+## Check
 
-Make `~/.cicero/config.yaml` with exactly this content (don't copy
-`config.yaml.example` for a first run — it documents every option and expects
-backends this quickstart doesn't install):
+Runs the same checks as `cicero doctor` against a private temporary copy of
+the draft. Config errors block saving. Engines that are not installed or
+running yet are listed with the command that fixes them, and you confirm
+before saving.
 
-```yaml
-# ~/.cicero/config.yaml — the minimal web-voice setup
+## Save
+
+Writes a private, annotated `~/.cicero/config.yaml` with a comment on every
+key, including a stable random `web_voice.token`. It only writes when no
+config exists. An invalid existing config is backed up only if you click
+*Back up old config and start fresh*.
+
+## Hand-off
+
+Shows the command to start Cicero and how to pair a phone. *Finish and close
+setup* stops the setup page; it does not start the daemon.
+
+### What the wizard writes for a Claude Code setup
+
+For cloud privacy, Claude Code as the front desk, a local Gemma 4 E4B helper
+on llama-swap, faster-whisper and Kokoro, the saved file comes down to this
+(comments and the random `web_voice.token` left out; with **Compress long
+conversations** ticked, `brain` also gets `history_compaction: { enabled: true }`):
+
+```yaml cicero-config
+deployment: local-cuda
 headless: true
-web_voice: { enabled: true, host: 0.0.0.0, port: 8090 } # a fresh token prints at startup
-stt: { backend: faster-whisper, port: 8083, model: large-v3-turbo }
-tts: { backend: pocket-tts, port: 8095, voice: alba }
-llm: { backend: ollama, port: 11434, model: qwen3.5:4b }
-brain: { backend: claude-code, mode: subprocess } # or acp / codex / gemini / ollama / any OpenAI-compatible URL
+privacy: { mode: cloud }
+brain: { backend: claude-code, mode: subprocess }
+web_voice:
+  enabled: true
+  tldr: { summarizer_url: http://127.0.0.1:8080/v1, summarizer_model: gemma4-e4b }
+llm: { backend: openai, baseUrl: http://127.0.0.1:8080/v1, model: gemma4-e4b }
+stt: { backend: faster-whisper }
+tts: { backend: kokoro }
 ```
 
-For Hermes or another ACP harness, set
-`brain: { backend: acp, binary: …, binary_args: […] }` instead — see
-[Brains](brains.md).
+Every key is documented in
+[`config.yaml.example`](https://github.com/5uck1ess/cicero/blob/main/config.yaml.example),
+the reference for every option. You don't need to copy it.
 
-### 4. Check the setup
-
-```bash
-cicero doctor   # checks configured backends and prints fixes
-```
-
-`cicero doctor` checks the effective configuration and prints fixes for missing
-prerequisites. It can verify that a CLI binary is present, but it does not prove
-that the CLI is authenticated or complete a live agent turn.
-
-### 5. Start Cicero
+## Start and pair
 
 ```bash
-cicero start
+cicero doctor   # re-checks everything and prints fixes
+cicero start    # or: bun run src/index.ts start
 # → 🎙️  Web voice server on https://0.0.0.0:8090 (token required)
 ```
 
-### 6. Pair your phone
-
-With the daemon running, use the fast path:
+To use Cicero from your phone, run this with the daemon running:
 
 ```bash
 cicero pair
@@ -183,88 +288,104 @@ Cloudflared quick-tunnel URLs change on every daemon run, so re-run `pair` after
 each restart; Tailscale hostnames are stable. The manual URL and certificate
 flow below remains available.
 
-### 7. Say this, expect this
+Open `https://<box-ip>:8090/?token=<token>`, accept the self-signed
+certificate once, and click **Start conversation** (the page loads with it
+off). Hold SPACE or the orb and say **"What can you help me with?"** You
+should hear a reply. Do this one real turn before treating a setup as ready:
+`cicero doctor` cannot prove that an agent's login works. Page controls,
+hands-free mode and the PWA are in the [web voice guide](web-voice.md); what
+to say next is in [Using Cicero](using.md).
 
-Open `https://<box-ip>:8090/?token=<token>`, accept the self-signed certificate
-once, and click **Start conversation** (the page loads with the conversation
-off; push-to-talk does nothing until you start it and grant the microphone).
-Then hold SPACE (or the orb) and say **“What can you help me with?”** Expect
-the hint line to flash what was heard, then a spoken response (the page keeps
-no chat log — replies are spoken, not displayed). Exercise this real turn
-before treating a deployment as ready. Full page controls, hands-free mode, and
-PWA behavior are in the [web-voice guide](web-voice.md).
+**If something is off:**
 
-### First-run troubleshooting
+- **The browser warns about the certificate.** Expected: Cicero makes a
+  self-signed HTTPS certificate on first start, because browsers only give the
+  microphone to HTTPS pages. Accept it once per device.
+- **I talk and nothing happens.** Click **Start conversation** first, then
+  hold SPACE or the orb *while* speaking. Then check the browser's microphone
+  permission, then `cicero doctor`.
+- **`doctor` is green but turns fail.** Run the agent's own CLI once by hand
+  to confirm it is logged in, then try a real turn again.
 
-- **The browser warns about the certificate.** Expected: Cicero generates a
-  self-signed HTTPS certificate on first start (browsers only expose the
-  microphone over HTTPS or on localhost, and this walkthrough reaches the box
-  from another device). Accept it once per device.
-- **Where's the token?** Printed at startup, once per run. For a stable token
-  across restarts, run `openssl rand -hex 16` and paste only its output as
-  `token:` inside the `web_voice:` block (e.g.
-  `web_voice: { enabled: true, host: 0.0.0.0, port: 8090, token: <paste> }`).
-  Configure it before running Cicero under a service manager, because startup
-  stdout may be retained — and never copy an example placeholder as a secret.
-- **I talk and nothing happens.** First make sure the conversation is started —
-  the page loads with it off, and push-to-talk is inert until you click
-  **Start conversation**. Then remember the default is push-to-talk: hold SPACE
-  or the orb *while* speaking. Then check the browser's microphone permission,
-  then `cicero doctor`.
+## Manual steps the wizard doesn't do yet
 
-## Platform variants of the first-run sequence
+The Channels and Install steps are previews: they are shown but not built.
 
-Use the same minimal config, `cicero doctor`, `cicero start`, browser URL, and
-spoken test above after substituting the platform-specific install steps below.
+- **Install the speech engines you chose.** Hear and Speak show the exact
+  command for your choice, and `cicero doctor` repeats it. The common ones:
+
+  ```bash
+  uv venv .venv-stt --python 3.10 && uv pip install --python .venv-stt -r requirements/faster-whisper.txt
+  uv venv .venv-kokoro --python 3.11 && uv pip install --python .venv-kokoro -r requirements/kokoro.txt
+  uv venv .venv-pocket --python 3.11 && uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
+  ```
+
+- **audio.cpp model weights** are downloaded by hand (see "Speech choices on a
+  CUDA box" above).
+- **Telegram** (messages and calls): see [Notifications](notifications.md) and
+  the [call sidecar guide](https://github.com/5uck1ess/cicero/blob/main/sidecars/telegram-call/README.md).
+  In local privacy mode, add `telegram` to `privacy.allow` or `cicero doctor`
+  warns.
+
+## Set it up with an AI agent
+
+The wizard's detection, choices and checks also run headlessly, for an AI agent
+working for you. [`INSTALL.md`](https://github.com/5uck1ess/cicero/blob/main/INSTALL.md)
+is the agent's script; the commands are:
+
+```bash
+bun run src/index.ts setup --plan --json --privacy local --agent codex-acp > plan.json
+bun run src/index.ts setup --apply answers.json      # answers.json = plan.recommended, edited
+bun run src/index.ts setup --test --json             # once the engines are running
+bun run src/index.ts doctor --json
+```
+
+- `--plan` reads only. It prints `detected` (each step's detection),
+  `recommended` (an answers file ready to apply), `reasons` (one line per
+  choice) and `blocked` (steps it could not fill, with the fix). Credentials
+  show only as found or not found.
+- The answers file is `{ version: 1, privacy: {…}, steps: { <step>: <choice> } }`,
+  one entry per choice step (`privacy`, `system`, `accounts`, `frontdesk`,
+  `helper`, `stt`, `tts`, `brain`, `board`), each exactly what the page posts.
+- `--apply` re-runs detection and parses every choice through the same code
+  and probes as the page, runs the same Check, and writes through the same
+  rules: it never overwrites an existing config. Engines that aren't ready yet
+  need `--acknowledge-not-ready`; an invalid existing config is backed up only
+  with `--backup-invalid`.
+- `--test` runs Test's probes against running engines and reports Speak as
+  skipped (no browser).
+
+## Platform variants
+
+The wizard is the same everywhere; only the prerequisites differ.
 
 ### macOS 14+ (Apple Silicon)
 
-The current MLX dependency floors require macOS 14 or newer on Apple Silicon.
-Install [Ollama](https://ollama.com) before running these commands:
-
 ```bash
-bun install
 brew install uv sox openssl ffmpeg
-bun link
-
-uv venv .venv-stt --python 3.10
-uv pip install --python .venv-stt -r requirements/faster-whisper.txt
-uv venv .venv-pocket --python 3.11
-uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
-ollama pull qwen3.5:4b
+bun install
+bun run src/index.ts setup
 ```
 
-For tab integration, use a terminal with remote control — [Kitty](https://sw.kovidgoyal.net/kitty/), [tmux](https://github.com/tmux/tmux), or [WezTerm](https://wezterm.org/). Cicero auto-detects which one you're in (`terminal: auto`). Set `terminal: none` for headless mode (voice → brain dispatch with no terminal integration). See [terminal adapters](https://github.com/5uck1ess/cicero/blob/main/docs/superpowers/terminal-adapters.md).
+The Machine step recommends the MLX stack (`local-mlx`). The current MLX
+dependency floors need macOS 14 or newer. For terminal tab integration, use a
+terminal with remote control ([Kitty](https://sw.kovidgoyal.net/kitty/),
+[tmux](https://github.com/tmux/tmux) or [WezTerm](https://wezterm.org/));
+`terminal: none` runs headless. See
+[terminal adapters](https://github.com/5uck1ess/cicero/blob/main/docs/superpowers/terminal-adapters.md).
 
 ### Windows (CUDA)
 
 ```bash
-# Install Bun
-powershell -c "irm bun.sh/install.ps1 | iex"
-
-# uv (manages the Python model servers), audio tools, tmux, and automatic
-# web-voice HTTPS certificate generation
-scoop install uv sox ffmpeg tmux openssl
-
-# Ollama: download from https://ollama.com/download/windows
-ollama pull qwen3.5:4b
-
-# Python backends (the venv-directory syntax is the same on every OS):
-uv venv .venv-stt --python 3.10
-uv pip install --python .venv-stt -r requirements/faster-whisper.txt
-uv venv .venv-pocket --python 3.11
-uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
-uv venv .venv-kokoro --python 3.11
-uv pip install --python .venv-kokoro -r requirements/kokoro.txt
-
+powershell -c "irm bun.sh/install.ps1 | iex"      # Bun
+scoop install uv sox ffmpeg tmux openssl          # uv, audio tools, tmux, OpenSSL
 bun install
-bun link
+bun run src/index.ts setup
 ```
 
-OpenSSL is needed only to create Cicero's first self-signed web-voice
-certificate. Later starts reuse the atomically published pair. `cicero doctor`
-reports a blocker, with the native install command, when generation is still
-needed and `openssl` is missing from `PATH`.
+The venv commands above work the same on Windows. OpenSSL is needed only to
+create the first web-voice certificate; `cicero doctor` reports it when it is
+missing.
 
 ## Optional macOS MLX stack and native helper
 
@@ -282,53 +403,6 @@ bun link
 
 bun run src/index.ts doctor
 cicero start --tts
-```
-
-## Additional Linux installation detail
-
-Install [Ollama](https://ollama.com) before the commands below, or select a
-different explicit `llm` backend in the copied configuration.
-
-The complete Linux package and fallback-seat recipe is retained here for
-operators who need local mic/system speech, terminal integration, or Kokoro:
-
-```bash
-bun install
-bun link
-sudo apt install tmux openssl ffmpeg alsa-utils # use pulseaudio-utils instead of alsa-utils when the host provides only PulseAudio
-ollama pull qwen3.5:4b
-# Non-headless local mic/system-speech fallback:
-sudo apt install sox speech-dispatcher
-
-# STT — faster-whisper (CTranslate2; CUDA if available, CPU otherwise):
-uv venv .venv-stt --python 3.10
-uv pip install --python .venv-stt -r requirements/faster-whisper.txt
-
-# TTS — pocket-tts (voice cloning, CPU-friendly) + kokoro as the fallback seat:
-uv venv .venv-pocket --python 3.11
-uv pip install --python .venv-pocket -r requirements/pocket-tts.txt
-uv venv .venv-kokoro --python 3.11
-uv pip install --python .venv-kokoro -r requirements/kokoro.txt
-
-# Config, then verify the configured prerequisites:
-mkdir -p ~/.cicero && cp config.yaml.example ~/.cicero/config.yaml   # edit it
-bun run src/index.ts doctor
-```
-
-The full `config.yaml.example` expects a `hermes` ACP executable; replace its
-`brain.binary`/`binary_args` with another ACP harness or one of the documented
-CLI/HTTP brains if Hermes is not your driver.
-
-On a fresh non-macOS install with no config file, an unsupported implicit LLM
-default produces a warning, while unsupported implicit STT or TTS defaults are
-hard failures. Copy and edit `config.yaml.example` before relying on `doctor` as
-a readiness gate.
-
-For Windows operators using that full example rather than the first-run config:
-
-```bash
-# Copy config.yaml.example to ~/.cicero/config.yaml, then: bun run src/index.ts doctor
-# The example uses Ollama qwen3.5:4b, matching the model pulled above.
 ```
 
 ## Run at boot
@@ -438,6 +512,14 @@ When `host` is a non-local address Cicero connects directly and does **not** lau
 ## CLI reference
 
 ```bash
+# Setup
+cicero setup                         # the setup page (prints its URL)
+cicero setup --lan --port 8443       # serve it to other devices on your network
+cicero setup --home /tmp/try         # try setup without touching ~/.cicero
+cicero setup --plan --json --privacy local|cloud [--agent <id>]   # headless: detect and recommend
+cicero setup --apply answers.json [--acknowledge-not-ready] [--backup-invalid]
+cicero setup --test --json           # probe the running engines
+
 # Sidecar mode
 cicero hook install claude-code      # install the Stop hook (one-time)
 cicero hook install codex            # install the native Codex Stop hook
@@ -451,6 +533,7 @@ cicero start --no-servers            # keyword routing only, no model servers
 cicero stop                          # stop the daemon
 cicero status                        # bounded effective-config/runtime snapshot
 cicero doctor                        # check every configured backend, print fixes
+cicero doctor --json                 # the same checks as JSON ({ version, checks, fails, warns })
 cicero pair                          # print the phone URL and credential-bearing QR
 cicero pair --no-token-in-qr         # scan the URL, then type the token separately
 cicero swap stt faster-whisper       # replace a live speech provider without restarting
