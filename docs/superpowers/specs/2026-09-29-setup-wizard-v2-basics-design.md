@@ -1,6 +1,6 @@
 # Setup v2, part 1: wizard, docs and agent-assisted setup
 
-Status: design, not implemented. Date: 2026-09-29. Revision 9 (adds docs and agent-assisted setup), after six rounds of GPT-6 Astra's adversarial review.
+Status: design, not implemented. Date: 2026-09-29. Revision 10 (adds docs and agent-assisted setup), after six rounds of GPT-6 Astra's adversarial review.
 Builds on: `2026-09-24-setup-wizard-design.md` (the current guided setup). This spec covers only what changes; the v1 rules stand unless a section below overrides them.
 Co-designed with GPT-6 Astra: an independent proposal, merged, then reviewed against the code.
 
@@ -230,10 +230,10 @@ An AI agent (Claude Code, Codex or any other) can install Cicero for a user thro
 
   It reads only; credentials show only as "found" or "not found". It runs no Test probes; those need running engines.
 - **The answers file** is `{ version: 1, privacy: {…}, steps: { <stepId>: <choice> } }`. Each `<choice>` is exactly the object the setup page posts for that step today, so there is one schema.
-  - Every available step must be present.
+  - Every available step that takes a choice must be present. Check, Write and Hand-off take none (`src/setup/steps.ts:24`, `src/setup/steps.ts:51`) and are not accepted.
   - Steps that can be skipped take their existing "none" choice.
   - Preview steps (Channels, Install) are not accepted.
-- **`cicero setup --apply <answers.json>`** never trusts saved detection. It re-runs detection, then parses each step with that fresh context through the same parsers (`src/setup/pickers.ts`). For example, a model that is no longer listed fails with the parser's own message (`src/setup/pickers.ts:155`). It then follows the page's save rules (`src/setup/server.ts:305`):
+- **`cicero setup --apply <answers.json>`** never trusts saved detection. It re-runs detection, then parses each step with that fresh context through the same parsers (`src/setup/pickers.ts`). For example, a model that is no longer listed fails with the parser's own message (`src/setup/pickers.ts:155`). Each choice then passes the same probe gate the page uses (`probeChoice`, `src/setup/server.ts:277`), so apply rejects any choice the page would reject. It then follows the page's save rules (`src/setup/server.ts:305`):
   - It runs the same Check.
   - Blocking failures exit non-zero.
   - Not-ready components need `--acknowledge-not-ready`.
@@ -244,7 +244,7 @@ An AI agent (Claude Code, Codex or any other) can install Cicero for a user thro
 
 ### Keeping docs true
 The docs test extends `tests/onboarding-contract.test.ts`:
-- **Configs:** a fenced block opened with ```` ```yaml cicero-config ```` is a complete config and must pass config validation. Fragments use plain ```` ```yaml ```` and are not validated. This applies to `docs/setup.md`, `INSTALL.md` and `config.yaml.example`.
+- **Configs:** a fenced block opened with ```` ```yaml cicero-config ```` is a complete config and must pass config validation. Fragments use plain ```` ```yaml ```` and are not validated. This applies to `docs/setup.md` and `INSTALL.md`. `config.yaml.example` has no fences and is validated as a whole file.
 - **README assertion replaced:** the README no longer carries a config, so its quickstart-YAML assertion (`tests/onboarding-contract.test.ts:17`) is replaced by one checking that the README links `docs/setup.md`. The setup guide and example keep theirs.
 - **Step lists:** `docs/setup.md` and `INSTALL.md` must list the available (non-preview) step titles from `src/setup/steps.ts`, in order. The README lists none.
 
