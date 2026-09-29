@@ -88,9 +88,10 @@ program
 program
   .command("doctor")
   .description("Check the configured setup end-to-end (engines, venvs, brain binaries, web voice) with fix hints")
-  .action(async () => {
+  .option("--json", "Print { version, checks, fails, warns } as JSON")
+  .action(async (opts) => {
     const { runDoctor } = await import("./cli/doctor");
-    process.exit(await runDoctor());
+    process.exit(await runDoctor({ json: opts.json === true }));
   });
 
 program

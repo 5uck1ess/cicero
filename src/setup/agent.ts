@@ -1,4 +1,6 @@
 import { isKeylessHost } from "../backends/net";
+import { ACP_AGENTS, type AcpAgent } from "./acp-agents";
+export { ACP_AGENTS } from "./acp-agents";
 import { unsetEnvFor, type AccountsChoice } from "./accounts";
 import type { FrontDeskChoice } from "./frontdesk";
 import { contributeBrain, detectBrain, parseBrain, type PickerDeps } from "./pickers";
@@ -10,16 +12,6 @@ import type { StepContext } from "./steps";
  * front desk it writes `brain.escalate`, the agent the front desk hands a
  * "think hard" turn to. Only ACP agents can be escalation targets.
  */
-export interface AcpAgent { id: string; label: string; command: string[]; cloud: boolean; provider: string | null }
-
-// Commands verified with an ACP initialize on 2026-09-29 (docs/superpowers/plans/2026-09-29-setup-v2-verification.md).
-export const ACP_AGENTS: readonly AcpAgent[] = [
-  { id: "hermes", label: "Hermes", command: ["hermes", "acp"], cloud: false, provider: null },
-  { id: "codex-acp", label: "Codex (ACP adapter)", command: ["bunx", "@agentclientprotocol/codex-acp@2.0.0"], cloud: true, provider: "codex" },
-  { id: "claude-acp", label: "Claude Code (ACP adapter)", command: ["bunx", "@agentclientprotocol/claude-agent-acp@0.84.0"], cloud: true, provider: "claude" },
-  { id: "grok-acp", label: "Grok (ACP)", command: ["grok", "agent", "stdio"], cloud: true, provider: "grok" },
-];
-
 const CLOUD_CLIS: Record<string, string | null> = { "claude-code": "claude-code", codex: "codex", gemini: null, qwen: null };
 export const ALLOW_CLOUD_FIRST = "Allow this agent to use the cloud first";
 const ESCALATE_ACP_ONLY = "With a model front desk, the agent must be an ACP agent (or none)";

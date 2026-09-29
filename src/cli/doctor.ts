@@ -3,6 +3,7 @@ import { describeTextInjection } from "../platform/text-inject-run";
 import { join, dirname } from "node:path";
 import { loadConfig, type RuntimeConfig } from "../config";
 import { ciceroHome } from "../platform/paths";
+import { privacyChecks } from "../setup/privacy-checks";
 import { probeNvidiaGpu } from "../platform/gpu";
 import {
   findVenvPython,
@@ -1126,19 +1127,26 @@ export async function collectChecks(
         ? { name: "gpu", level: "warn", detail: "nvidia-smi did not return GPU status before exiting" }
         : { name: "gpu", level: "warn", detail: "nvidia-smi did not respond within its diagnostic deadline" });
 
+  // -- privacy policy (declared, not enforced on the network) ---------------
+  checks.push(...privacyChecks(config.raw));
+
   return checks;
 }
 
 const ICON: Record<Level, string> = { ok: "✓", warn: "⚠", fail: "✗" };
 
-export async function runDoctor(): Promise<number> {
-  const checks = await collectChecks();
+export async function runDoctor(options: { json?: boolean; write?: (line: string) => void; checks?: () => Promise<Check[]> } = {}): Promise<number> {
+  const checks = await (options.checks ?? collectChecks)();
+  const fails = checks.filter((c) => c.level === "fail").length;
+  const warns = checks.filter((c) => c.level === "warn").length;
+  if (options.json) {
+    (options.write ?? ((line) => process.stdout.write(`${line}\n`)))(JSON.stringify({ version: 1, checks, fails, warns }, null, 2));
+    return fails ? 1 : 0;
+  }
   for (const c of checks) {
     console.log(`  ${ICON[c.level]} ${c.name}: ${c.detail}`);
     if (c.hint && c.level !== "ok") console.log(`      fix: ${c.hint}`);
   }
-  const fails = checks.filter((c) => c.level === "fail").length;
-  const warns = checks.filter((c) => c.level === "warn").length;
   console.log(fails ? `\n${fails} problem(s), ${warns} warning(s).` : warns ? `\nNo blockers — ${warns} warning(s).` : "\nAll clear.");
   return fails ? 1 : 0;
 }
