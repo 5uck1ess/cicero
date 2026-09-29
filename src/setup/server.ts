@@ -28,7 +28,7 @@ function choiceLabel(choice: unknown): string | undefined {
   if (!choice || typeof choice !== "object") return undefined;
   const c = choice as { id?: unknown; mode?: unknown; kind?: unknown; useSubscription?: unknown; runtime?: unknown; preset?: unknown; model?: unknown };
   if (c.kind === "agent") return "An agent";
-  if (c.kind === "model" && typeof c.model === "string") return `${c.runtime === "cloud" ? c.preset : c.runtime}: ${c.model}`;
+  if ((c.kind === "model" || c.id === "model") && typeof c.model === "string") return `${c.runtime === "cloud" ? c.preset : c.runtime}: ${c.model}`;
   if (Array.isArray(c.useSubscription)) return c.useSubscription.length ? `Subscription: ${c.useSubscription.join(", ")}` : "As detected";
   return [c.id, c.mode, c.kind].find((value): value is string => typeof value === "string");
 }
@@ -222,7 +222,7 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
     const free = redactStateValue({ detected, providerModels, checks: safeChecks, checkGroups, existing, invalidated }, draftSecrets(draft)) as Record<string, unknown>;
     return {
       steps: SETUP_STEPS.map(({ id, title, explain, pipeline, available }) => ({ id, title, explain, pipeline, available })),
-      current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, choiceLabel(choice)])), privacyAllow: (choices.get("privacy") as { allow?: string[] } | undefined)?.allow ?? [], accountsChoice: (choices.get("accounts") as { useSubscription?: string[] } | undefined)?.useSubscription ?? null, frontdeskChoice: choices.get("frontdesk") ?? null, storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
+      current, system, tier: draft.deployment, ...free, selectedChoices: Object.fromEntries([...choices].map(([id, choice]) => [id, choiceLabel(choice)])), privacyAllow: (choices.get("privacy") as { allow?: string[] } | undefined)?.allow ?? [], accountsChoice: (choices.get("accounts") as { useSubscription?: string[] } | undefined)?.useSubscription ?? null, frontdeskChoice: choices.get("frontdesk") ?? null, helperChoice: choices.get("helper") ?? null, storedSecrets: Object.fromEntries([...choices].map(([id, choice]) => [id, Boolean(choice && typeof choice === "object" && ((choice as Record<string, unknown>).apiKey || (choice as Record<string, unknown>).api_key))])), yaml: redactStateValue(renderDraft(publicDraft(draft)), draftSecrets(draft)),
       written, finished, startCommand: handoff.startCommand, handoff,
       canWrite: !written && checkGroups !== null && checkGroups.blocking.length === 0 && existing.status === "missing",
       requiresNotReadyAcknowledgement: (checkGroups?.notReady.length ?? 0) > 0,

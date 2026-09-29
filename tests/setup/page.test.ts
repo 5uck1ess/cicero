@@ -71,3 +71,12 @@ test("the Front desk screen offers model or agent, never MLX, and a no-key cloud
   expect(page).toContain("api('/api/provider-models', { choice: { id: fields.preset.value } })");
   expect(page).not.toContain("id === 'provider'");
 });
+
+test("the Helper screen offers compaction, a skip note, and Laya only as a disabled Advanced row", () => {
+  const page = setupPage();
+  expect(page).toContain("if (view === 'helper') renderHelper(step);");
+  expect(page).toContain("Compress long conversations");
+  expect(page).toContain("say details");
+  expect(page).toContain("h('input', { type: 'radio', name: 'pick-helper-adv', disabled: true })");
+  expect(page).not.toContain("switchboard.intent_url'");
+});

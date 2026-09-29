@@ -102,6 +102,11 @@ test("detection: local mode disables cloud and lists install steps; cloud mode p
   expect(cloud.cloudKeys.xai).toBe("found");
   expect(cloud.cloudSuggestion).toBe("xai");
   expect(local.cloudSuggestion).toBeNull();
+  const cpu = await detectFrontDesk({ ...ctx("local"), system: fixtureSystem("cpu") }, { ...noAccounts, fetcher: down }, "python");
+  expect(cpu.fit).toBeNull();
+  expect(cpu.recommended).toBeNull();
+  expect(cpu.reason).toContain("Not sized for this machine");
+  expect(cpu.reason).toContain("ollama pull qwen3.5:0.8b");
   expect(JSON.stringify(cloud)).not.toContain("synthetic-marker");
 });
 

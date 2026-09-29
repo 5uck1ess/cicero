@@ -5,6 +5,7 @@ import { modelBudget, planFit, speechKind, type SpeechKind } from "./fit";
 import { isLocal } from "./privacy";
 import { detectAccounts, parseAccounts, type AccountsDetected } from "./accounts";
 import { contributeFrontDesk, detectFrontDesk, parseFrontDesk, probeFrontDesk, type FrontDeskChoice, type FrontDeskDetected } from "./frontdesk";
+import { contributeHelper, detectHelper, parseHelper, probeHelper, type HelperChoice, type HelperDetected } from "./helper";
 import { PRIVACY_COPY, PRIVACY_MODES, parsePrivacy, type PrivacyChoice } from "./privacy";
 
 export interface StepContext { system: SystemFacts; draft: SetupDraft; detected?: unknown; choices?: ReadonlyMap<string, unknown> }
@@ -58,6 +59,12 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     recommend(detected) { const d = detected as FrontDeskDetected; return { choice: d.recommended, reason: d.reason }; },
     parseChoice: parseFrontDesk, contribute(_ctx, c) { return contributeFrontDesk(c as FrontDeskChoice); },
     probeChoice(c, deps) { return probeFrontDesk(c as FrontDeskChoice, deps); } },
+  { id: "helper", title: "Helper", available: true, pipeline: "brain",
+    explain: info("A small local model that summarizes long replies and old conversation history.", "It keeps spoken replies short (\"say details\" for the rest) and lets long sessions continue without dropping context. In local privacy mode it is required.", "Lists the same local runtimes as Front desk. Your choice goes into web_voice.tldr, llm and brain.history_compaction.", "docs/setup.md"),
+    async detect(ctx, deps) { return detectHelper(ctx, deps, await plannedSpeechKind(ctx, deps)); },
+    recommend(detected) { const d = detected as HelperDetected; return { choice: d.recommended, reason: d.reason }; },
+    parseChoice: (raw, ctx) => parseHelper(raw, ctx), contribute(ctx, c) { return contributeHelper(ctx, c as HelperChoice); },
+    probeChoice(c, deps) { return probeHelper(c as HelperChoice, deps); } },
   { id: "stt", title: "Hear", available: true, pipeline: "stt",
     explain: info("Speech-to-text turns microphone audio into words.", "The hardware tier determines the starting engine; installed venvs and ports are shown.", "Only checks installation and port readiness. The engine choice goes into stt.", "docs/setup.md"),
     detect(ctx, deps) { return detectSpeech("stt", ctx, deps); },

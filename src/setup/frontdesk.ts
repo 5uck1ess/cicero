@@ -72,7 +72,8 @@ export async function detectFrontDesk(ctx: StepContext, deps: PickerDeps = {}, s
   const local = recommendLocal(runtimes, fit?.frontDesk ?? null, fit?.helper ?? null);
   const recommended: FrontDeskChoice | null = local.choice ? { kind: "model", ...local.choice } : null;
   const cloudSuggestion = mode === "cloud" ? CLOUD_PRESETS.find((id) => cloudKeys[id] === "found") ?? null : null;
-  const reason = cloudSuggestion ? `Your ${cloudSuggestion} key was found: load its models to use it, or keep ${recommended ? "the local model below" : "going once a local runtime runs"}. ${local.reason}` : local.reason;
+  const localReason = !fit && !recommended ? "Not sized for this machine. Start Ollama and run ollama pull qwen3.5:0.8b, then check again." : local.reason;
+  const reason = cloudSuggestion ? `Your ${cloudSuggestion} key was found: load its models to use it, or keep ${recommended ? "the local model below" : "going once a local runtime runs"}. ${localReason}` : localReason;
   const target = fit?.frontDesk ?? null;
   const install = target ? RUNTIME_IDS.filter((id) => !runtimes[id].running || !suggestListedModel(runtimes[id].models, target))
     .map((id) => ({ runtime: id, hint: installHint(id, target), ...(id === "llama-cpp" ? { entry: llamaSwapEntry(target) } : {}) })) : [];

@@ -136,6 +136,8 @@ details.why{margin:0 0 28px;max-width:720px}
 details.why summary{cursor:pointer;color:var(--accent-text);font-weight:600;padding:4px 0}
 details.why div{padding:12px 0 0;color:var(--muted)}
 details.why p{margin:0 0 10px}
+details.advanced{margin:0 0 20px;max-width:720px}
+details.advanced summary{cursor:pointer;color:var(--muted);font-weight:600;padding:4px 0}
 .cmd{display:flex;align-items:center;gap:10px;margin:8px 0 0;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-ctl);padding:8px 8px 8px 12px}
 .cmd code{flex:1;font:13.5px/1.5 var(--mono);overflow-x:auto;white-space:pre}
 .facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:20px 0;margin:0 0 32px}
@@ -199,12 +201,13 @@ var state = null;
 var view = 'overview';
 var app = document.getElementById('app');
 
-var ORDER = ['privacy', 'system', 'accounts', 'frontdesk', 'stt', 'tts', 'brain', 'board', 'review'];
+var ORDER = ['privacy', 'system', 'accounts', 'frontdesk', 'helper', 'stt', 'tts', 'brain', 'board', 'review'];
 var STEP = {
   privacy:  { short: 'Privacy', title: 'What may leave this machine?', lede: 'Choose what Cicero may send off this machine. Later steps ask before anything else leaves.', sub: 'Data policy' },
   system:   { short: 'Machine', title: 'This machine', lede: 'Cicero picks a starting preset from your hardware. You can change it.', sub: 'Runs everything' },
   accounts: { short: 'Accounts', title: 'Which accounts pay?', lede: 'Cicero checks which login or API key each agent will use. Nothing secret is read or stored.', sub: 'Logins and keys' },
   frontdesk:{ short: 'Front desk', title: 'What answers when you talk?', lede: 'A model answers in about a second and hands coding work to your agent. An agent answers everything itself, slower, with tools.', sub: 'Model or agent' },
+  helper:   { short: 'Helper', title: 'A small helper model', lede: 'It keeps spoken replies short and summarizes long conversations, on this machine.', sub: 'Summaries' },
   stt:      { short: 'Hear',    title: 'How should Cicero hear you?', lede: 'Speech-to-text turns your voice into words.', sub: 'Speech-to-text' },
   brain:    { short: 'Agent',   title: 'Which coding agent does the work?', lede: 'Cicero is the voice. Your agent reads code, runs tools and opens PRs.', sub: 'Coding agent' },
   tts:      { short: 'Speak',   title: 'How should Cicero speak?', lede: 'Text-to-speech turns replies into audio.', sub: 'Text-to-speech' },
@@ -614,6 +617,73 @@ function renderFrontDesk(step) {
   }, row));
   app.append(row);
 }
+function renderHelper(step) {
+  var f = state.detected || {};
+  var saved = state.helperChoice;
+  var rec = f.recommended;
+  var skip = saved ? saved.id === 'none' : !!(rec && rec.id === 'none');
+  var runtimeIds = ['llama-cpp', 'ollama', 'lm-studio'];
+  var runtime = (saved && saved.runtime) || (rec && rec.runtime) || runtimeIds.find(function (r) { return f.runtimes && f.runtimes[r] && f.runtimes[r].running; }) || 'ollama';
+  var fields = {};
+  var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: STEP.helper.title })]);
+  var detail = h('div');
+  [['model', 'Use a helper model', 'Recommended.'], ['none', 'Skip the helper', 'Long replies end with "say details" instead of a summary.']].forEach(function (o) {
+    var input = h('input', { type: 'radio', name: 'pick-helper', value: o[0] });
+    var off = o[0] === 'none' && f.disabled && f.disabled.none;
+    input.disabled = !!off;
+    input.checked = !off && (o[0] === 'none') === skip;
+    input.onchange = function () { skip = o[0] === 'none'; drawDetail(); };
+    group.append(h('label', { class: 'choice' }, [input, h('span', { class: 'name', text: o[1] }), h('span', { class: 'note', text: off ? off : o[2] })]));
+  });
+  function drawDetail() {
+    detail.replaceChildren(); fields = {};
+    (f.warnings || []).forEach(function (w) { detail.append(h('div', { class: 'panel warn', role: 'status' }, [h('p', { text: w })])); });
+    if (skip) { detail.append(h('p', { class: 'detail', text: 'Skipped. Your cloud front desk also runs the conversation; long replies end with "say details".' })); return; }
+    var box = h('div', { class: 'fields' });
+    var sel = h('select');
+    runtimeIds.forEach(function (r) {
+      var rt = f.runtimes && f.runtimes[r];
+      var o = h('option', { value: r, text: RUNTIME_NAMES[r] + (rt && rt.running ? ' (running, ' + rt.models.length + ' listed)' : ' (not running)') });
+      if (r === runtime) o.selected = true;
+      sel.append(o);
+    });
+    sel.onchange = function () { runtime = sel.value; drawDetail(); };
+    box.append(field('Runs on', sel));
+    var rt = f.runtimes && f.runtimes[runtime];
+    if (rt && rt.running && rt.models.length) {
+      fields.model = selectOf(rt.models, (saved && saved.runtime === runtime && saved.model) || (rec && rec.runtime === runtime && rec.model) || rt.models[0]);
+      box.append(field('Model', fields.model));
+      if (rec && rec.runtime === runtime) box.append(h('small', { text: 'Recommended: ' + rec.model }));
+    }
+    fields.compact = h('input', { type: 'checkbox' });
+    fields.compact.checked = saved && saved.id === 'model' ? saved.compact : true;
+    box.append(h('label', { class: 'check-inline' }, [fields.compact, document.createTextNode('Compress long conversations (summarize older turns instead of dropping them)')]));
+    var hp = f.fit && f.fit.helper;
+    detail.append(box, h('p', { class: 'detail', text: hp ? 'Fits this machine: ' + hp.label + ' (' + hp.footprintGb + ' GB, ' + hp.basis + '). Every fit is an estimate.' : f.fit ? f.fit.reason : 'Not sized for this machine: model sizing covers NVIDIA on Linux and Apple Silicon.' }));
+    if (f.reason) detail.append(h('p', { class: 'detail', text: f.reason }));
+    if (!rt || !rt.running) {
+      var panel = h('div', { class: 'panel warn' }, [h('h2', { text: RUNTIME_NAMES[runtime] + ' is not running' })]);
+      var again = h('div', { class: 'actions' });
+      again.append(button('Check again', 'small', async function () { state = await api('/api/step', { id: 'helper' }); render(); }, again));
+      panel.append(again); detail.append(panel);
+    }
+    var failed = blockedByProbe(state);
+    if (failed && tried.helper) detail.append(h('div', { class: 'panel warn', role: 'alert' }, [h('h2', { text: 'That check failed' }), h('p', { text: failed })]));
+  }
+  var adv = h('details', { class: 'advanced' }, [h('summary', { text: 'Advanced' }),
+    h('label', { class: 'choice' }, [h('input', { type: 'radio', name: 'pick-helper-adv', disabled: true }), h('span', { class: 'name', text: 'Laya router' }), h('span', { class: 'note', text: (f.disabled && f.disabled.laya) || '' })])]);
+  drawDetail();
+  app.append(group, detail, adv, why(step));
+  var row = h('div', { class: 'actions' });
+  row.append(button('Continue', 'primary', async function () {
+    var c = skip ? { id: 'none' } : { id: 'model', runtime: runtime, model: fields.model && fields.model.value, compact: fields.compact.checked };
+    tried.helper = true;
+    state = await api('/api/choice', { id: 'helper', choice: c });
+    if (blockedByProbe(state)) { render(); return; }
+    await go(next('helper'));
+  }, row));
+  app.append(row);
+}
 function invalidatedBanner() {
   var list = state.invalidated || [];
   if (!list.length) return null;
@@ -831,6 +901,7 @@ function render() {
   else if (view === 'system') renderSystem(step);
   else if (view === 'accounts') renderAccounts(step);
   else if (view === 'frontdesk') renderFrontDesk(step);
+  else if (view === 'helper') renderHelper(step);
   else if (view === 'review') renderReview(step);
   else renderPicker(view, step);
 }
