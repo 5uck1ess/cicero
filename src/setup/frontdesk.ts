@@ -38,7 +38,7 @@ function text(value: unknown, name: string, max = 200): string {
 /** The fit plan for the current draft; null outside the part 1 hardware scope. */
 export function fitFor(ctx: StepContext, speech: Parameters<typeof modelBudget>[1]): FitPlan | null {
   const budget = modelBudget(ctx.system, speech);
-  return budget ? planFit(budget.budgetGb, isLocal(ctx) ? "local" : "cloud") : null;
+  return budget ? planFit(budget.budgetGb, isLocal(ctx) ? "local" : "cloud", budget.platform) : null;
 }
 
 /**
@@ -104,7 +104,7 @@ export async function detectFrontDesk(ctx: StepContext, deps: PickerDeps = {}, s
   const target = fit?.frontDesk ?? null;
   const install = target ? RUNTIME_IDS.filter((id) => !runtimes[id].running || !suggestListedModel(runtimes[id].models, target))
     .map((id) => ({ runtime: id, hint: installHint(id, target), ...(id === "llama-cpp" ? { entry: llamaSwapEntry(target) } : {}) })) : [];
-  return { mode, runtimes, cloudPresets: CLOUD_PRESETS, cloudKeys, fit, recommended, cloudSuggestion, reason, install, disabled: mode === "local" ? { cloud: LOCAL_ONLY } : {} };
+  return { mode, runtimes, cloudPresets: CLOUD_PRESETS, cloudKeys, fit, recommended, cloudSuggestion, reason, install, disabled: mode === "local" ? { cloud: LOCAL_ONLY, ...(tooSmall ? { model: fit!.reason } : {}) } : {} };
 }
 
 export function parseFrontDesk(raw: unknown, ctx: StepContext, deps: PickerDeps = {}): FrontDeskChoice {

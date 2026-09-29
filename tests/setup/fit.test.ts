@@ -19,6 +19,13 @@ test.each([
   expect(plan.frontDeskReusesHelper).toBe(reuse);
 });
 
+test("footprints measured on CUDA are labeled estimates on a Mac", () => {
+  expect(planFit(19, "local", "cuda").helper?.basis).toBe("measured");
+  const mac = planFit(36.4, "local", "mlx");
+  expect([mac.helper?.basis, mac.frontDesk?.basis]).toEqual(["estimate", "estimate"]);
+  expect(byId("e4b").basis).toBe("measured");
+});
+
 test("front desk fits exactly at the boundary (15 of 15 GB left)", () => {
   expect(planFit(19, "local").frontDesk?.id).toBe("26b-a4b");
   expect(planFit(18.99, "local").frontDesk?.id).toBe("12b");

@@ -216,7 +216,9 @@ and a Cancel button:
 - **Helper:** one summary.
 - **Speak:** use **Play sample** on the Speak step; the browser plays it.
 - **Memory:** on NVIDIA, measures what each engine and model really uses with
-  `nvidia-smi` and replaces the estimates. Mac memory stays an estimate.
+  `nvidia-smi` and shows it in the Memory row, next to the Machine bar's
+  fit-table values. Mac memory is not measured, and its fit is labeled an
+  estimate.
 
 A later choice clears the results. Failures never block saving.
 

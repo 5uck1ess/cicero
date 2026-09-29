@@ -28,6 +28,7 @@ test("local mode on a machine too small for E2B: no local model front desk; an a
   const detected = await detectFrontDesk(small, { ...noAccounts, fetcher }, "python");
   expect(detected.recommended).toBeNull();
   expect(detected.reason).toContain("cannot hold even Gemma 4 E2B");
+  expect(detected.disabled.model).toContain("cannot hold even Gemma 4 E2B");
   const withDetected = ctx("local", { system: fixtureSystem("cuda4"), detected });
   expect(() => parseFrontDesk({ kind: "model", runtime: "ollama", model: "gemma4:e4b-it-qat" }, withDetected)).toThrow("cannot hold even Gemma 4 E2B");
   expect(parseFrontDesk({ kind: "agent" }, withDetected)).toEqual({ kind: "agent" });

@@ -43,7 +43,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     async detect(ctx, deps) {
       const kind = await plannedSpeechKind(ctx, deps);
       const budget = modelBudget(ctx.system, kind);
-      return { ...ctx.system, budget, fit: budget ? planFit(budget.budgetGb, isLocal(ctx) ? "local" : "cloud") : null };
+      return { ...ctx.system, budget, fit: budget ? planFit(budget.budgetGb, isLocal(ctx) ? "local" : "cloud", budget.platform) : null };
     },
     recommend(_detected, { system }) { return { choice: system.recommendedTier, reason: system.reason }; },
     parseChoice(raw) { if (!["local-mlx", "local-cuda", "local-cpu"].includes(raw as string)) throw new Error("Choose a supported tier"); return raw as Tier; },

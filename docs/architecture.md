@@ -63,8 +63,8 @@ flowchart TB
 
 The footprints come from the wizard's fit table. On NVIDIA, the Test step
 measures what each engine and model actually uses with `nvidia-smi` and
-replaces the estimates. Mac memory is not measured yet, so Mac values stay
-estimates, and agents are never started during setup, so their footprint is
+shows those numbers in its Memory row, next to the fit-table values. Footprints
+are measured on NVIDIA only; on a Mac every value is labeled an estimate, and agents are never started during setup, so their footprint is
 unknown.
 
 ## Components

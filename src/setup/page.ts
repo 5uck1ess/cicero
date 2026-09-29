@@ -543,11 +543,15 @@ function renderFrontDesk(step) {
   var group = h('fieldset', { class: 'choices' }, [h('legend', { class: 'sr', text: STEP.frontdesk.title })]);
   var detail = h('div');
   var fields = {};
+  var helperChoice = state.selectedChoices && state.selectedChoices.helper;
+  var off = { model: f.disabled && f.disabled.model, agent: helperChoice && helperChoice.id === 'none' ? 'A no-helper setup needs a model front desk. Pick a helper first to use an agent.' : '' };
+  if (off[kind]) kind = kind === 'model' ? 'agent' : 'model';
   [['model', 'A model', 'Fast, no tools. Recommended.'], ['agent', 'An agent', 'Slower, can use tools. The Agent step picks which one.']].forEach(function (o) {
     var input = h('input', { type: 'radio', name: 'pick-frontdesk', value: o[0] });
-    input.checked = o[0] === kind;
+    input.disabled = !!off[o[0]];
+    input.checked = !input.disabled && o[0] === kind;
     input.onchange = function () { kind = o[0]; drawDetail(); };
-    group.append(h('label', { class: 'choice' }, [input, h('span', { class: 'name', text: o[1] }), h('span', { class: 'note', text: o[2] }), o[0] === 'model' ? h('span', { class: 'badge', text: 'Recommended' }) : null]));
+    group.append(h('label', { class: 'choice' }, [input, h('span', { class: 'name', text: o[1] }), h('span', { class: 'note', text: off[o[0]] ? off[o[0]] + ' ' + o[2] : o[2] }), o[0] === 'model' && !off.model ? h('span', { class: 'badge', text: 'Recommended' }) : null]));
   });
   function fitLine() {
     if (!f.fit) return h('p', { class: 'detail', text: 'Not sized for this machine: model sizing covers NVIDIA on Linux and Apple Silicon. A small model such as qwen3.5:0.8b in Ollama is a safe start.' });
@@ -764,7 +768,7 @@ function renderPicker(id, step) {
   function realId() { return extra && picked === extra.key ? extra.value : picked; }
   function draw() {
     group.querySelectorAll('.choice').forEach(function (n) { n.remove(); });
-    options.concat(Object.keys(f.disabled || {})).forEach(function (o) {
+    options.concat(Object.keys(f.disabled || {}).filter(function (o) { return options.indexOf(o) < 0; })).forEach(function (o) {
       var input = h('input', { type: 'radio', name: 'pick-' + id, value: o });
       input.disabled = !!(f.disabled && f.disabled[o]) || (id === 'board' && o !== 'none' && !allowBoard.checked);
       input.checked = !input.disabled && o === picked;
@@ -772,7 +776,7 @@ function renderPicker(id, step) {
       var s = stateLabel(o, f);
       var rt = f.runtimes && f.runtimes[o];
       var note = o === 'audiocpp' ? (id === 'stt' ? 'Fast, accurate English ASR with Nemotron’s streaming model on an NVIDIA GPU; needs the audio.cpp build.' : 'Voice cloning on an NVIDIA GPU; needs the audio.cpp build.') : (NOTES[o] || '');
-      if (input.disabled) note = f.disabled[o] + ' ' + note;
+      if (input.disabled) note = ((f.disabled && f.disabled[o]) || 'Tick the allowance above first.') + ' ' + note;
       if (rt && rt.running && rt.models && rt.models.length) note += ' ' + rt.models.length + ' models loaded.';
       group.append(h('label', { class: 'choice' }, [input,
         s ? h('span', { class: 'state' + (s[1] ? ' on' : '') }, [h('i'), document.createTextNode(s[0])]) : null,
