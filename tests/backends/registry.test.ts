@@ -130,9 +130,9 @@ describe("createProviders", () => {
   test("throws for unimplemented backends", () => {
     const config = loadConfig();
     Object.defineProperty(config, 'sttBackend', {
-      get: () => ({ backend: "deepgram" }),
+      get: () => ({ backend: "nemotron" }),
     });
-    expect(() => createProviders(config)).toThrow("stt.backend='deepgram' is not implemented");
+    expect(() => createProviders(config)).toThrow("stt.backend='nemotron' is not implemented");
     expect(() => createProviders(config)).toThrow("valid values for stt.backend");
   });
 
@@ -142,7 +142,7 @@ describe("createProviders", () => {
       get: () => ({ backend: "faster-whispr" }),
     });
     expect(() => createProviders(config)).toThrow("stt.backend='faster-whispr' is unsupported");
-    expect(() => createProviders(config)).toThrow("valid values for stt.backend: mlx-whisper, faster-whisper, audiocpp, wyoming");
+    expect(() => createProviders(config)).toThrow("valid values for stt.backend: mlx-whisper, faster-whisper, audiocpp, wyoming, soniox, deepgram, openai, groq, mistral");
 
     const ttsConfig = loadConfig();
     Object.defineProperty(ttsConfig, 'ttsBackend', {

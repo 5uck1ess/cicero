@@ -9,6 +9,8 @@ import { audioCppLocalRuntimePaths } from "../backends/tts/audiocpp";
 import { runBoundedCommand } from "../process/bounded-command";
 import { AUDIOCPP_MODELS, AUDIOCPP_PORT, audioCppModelPath } from "./audiocpp";
 import type { StepContext } from "./steps";
+import { CLOUD_SPEECH_BACKENDS, cloudSpeechBackend, cloudSpeechIds } from "../backends/cloud-speech";
+import { withAllowance } from "./privacy";
 
 export interface PickerDeps {
   fetcher?: typeof fetch;
@@ -212,14 +214,33 @@ export async function defaultPortProbe(hostname: string, number: number): Promis
     socket.once("connect", () => done(true)); socket.once("error", () => done(false));
   });
 }
-/** Both privacy modes keep speech on this machine; the wizard enforces that once a mode is declared. */
-export const SPEECH_LOCAL = "Speech stays on this machine in both privacy modes";
+/** Local speech engines keep audio on this machine; a cloud engine adds the "speech" allowance. */
+export const SPEECH_LOCAL = "Local speech engines keep audio on this machine";
 const speechLocal = (ctx: StepContext) => Boolean(ctx.draft.privacy);
 const localSpeechHost = (h: string) => isLoopbackHost(h);
 const VENV: Record<string, string> = { "faster-whisper": ".venv-stt", "mlx-whisper": ".venv", kokoro: ".venv-kokoro", "pocket-tts": ".venv-pocket", "mlx-audio": ".venv" };
+function localSpeechOptions(kind: "stt" | "tts", ctx: StepContext): string[] {
+  return kind === "stt" ? ["faster-whisper", ...(mlx(ctx) ? ["mlx-whisper"] : []), "wyoming", ...(cuda(ctx) ? ["audiocpp"] : [])]
+    : ["kokoro", "pocket-tts", ...(cuda(ctx) ? ["audiocpp"] : []), ...(mlx(ctx) ? ["mlx-audio"] : []), "wyoming"];
+}
+/** Every option the Hear/Speak step offers: local engines first, then cloud services. */
+function speechOptions(kind: "stt" | "tts", ctx: StepContext): string[] {
+  return [...localSpeechOptions(kind, ctx), ...cloudSpeechIds(kind)];
+}
+/** What the page needs to draw a cloud option. A key is reported only as found / not found. */
+export interface CloudSpeechOption {
+  label: string; note: string; apiKeyEnv: string; keyInEnv: boolean; consoleUrl: string;
+  egressHost: string; models: readonly string[]; defaultModel: string; defaultVoice?: string; liveStream: boolean;
+}
+export function cloudSpeechOptions(kind: "stt" | "tts", env: Record<string, string | undefined> = process.env): Record<string, CloudSpeechOption> {
+  return Object.fromEntries(CLOUD_SPEECH_BACKENDS.filter((entry) => entry.role === kind).map((entry) => [entry.id, {
+    label: entry.label, note: entry.note, apiKeyEnv: entry.apiKeyEnv, keyInEnv: Boolean(env[entry.apiKeyEnv]),
+    consoleUrl: entry.consoleUrl, egressHost: entry.egressHost, models: entry.models, defaultModel: entry.defaultModel,
+    ...(entry.defaultVoice ? { defaultVoice: entry.defaultVoice } : {}), liveStream: entry.liveStream === true,
+  }]));
+}
 export async function detectSpeech(kind: "stt" | "tts", ctx: StepContext, deps: PickerDeps = {}) {
-  const options = kind === "stt" ? ["faster-whisper", ...(mlx(ctx) ? ["mlx-whisper"] : []), "wyoming", ...(cuda(ctx) ? ["audiocpp"] : [])]
-    : ["kokoro", "pocket-tts", ...(cuda(ctx) ? ["audiocpp"] : []), ...(mlx(ctx) ? ["mlx-audio"] : []), "elevenlabs", "wyoming"];
+  const options = speechOptions(kind, ctx);
   const root = deps.checkout ?? join(import.meta.dir, "..", "..");
   const exists = deps.exists ?? existsSync;
   const portByBackend: Record<string, number> = { "faster-whisper": 8083, "mlx-whisper": 8083, audiocpp: AUDIOCPP_PORT, kokoro: 8082, "pocket-tts": 8082, "mlx-audio": 8082 };
@@ -239,22 +260,35 @@ export async function detectSpeech(kind: "stt" | "tts", ctx: StepContext, deps: 
   const audio = status.audiocpp;
   const ready = ctx.draft.deployment === "local-cuda" && audio?.installed && audio.modelPresent && (!audio.running || audio.modelLoaded === true);
   const recommended = ready ? "audiocpp" : kind === "stt" ? mlx(ctx) ? "mlx-whisper" : "faster-whisper" : mlx(ctx) ? "mlx-audio" : "kokoro";
-  const disabled: Record<string, string> = speechLocal(ctx) && kind === "tts" ? { elevenlabs: `${SPEECH_LOCAL}; ElevenLabs is a cloud service.` } : {};
-  return { options, recommended, status, reason: ctx.draft.deployment + " tier", disabled };
+  return { options, recommended, status, reason: ctx.draft.deployment + " tier", disabled: {}, cloudSpeech: cloudSpeechOptions(kind, deps.env ?? process.env) };
 }
-export function parseSpeech(kind: "stt" | "tts", raw: unknown, ctx: StepContext) {
+export type SpeechChoice =
+  | { id: string; host?: string; port?: number; streaming?: boolean; cloud?: false }
+  | { id: string; cloud: true; apiKey?: string; model?: string; voice?: string; language?: string };
+export function parseSpeech(kind: "stt" | "tts", raw: unknown, ctx: StepContext, deps: PickerDeps = {}): SpeechChoice {
   const c = choice(raw);
-  const allowed = kind === "stt" ? ["faster-whisper", ...(mlx(ctx) ? ["mlx-whisper"] : []), "wyoming", ...(cuda(ctx) ? ["audiocpp"] : [])]
-    : ["kokoro", "pocket-tts", ...(cuda(ctx) ? ["audiocpp"] : []), ...(mlx(ctx) ? ["mlx-audio"] : []), "elevenlabs", "wyoming"];
-  const id = member(c.id, allowed, kind.toUpperCase());
+  const id = member(c.id, speechOptions(kind, ctx), kind.toUpperCase());
   if (id === "wyoming") {
     const h = host(c.host);
     if (speechLocal(ctx) && !localSpeechHost(h)) throw new Error(`${SPEECH_LOCAL}: use a Wyoming server on localhost`);
     return { id, host: h, port: port(c.port) };
   }
-  if (id === "elevenlabs") {
-    if (speechLocal(ctx)) throw new Error(`${SPEECH_LOCAL}; ElevenLabs is a cloud service`);
-    return { id, apiKey: field(c.apiKey, "ElevenLabs API key", 1024) };
+  const cloud = cloudSpeechBackend(kind, id);
+  if (cloud) {
+    // A key typed here is written into config.yaml (owner-only); a blank one
+    // means the daemon reads the provider's environment variable instead.
+    const apiKey = optional(c.apiKey, `${cloud.label} API key`, 1024);
+    if (!apiKey && !(deps.env ?? process.env)[cloud.apiKeyEnv]) {
+      throw new Error(`Enter a ${cloud.label} API key, or set ${cloud.apiKeyEnv} before running setup`);
+    }
+    const chosenModel = optional(c.model, "model", 200);
+    const voice = kind === "tts" ? optional(c.voice, "voice", 200) : undefined;
+    return {
+      id, cloud: true,
+      ...(apiKey ? { apiKey } : {}),
+      ...(chosenModel && chosenModel !== cloud.defaultModel ? { model: chosenModel } : {}),
+      ...(voice ? { voice } : {}),
+    };
   }
   if (kind === "stt" && id === "audiocpp") {
     if (c.streaming !== undefined && typeof c.streaming !== "boolean") throw new Error("Streaming must be a checkbox choice");
@@ -262,9 +296,13 @@ export function parseSpeech(kind: "stt" | "tts", raw: unknown, ctx: StepContext)
   }
   return { id };
 }
-export function contributeSpeech(kind: "stt" | "tts", c: ReturnType<typeof parseSpeech>) {
-  if (c.id === "elevenlabs") return { tts: { backend: c.id, apiKey: c.apiKey } };
+export function contributeSpeech(kind: "stt" | "tts", c: SpeechChoice, ctx?: StepContext) {
+  if (c.cloud) {
+    const { id, cloud: _cloud, ...rest } = c;
+    // Choosing a cloud engine is the operator's allowance for speech to leave the machine.
+    return { [kind]: { backend: id, ...rest }, ...(ctx ? withAllowance(ctx, "speech") : {}) };
+  }
   if (c.id === "audiocpp") return { [kind]: { backend: c.id, port: AUDIOCPP_PORT, model: AUDIOCPP_MODELS[kind].id,
-    ...(kind === "stt" && "streaming" in c && c.streaming === true ? { streaming: true } : {}) } };
+    ...(kind === "stt" && c.streaming === true ? { streaming: true } : {}) } };
   return { [kind]: { backend: c.id, ...(c.id === "wyoming" ? { host: c.host, port: c.port } : {}) } };
 }

@@ -10,11 +10,12 @@ export const PRIVACY_COPY: Record<Allowance, string> = {
   agent: "A cloud coding agent (Claude Code, Codex, Grok) sends your prompts and the code it reads to that company.",
   telegram: "Telegram carries message text.",
   board: "A hosted task board holds task text.",
+  speech: "A cloud speech service hears your microphone audio or speaks reply text.",
 };
 
 export const PRIVACY_MODES: Record<PrivacyMode, { title: string; detail: string }> = {
-  local: { title: "Nothing, unless I allow it", detail: "The front desk, helper and speech run on this machine. Anything else that reaches the network needs its own allowance." },
-  cloud: { title: "Conversation may use cloud models", detail: "The front desk and agents may be cloud services; the helper and speech stay local. Telegram and task boards still need their own allowance." },
+  local: { title: "Nothing, unless I allow it", detail: "The front desk, helper and speech run on this machine. Anything else that reaches the network, including a cloud speech service, needs its own allowance." },
+  cloud: { title: "Conversation may use cloud models", detail: "The front desk and agents may be cloud services; the helper stays local. Cloud speech, Telegram and task boards still need their own allowance." },
 };
 
 export function parsePrivacy(raw: unknown): PrivacyChoice {

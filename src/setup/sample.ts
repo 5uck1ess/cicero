@@ -2,11 +2,14 @@ import { buildTTSProvider } from "../backends/registry";
 import { ttsDefaultPort, type TTSProvider, type TTSProviderConfig } from "../backends/tts/provider";
 import { engineVenvHint } from "../cli/doctor";
 import { defaultPortProbe, type PickerDeps } from "./pickers";
+import { cloudSpeechBackend } from "../backends/cloud-speech";
 
 /**
  * One sentence spoken by a TTS engine that is already running. It never
  * calls start(), so it never launches an engine; a closed port is reported
- * as "not running" with the command that installs it.
+ * as "not running" with the command that installs it. A cloud voice has no
+ * port: pressing "Play sample" on one is the operator's explicit request to
+ * send the sample sentence to that provider.
  */
 export const SAMPLE_SENTENCE = "Hello, I'm Cicero. This is how I sound.";
 export const SAMPLE_MAX_BYTES = 2 * 1024 * 1024;
@@ -35,12 +38,15 @@ export function engineStartCommand(backend: string): string | undefined {
 
 export async function synthesizeSample(tts: TTSProviderConfig, opts: SampleOptions): Promise<SynthResult> {
   const backend = String(tts.backend ?? "");
-  if (backend === "elevenlabs") return { ok: false, state: "failed", message: "Sample unavailable for this engine: it is a cloud voice, and setup sends nothing off this machine." };
+  const cloud = cloudSpeechBackend("tts", backend);
+  if (cloud && backend === "elevenlabs" && !tts.voice) {
+    return { ok: false, state: "failed", message: "Add an ElevenLabs voice first (cicero voice add … --provider elevenlabs); the sample needs a voice ID." };
+  }
   const host = tts.host ?? (backend === "wyoming" ? "127.0.0.1" : "localhost");
   const port = tts.port ?? ttsDefaultPort(backend);
-  if (!port) return { ok: false, state: "failed", message: "Sample unavailable for this engine" };
+  if (!port && !cloud) return { ok: false, state: "failed", message: "Sample unavailable for this engine" };
   if (opts.signal.aborted) return { ok: false, state: "cancelled", message: "Sample cancelled" };
-  if (!(await (opts.deps?.probePort ?? defaultPortProbe)(host, port))) {
+  if (!cloud && !(await (opts.deps?.probePort ?? defaultPortProbe)(host, port!))) {
     const startCommand = engineStartCommand(backend);
     return { ok: false, state: "not running", message: `Nothing is listening on ${host}:${port}. Cicero starts this engine when it runs; install it first if needed.`, ...(startCommand ? { startCommand } : {}) };
   }

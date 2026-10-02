@@ -3,7 +3,7 @@ import type { BoardPreset } from "./notify/board-presets";
 // Core types for Cicero voice assistant
 
 /** Declared data-egress policy written by the setup wizard; doctor warns on violations. */
-export interface PrivacyConfig { mode: "local" | "cloud"; allow?: ("agent" | "telegram" | "board")[] }
+export interface PrivacyConfig { mode: "local" | "cloud"; allow?: ("agent" | "telegram" | "board" | "speech")[] }
 
 export interface CiceroConfig {
   privacy?: PrivacyConfig;
@@ -257,6 +257,7 @@ export interface STTBackendConfig extends BackendConfig {
   compute_type?: string; // engine quantization knob (faster-whisper/CTranslate2: float16 | int8_float16 | int8)
   language?: string; // explicit recognition language, where supported
   vocabulary?: string[]; // pronunciation hints; backend support varies
+  apiKey?: string; // inline key for a cloud STT backend (soniox, deepgram, openai, groq, mistral)
 }
 
 export interface TTSBackendConfig extends BackendConfig {
@@ -264,7 +265,8 @@ export interface TTSBackendConfig extends BackendConfig {
   voice?: string;
   refAudio?: string;
   refText?: string;
-  apiKey?: string; // inline key for a supported cloud TTS backend (currently ElevenLabs)
+  apiKey?: string; // inline key for a cloud TTS backend (elevenlabs, soniox)
+  language?: string; // synthesis language for cloud voices that need one (soniox)
   responseTimeoutMs?: number;
   maxAudioBytes?: number;
 }

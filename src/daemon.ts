@@ -69,6 +69,7 @@ import {
   type SwapResult,
   type SwapRole,
 } from "./runtime-control";
+import { cloudSpeechBackend } from "./backends/cloud-speech";
 import { OPENAI_COMPATIBLE_BACKENDS, resolveOpenAiTarget } from "./backends/llm/openai";
 import type { LLMProviderConfig } from "./backends/llm/provider";
 import {
@@ -901,13 +902,20 @@ export class CiceroDaemon {
       addEnv(resolveOpenAiTarget(classifier).apiKeyEnv);
     }
     addHeaderValues(classifier?.extraHeaders);
-    add(this.config.ttsBackend?.apiKey);
-    add(this.config.ttsFallbackBackend?.apiKey);
-    // ElevenLabs resolves its key from ELEVENLABS_API_KEY when no inline key is
-    // configured (src/backends/tts/elevenlabs.ts) — mirror that resolution so the
-    // live credential is in the set either way.
-    if (this.config.ttsBackend?.backend === "elevenlabs" || this.config.ttsFallbackBackend?.backend === "elevenlabs") {
-      add(process.env.ELEVENLABS_API_KEY);
+    // Cloud speech backends resolve their key from config or from their own
+    // environment variable (src/backends/cloud-speech.ts) — mirror that
+    // resolution for every speech seat so the live credential is in the set
+    // either way.
+    const speechSeats = [
+      ["stt", this.config.sttBackend],
+      ["stt_fallback", this.config.sttFallbackBackend],
+      ["tts", this.config.ttsBackend],
+      ["tts_fallback", this.config.ttsFallbackBackend],
+    ] as const;
+    for (const [role, seat] of speechSeats) {
+      add(seat?.apiKey);
+      const cloud = cloudSpeechBackend(role, seat?.backend);
+      if (cloud) addEnv(cloud.apiKeyEnv);
     }
 
     return [...secrets];

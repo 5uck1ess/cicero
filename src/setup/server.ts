@@ -9,6 +9,7 @@ import { classifySetupChecks } from "./checks";
 import { setupPage } from "./page";
 import { SETUP_STEPS } from "./steps";
 import { detectSystem, type SystemDeps, type SystemFacts } from "./system";
+import { checkCloudSpeechKey, CLOUD_SPEECH_KEY_VARIABLES, cloudSpeechApiKey, cloudSpeechBackend } from "../backends/cloud-speech";
 import { contributeSpeech, parseSpeech, probeRemoteProviderModels, type PickerDeps, type ProviderModelList } from "./pickers";
 import { synthesizeSample } from "./sample";
 import { PROBE_IDS, PROBE_TIMEOUT_MS, PROBES, type ProbeId, type ProbeResult } from "./probes";
@@ -78,7 +79,7 @@ export function redactStateValue(value: unknown, secrets: readonly string[]): un
 }
 
 // Every provider key variable a setup step may read from Cicero's environment.
-const KEY_VARIABLES = [...new Set([...OPENAI_COMPATIBLE_BACKENDS.map((id) => resolveOpenAiTarget({ backend: id }).apiKeyEnv), "ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY"])];
+const KEY_VARIABLES = [...new Set([...OPENAI_COMPATIBLE_BACKENDS.map((id) => resolveOpenAiTarget({ backend: id }).apiKeyEnv), "ANTHROPIC_API_KEY", ...CLOUD_SPEECH_KEY_VARIABLES])];
 
 /** API-key values present in the environment (8+ chars), so output can redact keys the wizard never saw typed. */
 export function envSecrets(env: Record<string, string | undefined> = process.env): string[] {
@@ -283,6 +284,11 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
       requiresNotReadyAcknowledgement: (checkGroups?.notReady.length ?? 0) > 0,
     };
   };
+  /** The cloud speech key already chosen for this engine in this session, if any. */
+  const savedSpeechKey = (kind: "stt" | "tts", id: string): string | undefined => {
+    const seat = (session.draft as Record<string, unknown>)[kind] as { backend?: unknown; apiKey?: unknown } | undefined;
+    return seat && seat.backend === id && typeof seat.apiKey === "string" && seat.apiKey ? seat.apiKey : undefined;
+  };
   let server: ReturnType<typeof Bun.serve>;
   server = (options.serve ?? Bun.serve)({
     hostname: options.hostname ?? (lan ? "0.0.0.0" : "127.0.0.1"),
@@ -331,8 +337,26 @@ export async function startSetupServer(options: SetupServerOptions): Promise<Set
           sample?.abort();
           return reply({ ok: true });
         }
+        if (url.pathname === "/api/speech-key") {
+          // "Test key": prove a cloud speech key with the provider's free, read-only
+          // probe. The key is sent only to that provider and never comes back.
+          const kind = data.kind === "stt" || data.kind === "tts" ? data.kind : null;
+          const cloud = kind ? cloudSpeechBackend(kind, typeof data.id === "string" ? data.id : undefined) : null;
+          if (!kind || !cloud) return reply({ error: "Unknown cloud speech engine" }, 400);
+          const typed = typeof data.apiKey === "string" && data.apiKey.trim() ? data.apiKey.trim().slice(0, 1024) : undefined;
+          const key = cloudSpeechApiKey(cloud, typed ?? savedSpeechKey(kind, cloud.id), options.pickerDeps?.env ?? process.env);
+          const result = await checkCloudSpeechKey(cloud, key, { fetcher: options.pickerDeps?.fetcher, signal: closed.signal });
+          return reply(result.ok ? { ok: true, message: `${cloud.label} accepted the key.` } : { ok: false, message: result.reason });
+        }
         if (url.pathname === "/api/sample") {
-          const tts = (contributeSpeech("tts", parseSpeech("tts", data.tts, session.context())) as { tts: TTSProviderConfig }).tts;
+          const rawTts = data.tts && typeof data.tts === "object" && !Array.isArray(data.tts) ? { ...(data.tts as Record<string, unknown>) } : data.tts;
+          // A cloud voice may use the key saved earlier in this session; it is never sent back to the page.
+          if (rawTts && typeof rawTts === "object" && !(rawTts as { apiKey?: unknown }).apiKey) {
+            const id = (rawTts as { id?: unknown }).id;
+            const saved = typeof id === "string" && cloudSpeechBackend("tts", id) ? savedSpeechKey("tts", id) : undefined;
+            if (saved) (rawTts as Record<string, unknown>).apiKey = saved;
+          }
+          const tts = (contributeSpeech("tts", parseSpeech("tts", rawTts, session.context(), options.pickerDeps)) as { tts: TTSProviderConfig }).tts;
           sample?.abort();
           const controller = new AbortController();
           sample = controller;

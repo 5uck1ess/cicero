@@ -80,9 +80,9 @@ test("the Agent screen explains think-hard escalation and asks before a cloud ag
   expect(page).toContain("No agent (talk only)");
 });
 
-test("Speak offers Play sample only for running local engines", () => {
+test("Speak offers Play sample for running local engines and cloud voices with a key", () => {
   const page = setupPage();
-  expect(page).toContain("if (id === 'tts' && o !== 'elevenlabs' && engine && engine.running)");
+  expect(page).toContain("if (id === 'tts' && o !== 'elevenlabs' && (cloudSpeech || (engine && engine.running)))");
   expect(page).toContain("api('/api/sample', { tts: tts })");
   expect(page).toContain("new Audio('data:' + r.mime + ';base64,' + r.audio).play()");
 });

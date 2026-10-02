@@ -1,3 +1,4 @@
+import { cloudSpeechBackend } from "../backends/cloud-speech";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildSTTProvider } from "../backends/registry";
@@ -119,8 +120,10 @@ export function probeHear(config: Config, o: ProbeOptions): Promise<ProbeResult>
     const backend = str(stt.backend) ?? "";
     const host = str(stt.host) ?? (backend === "wyoming" ? "127.0.0.1" : "localhost");
     const port = typeof stt.port === "number" ? stt.port : sttDefaultPort(backend);
-    if (!port) return { id: "hear", state: "failed", message: `No test for the ${backend || "unset"} speech engine` };
-    if (!(await (deps.probePort ?? defaultPortProbe)(host, port))) {
+    // A cloud recognizer has no port; pressing Test sends the test clip to that provider.
+    const cloud = cloudSpeechBackend("stt", backend) !== null;
+    if (!port && !cloud) return { id: "hear", state: "failed", message: `No test for the ${backend || "unset"} speech engine` };
+    if (!cloud && !(await (deps.probePort ?? defaultPortProbe)(host, port!))) {
       const startCommand = engineStartCommand(backend);
       return { id: "hear", state: "not running", message: `Nothing is listening on ${host}:${port}. Cicero starts this engine when it runs.`, ...(startCommand ? { startCommand } : {}) };
     }

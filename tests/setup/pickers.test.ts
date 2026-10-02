@@ -37,18 +37,31 @@ test("each picker parses valid input and rejects malformed input", () => {
   for (const bad of ["http://localhost", "bad host", "999.999.999.999", "x".repeat(254)]) expect(() => parseSpeech("stt", { id: "wyoming", host: bad, port: 10300 }, c)).toThrow();
   expect(() => parseSpeech("stt", { id: "wyoming", host: "localhost", port: 70000 }, c)).toThrow();
   expect(() => parseSpeech("stt", { id: "audiocpp" }, c)).toThrow();
-  expect(parseSpeech("tts", { id: "elevenlabs", apiKey: "synthetic-key" }, c).id).toBe("elevenlabs");
-  expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "" }, c)).toThrow();
-  expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "x".repeat(1025) }, c)).toThrow();
-  // With a declared privacy mode (always, in the wizard), speech stays on this machine in both modes.
+  const noEnv = { env: {} };
+  expect(parseSpeech("tts", { id: "elevenlabs", apiKey: "synthetic-key" }, c, noEnv).id).toBe("elevenlabs");
+  expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "" }, c, noEnv)).toThrow("ELEVENLABS_API_KEY");
+  // A blank key is fine when the provider's variable is set: the daemon reads it from there.
+  expect(parseSpeech("tts", { id: "elevenlabs", apiKey: "" }, c, { env: { ELEVENLABS_API_KEY: "synthetic-env-key" } })).toEqual({ id: "elevenlabs", cloud: true });
+  expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "x".repeat(1025) }, c, noEnv)).toThrow();
+  expect(parseSpeech("stt", { id: "soniox", apiKey: "synthetic-key", model: "stt-rt-v5" }, c, noEnv)).toEqual({ id: "soniox", cloud: true, apiKey: "synthetic-key" });
+  expect(parseSpeech("tts", { id: "soniox", apiKey: "synthetic-key", voice: "Iris" }, c, noEnv)).toEqual({ id: "soniox", cloud: true, apiKey: "synthetic-key", voice: "Iris" });
+  expect(() => parseSpeech("stt", { id: "deepgram" }, c, noEnv)).toThrow("DEEPGRAM_API_KEY");
+  // With a declared privacy mode (always, in the wizard), choosing a cloud engine adds the speech allowance.
   for (const mode of ["local", "cloud"] as const) {
-    const p = { ...c, draft: { ...c.draft, privacy: { mode } } } as typeof c;
-    expect(() => parseSpeech("tts", { id: "elevenlabs", apiKey: "synthetic-key" }, p)).toThrow("Speech stays on this machine");
-    expect(() => parseSpeech("stt", { id: "wyoming", host: "192.168.1.2", port: 10300 }, p)).toThrow("Speech stays on this machine");
+    const p = { ...c, draft: { ...c.draft, privacy: { mode, allow: ["telegram"] } } } as typeof c;
+    expect(contributeSpeech("tts", parseSpeech("tts", { id: "elevenlabs", apiKey: "synthetic-key" }, p, noEnv), p)).toEqual({
+      tts: { backend: "elevenlabs", apiKey: "synthetic-key" },
+      privacy: { mode, allow: ["telegram", "speech"] },
+    });
+    expect(contributeSpeech("stt", parseSpeech("stt", { id: "groq", apiKey: "synthetic-key", model: "whisper-large-v3" }, p, noEnv), p)).toEqual({
+      stt: { backend: "groq", apiKey: "synthetic-key", model: "whisper-large-v3" },
+      privacy: { mode, allow: ["telegram", "speech"] },
+    });
+    expect(() => parseSpeech("stt", { id: "wyoming", host: "192.168.1.2", port: 10300 }, p)).toThrow("Local speech engines keep audio on this machine");
     expect(parseSpeech("stt", { id: "wyoming", host: "127.0.0.1", port: 10300 }, p).host).toBe("127.0.0.1");
     expect(parseSpeech("stt", { id: "wyoming", host: "127.0.0.2", port: 10300 }, p).host).toBe("127.0.0.2");
     // A DNS name that merely starts with 127. can resolve anywhere.
-    expect(() => parseSpeech("stt", { id: "wyoming", host: "127.example.com", port: 10300 }, p)).toThrow("Speech stays on this machine");
+    expect(() => parseSpeech("stt", { id: "wyoming", host: "127.example.com", port: 10300 }, p)).toThrow("Local speech engines keep audio on this machine");
   }
 });
 
@@ -78,12 +91,19 @@ test("brain and board detection use injected PATH and bounded runner", async () 
 
 test("speech options follow platform and venv/port status is informational", async () => {
   const deps = { exists: () => true, probePort: async () => false, checkout: "/repo" };
-  expect((await detectSpeech("stt", ctx("darwin"), deps)).options).toEqual(["faster-whisper", "mlx-whisper", "wyoming"]);
+  const cloudStt = ["soniox", "deepgram", "openai", "groq", "mistral"];
+  expect((await detectSpeech("stt", ctx("darwin"), deps)).options).toEqual(["faster-whisper", "mlx-whisper", "wyoming", ...cloudStt]);
   expect((await detectSpeech("tts", ctx("darwin"), deps)).options).toContain("mlx-audio");
   expect((await detectSpeech("stt", ctx("linux", true), deps)).options).toContain("audiocpp");
   expect((await detectSpeech("tts", ctx("linux", true), deps)).options).toContain("audiocpp");
   expect((await detectSpeech("tts", ctx("linux"), deps)).options).not.toContain("audiocpp");
-  expect((await detectSpeech("stt", ctx("win32"), deps)).options).toEqual(["faster-whisper", "wyoming"]);
+  expect((await detectSpeech("stt", ctx("win32"), deps)).options).toEqual(["faster-whisper", "wyoming", ...cloudStt]);
+  // Cloud options report only whether a key is present, never its value.
+  const tts = await detectSpeech("tts", ctx("win32"), { ...deps, env: { SONIOX_API_KEY: "synthetic-secret" } });
+  expect(tts.options).toContain("soniox");
+  expect(tts.cloudSpeech.soniox).toMatchObject({ keyInEnv: true, apiKeyEnv: "SONIOX_API_KEY", defaultVoice: "Iris" });
+  expect(tts.cloudSpeech.elevenlabs!.keyInEnv).toBe(false);
+  expect(JSON.stringify(tts)).not.toContain("synthetic-secret");
   expect((await detectSpeech("tts", ctx("win32"), deps)).status.kokoro).toEqual({ installed: true, running: false });
 });
 

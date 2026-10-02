@@ -17,6 +17,7 @@ import {
   type STTProviderConfig,
 } from "./backends/stt/provider";
 import { isSttLanguageTag } from "./backends/stt/language";
+import { cloudSpeechBackend } from "./backends/cloud-speech";
 import { ttsDefaultPort } from "./backends/tts/provider";
 import { backendRoutesByModel, llmDefaultPort, LLM_DEFAULT_MODEL } from "./backends/llm/provider";
 import { OPENAI_COMPATIBLE_BACKENDS, OPENAI_DEFAULT_MODEL } from "./backends/llm/openai";
@@ -305,7 +306,7 @@ function checkRegex(value: unknown, path: string, issues: string[]): void {
 }
 
 /** What may leave the machine under `privacy.mode: local`, one item at a time. */
-export const PRIVACY_ALLOWANCES = ["agent", "telegram", "board"] as const;
+export const PRIVACY_ALLOWANCES = ["agent", "telegram", "board", "speech"] as const;
 
 /**
  * Validate the operational parts of the merged runtime config before any
@@ -638,8 +639,12 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     const roleProviderKeys = name === "llm" || name === "classifier"
       ? ["apiKey", "apiKeyEnv", "baseUrl", "extraHeaders", "extra"] as const
       : name === "stt" || name === "stt_fallback"
-        ? ["compute_type", "language", "vocabulary", ...(name === "stt" ? ["streaming"] : [])] as const
-        : ["apiKey", "voice", "device", "refAudio", "refText", "responseTimeoutMs", "maxAudioBytes"] as const;
+        ? [
+            // A key is consumed only by a cloud recognizer; on a local engine it would be silently ignored.
+            ...(cloudSpeechBackend(name, typeof provider.backend === "string" ? provider.backend : undefined) ? ["apiKey"] : []),
+            "compute_type", "language", "vocabulary", ...(name === "stt" ? ["streaming"] : []),
+          ] as const
+        : ["apiKey", "voice", "language", "device", "refAudio", "refText", "responseTimeoutMs", "maxAudioBytes"] as const;
     checkKnownKeys(provider, name, [...commonProviderKeys, ...roleProviderKeys], issues);
     checkString(provider.backend, `${name}.backend`, issues);
     checkOptionalPort(provider, name, issues);
@@ -649,7 +654,9 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     if (name === "stt" || name === "stt_fallback") {
       if (name === "stt" && provider.streaming !== undefined) {
         if (typeof provider.streaming !== "boolean") issues.push("stt.streaming must be a boolean");
-        else if (provider.streaming && provider.backend !== "audiocpp") issues.push("stt.streaming requires stt.backend: audiocpp");
+        else if (provider.streaming && provider.backend !== "audiocpp" && !cloudSpeechBackend("stt", provider.backend as string | undefined)?.liveStream) {
+          issues.push("stt.streaming requires a live-capable stt.backend (audiocpp or soniox)");
+        }
       }
       if (provider.language !== undefined && !isSttLanguageTag(provider.language)) {
         issues.push(`${name}.language must be a language tag (2–3 letter code, optional script and region, at most 32 characters)`);
@@ -664,6 +671,9 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
           issues.push(`${name}.vocabulary prompt must be at most 1024 UTF-8 bytes`);
         }
       }
+    }
+    if ((name === "tts" || name === "tts_fallback") && provider.language !== undefined && !isSttLanguageTag(provider.language)) {
+      issues.push(`${name}.language must be a language tag (2–3 letter code, optional script and region, at most 32 characters)`);
     }
     if (provider.baseUrl !== undefined) checkHttpUrl(provider.baseUrl, `${name}.baseUrl`, issues);
     if (provider.extraHeaders !== undefined) checkStringRecord(provider.extraHeaders, `${name}.extraHeaders`, issues);

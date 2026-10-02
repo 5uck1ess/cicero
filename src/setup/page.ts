@@ -217,7 +217,7 @@ var STEP = {
   test:     { short: 'Test',    title: 'Try it', lede: 'Each check runs one small request against an engine that is already running. None of them blocks saving.', sub: 'Live checks' },
   review:   { short: 'Save',    title: 'Review and save', lede: 'Cicero checks your choices before writing the config.', sub: 'Check and write' }
 };
-var NAMES = {'llm':'LLM prompt (default)','laya':'Laya sidecar (checkpoint required)','llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'OpenAI-compatible URL','claude-code':'Claude Code','codex':'Codex','gemini':'Gemini CLI','qwen':'Qwen Code','acp':'ACP agent','faster-whisper':'faster-whisper','mlx-whisper':'MLX Whisper','audiocpp':'audio.cpp','kokoro':'Kokoro','pocket-tts':'Pocket TTS (Python)','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming server','hermes':'Hermes','multica':'Multica','paperclip':'Paperclip','none':'No board','cloud':'Cloud or custom API','api':'Model API','local-cuda':'NVIDIA GPU','local-mlx':'Apple Silicon','local-cpu':'CPU only'};
+var NAMES = {'soniox':'Soniox','deepgram':'Deepgram','openai':'OpenAI','groq':'Groq','mistral':'Mistral Voxtral','llm':'LLM prompt (default)','laya':'Laya sidecar (checkpoint required)','llama-cpp':'llama.cpp','ollama':'Ollama','lm-studio':'LM Studio','mlx-lm':'MLX','openai-compatible':'OpenAI-compatible URL','claude-code':'Claude Code','codex':'Codex','gemini':'Gemini CLI','qwen':'Qwen Code','acp':'ACP agent','faster-whisper':'faster-whisper','mlx-whisper':'MLX Whisper','audiocpp':'audio.cpp','kokoro':'Kokoro','pocket-tts':'Pocket TTS (Python)','mlx-audio':'MLX Audio','elevenlabs':'ElevenLabs','wyoming':'Wyoming server','hermes':'Hermes','multica':'Multica','paperclip':'Paperclip','none':'No board','cloud':'Cloud or custom API','api':'Model API','local-cuda':'NVIDIA GPU','local-mlx':'Apple Silicon','local-cpu':'CPU only'};
 function optionName(stepId, option) { if (stepId === 'brain' && option === 'none') return 'No agent (talk only)'; if (stepId === 'brain' && option === 'acp') return 'Other ACP command'; return option === 'audiocpp' ? (stepId === 'stt' ? 'Nemotron (audio.cpp)' : 'Pocket TTS (audio.cpp)') : (NAMES[option] || option); }
 var NOTES = {
   'llm':'Routes with the conversational LLM; no separate checkpoint needed.',
@@ -226,7 +226,7 @@ var NOTES = {
   'cloud':'Any OpenAI-compatible endpoint or a cloud provider.', 'api':'An OpenAI-compatible model API instead of an agent CLI.',
   'claude-code':'Anthropic\\u2019s coding agent.', 'codex':'OpenAI\\u2019s coding agent.', 'gemini':'Google\\u2019s coding agent.', 'qwen':'Qwen\\u2019s coding agent.', 'acp':'Any Agent Client Protocol harness, such as Hermes.',
   'faster-whisper':'Accurate, runs on GPU or CPU.', 'mlx-whisper':'Fast on Apple Silicon.', 'wyoming':'Use a speech server you already run.',
-  'kokoro':'Natural preset voices.', 'pocket-tts':'Python sidecar; clone a voice from a short clip.', 'mlx-audio':'Local voices on Apple Silicon.', 'elevenlabs':'Cloud voices. Needs an API key.',
+  'kokoro':'Natural preset voices.', 'pocket-tts':'Python sidecar; clone a voice from a short clip.', 'mlx-audio':'Local voices on Apple Silicon.', 'elevenlabs':'Cloud voices, including your own clone. Needs an API key.',
   'hermes':'Live-tested.', 'multica':'Supported, not live-tested yet.', 'paperclip':'Supported, not live-tested yet.', 'none':'Skip task announcements.',
   'local-cuda':'Local speech and models on your NVIDIA card.', 'local-mlx':'Local speech and models on Apple Silicon.', 'local-cpu':'Works anywhere, slower.'
 };
@@ -426,6 +426,8 @@ function why(step) {
   return h('details', { class: 'why' }, [h('summary', { text: 'Why this?' }), body]);
 }
 function stateLabel(option, f) {
+  var cs = f.cloudSpeech && f.cloudSpeech[option];
+  if (cs) return cs.keyInEnv ? ['Key found', true] : ['Cloud', true];
   var rt = f.runtimes && f.runtimes[option];
   if (rt) return rt.running ? ['Running', true] : ['Not running', false];
   var inst = f.installed && f.installed[option];
@@ -810,12 +812,13 @@ function renderPicker(id, step) {
       input.onchange = function () { picked = o; drawDetail(); };
       var s = stateLabel(o, f);
       var rt = f.runtimes && f.runtimes[o];
-      var note = o === 'audiocpp' ? (id === 'stt' ? 'Fast, accurate English ASR with Nemotron’s streaming model on an NVIDIA GPU; needs the audio.cpp build.' : 'Voice cloning on an NVIDIA GPU; needs the audio.cpp build.') : (NOTES[o] || '');
+      var cs = f.cloudSpeech && f.cloudSpeech[o];
+      var note = cs ? cs.note : o === 'audiocpp' ? (id === 'stt' ? 'Fast, accurate English ASR with Nemotron’s streaming model on an NVIDIA GPU; needs the audio.cpp build.' : 'Voice cloning on an NVIDIA GPU; needs the audio.cpp build.') : (NOTES[o] || '');
       if (input.disabled) note = ((f.disabled && f.disabled[o]) || 'Tick the allowance above first.') + ' ' + note;
       if (rt && rt.running && rt.models && rt.models.length) note += ' ' + rt.models.length + ' models loaded.';
       group.append(h('label', { class: 'choice' }, [input,
         s ? h('span', { class: 'state' + (s[1] ? ' on' : '') }, [h('i'), document.createTextNode(s[0])]) : null,
-        h('span', { class: 'name', text: optionName(id, o) }), h('span', { class: 'note', text: note }),
+        h('span', { class: 'name', text: cs ? cs.label : optionName(id, o) }), h('span', { class: 'note', text: note }),
         o === f.recommended || (extra && o === extra.key && extra.items.indexOf(f.recommended) >= 0) ? h('span', { class: 'badge', text: 'Recommended' }) : null]));
     });
   }
@@ -843,9 +846,30 @@ function renderPicker(id, step) {
     if (id === 'board' && o === 'paperclip' && !f.paperclipEnv) fields.companyId = textInput(''), box.append(field('Paperclip company ID (blank uses your paperclipai context)', fields.companyId));
     if ((id === 'stt' || id === 'tts') && o === 'wyoming') { fields.host = textInput('127.0.0.1'); fields.port = textInput(id === 'stt' ? '10300' : '10200', 'number'); box.append(field('Server host', fields.host), field('Port', fields.port)); }
     if (id === 'stt' && o === 'audiocpp') { fields.streaming = h('input', { type: 'checkbox' }); box.append(h('label', { class: 'check-inline' }, [fields.streaming, document.createTextNode('Stream browser speech for live captions (requires Nemotron mode: streaming)')])); }
-    if (o === 'elevenlabs') fields.apiKey = textInput('', 'password'), box.append(field('ElevenLabs API key', fields.apiKey));
+    var cloudSpeech = (id === 'stt' || id === 'tts') && f.cloudSpeech && f.cloudSpeech[o];
+    if (cloudSpeech) {
+      // The key goes to Cicero's own setup server and into config.yaml (owner-only).
+      // It is never sent back to this page: a saved key shows only as "saved".
+      fields.apiKey = textInput('', 'password');
+      fields.apiKey.placeholder = cloudSpeech.keyInEnv ? 'Leave blank to use ' + cloudSpeech.apiKeyEnv : 'Paste your ' + cloudSpeech.label + ' key';
+      box.append(field(cloudSpeech.label + ' API key' + (cloudSpeech.keyInEnv ? ' (optional: ' + cloudSpeech.apiKeyEnv + ' is set)' : ''), fields.apiKey));
+      var keyRow = h('div', { class: 'actions' });
+      var keyNote = h('small');
+      keyRow.append(button('Test key', 'small', async function () {
+        keyNote.textContent = 'Checking…';
+        var r = await api('/api/speech-key', { kind: id, id: o, apiKey: fields.apiKey.value });
+        keyNote.textContent = r.message || r.error || '';
+      }, keyRow), keyNote);
+      keyRow.append(h('a', { href: cloudSpeech.consoleUrl, target: '_blank', rel: 'noopener noreferrer', text: 'Get a key' }));
+      box.append(keyRow);
+      fields.model = textInput(cloudSpeech.defaultModel);
+      fields.model.setAttribute('list', 'models-' + id + '-' + o);
+      box.append(field('Model', fields.model), h('datalist', { id: 'models-' + id + '-' + o }, cloudSpeech.models.map(function (m) { return h('option', { value: m }); })));
+      if (id === 'tts' && cloudSpeech.defaultVoice) { fields.voice = textInput(cloudSpeech.defaultVoice); box.append(field('Voice', fields.voice)); }
+      box.append(h('p', { class: 'detail', text: (id === 'stt' ? 'Your microphone audio' : 'Reply text') + ' is sent to ' + cloudSpeech.egressHost + '. Choosing it adds "speech" to your privacy policy.' + (cloudSpeech.liveStream ? ' Transcribes while you talk, so replies start sooner.' : '') }));
+    }
     var engine = f.status && f.status[o];
-    if (id === 'tts' && o !== 'elevenlabs' && engine && engine.running) {
+    if (id === 'tts' && o !== 'elevenlabs' && (cloudSpeech || (engine && engine.running))) {
       var sampleRow = h('div', { class: 'actions' });
       var sampleNote = h('small');
       var cancelBtn = h('button', { type: 'button', class: 'btn small', text: 'Cancel', hidden: true });
@@ -853,6 +877,7 @@ function renderPicker(id, step) {
       sampleRow.append(button('Play sample', 'small', async function () {
         var tts = { id: o };
         if (fields.host) { tts.host = fields.host.value; tts.port = Number(fields.port.value); }
+        if (cloudSpeech) { if (fields.apiKey.value) tts.apiKey = fields.apiKey.value; tts.model = fields.model.value; if (fields.voice) tts.voice = fields.voice.value; }
         var run = sampleRun = Date.now();
         sampleNote.textContent = 'Generating…';
         cancelBtn.hidden = false;

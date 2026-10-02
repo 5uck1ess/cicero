@@ -7,6 +7,10 @@ import { MlxWhisperProvider } from "./stt/mlx-whisper";
 import { FasterWhisperProvider } from "./stt/faster-whisper";
 import { AudioCppSTTProvider } from "./stt/audiocpp";
 import { FallbackSTTProvider } from "./stt/fallback";
+import { SonioxSTTProvider } from "./stt/soniox";
+import { DeepgramSTTProvider } from "./stt/deepgram";
+import { OpenAiTranscribeProvider } from "./stt/openai-transcribe";
+import { SonioxTTSProvider } from "./tts/soniox";
 import { MlxAudioProvider } from "./tts/mlx-audio";
 import { KokoroProvider } from "./tts/kokoro";
 import { VibeVoiceProvider } from "./tts/vibevoice";
@@ -94,9 +98,17 @@ export function buildSTTProvider(sttConfig: STTProviderConfig, configKey: string
       return new AudioCppSTTProvider(sttConfig);
     case "wyoming":
       return new WyomingSTTProvider(sttConfig);
+    // Cloud recognizers (see cloud-speech.ts): no local server, key from config or env.
+    case "soniox":
+      return new SonioxSTTProvider(sttConfig);
+    case "deepgram":
+      return new DeepgramSTTProvider(sttConfig);
+    case "openai":
+    case "groq":
+    case "mistral":
+      return new OpenAiTranscribeProvider(sttConfig.backend, sttConfig);
     case "nemotron":
     case "moonshine":
-    case "deepgram":
       throw new Error(
         `${configKey}='${sttConfig.backend}' is not implemented; ${supportedBackendHint(configKey, SUPPORTED_STT_BACKENDS)}`,
       );
@@ -129,8 +141,9 @@ export function buildTTSProvider(ttsConfig: TTSProviderConfig, configKey: string
       return new KokoroProvider(ttsConfig);
     case "wyoming":
       return new WyomingTTSProvider(ttsConfig);
+    case "soniox":
+      return new SonioxTTSProvider(ttsConfig);
     case "omnivoice":
-    case "voxtral":
       throw new Error(
         `${configKey}='${ttsConfig.backend}' is not implemented; ${supportedBackendHint(configKey, SUPPORTED_TTS_BACKENDS)}`,
       );
