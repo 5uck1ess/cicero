@@ -144,6 +144,21 @@ test("an unconfirmed socket release blocks new streams until the close is confir
   expect(sockets).toHaveLength(2);
 });
 
+test("a release that fails while superseding blocks the new stream and the batch retry", async () => {
+  const { provider, sockets } = harness();
+  const first = provider.openStream!({ sampleRate: 16_000 });
+  sockets[0]!.open();
+  sockets[0]!.terminateThrows = true;
+  expect(() => provider.openStream!({ sampleRate: 16_000 })).toThrow("cleanup is unconfirmed");
+  expect(liveSttFailure(await first.final.catch((e: unknown) => e))).toBe("aborted");
+  expect(sockets).toHaveLength(1);
+  expect(await provider.transcribeResult("never-read.wav")).toEqual({ kind: "failure", reason: "prior Soniox socket cleanup is unconfirmed" });
+  expect(sockets).toHaveLength(1);
+  sockets[0]!.closedByPeer();
+  provider.openStream!({ sampleRate: 16_000 });
+  expect(sockets).toHaveLength(2);
+});
+
 test("oversized or malformed server messages fail closed instead of being retained", async () => {
   const { provider, sockets } = harness();
   const big = provider.openStream!({ sampleRate: 16_000 });

@@ -39,6 +39,7 @@ const MAX_VOCABULARY_TERMS = 200;
 const LIVE_DEADLINE_MS = 180_000;
 /** After the transcript resolves, how long a graceful close may take before release is forced. */
 const CLOSE_GRACE_MS = 2_000;
+const UNCONFIRMED = "prior Soniox socket cleanup is unconfirmed";
 const SOCKET_OPEN = 1;
 
 interface SessionOptions {
@@ -309,6 +310,12 @@ export class SonioxSTTProvider implements STTProvider {
     this.now = deps.now ?? (() => performance.now());
   }
 
+  /** True while a socket close is unconfirmed; clears itself once that session reports released. */
+  private releaseBlocked(): boolean {
+    if (this.cleanupBlocked?.released) this.cleanupBlocked = null;
+    return this.cleanupBlocked !== null;
+  }
+
   get openStream(): STTProvider["openStream"] {
     return this.live ? (options) => this.openLiveStream(options) : undefined;
   }
@@ -317,10 +324,11 @@ export class SonioxSTTProvider implements STTProvider {
     if (!this.apiKey) throw new LiveSttError("never_opened", new Error(`Soniox API key not found; set ${this.entry.apiKeyEnv}`));
     if (!Number.isSafeInteger(options.sampleRate) || options.sampleRate < 8000 || options.sampleRate > 192000)
       throw new RangeError("invalid live PCM sample rate");
-    if (this.cleanupBlocked?.released) this.cleanupBlocked = null;
-    if (this.cleanupBlocked) throw new LiveSttError("never_opened", new Error("prior Soniox socket cleanup is unconfirmed"));
-    // One live microphone at a time: a newer capture supersedes the previous socket.
+    // One live microphone at a time: a newer capture supersedes the previous
+    // socket. Check the latch after superseding, so a release that fails
+    // during the supersede is caught too.
     this.activeStream?.abort();
+    if (this.releaseBlocked()) throw new LiveSttError("never_opened", new Error(UNCONFIRMED));
     let session!: LivePcmSession;
     session = openSonioxSession({
       apiKey: this.apiKey,
@@ -354,6 +362,7 @@ export class SonioxSTTProvider implements STTProvider {
   async transcribeResult(audioFile: string, signal?: AbortSignal): Promise<STTTranscriptionResult> {
     signal?.throwIfAborted();
     if (!this.apiKey) return { kind: "failure", reason: `Soniox API key not found; set ${this.entry.apiKeyEnv}` };
+    if (this.releaseBlocked()) return { kind: "failure", reason: UNCONFIRMED };
     try {
       const file = Bun.file(audioFile);
       if (file.size > MAX_CLOUD_STT_UPLOAD_BYTES) {
@@ -371,6 +380,7 @@ export class SonioxSTTProvider implements STTProvider {
         signal,
         connect: this.connect,
         now: this.now,
+        onReleaseUnconfirmed: () => { this.cleanupBlocked = session; },
       });
       for (let offset = 0; offset < audio.length; offset += MAX_PUSH_BYTES) {
         session.push(audio.subarray(offset, offset + MAX_PUSH_BYTES));
