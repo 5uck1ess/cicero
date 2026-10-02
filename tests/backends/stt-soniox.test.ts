@@ -24,6 +24,13 @@ class FakeSocket implements SonioxSocket {
     this.sent.push(data);
   }
   close(): void { this.closed = true; }
+  terminated = false;
+  terminateThrows = false;
+  terminate(): void {
+    if (this.terminateThrows) throw new Error("terminate failed");
+    this.terminated = true;
+    this.readyState = 3;
+  }
   open(): void { this.readyState = 1; this.onopen?.({}); }
   message(value: unknown): void { this.onmessage?.({ data: typeof value === "string" ? value : JSON.stringify(value) }); }
   closedByPeer(): void { this.readyState = 3; this.onclose?.({}); }
@@ -93,7 +100,8 @@ test("a server error rejects with a scrubbed reason and releases the socket", as
   expect(String(error)).toContain("401 unauthenticated");
   expect(String(error)).not.toContain(KEY);
   expect(String(error)).not.toContain("\u001b");
-  expect(sockets[0]!.closed).toBe(true);
+  expect(sockets[0]!.terminated).toBe(true);
+  expect(session.released).toBe(true);
   expect(() => session.push(new Uint8Array(2))).toThrow("closed");
 });
 
@@ -104,7 +112,8 @@ test("abort, early close, and a newer capture each end the session with a typed 
   sockets[0]!.open();
   controller.abort();
   expect(liveSttFailure(await aborted.final.catch((e: unknown) => e))).toBe("aborted");
-  expect(sockets[0]!.closed).toBe(true);
+  expect(sockets[0]!.terminated).toBe(true);
+  expect(aborted.released).toBe(true);
 
   const dropped = provider.openStream!({ sampleRate: 16_000 });
   sockets[1]!.open();
@@ -115,7 +124,24 @@ test("abort, early close, and a newer capture each end the session with a typed 
   const first = provider.openStream!({ sampleRate: 16_000 });
   provider.openStream!({ sampleRate: 16_000 });
   expect(liveSttFailure(await first.final.catch((e: unknown) => e))).toBe("aborted");
-  expect(sockets[2]!.closed).toBe(true);
+  expect(sockets[2]!.terminated).toBe(true);
+});
+
+test("an unconfirmed socket release blocks new streams until the close is confirmed", async () => {
+  const { provider, sockets } = harness();
+  const stuck = provider.openStream!({ sampleRate: 16_000 });
+  sockets[0]!.open();
+  sockets[0]!.terminateThrows = true;
+  stuck.abort();
+  expect(liveSttFailure(await stuck.final.catch((e: unknown) => e))).toBe("aborted");
+  expect(stuck.released).toBe(false);
+  expect(() => provider.openStream!({ sampleRate: 16_000 })).toThrow("cleanup is unconfirmed");
+  expect(sockets).toHaveLength(1);
+  // The latch is retryable: once the runtime reports the socket closed, streaming resumes.
+  sockets[0]!.closedByPeer();
+  expect(stuck.released).toBe(true);
+  provider.openStream!({ sampleRate: 16_000 });
+  expect(sockets).toHaveLength(2);
 });
 
 test("oversized or malformed server messages fail closed instead of being retained", async () => {

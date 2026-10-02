@@ -137,7 +137,7 @@ time, which these docs do not measure.
 
 `language` and `vocabulary` apply to cloud recognizers too: Soniox gets the
 primary language code as a hint and the terms as context; Deepgram gets the tag
-as written and one `keyterm` per term; OpenAI and Groq get the primary code and
+as written and one `keyterm` per term (`keywords` on Nova-2 and older models); OpenAI and Groq get the primary code and
 the vocabulary prompt; Mistral gets the primary code only.
 
 Cloud voices still synthesize one sentence group per request, the same as the

@@ -19,8 +19,10 @@ export class DeepgramSTTProvider extends CloudHttpSttProvider {
   protected request(audio: Blob, signal: AbortSignal | undefined): Promise<Response> {
     const query = new URLSearchParams({ model: this.model, smart_format: "true" });
     if (this.language) query.set("language", this.language);
-    // keyterm is the Nova-3 vocabulary channel; one repeated parameter per term.
-    for (const term of this.vocabulary.slice(0, MAX_KEYTERMS)) query.append("keyterm", term);
+    // Nova-3 takes vocabulary as keyterm; older models (Nova-2 and earlier)
+    // only understand keywords. One repeated parameter per term either way.
+    const channel = this.model.startsWith("nova-3") ? "keyterm" : "keywords";
+    for (const term of this.vocabulary.slice(0, MAX_KEYTERMS)) query.append(channel, term);
     return this.fetcher(`${DEEPGRAM_LISTEN_URL}?${query}`, {
       method: "POST",
       headers: { Authorization: `Token ${this.apiKey}`, "Content-Type": "audio/wav" },

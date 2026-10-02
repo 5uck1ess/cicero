@@ -104,10 +104,18 @@ test("Deepgram posts the WAV body with Token auth, model, language and one keyte
   expect(url.searchParams.get("model")).toBe("nova-3");
   expect(url.searchParams.get("language")).toBe("en-US");
   expect(url.searchParams.getAll("keyterm")).toEqual(["Cicero", "audio.cpp"]);
+  expect(url.searchParams.getAll("keywords")).toEqual([]);
   const headers = new Headers(f.calls[0]!.init?.headers);
   expect(headers.get("authorization")).toBe(`Token ${KEY}`);
   expect(headers.get("content-type")).toBe("audio/wav");
   expect(f.calls[0]!.init?.body).toBeInstanceOf(Blob);
+
+  // Nova-2 predates keyterm; its vocabulary channel is keywords.
+  const older = new DeepgramSTTProvider({ backend: "deepgram", apiKey: KEY, model: "nova-2", vocabulary: ["Cicero"] }, { fetcher: f.fetch });
+  await older.transcribeResult(wavFile());
+  const olderUrl = new URL(f.calls[1]!.url);
+  expect(olderUrl.searchParams.getAll("keywords")).toEqual(["Cicero"]);
+  expect(olderUrl.searchParams.getAll("keyterm")).toEqual([]);
 });
 
 test("cloud STT failures are quiet results, scrubbed of the key, and a missing key never calls out", async () => {

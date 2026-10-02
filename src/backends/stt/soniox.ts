@@ -21,6 +21,8 @@ export interface SonioxSocket {
   binaryType: string;
   send(data: string | Uint8Array): void;
   close(code?: number, reason?: string): void;
+  /** Forceful close without the handshake (Bun's WebSocket has it). */
+  terminate?(): void;
   onopen: ((event: unknown) => void) | null;
   onmessage: ((event: { data: unknown }) => void) | null;
   onerror: ((event: unknown) => void) | null;
@@ -52,6 +54,8 @@ interface SessionOptions {
   onPartial?: (text: string, at: number) => void;
   connect: SonioxConnect;
   now: () => number;
+  /** Called once when the socket could not be confirmed closed, even by force. */
+  onReleaseUnconfirmed?: () => void;
 }
 
 /**
@@ -65,7 +69,9 @@ interface SessionOptions {
  *
  * Ownership: the socket is this session's alone. Every exit — final, server
  * error, deadline, abort — closes it, and `released` turns true only when the
- * close is confirmed (or forced after a bounded grace period).
+ * close is confirmed or `terminate()` succeeded. A final transcript closes
+ * gracefully and is terminated after a bounded grace period; any other exit
+ * terminates at once.
  */
 function openSonioxSession(options: SessionOptions): LivePcmSession {
   let socket: SonioxSocket | null = null;
@@ -90,17 +96,30 @@ function openSonioxSession(options: SessionOptions): LivePcmSession {
     released = true;
     if (closeTimer !== undefined) { clearTimeout(closeTimer); closeTimer = undefined; }
   };
+  const forceRelease = (current: SonioxSocket): void => {
+    closeTimer = undefined;
+    if (released) return;
+    try {
+      if (!current.terminate) throw new Error("socket cannot be terminated");
+      current.terminate();
+      markReleased();
+    } catch {
+      // Not confirmed: the provider latches this session and refuses a new
+      // stream until onclose finally reports it closed.
+      options.onReleaseUnconfirmed?.();
+    }
+  };
   const release = (graceful: boolean): void => {
     const current = socket;
     if (!current) { markReleased(); return; }
+    if (!graceful) { forceRelease(current); return; }
     try {
-      if (graceful && current.readyState === SOCKET_OPEN) current.send(""); // end of audio; Soniox closes the socket
+      if (current.readyState === SOCKET_OPEN) current.send(""); // end of audio; Soniox closes the socket
       current.close(1000);
-    } catch { /* the close below is the release; a throw here means it is already closing */ }
+    } catch { /* a throw means it is already closing; the grace timer still bounds it */ }
     // Bound the release: a peer that never acknowledges the close must not
-    // hold the session open. After the grace period the socket is abandoned
-    // to the runtime's own teardown, and released reflects that decision.
-    closeTimer = setTimeout(markReleased, CLOSE_GRACE_MS);
+    // hold the session open past the grace period.
+    closeTimer = setTimeout(() => forceRelease(current), CLOSE_GRACE_MS);
   };
   const settle = (outcome: { text: string } | { error: Error }): void => {
     if (settled) return;
@@ -274,6 +293,8 @@ export class SonioxSTTProvider implements STTProvider {
   private readonly fetcher: typeof fetch;
   private readonly now: () => number;
   private activeStream: LivePcmSession | null = null;
+  /** A session whose socket close is still unconfirmed; retryable, cleared once it reports released. */
+  private cleanupBlocked: LivePcmSession | null = null;
 
   constructor(config: STTProviderConfig, deps: SonioxSttDeps = {}) {
     this.entry = cloudSpeechBackend("stt", "soniox")!;
@@ -296,9 +317,12 @@ export class SonioxSTTProvider implements STTProvider {
     if (!this.apiKey) throw new LiveSttError("never_opened", new Error(`Soniox API key not found; set ${this.entry.apiKeyEnv}`));
     if (!Number.isSafeInteger(options.sampleRate) || options.sampleRate < 8000 || options.sampleRate > 192000)
       throw new RangeError("invalid live PCM sample rate");
+    if (this.cleanupBlocked?.released) this.cleanupBlocked = null;
+    if (this.cleanupBlocked) throw new LiveSttError("never_opened", new Error("prior Soniox socket cleanup is unconfirmed"));
     // One live microphone at a time: a newer capture supersedes the previous socket.
     this.activeStream?.abort();
-    const session = openSonioxSession({
+    let session!: LivePcmSession;
+    session = openSonioxSession({
       apiKey: this.apiKey,
       model: this.model,
       format: { kind: "pcm", sampleRate: options.sampleRate },
@@ -310,6 +334,7 @@ export class SonioxSTTProvider implements STTProvider {
       onPartial: options.onPartial,
       connect: this.connect,
       now: this.now,
+      onReleaseUnconfirmed: () => { this.cleanupBlocked = session; },
     });
     this.activeStream = session;
     void session.final.finally(() => { if (this.activeStream === session) this.activeStream = null; }).catch(() => {});
