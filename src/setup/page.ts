@@ -862,7 +862,7 @@ function renderPicker(id, step) {
       }, keyRow), keyNote);
       keyRow.append(h('a', { href: cloudSpeech.consoleUrl, target: '_blank', rel: 'noopener noreferrer', text: 'Get a key' }));
       box.append(keyRow);
-      fields.model = textInput(cloudSpeech.defaultModel);
+      fields.model = textInput(cloudSpeech.setupModel);
       fields.model.setAttribute('list', 'models-' + id + '-' + o);
       box.append(field('Model', fields.model), h('datalist', { id: 'models-' + id + '-' + o }, cloudSpeech.models.map(function (m) { return h('option', { value: m }); })));
       if (id === 'tts' && cloudSpeech.defaultVoice) { fields.voice = textInput(cloudSpeech.defaultVoice); box.append(field('Voice', fields.voice)); }

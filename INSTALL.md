@@ -42,11 +42,11 @@ Ask these in your own words only if you must; the verbatim wording is best.
 **Question 1: "What may leave this machine?"**
 
 - **Nothing, unless I allow it.** The front desk, helper and speech run on
-  this machine. Anything else that reaches the network needs its own
-  allowance. (`--privacy local`)
+  this machine. Anything else that reaches the network, including a cloud
+  speech service, needs its own allowance. (`--privacy local`)
 - **Conversation may use cloud models.** The front desk and agents may be
-  cloud services; the helper and speech stay local. Telegram and task boards
-  still need their own allowance. (`--privacy cloud`)
+  cloud services; the helper stays local. Cloud speech, Telegram and task
+  boards still need their own allowance. (`--privacy cloud`)
 
 **Question 2: "Which coding agent should Cicero use, if any?"** The ids
 `--agent` accepts:

@@ -81,12 +81,16 @@ longer explanation.
 **What may leave this machine?**
 
 - **Nothing, unless I allow it** (the default). The front desk, the helper and
-  speech must run here. A cloud coding agent or a hosted task board is offered
-  only after you allow it, one item at a time, with a sentence saying what
-  leaves.
+  speech run here. A cloud coding agent, a hosted task board, or a cloud speech
+  service is allowed one item at a time, with a sentence saying what leaves.
 - **Conversation may use cloud models.** The front desk and agents may be
-  cloud services; the helper and speech still run here. Telegram and task
+  cloud services; the helper still runs here. Cloud speech, Telegram and task
   boards still need their own allowance.
+
+Picking a cloud recognizer or voice on the Hear or Speak step (Soniox, Deepgram,
+OpenAI, Groq, Mistral, ElevenLabs) adds the `speech` allowance for you. Those
+steps take the provider's API key in a password field, or use its environment
+variable when that is already set, and offer a **Test key** button.
 
 Writes `privacy: { mode: local | cloud, allow: [...] }`. This is a declared
 policy, not a firewall: the wizard enforces it when you choose, and

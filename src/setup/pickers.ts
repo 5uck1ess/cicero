@@ -230,12 +230,13 @@ function speechOptions(kind: "stt" | "tts", ctx: StepContext): string[] {
 /** What the page needs to draw a cloud option. A key is reported only as found / not found. */
 export interface CloudSpeechOption {
   label: string; note: string; apiKeyEnv: string; keyInEnv: boolean; consoleUrl: string;
-  egressHost: string; models: readonly string[]; defaultModel: string; defaultVoice?: string; liveStream: boolean;
+  egressHost: string; models: readonly string[]; defaultModel: string; setupModel: string; defaultVoice?: string; liveStream: boolean;
 }
 export function cloudSpeechOptions(kind: "stt" | "tts", env: Record<string, string | undefined> = process.env): Record<string, CloudSpeechOption> {
   return Object.fromEntries(CLOUD_SPEECH_BACKENDS.filter((entry) => entry.role === kind).map((entry) => [entry.id, {
     label: entry.label, note: entry.note, apiKeyEnv: entry.apiKeyEnv, keyInEnv: Boolean(env[entry.apiKeyEnv]),
     consoleUrl: entry.consoleUrl, egressHost: entry.egressHost, models: entry.models, defaultModel: entry.defaultModel,
+    setupModel: entry.setupModel ?? entry.defaultModel,
     ...(entry.defaultVoice ? { defaultVoice: entry.defaultVoice } : {}), liveStream: entry.liveStream === true,
   }]));
 }

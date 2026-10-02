@@ -29,6 +29,12 @@ export interface CloudSpeechBackend {
   /** Where an operator creates or checks a key; named in key failures. */
   consoleUrl: string;
   defaultModel: string;
+  /**
+   * The model the setup page pre-fills when it differs from the runtime
+   * default. The runtime default stays put so an existing config keeps the
+   * voice it already has; setup steers new installs to the faster model.
+   */
+  setupModel?: string;
   /** Suggested models for the setup page; any string the provider accepts still works. */
   models: readonly string[];
   /** TTS only: the voice used when the config names none. */
@@ -112,6 +118,9 @@ export const CLOUD_SPEECH_BACKENDS: readonly CloudSpeechBackend[] = Object.freez
     egressHost: "api.elevenlabs.io",
     consoleUrl: "https://elevenlabs.io/app/settings/api-keys",
     defaultModel: "eleven_multilingual_v2",
+    // Measured 2026-10-02 on one sentence: Flash returned the whole clip in
+    // ~0.25-0.3 s, v4 Turbo in ~0.6 s, so setup recommends Flash.
+    setupModel: "eleven_flash_v2_5",
     models: ["eleven_flash_v2_5", "eleven_v4_turbo", "eleven_multilingual_v2", "eleven_v4"],
     keyProbe: { url: "https://api.elevenlabs.io/v1/models", headers: (key) => ({ "xi-api-key": key }) },
   },
@@ -119,7 +128,7 @@ export const CLOUD_SPEECH_BACKENDS: readonly CloudSpeechBackend[] = Object.freez
     id: "soniox",
     role: "tts",
     label: "Soniox",
-    note: "Fast, inexpensive cloud voices (preset per language). Needs an API key.",
+    note: "Inexpensive cloud voices, preset per language. About 2 s per sentence until Cicero streams playback. Needs an API key.",
     apiKeyEnv: "SONIOX_API_KEY",
     egressHost: "tts-rt.soniox.com",
     consoleUrl: "https://console.soniox.com",
@@ -199,17 +208,30 @@ export async function checkCloudSpeechKey(
 ): Promise<CloudKeyCheck> {
   if (!key) return { ok: false, reason: `No ${entry.label} API key; set ${entry.apiKeyEnv} or enter one` };
   const fetcher = options.fetcher ?? fetch;
+  const timeoutMs = options.timeoutMs ?? PROVIDER_TIMEOUT_MS.health;
+  const late = `${entry.label} did not answer in time`;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // The signal cancels a cooperative fetch; the race bounds one that ignores it.
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new DOMException(late, "TimeoutError")), timeoutMs);
+  });
   let response: Response;
   try {
-    response = await fetcher(entry.keyProbe.url, {
-      headers: entry.keyProbe.headers(key),
-      signal: providerSignal(options.timeoutMs ?? PROVIDER_TIMEOUT_MS.health, options.signal),
-    });
+    response = await Promise.race([
+      fetcher(entry.keyProbe.url, {
+        headers: entry.keyProbe.headers(key),
+        signal: providerSignal(timeoutMs, options.signal),
+      }),
+      deadline,
+    ]);
   } catch (error: unknown) {
-    const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
-    return { ok: false, reason: timedOut ? `${entry.label} did not answer in time` : `Could not reach ${entry.egressHost}` };
+    const name = (error as { name?: unknown } | null)?.name;
+    const timedOut = name === "TimeoutError" || name === "AbortError";
+    return { ok: false, reason: timedOut ? late : `Could not reach ${entry.egressHost}` };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
-  await discardResponseBody(response).catch(() => {});
+  void discardResponseBody(response).catch(() => {});
   if (response.ok) return { ok: true };
   if (response.status === 401 || response.status === 403) {
     return { ok: false, reason: `${entry.label} rejected the key (HTTP ${response.status}); check it at ${entry.consoleUrl}` };

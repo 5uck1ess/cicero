@@ -85,6 +85,10 @@ Each row is off by default and activates only when you set the named key.
 | `brain.backend: openai-compatible` + `brain.base_url` | The full conversation | The endpoint you name |
 | `web_voice.tldr.summarizer_url` | Conversation-derived text for spoken summaries | The endpoint you name |
 | `tts.backend: elevenlabs` | Reply text; voice provisioning uploads your reference WAV once | `api.elevenlabs.io` |
+| `tts.backend: soniox` | Reply text + your API key | `tts-rt.soniox.com` |
+| `stt.backend: soniox` | Live microphone audio while you speak (or each finished utterance) + your API key | `stt-rt.soniox.com` |
+| `stt.backend: deepgram` | Each finished utterance + your API key | `api.deepgram.com` |
+| `stt.backend: openai` / `groq` / `mistral` | Each finished utterance + your API key | `api.openai.com` / `api.groq.com` / `api.mistral.ai` |
 | ACP brain with remote args (e.g. `ssh box agent acp`) | The conversation, over your ssh session | Your remote box |
 | `compute.allow_cloud: true` (computer use) | Goals, selected file contents, command output | The cloud LLM you configured |
 
