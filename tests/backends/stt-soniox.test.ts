@@ -152,7 +152,9 @@ test("a release that fails while superseding blocks the new stream and the batch
   expect(() => provider.openStream!({ sampleRate: 16_000 })).toThrow("cleanup is unconfirmed");
   expect(liveSttFailure(await first.final.catch((e: unknown) => e))).toBe("aborted");
   expect(sockets).toHaveLength(1);
-  expect(await provider.transcribeResult("never-read.wav")).toEqual({ kind: "failure", reason: "prior Soniox socket cleanup is unconfirmed" });
+  const wav = join(mkdtempSync(join(tmpdir(), "cicero-soniox-")), "turn.wav");
+  writeFileSync(wav, encodeWav(new Int16Array(1_600), 16_000));
+  expect(await provider.transcribeResult(wav)).toEqual({ kind: "failure", reason: "prior Soniox socket cleanup is unconfirmed" });
   expect(sockets).toHaveLength(1);
   sockets[0]!.closedByPeer();
   provider.openStream!({ sampleRate: 16_000 });

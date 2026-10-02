@@ -362,13 +362,14 @@ export class SonioxSTTProvider implements STTProvider {
   async transcribeResult(audioFile: string, signal?: AbortSignal): Promise<STTTranscriptionResult> {
     signal?.throwIfAborted();
     if (!this.apiKey) return { kind: "failure", reason: `Soniox API key not found; set ${this.entry.apiKeyEnv}` };
-    if (this.releaseBlocked()) return { kind: "failure", reason: UNCONFIRMED };
     try {
       const file = Bun.file(audioFile);
       if (file.size > MAX_CLOUD_STT_UPLOAD_BYTES) {
         return { kind: "failure", reason: `Soniox upload refused: utterance exceeds ${MAX_CLOUD_STT_UPLOAD_BYTES} bytes` };
       }
       const audio = new Uint8Array(await file.arrayBuffer());
+      // Checked after the read: a prior socket's grace timer may have latched meanwhile.
+      if (this.releaseBlocked()) return { kind: "failure", reason: UNCONFIRMED };
       const session = openSonioxSession({
         apiKey: this.apiKey,
         model: this.model,
