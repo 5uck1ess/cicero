@@ -431,8 +431,9 @@ export class SonioxSTTProvider implements STTProvider {
   }
 
   /**
-   * Swap readiness: the free model list names every recognition model and its
-   * aliases, so an unknown stt.model is refused before cutover.
+   * Swap readiness: the free model list names every recognition model, its
+   * aliases and its transcription mode, so an unknown or async-only stt.model
+   * is refused before cutover.
    */
   async warmup(): Promise<void> {
     if (!this.apiKey) throw new Error(`Soniox API key not found; set ${this.entry.apiKeyEnv}`);
@@ -446,9 +447,13 @@ export class SonioxSTTProvider implements STTProvider {
     }
     const body = await readBoundedJson<{ models?: unknown }>(response, PROVIDER_RESPONSE_LIMIT_BYTES.json, "Soniox model list");
     const models = Array.isArray(body?.models) ? body.models : [];
-    const known = models.flatMap((entry) => typeof (entry as { id?: unknown })?.id === "string" ? [(entry as { id: string }).id] : []);
-    if (!known.includes(this.model)) {
-      throw new Error(`Soniox does not offer model '${scrubProviderText(this.model, this.apiKey)}'`);
+    const listed = models.find((entry) => (entry as { id?: unknown })?.id === this.model) as { transcription_mode?: unknown } | undefined;
+    const model = scrubProviderText(this.model, this.apiKey);
+    if (!listed) throw new Error(`Soniox does not offer model '${model}'`);
+    // Every request here (live and finished-file) uses the real-time socket,
+    // which refuses async-only models such as stt-async-v5.
+    if (listed.transcription_mode !== "real_time") {
+      throw new Error(`Soniox model '${model}' is not a real-time model; use a stt-rt model such as ${this.entry.defaultModel}`);
     }
   }
 

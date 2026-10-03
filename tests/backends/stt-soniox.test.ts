@@ -232,10 +232,17 @@ test("stop() force-closes a finished session still inside its close grace period
 });
 
 test("swap readiness: warmup accepts a listed Soniox model and refuses an unknown one", async () => {
-  const models = { models: [{ id: "stt-rt-v5" }, { id: "stt-rt-v4", aliased_model_id: "stt-rt-v5" }] };
+  const models = { models: [
+    { id: "stt-rt-v5", transcription_mode: "real_time" },
+    { id: "stt-rt-v4", aliased_model_id: "stt-rt-v5", transcription_mode: "real_time" },
+    { id: "stt-async-v4", aliased_model_id: "stt-async-v5", transcription_mode: "async" },
+  ] };
   const listing = (async () => Response.json(models)) as unknown as typeof fetch;
   await new SonioxSTTProvider({ backend: "soniox", apiKey: KEY, model: "stt-rt-v4" }, { fetcher: listing, env: {} }).warmup();
   const error = await new SonioxSTTProvider({ backend: "soniox", apiKey: KEY, model: "stt-404" }, { fetcher: listing, env: {} })
     .warmup().catch((e: Error) => e);
   expect(String(error)).toContain("does not offer model 'stt-404'");
+  const async = await new SonioxSTTProvider({ backend: "soniox", apiKey: KEY, model: "stt-async-v4" }, { fetcher: listing, env: {} })
+    .warmup().catch((e: Error) => e);
+  expect(String(async)).toContain("'stt-async-v4' is not a real-time model");
 });
