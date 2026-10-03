@@ -201,3 +201,41 @@ test("no key means no socket, and live streaming can be switched off", () => {
   expect(sockets).toHaveLength(0);
   expect(new SonioxSTTProvider({ backend: "soniox", apiKey: KEY, streaming: false }).openStream).toBeUndefined();
 });
+
+test("stop() keeps ownership of an unconfirmed socket and succeeds once a retry closes it", async () => {
+  const { provider, sockets } = harness();
+  const session = provider.openStream!({ sampleRate: 16_000 });
+  sockets[0]!.open();
+  sockets[0]!.terminateThrows = true;
+  session.abort();
+  await expect(provider.stop()).rejects.toThrow("cleanup is unconfirmed");
+  await expect(provider.stop()).rejects.toThrow("cleanup is unconfirmed");
+  sockets[0]!.terminateThrows = false;
+  await provider.stop();
+  expect(sockets[0]!.terminated).toBe(true);
+  expect(session.released).toBe(true);
+  provider.openStream!({ sampleRate: 16_000 });
+  expect(sockets).toHaveLength(2);
+});
+
+test("stop() force-closes a finished session still inside its close grace period", async () => {
+  const { provider, sockets } = harness();
+  const session = provider.openStream!({ sampleRate: 16_000 });
+  sockets[0]!.open();
+  const final = session.end();
+  sockets[0]!.message({ tokens: [token("done", true), token("<fin>", true)] });
+  expect(await final).toBe("done");
+  expect(session.released).toBe(false);
+  await provider.stop();
+  expect(sockets[0]!.terminated).toBe(true);
+  expect(session.released).toBe(true);
+});
+
+test("swap readiness: warmup accepts a listed Soniox model and refuses an unknown one", async () => {
+  const models = { models: [{ id: "stt-rt-v5" }, { id: "stt-rt-v4", aliased_model_id: "stt-rt-v5" }] };
+  const listing = (async () => Response.json(models)) as unknown as typeof fetch;
+  await new SonioxSTTProvider({ backend: "soniox", apiKey: KEY, model: "stt-rt-v4" }, { fetcher: listing, env: {} }).warmup();
+  const error = await new SonioxSTTProvider({ backend: "soniox", apiKey: KEY, model: "stt-404" }, { fetcher: listing, env: {} })
+    .warmup().catch((e: Error) => e);
+  expect(String(error)).toContain("does not offer model 'stt-404'");
+});

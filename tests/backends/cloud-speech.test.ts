@@ -191,3 +191,25 @@ test("the registry builds every cloud backend without starting anything", () => 
   expect(buildSTTProvider({ backend: "soniox", apiKey: KEY, streaming: false }, "stt.backend").openStream).toBeUndefined();
   expect(buildSTTProvider({ backend: "deepgram", apiKey: KEY }, "stt.backend").openStream).toBeUndefined();
 });
+
+test("swap readiness: each cloud adapter's warmup refuses a model the provider rejects", async () => {
+  const rejecting = fetcher(() => new Response(`{"err_msg":"No such model ${KEY}"}`, { status: 400 }));
+  for (const provider of [
+    new DeepgramSTTProvider({ backend: "deepgram", apiKey: KEY, model: "nova-404" }, { fetcher: rejecting.fetch }),
+    new OpenAiTranscribeProvider("groq", { backend: "groq", apiKey: KEY, model: "whisper-404" }, { fetcher: rejecting.fetch }),
+  ]) {
+    const error = await provider.warmup().catch((e: Error) => e);
+    expect(String(error)).toContain("rejected model");
+    expect(String(error)).toContain("400");
+    expect(String(error)).not.toContain(KEY);
+  }
+  const tts = await new SonioxTTSProvider({ backend: "soniox", apiKey: KEY, model: "tts-404" }, { fetcher: rejecting.fetch })
+    .warmup().catch((e: Error) => e);
+  expect(String(tts)).toContain("400");
+  expect(String(tts)).not.toContain(KEY);
+
+  // An accepted model passes: silence comes back as an empty transcript.
+  const accepting = fetcher(() => Response.json({ results: { channels: [{ alternatives: [{ transcript: "" }] }] } }));
+  await new DeepgramSTTProvider({ backend: "deepgram", apiKey: KEY }, { fetcher: accepting.fetch }).warmup();
+  expect(new URL(accepting.calls[0]!.url).searchParams.get("model")).toBe("nova-3");
+});

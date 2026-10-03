@@ -10,7 +10,14 @@ import {
   scrubProviderText,
   type CloudSpeechBackend,
 } from "../cloud-speech";
-import { PROVIDER_TIMEOUT_MS, requestTimeout } from "../http-transfer";
+import {
+  PROVIDER_RESPONSE_LIMIT_BYTES,
+  PROVIDER_TIMEOUT_MS,
+  providerSignal,
+  readBoundedJson,
+  readErrorDetail,
+  requestTimeout,
+} from "../http-transfer";
 import { log } from "../../logger";
 
 export const SONIOX_STT_URL = "wss://stt-rt.soniox.com/transcribe-websocket";
@@ -74,7 +81,13 @@ interface SessionOptions {
  * gracefully and is terminated after a bounded grace period; any other exit
  * terminates at once.
  */
-function openSonioxSession(options: SessionOptions): LivePcmSession {
+/** A live session plus a forced-close retry that only its owning provider calls. */
+interface SonioxSession extends LivePcmSession {
+  /** Try `terminate()` again on a socket whose close is unconfirmed. */
+  retryRelease(): void;
+}
+
+function openSonioxSession(options: SessionOptions): SonioxSession {
   let socket: SonioxSocket | null = null;
   let opened = false;
   let settled = false;
@@ -236,6 +249,11 @@ function openSonioxSession(options: SessionOptions): LivePcmSession {
 
   return {
     get released() { return released; },
+    retryRelease() {
+      if (released) return;
+      if (socket) forceRelease(socket);
+      else markReleased();
+    },
     push(pcm) {
       if (settled || ended) throw new Error("live stream is closed");
       if (!(pcm instanceof Uint8Array) || pcm.length === 0 || pcm.length > MAX_PUSH_BYTES)
@@ -296,6 +314,8 @@ export class SonioxSTTProvider implements STTProvider {
   private activeStream: LivePcmSession | null = null;
   /** A session whose socket close is still unconfirmed; retryable, cleared once it reports released. */
   private cleanupBlocked: LivePcmSession | null = null;
+  /** Every session whose socket is not yet confirmed closed; stop() owns their release. */
+  private readonly sessions = new Set<SonioxSession>();
 
   constructor(config: STTProviderConfig, deps: SonioxSttDeps = {}) {
     this.entry = cloudSpeechBackend("stt", "soniox")!;
@@ -308,6 +328,13 @@ export class SonioxSTTProvider implements STTProvider {
     this.connect = deps.connect ?? ((url) => new WebSocket(url) as unknown as SonioxSocket);
     this.fetcher = deps.fetcher ?? fetch;
     this.now = deps.now ?? (() => performance.now());
+  }
+
+  /** Register a new session, forgetting any older one that has since released. */
+  private track(session: SonioxSession): SonioxSession {
+    for (const old of this.sessions) if (old.released) this.sessions.delete(old);
+    this.sessions.add(session);
+    return session;
   }
 
   /** True while a socket close is unconfirmed; clears itself once that session reports released. */
@@ -329,8 +356,8 @@ export class SonioxSTTProvider implements STTProvider {
     // during the supersede is caught too.
     this.activeStream?.abort();
     if (this.releaseBlocked()) throw new LiveSttError("never_opened", new Error(UNCONFIRMED));
-    let session!: LivePcmSession;
-    session = openSonioxSession({
+    let session!: SonioxSession;
+    session = this.track(openSonioxSession({
       apiKey: this.apiKey,
       model: this.model,
       format: { kind: "pcm", sampleRate: options.sampleRate },
@@ -343,7 +370,7 @@ export class SonioxSTTProvider implements STTProvider {
       connect: this.connect,
       now: this.now,
       onReleaseUnconfirmed: () => { this.cleanupBlocked = session; },
-    });
+    }));
     this.activeStream = session;
     void session.final.finally(() => { if (this.activeStream === session) this.activeStream = null; }).catch(() => {});
     return session;
@@ -370,7 +397,7 @@ export class SonioxSTTProvider implements STTProvider {
       const audio = new Uint8Array(await file.arrayBuffer());
       // Checked after the read: a prior socket's grace timer may have latched meanwhile.
       if (this.releaseBlocked()) return { kind: "failure", reason: UNCONFIRMED };
-      const session = openSonioxSession({
+      const session: SonioxSession = this.track(openSonioxSession({
         apiKey: this.apiKey,
         model: this.model,
         format: { kind: "auto" },
@@ -382,7 +409,7 @@ export class SonioxSTTProvider implements STTProvider {
         connect: this.connect,
         now: this.now,
         onReleaseUnconfirmed: () => { this.cleanupBlocked = session; },
-      });
+      }));
       for (let offset = 0; offset < audio.length; offset += MAX_PUSH_BYTES) {
         session.push(audio.subarray(offset, offset + MAX_PUSH_BYTES));
       }
@@ -403,8 +430,41 @@ export class SonioxSTTProvider implements STTProvider {
     return result.ok;
   }
 
+  /**
+   * Swap readiness: the free model list names every recognition model and its
+   * aliases, so an unknown stt.model is refused before cutover.
+   */
+  async warmup(): Promise<void> {
+    if (!this.apiKey) throw new Error(`Soniox API key not found; set ${this.entry.apiKeyEnv}`);
+    const response = await this.fetcher(this.entry.keyProbe.url, {
+      headers: this.entry.keyProbe.headers(this.apiKey),
+      signal: providerSignal(PROVIDER_TIMEOUT_MS.health),
+    });
+    if (!response.ok) {
+      const detail = scrubProviderText(await readErrorDetail(response), this.apiKey);
+      throw new Error(`Soniox model lookup returned ${response.status}${detail ? `: ${detail}` : ""}`);
+    }
+    const body = await readBoundedJson<{ models?: unknown }>(response, PROVIDER_RESPONSE_LIMIT_BYTES.json, "Soniox model list");
+    const models = Array.isArray(body?.models) ? body.models : [];
+    const known = models.flatMap((entry) => typeof (entry as { id?: unknown })?.id === "string" ? [(entry as { id: string }).id] : []);
+    if (!known.includes(this.model)) {
+      throw new Error(`Soniox does not offer model '${scrubProviderText(this.model, this.apiKey)}'`);
+    }
+  }
+
+  /**
+   * Ends the live stream and confirms every socket this provider opened is
+   * closed. A close that cannot be confirmed is retried here and, if it still
+   * fails, rejects: the caller keeps ownership and may stop() again.
+   */
   async stop(): Promise<void> {
     this.activeStream?.abort();
     this.activeStream = null;
+    for (const session of [...this.sessions]) {
+      if (!session.released) session.retryRelease();
+      if (session.released) this.sessions.delete(session);
+    }
+    if (this.sessions.size > 0) throw new Error(UNCONFIRMED);
+    this.cleanupBlocked = null;
   }
 }

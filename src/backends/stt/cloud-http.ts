@@ -7,6 +7,7 @@ import {
   type CloudSpeechBackend,
 } from "../cloud-speech";
 import { log } from "../../logger";
+import { encodeWav } from "../../platform/wav";
 import {
   PROVIDER_RESPONSE_LIMIT_BYTES,
   PROVIDER_TIMEOUT_MS,
@@ -94,6 +95,30 @@ export abstract class CloudHttpSttProvider implements STTProvider {
       const message = scrubProviderText(error instanceof Error ? error.message : String(error), this.apiKey);
       return { kind: "failure", reason: `${this.entry.label} transcription failed: ${message}` };
     }
+  }
+
+  /**
+   * Swap readiness: send a quarter second of silence through the real request
+   * path. The free key probe cannot see the model (an OpenAI project key even
+   * hides models it may use), so only a real request proves the configured
+   * model, language and vocabulary are accepted. Costs a fraction of a cent,
+   * and only runs when this provider is swapped in.
+   */
+  async warmup(): Promise<void> {
+    if (!this.apiKey) throw new Error(`${this.entry.label} API key not found; set ${this.entry.apiKeyEnv}`);
+    const silence = new Blob([encodeWav(new Int16Array(4_000), 16_000) as Uint8Array<ArrayBuffer>], { type: "audio/wav" });
+    let response: Response;
+    try {
+      response = await this.request(silence, undefined);
+    } catch (error: unknown) {
+      throw new Error(`${this.entry.label} warmup failed: ${scrubProviderText(error instanceof Error ? error.message : String(error), this.apiKey)}`);
+    }
+    if (!response.ok) {
+      const detail = scrubProviderText(await readErrorDetail(response), this.apiKey);
+      throw new Error(`${this.entry.label} rejected model '${scrubProviderText(this.model, this.apiKey)}': ${response.status}${detail ? ` ${detail}` : ""}`);
+    }
+    const body = await readBoundedJson<unknown>(response, PROVIDER_RESPONSE_LIMIT_BYTES.json, `${this.entry.label} warmup`);
+    if (this.transcriptFrom(body) === null) throw new Error(`${this.entry.label} warmup response had no transcript`);
   }
 
   /** A key check against the provider's free probe; never spends transcription credit. */

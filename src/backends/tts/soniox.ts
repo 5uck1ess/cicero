@@ -92,6 +92,15 @@ export class SonioxTTSProvider implements TTSProvider {
     return wavFromPcm(aligned, { rate: SAMPLE_RATE, width: 2, channels: 1 });
   }
 
+  /**
+   * Swap readiness: Soniox's model list covers recognition models only, so a
+   * one-word synthesis is the check that the TTS model, voice and language are
+   * accepted (an unknown model is an HTTP 400). Runs only on swap-in.
+   */
+  async warmup(): Promise<void> {
+    await this.generateAudio("Hi.");
+  }
+
   async health(): Promise<boolean> {
     const result = await checkCloudSpeechKey(this.entry, this.apiKey, { fetcher: this.fetcher });
     if (!result.ok) log("info", `Soniox TTS health: ${result.reason}`);
