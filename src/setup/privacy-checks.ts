@@ -4,6 +4,7 @@ import { OPENAI_COMPATIBLE_BACKENDS } from "../backends/llm/openai";
 import type { Check } from "../cli/doctor";
 import type { CiceroConfig } from "../types";
 import { isCloudAcpCommand } from "./acp-agents";
+import { cloudSpeechBackend } from "../backends/cloud-speech";
 
 /**
  * Doctor warnings for a declared privacy policy. The policy is declared, not
@@ -21,8 +22,6 @@ function loopback(url: string | undefined): boolean {
 
 /** An endpoint as shown in a warning: URL credentials and tokens redacted. */
 const shown = (url: string) => redactSecrets(url);
-/** Speech engines that always send audio or text off this machine. */
-const CLOUD_SPEECH = new Set(["elevenlabs"]);
 
 export function privacyChecks(raw: CiceroConfig): Check[] {
   const privacy = raw.privacy;
@@ -51,13 +50,14 @@ export function privacyChecks(raw: CiceroConfig): Check[] {
         warn("escalation agent", `Privacy is local, but brain.escalate runs a cloud ACP agent and privacy.allow has no agent; ${AGENT_NOTE}.`);
     }
   }
-  // Speech stays on this machine in both modes.
-  const speech = [["stt", raw.stt], ["tts", raw.tts]] as const;
-  const off = speech.filter(([, c]) => {
+  // Speech stays on this machine in both modes unless privacy.allow has "speech".
+  // Fallback seats count: a cloud fallback sends audio exactly when it is used.
+  const speech = [["stt", raw.stt], ["stt_fallback", raw.stt_fallback], ["tts", raw.tts], ["tts_fallback", raw.tts_fallback]] as const;
+  const off = speech.filter(([key, c]) => {
     const s = c as { backend?: string; host?: string } | undefined;
-    return s && ((s.backend && CLOUD_SPEECH.has(s.backend)) || (s.host && !loopbackHost(s.host)));
+    return s && (cloudSpeechBackend(key, s.backend) !== null || (s.host && !loopbackHost(s.host)));
   }).map(([key]) => key);
-  if (off.length) warn("speech", `Privacy says speech stays on this machine, but ${off.join(" and ")} ${off.length > 1 ? "use" : "uses"} a cloud or remote engine.`);
+  if (off.length && !allow.has("speech")) warn("speech", `Privacy says speech stays on this machine, but ${off.join(" and ")} ${off.length > 1 ? "use" : "uses"} a cloud or remote engine and privacy.allow has no speech.`);
   if (raw.notify?.telegram && !allow.has("telegram")) warn("telegram", "notify.telegram is set, but privacy.allow has no telegram: message text goes to Telegram.");
   if (raw.notify?.kanban?.enabled && !allow.has("board")) warn("board", "notify.kanban is enabled, but privacy.allow has no board: task text goes to the board CLI.");
   return checks;

@@ -92,13 +92,69 @@ inherited from `stt`. `doctor` and `status` show the language and term count,
 without printing the terms.
 
 `stt.streaming: true` opts browser voice into live audio.cpp recognition. It
-requires `stt.backend: audiocpp`; any other backend is a configuration error.
+requires a live-capable backend (`audiocpp`, or `soniox`, where it is on by
+default); any other backend is a configuration error.
 Configure Nemotron's model entry in `servers/audiocpp_server.local.json` with
 `"mode": "streaming"`. The setup page writes that mode when its live streaming
 checkbox is selected. The browser sends bounded, ordered 16 kHz PCM during
 speech and shows partial captions. At speech end, the final live transcript
 feeds the ordinary turn pipeline. A failed live stream retries the full WAV via
 batch STT. The local microphone path continues to use batch STT.
+
+### Cloud speech (paid)
+
+Cloud recognizers and voices run nothing on this machine and need an API key,
+either inline as `apiKey` (written to the owner-only `config.yaml`) or in the
+provider's environment variable. `cicero setup` offers each one on the Hear and
+Speak steps with a password field, a **Test key** button that calls the
+provider's free, read-only key check, and a link to the provider's key page.
+Choosing one adds `speech` to `privacy.allow`; without it, `doctor` warns that
+speech leaves the machine. `doctor` and `status` prove the key the same way, and
+every configured key is redacted from logs and the dashboard.
+
+| `stt.backend` | Key variable | Default model | How audio is sent |
+|---|---|---|---|
+| `soniox` | `SONIOX_API_KEY` | `stt-rt-v5` | Live over a websocket while you speak (browser voice); a finished WAV otherwise |
+| `deepgram` | `DEEPGRAM_API_KEY` | `nova-3` | Each finished utterance |
+| `openai` | `OPENAI_API_KEY` | `gpt-4o-mini-transcribe` | Each finished utterance |
+| `groq` | `GROQ_API_KEY` | `whisper-large-v3-turbo` | Each finished utterance |
+| `mistral` | `MISTRAL_API_KEY` | `voxtral-mini-latest` | Each finished utterance |
+
+| `tts.backend` | Key variable | Default model | Voices |
+|---|---|---|---|
+| `soniox` | `SONIOX_API_KEY` | `tts-rt-v2` | Soniox presets (default `Iris`); set `tts.language` for non-English replies |
+| `elevenlabs` | `ELEVENLABS_API_KEY` | `eleven_multilingual_v2` (setup pre-fills `eleven_flash_v2_5`) | Your cloned or library voice ID |
+
+Soniox is the only cloud recognizer that transcribes **during** speech, so its
+transcript is ready almost as the turn ends. It is on by default; set
+`stt.streaming: false` to send finished utterances instead. One measurement on
+the ryzen-ai box (a 6-second clip streamed at real time, 2026-10-02): the final
+transcript arrived 24–41 ms after the last audio. The same clip uploaded whole
+took about 3.3 s, because Soniox processes uploaded audio at roughly twice real
+time, so the live path is what makes it fast. The other cloud recognizers are
+request/response: their latency is the upload plus the provider's processing
+time, which these docs do not measure.
+
+`language` and `vocabulary` apply to cloud recognizers too: Soniox gets the
+primary language code as a hint and the terms as context; Deepgram gets the tag
+as written and one `keyterm` per term (`keywords` on Nova-2 and older models); OpenAI and Groq get the primary code and
+the vocabulary prompt; Mistral gets the primary code only.
+
+Cloud voices still synthesize one sentence group per request, the same as the
+local engines, so a cloud voice starts speaking when its first sentence is fully
+generated; Cicero does not yet play audio that is still streaming in. That makes
+the whole-sentence time the number that matters. One measurement from the
+ryzen-ai box (2026-10-02, one ~3-second English sentence, two runs each):
+
+| Voice | First byte | Whole sentence |
+|---|---|---|
+| ElevenLabs `eleven_flash_v2_5` | 240–280 ms | 240–320 ms |
+| ElevenLabs `eleven_v4_turbo` | ~580 ms | ~600 ms |
+| Soniox `tts-rt-v2` | 200–260 ms | ~2.1 s |
+
+Soniox streams its audio at roughly 1.5x real time, so it is fast to *start* but
+slow to *finish*; it will only be competitive once Cicero plays audio as it
+arrives. For the lowest reply latency today, use ElevenLabs Flash.
 
 An optional `classifier:` section takes the same shape as `llm:` and holds a
 small model apart from the reply model for per-utterance decisions. It is off by

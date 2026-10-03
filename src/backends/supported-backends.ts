@@ -1,5 +1,6 @@
 import { SUPPORTED_VOICE_PROVIDERS } from "../voice/provider-contract";
 import { OPENAI_COMPATIBLE_BACKENDS } from "./llm/openai";
+import { CLOUD_STT_BACKENDS, CLOUD_TTS_BACKENDS } from "./cloud-speech";
 
 /** Backends the built-in registry can construct today. */
 export const SUPPORTED_STT_BACKENDS = [
@@ -7,15 +8,16 @@ export const SUPPORTED_STT_BACKENDS = [
   "faster-whisper",
   "audiocpp",
   "wyoming",
-] as const;
+  ...CLOUD_STT_BACKENDS,
+] as readonly string[];
 
 /** Backends the built-in registry can construct today. */
 export const SUPPORTED_TTS_BACKENDS = [
   "mlx-audio",
   "kokoro",
   "wyoming",
-  ...SUPPORTED_VOICE_PROVIDERS,
-] as const;
+  ...new Set<string>([...SUPPORTED_VOICE_PROVIDERS, ...CLOUD_TTS_BACKENDS]),
+] as readonly string[];
 
 /** Backends the built-in LLM registry can construct today. */
 export const SUPPORTED_LLM_BACKENDS = [

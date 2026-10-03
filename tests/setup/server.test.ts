@@ -62,6 +62,39 @@ describe("setup server auth", () => {
     expect(text).toContain("echo-");
     expect(text).not.toContain(marker);
   });
+  test("Test key sends a cloud speech key only to its provider and never echoes it", async () => {
+    let handler: (request: Request) => Response | Promise<Response> = () => new Response("missing");
+    const serve = ((options: { fetch: typeof handler }) => { handler = options.fetch; return { port: 9999, stop: () => {} }; }) as unknown as typeof Bun.serve;
+    const typed = "synthetic-typed-soniox-key-555";
+    const fromEnv = "synthetic-env-deepgram-key-777";
+    const calls: Array<{ url: string; auth: string | null }> = [];
+    const pickerDeps = { ...requiredDeps, env: { DEEPGRAM_API_KEY: fromEnv },
+      fetcher: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(input), auth: new Headers(init?.headers).get("authorization") });
+        return String(input).includes("soniox") ? new Response(`bad key ${typed}`, { status: 401 }) : new Response("{}", { status: 200 });
+      }) as typeof fetch };
+    const server = await startSetupServer({ home: home(), systemDeps, output: () => {}, serve, pickerDeps });
+    servers.push(server);
+    const headers = { host: `127.0.0.1:${server.port}`, "x-cicero-setup-token": server.token, "x-cicero-setup-csrf": "1" };
+    const post = (body: unknown) => handler(new Request(`http://127.0.0.1:${server.port}/api/speech-key`, { method: "POST", headers, body: JSON.stringify(body) }));
+
+    const rejected = await post({ kind: "stt", id: "soniox", apiKey: typed });
+    const rejectedText = await rejected.text();
+    expect(JSON.parse(rejectedText)).toMatchObject({ ok: false, message: expect.stringContaining("console.soniox.com") });
+    expect(rejectedText).not.toContain(typed);
+
+    const accepted = await post({ kind: "stt", id: "deepgram" });
+    const acceptedText = await accepted.text();
+    expect(JSON.parse(acceptedText)).toEqual({ ok: true, message: "Deepgram accepted the key." });
+    expect(acceptedText).not.toContain(fromEnv);
+
+    expect(calls).toEqual([
+      { url: "https://api.soniox.com/v1/models", auth: `Bearer ${typed}` },
+      { url: "https://api.deepgram.com/v1/projects", auth: `Token ${fromEnv}` },
+    ]);
+    expect((await post({ kind: "stt", id: "kokoro" })).status).toBe(400);
+    expect((await post({ kind: "llm", id: "openai" })).status).toBe(400);
+  });
   test("every handler response goes through the redacting reply, never a bare json()", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/setup/server.ts"), "utf8");
     const handler = source.slice(source.indexOf("async fetch(req)"), source.indexOf("function stop(): Promise<void>"));

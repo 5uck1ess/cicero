@@ -11,8 +11,10 @@ export interface STTProviderConfig {
   vocabulary?: string[];
   /** Absolute per-transcription deadline in milliseconds (default 90 seconds). */
   timeout_ms?: number;
-  /** Opt-in browser live PCM transcription; audio.cpp only. */
+  /** Browser live PCM transcription: opt-in for audio.cpp, on by default for Soniox. */
   streaming?: boolean;
+  /** Inline key for a cloud recognizer; otherwise its environment variable is read. */
+  apiKey?: string;
 }
 
 /** Shared wire prompt for the HTTP recognizers. Config validation bounds its UTF-8 size. */

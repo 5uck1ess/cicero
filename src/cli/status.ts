@@ -17,6 +17,7 @@ import type { STTProviderConfig } from "../backends/stt/provider";
 import { sttDefaultPort } from "../backends/stt/provider";
 import { ttsDefaultPort, type TTSProviderConfig } from "../backends/tts/provider";
 import { ELEVENLABS_API_BASE } from "../backends/tts/elevenlabs";
+import { cloudSpeechApiKey, cloudSpeechBackend } from "../backends/cloud-speech";
 import {
   SUPPORTED_STT_BACKENDS,
   SUPPORTED_TTS_BACKENDS,
@@ -159,7 +160,21 @@ function httpEndpoint(
   return { summary: networkSummary(backend, url, model), request: { url } };
 }
 
-function sttPlan(config: STTProviderConfig): EndpointPlan {
+/** Cloud speech status: the provider's free key probe, sent with the resolved key. */
+function cloudSpeechPlan(
+  role: "stt" | "tts",
+  config: { backend?: string; apiKey?: string; model?: string },
+  env: Record<string, string | undefined>,
+): EndpointPlan | null {
+  const cloud = cloudSpeechBackend(role, config.backend);
+  if (!cloud) return null;
+  const summary = networkSummary(cloud.id, cloud.keyProbe.url, config.model ?? cloud.defaultModel);
+  const apiKey = cloudSpeechApiKey(cloud, config.apiKey, env);
+  if (!apiKey) return { summary, problem: `${cloud.apiKeyEnv} is not set` };
+  return { summary, request: { url: cloud.keyProbe.url, headers: cloud.keyProbe.headers(apiKey) } };
+}
+
+function sttPlan(config: STTProviderConfig, env: Record<string, string | undefined>): EndpointPlan {
   const backend = config.backend ?? "unknown";
   const hintSummary = `${config.language ? ` · language ${concise(config.language, 64)}` : ""} · vocabulary ${config.vocabulary?.length ?? 0} terms${config.streaming ? " · live streaming" : ""}`;
   const withHints = (plan: EndpointPlan): EndpointPlan => ({ ...plan, summary: `${plan.summary}${hintSummary}` });
@@ -169,6 +184,8 @@ function sttPlan(config: STTProviderConfig): EndpointPlan {
       fatalProblem: `unsupported backend; valid STT backends: ${SUPPORTED_STT_BACKENDS.join(", ")}`,
     });
   }
+  const cloud = cloudSpeechPlan("stt", config, env);
+  if (cloud) return withHints(cloud);
   const port = config.port ?? sttDefaultPort(backend);
   if (backend === "wyoming") {
     return withHints(nativeEndpoint(backend, config.host, port ?? 10300, config.model));
@@ -209,6 +226,8 @@ function ttsPlan(
       request: { url: endpoint, headers: { "xi-api-key": apiKey } },
     };
   }
+  const cloud = cloudSpeechPlan("tts", config, env);
+  if (cloud) return cloud;
 
   const port = config.port ?? ttsDefaultPort(backend);
   if (backend === "wyoming") {
@@ -724,9 +743,9 @@ export async function collectStatus(
   }
 
   const daemon = checkDaemon(inspect, pidFile, timeoutMs);
-  const stt = probePlan("STT", sttPlan(config.sttBackend), probe, timeoutMs);
+  const stt = probePlan("STT", sttPlan(config.sttBackend, env), probe, timeoutMs);
   const sttFallback = config.sttFallbackBackend
-    ? probePlan("STT fallback", sttPlan(config.sttFallbackBackend), probe, timeoutMs)
+    ? probePlan("STT fallback", sttPlan(config.sttFallbackBackend, env), probe, timeoutMs)
     : null;
   const ttsSkip = config.ttsEnabled ? undefined : "disabled; health probe skipped";
   const tts = probePlan("TTS", ttsPlan(config.ttsBackend, env), probe, timeoutMs, ttsSkip);

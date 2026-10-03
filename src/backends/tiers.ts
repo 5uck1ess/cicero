@@ -28,6 +28,7 @@ export const TIER_PRESETS: Record<string, TierConfig> = {
     llm: { backend: "ollama", port: 11434, model: "qwen3.5:0.8b" },
     terminal: "auto",
   },
-  // "hybrid" and "cloud" presets are deferred; Deepgram STT and claude-api
-  // still need runtime providers before a complete preset can be advertised.
+  // "hybrid" and "cloud" presets are deferred: cloud speech exists
+  // (src/backends/cloud-speech.ts), but a preset would also pick a brain and a
+  // key for the operator, and claude-api still needs a runtime provider.
 };

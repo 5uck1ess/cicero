@@ -153,6 +153,12 @@ stt:
 #   stt: { backend: mlx-whisper, port: 8083 }              # macOS / Apple Silicon
 #   stt: { backend: faster-whisper, host: 192.168.1.50, port: 8083 }  # remote GPU box
 #   stt: { backend: audiocpp, port: 8092, model: nemotron, streaming: true } # live web captions
+# Cloud (paid; key inline as apiKey or in the named variable; needs privacy.allow: [speech]):
+#   stt: { backend: soniox }                       # SONIOX_API_KEY; transcribes live while you talk
+#   stt: { backend: deepgram, model: nova-3 }      # DEEPGRAM_API_KEY
+#   stt: { backend: groq }                         # GROQ_API_KEY; whisper-large-v3-turbo
+#   stt: { backend: openai }                       # OPENAI_API_KEY; gpt-4o-mini-transcribe
+#   stt: { backend: mistral }                      # MISTRAL_API_KEY; Voxtral
 
 # ---------------------------------------------------------------------------
 # TTS — pocket-tts (Kyutai) clones any voice from a reference WAV and runs
@@ -164,6 +170,9 @@ tts:
   port: 8095
   voice: alba                   # built-in preset; `voice use` writes a clone reference
   timeout_ms: 60000             # absolute synthesis deadline
+# Cloud voices (paid; needs privacy.allow: [speech]):
+#   tts: { backend: soniox, voice: Iris, language: en }            # SONIOX_API_KEY
+#   tts: { backend: elevenlabs, voice: <voice-id>, model: eleven_flash_v2_5 }  # ELEVENLABS_API_KEY
 # Optional second engine — unknown voices and pocket failures land here:
 tts_fallback:
   backend: kokoro

@@ -8,6 +8,8 @@ export interface TTSProviderConfig {
   refAudio?: string;
   refText?: string;
   apiKey?: string;
+  /** Synthesis language for cloud voices that need one (Soniox); a language tag. */
+  language?: string;
   /** Alternate voice-library root for embedded runtimes and contract tests. */
   voiceLibraryRoot?: string;
   /** Alternate private audio.cpp reference cache for embedded runtimes/tests. */

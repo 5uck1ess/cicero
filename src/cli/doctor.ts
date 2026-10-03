@@ -21,6 +21,7 @@ import {
   voiceProviderContractForBackend,
 } from "../voice/provider-contract";
 import { ElevenLabsProvider } from "../backends/tts/elevenlabs";
+import { checkCloudSpeechKey, cloudSpeechApiKey, cloudSpeechBackend } from "../backends/cloud-speech";
 import { audioCppLocalRuntimePaths } from "../backends/tts/audiocpp";
 import { ttsDefaultPort, type TTSProviderConfig } from "../backends/tts/provider";
 import { sttDefaultPort, type STTProviderConfig } from "../backends/stt/provider";
@@ -81,6 +82,8 @@ export interface DoctorCheckOptions {
   ciceroHome?: string;
   projectRoot?: string;
   cloudProbeTimeoutMs?: number;
+  /** Fetch override for deterministic cloud speech key probes. */
+  cloudFetcher?: typeof fetch;
   /** Resolved `terminal: auto` override for deterministic brain-mode tests. */
   detectedTerminal?: "kitty" | "wezterm" | "tmux" | "none";
   /** Environment override for deterministic API credential checks. */
@@ -336,6 +339,30 @@ async function checkEngine(
     return;
   }
 
+  // Cloud speech other than ElevenLabs (whose voice-ID check is below): prove
+  // the key with the provider's free, read-only probe. No local port exists.
+  const cloudSpeech = cloudSpeechBackend(role, cfg.backend);
+  if (cloudSpeech && !(ttsRole && cloudSpeech.id === "elevenlabs")) {
+    const inlineApiKey = typeof cfg.apiKey === "string" ? cfg.apiKey.trim() : "";
+    const apiKey = cloudSpeechApiKey(cloudSpeech, inlineApiKey, options.env ?? process.env).trim();
+    if (!apiKey) {
+      record({
+        level: "fail",
+        detail: `${cloudSpeech.apiKeyEnv} is not set — ${cloudSpeech.label} cannot authenticate`,
+        hint: `export ${cloudSpeech.apiKeyEnv}=<your-key> (keys: ${cloudSpeech.consoleUrl}), or enter it in cicero setup`,
+      });
+      return;
+    }
+    const result = await checkCloudSpeechKey(cloudSpeech, apiKey, {
+      fetcher: options.cloudFetcher,
+      timeoutMs: options.cloudProbeTimeoutMs ?? 1_500,
+    });
+    record(result.ok
+      ? { level: "ok", detail: `${cloudSpeech.label} key accepted; ${sttRole ? "audio" : "reply text"} is sent to ${cloudSpeech.egressHost}` }
+      : { level: "fail", detail: result.reason, hint: `check ${cloudSpeech.apiKeyEnv} and network access` });
+    return;
+  }
+
   if (runtimeContract?.runtime === "cloud") {
     const inlineApiKey = typeof cfg.apiKey === "string" ? cfg.apiKey.trim() : "";
     const apiKey = inlineApiKey || process.env.ELEVENLABS_API_KEY?.trim();
@@ -379,6 +406,11 @@ async function checkEngine(
         ? `configure an explicit non-MLX/remote ${role} backend if the local router is needed`
         : `upgrade macOS or configure a non-MLX/remote ${role} backend`,
     });
+    return;
+  }
+  if (port === undefined) {
+    // Nothing local to probe. Saying "ok … on :undefined" here would be a lie.
+    record({ level: "warn", detail: "no local port is known for this backend, so doctor cannot probe it", hint: `set ${role}.port or ${role}.host` });
     return;
   }
   const host = isRemote(cfg.host) ? cfg.host! : "127.0.0.1";

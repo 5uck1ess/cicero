@@ -345,9 +345,8 @@ describe("doctor setup hints", () => {
       expect(stt?.level).toBe("fail");
       expect(stt?.detail).toContain("stt.backend='faster-whispr'");
       expect(stt?.hint).toContain(
-        "valid values for stt.backend: mlx-whisper, faster-whisper, audiocpp, wyoming",
+        "valid values for stt.backend: mlx-whisper, faster-whisper, audiocpp, wyoming, soniox, deepgram, openai, groq, mistral",
       );
-      expect(stt?.hint).not.toContain("deepgram");
       expect(tts?.level).toBe("fail");
       expect(tts?.detail).toContain("tts.backend='pocket-ttz'");
       expect(tts?.hint).toContain("valid values for tts.backend:");

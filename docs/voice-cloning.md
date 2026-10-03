@@ -139,6 +139,7 @@ Zero-shot cloning copies **timbre from the reference clip's opening seconds** â€
 | `kokoro` | No (presets) | 50â€“100 ms | ~1 GB (CUDA) or CPU |
 | `vibevoice` | Yes (zero-shot) | ~150 ms | ~2 GB |
 | `elevenlabs` | Yes (uploaded voice ID) | network-dependent | cloud |
+| `soniox` | No (Soniox preset voices) | network-dependent | cloud |
 | `mlx-audio` (default Mac) | Direct reference config only | ~200 ms | unified |
 
 The voice-library providers are `audiocpp`, `pocket-tts`, `vibevoice`, and `elevenlabs`. Kokoro, Wyoming, and MLX Audio remain useful preset/direct-reference engines and fallback seats, but `voice add` does not claim to provision clones for them.
