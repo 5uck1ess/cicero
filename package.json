@@ -38,7 +38,7 @@
   },
   "dependencies": {
     "@zed-industries/agent-client-protocol": "^0.4.5",
-    "chalk": "^6.0.0",
+    "chalk": "^6.0.1",
     "commander": "^15.0.0",
     "qrcode": "^1.5.4",
     "yaml": "^2.9.1"
