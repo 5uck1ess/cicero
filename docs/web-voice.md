@@ -223,7 +223,12 @@ acoustic behavior. Measure your local classifier before enabling this experiment
 Hands-free barge-in pauses the current audio clip and keeps the bounded playback
 queue. If recognition yields no words, or `web_voice.false_interruption_ms`
 elapses (default 1500; range 250–10000), playback resumes from the same position.
-It does not re-synthesize the reply. The Telegram call bridge negotiates the same
+It does not re-synthesize the reply. A backchannel — a transcript that is only
+"mm-hmm", "uh-huh", "yeah", "right", "okay", "I see" and the like — is treated
+the same way, so saying it to show you're following resumes the reply instead
+of replacing it. "Stop", "wait", "yes"/"no" and anything with real content
+still interrupt; set top-level `backchannel_enabled: false` to interrupt on any
+words. The Telegram call bridge negotiates the same
 behavior with the daemon; an older daemon retains the existing hard-abort path.
 Push-to-talk cancellation and Stop remain explicit cancellations.
 

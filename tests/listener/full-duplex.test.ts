@@ -232,3 +232,66 @@ test("an old legacy barge loop drops stale audio instead of dispatching it", asy
   expect(l.active).toBe(true);
   expect(await Bun.file(stalePath).exists()).toBe(false);
 });
+
+/** One capture, then the reply finishes; resolves with how many times detection armed. */
+async function runOneCapture(l: Stub, run: (cb: Promise<void>) => Promise<void>): Promise<number> {
+  let detectCalls = 0;
+  let resolveDone!: () => void;
+  const callbackPromise = new Promise<void>((res) => { resolveDone = res; });
+  l.detectBargeIn = async () => {
+    detectCalls++;
+    if (detectCalls === 1) return "/tmp/cicero-test-backchannel.wav";
+    resolveDone();
+    return null;
+  };
+  await run(callbackPromise);
+  return detectCalls;
+}
+
+test("a backchannel over the reply keeps Cicero talking and dispatches nothing", async () => {
+  const l = makeListener("Mm-hmm.", SPOKEN);
+  let interrupted = false;
+  let received: string | null = null;
+  let judged = false;
+  l.onBargeIn(() => { interrupted = true; });
+  l.onCommand((t) => { received = t; });
+  l.setIntentJudge({ decide: async () => { judged = true; return { addressed: true } as never; } });
+
+  const detectCalls = await runOneCapture(l, (cb) => l.runFullDuplexTurn(cb));
+
+  expect(interrupted).toBe(false);
+  expect(received).toBeNull();
+  expect(judged).toBe(false); // never spends the judge budget
+  expect(detectCalls).toBeGreaterThanOrEqual(2); // re-armed for a real interruption
+});
+
+test("with backchannels not ignored, 'mm-hmm' interrupts like any speech", async () => {
+  const l = makeListener("Mm-hmm.", SPOKEN);
+  l.setIgnoreBackchannels(false);
+  let interrupted = false;
+  let received: string | null = null;
+  l.onBargeIn(() => { interrupted = true; });
+  l.onCommand((t) => { received = t; });
+  l.detectBargeIn = async () => "/tmp/cicero-test-backchannel-off.wav";
+
+  await l.runFullDuplexTurn(new Promise<void>(() => {}));
+
+  expect(interrupted).toBe(true);
+  expect(received).toBe("Mm-hmm.");
+});
+
+test("legacy barge-in still dispatches a backchannel so the brain can resume", async () => {
+  // The energy detector has already cut the reply. Dropping "go on" here would
+  // also drop the recovery snapshot and leave silence; dispatching it lets the
+  // brain pick the reply back up.
+  const l = makeListener("go on", SPOKEN);
+  let received: string | null = null;
+  let discarded = 0;
+  l.onCommand((t) => { received = t; });
+  l.onBargeInDiscarded(() => { discarded++; });
+
+  await runOneCapture(l, (cb) => l.runLegacyBargeInTurn(cb));
+
+  expect(received).toBe("go on");
+  expect(discarded).toBe(0);
+});

@@ -22,6 +22,12 @@
 # I/O. Delete this line on a desktop to use the local mic instead.
 headless: true
 
+# Backchannels (default on): "mm-hmm", "yeah", "right" or "I see" said over a
+# reply means "keep going", so Cicero keeps talking instead of treating it as
+# an interruption. "Stop", "wait" and real requests still interrupt. Applies to
+# web hands-free, Telegram calls and local full-duplex.
+# backchannel_enabled: false
+
 # ---------------------------------------------------------------------------
 # Native dictation: record on demand, transcribe with Cicero's own STT, and
 # deliver the transcript. Off by default — it types into other applications.

@@ -80,6 +80,7 @@ function start(opts: {
   createIncompleteFilter?: () => IncompleteTurnFilter;
 
   onBargeTranscribe?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onBargeTranscribe"]>;
+  ignoreBackchannels?: boolean;
   onTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onTurn"]>;
   onStreamTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onStreamTurn"]>;
   onTextTurn?: NonNullable<Parameters<typeof startWebVoiceServer>[0]["onTextTurn"]>;
@@ -107,6 +108,7 @@ function start(opts: {
     tls: null,
     onTurn: opts.onTurn ?? (async () => ({ transcript: "hi", reply: "hello", audio: new ArrayBuffer(0) })),
     onBargeTranscribe: opts.onBargeTranscribe,
+    ignoreBackchannels: opts.ignoreBackchannels,
     onStreamTurn: opts.onStreamTurn,
     onTextTurn: opts.onTextTurn,
     onNotify: opts.onNotify,
@@ -2820,6 +2822,44 @@ for (const protocol of [1, 2] as const) {
       expect(await transcript).toMatchObject({ text: result });
       expect(originalSignal!.aborted).toBe(true);
       expect(invocations).toBe(2);
+    } finally { ws.close(); }
+  });
+}
+
+for (const ignoreBackchannels of [undefined, false] as const) {
+  test(`tentative backchannel ${ignoreBackchannels === false ? 'replaces' : 'resumes'} the reply when ignoreBackchannels is ${ignoreBackchannels}`, async () => {
+    const started = deferred();
+    let originalSignal: AbortSignal | undefined;
+    let invocations = 0;
+    const base = start({
+      ignoreBackchannels,
+      onBargeTranscribe: async () => 'Mm-hmm.',
+      onStreamTurn: async (_wav, sink, options) => {
+        invocations++;
+        if (invocations === 1) {
+          originalSignal = options!.signal;
+          started.resolve();
+          await new Promise<void>((resolve) => originalSignal!.addEventListener('abort', () => resolve(), { once: true }));
+        }
+        sink.done();
+      },
+    });
+    const { ws, sessionId } = await connectV2(base);
+    try {
+      ws.send(encodeTurnAudioFrame(sessionId, 'original', wav())); await started.promise;
+      ws.send(JSON.stringify({ type: 'barge_in', sessionId, captureId: 'mmhmm' }));
+      const result = nextJson(ws, m => m.type === 'barge_result');
+      ws.send(encodeTurnAudioFrame(sessionId, 'mmhmm', wav()));
+      if (ignoreBackchannels === false) {
+        expect(await result).toMatchObject({ accepted: true, captureId: 'mmhmm' });
+        await Bun.sleep(0);
+        expect(originalSignal!.aborted).toBe(true);
+      } else {
+        // Rejected like noise: the client resumes the paused reply.
+        expect(await result).toMatchObject({ accepted: false, captureId: 'mmhmm' });
+        expect(originalSignal!.aborted).toBe(false);
+        expect(invocations).toBe(1);
+      }
     } finally { ws.close(); }
   });
 }

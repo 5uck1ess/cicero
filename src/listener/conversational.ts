@@ -6,6 +6,7 @@ import { join, dirname } from "path";
 import { statSync, unlinkSync } from "fs";
 import { ciceroPath } from "../platform/paths";
 import { isSelfEcho } from "./echo";
+import { isBackchannel } from "./backchannel";
 import type { IntentDecision, IntentJudge } from "./intent-judge";
 import type { TurnDetector, TurnPrediction } from "../backends/turn/provider";
 import { decideEndOfTurn } from "../backends/turn/policy";
@@ -102,7 +103,7 @@ function normalizeVoicePhrase(text: string | null | undefined): string {
 }
 
 /** What audio captured during TTS playback turned out to be. */
-export type BargeInClass = "empty" | "echo" | "stop" | "command";
+export type BargeInClass = "empty" | "echo" | "stop" | "backchannel" | "command";
 
 /**
  * Full-duplex policy: classify audio the mic captured *while Cicero was speaking*.
@@ -114,12 +115,19 @@ export type BargeInClass = "empty" | "echo" | "stop" | "command";
  *
  * Order matters: a bare "stop" is checked before echo so the user can always halt
  * playback even if "stop" happens to overlap Cicero's words (it never trips the
- * echo guard anyway — a single word is below the echo floor).
+ * echo guard anyway — a single word is below the echo floor). A backchannel
+ * ("mm-hmm", "yeah") comes after stop for the same reason: the two word lists
+ * are disjoint, but stopping must win any future overlap.
  */
-export function classifyBargeIn(transcript: string | null | undefined, speaking: string): BargeInClass {
+export function classifyBargeIn(
+  transcript: string | null | undefined,
+  speaking: string,
+  ignoreBackchannels = true,
+): BargeInClass {
   const t = (transcript ?? "").trim();
   if (!t) return "empty";
   if (isStopCommand(t)) return "stop";
+  if (ignoreBackchannels && isBackchannel(t)) return "backchannel";
   if (speaking && isSelfEcho(t, speaking)) return "echo";
   return "command";
 }
@@ -177,6 +185,8 @@ export class ConversationalListener implements Listener {
   // Full-duplex: keep the mic open during TTS and yield to genuine user speech
   // (echo-rejected), instead of the half-duplex record→speak→record ping-pong.
   private fullDuplex = false;
+  // "mm-hmm" / "yeah" over a reply means "keep going", not "stop" (see backchannel.ts).
+  private ignoreBackchannels = true;
   // True while we're listening for a barge-in over Cicero's own reply. A clap in
   // this window interrupts; a clap while idle-listening deactivates (if enabled).
   private detectingBargeIn = false;
@@ -450,6 +460,11 @@ export class ConversationalListener implements Listener {
    * Provide a live snapshot of the text Cicero is currently speaking. Full-duplex
    * uses it to tell a real barge-in apart from the mic re-capturing our own TTS.
    */
+  /** Whether a backchannel transcript heard over a reply is ignored instead of interrupting it. */
+  setIgnoreBackchannels(enabled: boolean): void {
+    this.ignoreBackchannels = enabled;
+  }
+
   setSpeakingTextProvider(fn: () => string): void {
     this.speakingTextProvider = fn;
   }
@@ -1280,6 +1295,10 @@ export class ConversationalListener implements Listener {
         this.stopCallback?.();
         return;
       }
+      // No backchannel filter here: this detector already cut the reply on
+      // energy alone. Dispatching "mm-hmm" / "go on" carries the recovery
+      // snapshot to the brain, which is what lets it resume the reply;
+      // discarding it would leave silence.
       if (bargeTranscript && this.isCurrentActivation(epoch)) {
         // Full duplex is the noisy-room case: background speech captured over
         // Cicero's own reply has to face the same veto as anything else.
@@ -1354,11 +1373,14 @@ export class ConversationalListener implements Listener {
       if (!this.isCurrentActivation(epoch)) return;
       if (supersession?.aborted) continue;
 
-      const cls = classifyBargeIn(bargeTranscript, this.currentlySpeaking());
-      if (cls === "empty" || cls === "echo") {
-        // Silence/noise, or the mic re-captured our own TTS — keep speaking and
-        // re-arm detection rather than interrupting ourselves.
+      const cls = classifyBargeIn(bargeTranscript, this.currentlySpeaking(), this.ignoreBackchannels);
+      if (cls === "empty" || cls === "echo" || cls === "backchannel") {
+        // Silence/noise, the mic re-capturing our own TTS, or the user saying
+        // "mm-hmm" to show they're following — keep speaking and re-arm
+        // detection rather than interrupting. Checked before the intent judge
+        // so a backchannel never spends its budget.
         if (cls === "echo") log("info", `🔇 Ignored self-echo during playback: "${bargeTranscript}"`);
+        if (cls === "backchannel") log("info", `Backchannel during playback, kept talking: "${boundedForLog(bargeTranscript)}"`);
         continue;
       }
 

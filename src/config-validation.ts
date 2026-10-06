@@ -325,7 +325,7 @@ export function validateRuntimeConfig(config: unknown, source = "merged configur
     // Retired with the Wispr Flow listener (see docs/dictation.md). Still
     // accepted so an existing config keeps starting; both are ignored.
     ...RETIRED_TOP_LEVEL_KEYS,
-    "voice_ref_text", "barge_in_enabled", "full_duplex", "aec", "silence_duration",
+    "voice_ref_text", "barge_in_enabled", "backchannel_enabled", "full_duplex", "aec", "silence_duration",
     "silence_threshold", "phonetic_aliases", "brain", "servers", "actions", "deployment", "stt",
     "stt_fallback", "tts", "tts_fallback", "llm", "classifier", "compute", "sidecar", "dashboard", "web_voice",
     "notify", "headless", "turn", "tone", "clap", "vad", "earcons", "tts_coalesce", "intent_judge", "privacy",
