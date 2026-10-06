@@ -20,6 +20,7 @@ import type { LivePcmSession } from "../backends/stt/live-client";
 import { LiveSttError } from "../backends/stt/live-failure";
 import { isProbeFrame, decodeProbeFrame } from "./probe";
 import { snapshotSynthesizedWav } from "../platform/wav";
+import { isBackchannel } from "../listener/backchannel";
 import {
   RequestBodyAbortedError,
   RequestBodyTimeoutError,
@@ -167,6 +168,8 @@ export interface WebVoiceServerOptions {
   /** Transcribe tentative interruptions without acquiring/replacing a brain turn. */
   onBargeTranscribe?: (wav: ArrayBuffer, signal: AbortSignal) => Promise<string>;
   falseInterruptionMs?: number;
+  /** Treat a backchannel ("mm-hmm", "yeah") over a reply as a false interruption so it resumes (default true). */
+  ignoreBackchannels?: boolean;
   /** Resolve the current wrapped STT provider's live capability for each capture. */
   resolveSttStream?: () => ((options: { signal: AbortSignal; sampleRate: number; onPartial: (text: string, at: number) => void }) => LivePcmSession) | undefined;
   /** Stream a TYPED message's reply (same pipeline, no STT). Optional. */
@@ -2348,6 +2351,12 @@ export function startWebVoiceServer(opts: WebVoiceServerOptions): WebVoiceHandle
             }
             if (barges.get(ws) !== candidate || !sockets.has(ws) || !accepting) return;
             if (signal.aborted) text = "";
+            if (text && opts.ignoreBackchannels !== false && isBackchannel(text)) {
+              // "mm-hmm" over the reply means "keep going": reject it like an
+              // empty capture so the paused reply resumes where it stopped.
+              log("info", `web-voice backchannel during playback, resuming reply (${text.length} chars)`);
+              text = "";
+            }
             // withTurn, not withSession: the session envelope nulls turnId, and
             // a v2 client adopts this id as the turn it plays.
             sendJson(ws, withTurn(ws, turnId, { type: "barge_result", captureId: candidate.id, accepted: !!text, turnId }));

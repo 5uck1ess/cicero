@@ -1968,6 +1968,7 @@ export class CiceroDaemon {
         // than a beat of silence).
         latencyStore: new LatencyStore(),
         falseInterruptionMs: wv.false_interruption_ms,
+        ignoreBackchannels: this.config.backchannelEnabled,
         onBargeTranscribe: (wav, signal) => transcribeBarge(wav, this.providers.stt, signal),
         resolveSttStream: () => this.providers.stt.openStream,
         onStreamTurn: async (wav, sink, options) => {

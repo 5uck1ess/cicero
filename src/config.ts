@@ -889,6 +889,7 @@ export class RuntimeConfig {
   get voiceRefAudio(): string | undefined { return this.config.voice_ref_audio; }
   get voiceRefText(): string | undefined { return this.config.voice_ref_text; }
   get bargeInEnabled(): boolean { return this.config.barge_in_enabled ?? false; }
+  get backchannelEnabled(): boolean { return this.config.backchannel_enabled ?? true; }
   get fullDuplex(): boolean { return this.config.full_duplex ?? false; }
   get aec(): boolean { return this.config.aec ?? false; }
   get ttsSummaryMaxTokens(): number { return this.config.tts_summary_max_tokens ?? 100; }

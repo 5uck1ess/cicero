@@ -22,6 +22,7 @@ export interface CiceroConfig {
   voice_ref_audio?: string; // path to reference audio for voice cloning
   voice_ref_text?: string;  // transcript of the reference audio
   barge_in_enabled?: boolean; // enable barge-in (interrupt TTS by speaking)
+  backchannel_enabled?: boolean; // ignore "mm-hmm"/"yeah" heard over a reply instead of treating it as a barge-in (default true)
   full_duplex?: boolean; // continuous, interruptible conversation: mic stays open through TTS, yields to genuine (echo-rejected) speech (default false)
   aec?: boolean; // macOS hardware echo cancellation: route mic+TTS through the cicero-aec-mic helper so the mic doesn't hear Cicero's own voice (default false; needs `bun run build:aec`)
   silence_duration?: string;  // seconds of silence before end-of-speech (default "1.0")

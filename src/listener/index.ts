@@ -65,7 +65,7 @@ export function createConversationalListener(
   const turn = config.turn;
   const vad = config.vad;
   const clap = config.clap;
-  return new ConversationalListener(
+  const listener = new ConversationalListener(
     sttProvider,
     recorder,
     audioPlayer,
@@ -96,4 +96,6 @@ export function createConversationalListener(
       : undefined,
     micHub,
   );
+  listener.setIgnoreBackchannels(config.backchannelEnabled);
+  return listener;
 }

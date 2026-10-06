@@ -20,8 +20,9 @@ Details are in the [web voice guide](web-voice.md).
 
 Talk over Cicero at any time and it stops speaking and listens ("barge-in").
 A small local voice-activity model checks that it is actually speech first, so
-keyboard noise and music do not cut it off. Typing while it speaks interrupts
-it too. Within five minutes, "continue", "go on" or "as you were saying"
+keyboard noise and music do not cut it off. A quick "mm-hmm", "yeah" or
+"right" just tells it you're following, so it keeps talking. Typing while it
+speaks interrupts it too. Within five minutes, "continue", "go on" or "as you were saying"
 resumes the interrupted reply from what you actually heard.
 
 ## "Details" after a short reply
