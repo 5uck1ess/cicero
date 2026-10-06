@@ -280,18 +280,18 @@ test("with backchannels not ignored, 'mm-hmm' interrupts like any speech", async
   expect(received).toBe("Mm-hmm.");
 });
 
-test("legacy barge-in never sends a backchannel to the brain", async () => {
-  // The energy detector has already cut the reply; the transcript only decides
-  // whether anything is dispatched.
-  const l = makeListener("uh-huh", SPOKEN);
+test("legacy barge-in still dispatches a backchannel so the brain can resume", async () => {
+  // The energy detector has already cut the reply. Dropping "go on" here would
+  // also drop the recovery snapshot and leave silence; dispatching it lets the
+  // brain pick the reply back up.
+  const l = makeListener("go on", SPOKEN);
   let received: string | null = null;
   let discarded = 0;
   l.onCommand((t) => { received = t; });
   l.onBargeInDiscarded(() => { discarded++; });
 
-  const detectCalls = await runOneCapture(l, (cb) => l.runLegacyBargeInTurn(cb));
+  await runOneCapture(l, (cb) => l.runLegacyBargeInTurn(cb));
 
-  expect(received).toBeNull();
-  expect(discarded).toBe(1);
-  expect(detectCalls).toBeGreaterThanOrEqual(2);
+  expect(received).toBe("go on");
+  expect(discarded).toBe(0);
 });

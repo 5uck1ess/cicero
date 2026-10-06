@@ -1295,14 +1295,10 @@ export class ConversationalListener implements Listener {
         this.stopCallback?.();
         return;
       }
-      if (this.ignoreBackchannels && isBackchannel(bargeTranscript)) {
-        // This detector already cut the reply on energy alone, so a
-        // backchannel cannot keep it playing here. It can still stay out of
-        // the brain: "mm-hmm" is not a request.
-        log("info", `Backchannel "${boundedForLog(bargeTranscript)}" after an energy barge-in — not sent as a command`);
-        this.bargeInDiscardedCallback?.();
-        continue;
-      }
+      // No backchannel filter here: this detector already cut the reply on
+      // energy alone. Dispatching "mm-hmm" / "go on" carries the recovery
+      // snapshot to the brain, which is what lets it resume the reply;
+      // discarding it would leave silence.
       if (bargeTranscript && this.isCurrentActivation(epoch)) {
         // Full duplex is the noisy-room case: background speech captured over
         // Cicero's own reply has to face the same veto as anything else.
