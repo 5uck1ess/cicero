@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1000" height="500" viewBox="0 16 1000 500" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="cicero-turn-dark-title cicero-turn-dark-desc" id="cicero-turn-dark-root">
+      <title id="cicero-turn-dark-title">How a Cicero turn flows</title>
+      <desc id="cicero-turn-dark-desc">Your speech travels from the browser or a Telegram call through speech-to-text and the switchboard to the front desk, and the reply comes back sentence by sentence through text-to-speech, with optional escalation, a helper for long replies, and office lanes.</desc>
+      <defs>
+      <style>#cicero-turn-dark-root { --color-paper: #17181C;
+      --color-ink:   #F5F4F0;
+      --color-muted: #A8ABB3;
+      --color-accent:#CB9459;
+      --font-sans:  ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      --font-serif: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+      --font-mono:  ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; }
+      #cicero-turn-dark-root { font-family: var(--font-sans); color: var(--color-ink); }
+      #cicero-turn-dark-root .scroll { overflow-x: auto; }</style>
+        <pattern id="cicero-turn-dark-ciceroD-dots" width="22" height="22" patternUnits="userSpaceOnUse">
+          <circle cx="1" cy="1" r="0.9" fill="#f5f4f0" fill-opacity="0.10"/>
+        </pattern>
+        <marker id="cicero-turn-dark-ciceroD-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#A8ABB3"/></marker>
+        <marker id="cicero-turn-dark-ciceroD-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#CB9459"/></marker>
+      </defs>
+
+      <rect x="0" y="16" width="1000" height="500" fill="#17181C"/>
+      <rect x="0" y="16" width="1000" height="500" fill="url(#cicero-turn-dark-ciceroD-dots)" opacity="0.55"/>
+
+      <!-- ============ Arrows (drawn before nodes) ============ -->
+      <!-- inbound row -->
+      <line x1="104" y1="182" x2="160" y2="182" stroke="#A8ABB3" stroke-width="1.2" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+      <line x1="304" y1="182" x2="360" y2="182" stroke="#A8ABB3" stroke-width="1.2" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+      <line x1="496" y1="182" x2="552" y2="182" stroke="#A8ABB3" stroke-width="1.2" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+      <line x1="704" y1="182" x2="760" y2="182" stroke="#A8ABB3" stroke-width="1.2" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+
+      <!-- switchboard -> office lanes (optional) -->
+      <line x1="628" y1="150" x2="628" y2="96" stroke="#A8ABB3" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+      <!-- front desk <-> escalation (optional) -->
+      <line x1="820" y1="142" x2="820" y2="96" stroke="#A8ABB3" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+      <line x1="884" y1="96" x2="884" y2="142" stroke="#A8ABB3" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+
+      <!-- front desk -> helper (long reply) -->
+      <line x1="884" y1="222" x2="884" y2="300" stroke="#A8ABB3" stroke-width="1.2" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+      <!-- front desk -> speak (short reply) -->
+      <path d="M 820,222 V 252 Q 820,260 812,260 H 552 Q 544,260 544,268 V 300" fill="none" stroke="#A8ABB3" stroke-width="1.2" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+      <!-- helper -> speak -->
+      <line x1="760" y1="332" x2="640" y2="332" stroke="#A8ABB3" stroke-width="1.2" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+      <!-- speak -> browser (streamed audio, headline path) -->
+      <path d="M 448,332 H 240 Q 232,332 232,324 V 214" fill="none" stroke="#CB9459" stroke-width="1.6" marker-end="url(#cicero-turn-dark-ciceroD-arrow-accent)"/>
+
+      <!-- ============ Arrow labels ============ -->
+      <rect x="110" y="162" width="44" height="12" rx="2" fill="#17181C"/>
+      <text x="132" y="171" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">SPEECH</text>
+      <rect x="312" y="162" width="40" height="12" rx="2" fill="#17181C"/>
+      <text x="332" y="171" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">AUDIO</text>
+      <rect x="506" y="162" width="36" height="12" rx="2" fill="#17181C"/>
+      <text x="524" y="171" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">TEXT</text>
+      <rect x="712" y="162" width="40" height="12" rx="2" fill="#17181C"/>
+      <text x="732" y="171" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">TURN</text>
+
+      <rect x="636" y="117" width="64" height="12" rx="2" fill="#17181C"/>
+      <text x="668" y="126" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">TRANSFER</text>
+      <rect x="740" y="113" width="72" height="12" rx="2" fill="#17181C"/>
+      <text x="776" y="122" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">"THINK HARD"</text>
+      <rect x="892" y="113" width="48" height="12" rx="2" fill="#17181C"/>
+      <text x="916" y="122" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">ANSWER</text>
+
+      <rect x="892" y="255" width="72" height="12" rx="2" fill="#17181C"/>
+      <text x="928" y="264" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">LONG REPLY</text>
+      <rect x="644" y="240" width="80" height="12" rx="2" fill="#17181C"/>
+      <text x="684" y="249" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">SHORT REPLY</text>
+      <rect x="664" y="312" width="72" height="12" rx="2" fill="#17181C"/>
+      <text x="700" y="321" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">SHORTENED</text>
+      <rect x="276" y="312" width="132" height="12" rx="2" fill="#17181C"/>
+      <text x="342" y="321" fill="#CB9459" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">SENTENCE BY SENTENCE</text>
+
+      <!-- ============ Nodes ============ -->
+      <!-- You -->
+      <rect x="24" y="150" width="80" height="64" rx="6" fill="#17181C"/>
+      <rect x="24" y="150" width="80" height="64" rx="6" fill="#a8abb3" fill-opacity="0.12" stroke="#A8ABB3" stroke-width="1"/>
+      <text x="64" y="186" fill="#F5F4F0" font-size="12" font-weight="600" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">You</text>
+
+      <!-- Browser / Telegram -->
+      <rect x="160" y="150" width="144" height="64" rx="6" fill="#17181C"/>
+      <rect x="160" y="150" width="144" height="64" rx="6" fill="#202127" stroke="#F5F4F0" stroke-width="1"/>
+      <rect x="168" y="158" width="52" height="12" rx="2" fill="none" stroke="#f5f4f0" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="194" y="167" fill="#F5F4F0" font-size="7" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">CHANNEL</text>
+      <text x="232" y="190" fill="#F5F4F0" font-size="12" font-weight="600" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Browser / PWA</text>
+      <text x="232" y="205" fill="#A8ABB3" font-size="9" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">or Telegram call</text>
+
+      <!-- Hear -->
+      <rect x="360" y="150" width="136" height="64" rx="6" fill="#17181C"/>
+      <rect x="360" y="150" width="136" height="64" rx="6" fill="#202127" stroke="#F5F4F0" stroke-width="1"/>
+      <rect x="368" y="158" width="28" height="12" rx="2" fill="none" stroke="#f5f4f0" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="382" y="167" fill="#F5F4F0" font-size="7" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">STT</text>
+      <text x="428" y="190" fill="#F5F4F0" font-size="12" font-weight="600" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Hear</text>
+      <text x="428" y="205" fill="#A8ABB3" font-size="9" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">your STT engine</text>
+
+      <!-- Switchboard -->
+      <rect x="552" y="150" width="152" height="64" rx="6" fill="#17181C"/>
+      <rect x="552" y="150" width="152" height="64" rx="6" fill="#202127" stroke="#F5F4F0" stroke-width="1"/>
+      <rect x="560" y="158" width="40" height="12" rx="2" fill="none" stroke="#f5f4f0" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="580" y="167" fill="#F5F4F0" font-size="7" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">ROUTE</text>
+      <text x="628" y="190" fill="#F5F4F0" font-size="12" font-weight="600" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Switchboard</text>
+      <text x="628" y="205" fill="#A8ABB3" font-size="9" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">transfers · quick intents</text>
+
+      <!-- Front desk (focal) -->
+      <rect x="760" y="142" width="184" height="80" rx="6" fill="#17181C"/>
+      <rect x="760" y="142" width="184" height="80" rx="6" fill="#cb9459" fill-opacity="0.10" stroke="#CB9459" stroke-width="1.2"/>
+      <rect x="768" y="150" width="40" height="12" rx="2" fill="none" stroke="#cb9459" stroke-opacity="0.60" stroke-width="0.8"/>
+      <text x="788" y="159" fill="#CB9459" font-size="7" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">BRAIN</text>
+      <text x="852" y="188" fill="#F5F4F0" font-size="13" font-weight="600" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Front desk</text>
+      <text x="852" y="205" fill="#A8ABB3" font-size="9" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">a model or an agent</text>
+
+      <!-- Office lanes (optional) -->
+      <rect x="552" y="40" width="152" height="56" rx="6" fill="#17181C"/>
+      <rect x="552" y="40" width="152" height="56" rx="6" fill="none" stroke="#A8ABB3" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="628" y="64" fill="#F5F4F0" font-size="12" font-weight="600" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Office lanes</text>
+      <text x="628" y="80" fill="#A8ABB3" font-size="9" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">opt-in · not in wizard yet</text>
+
+      <!-- Escalation agent (optional) -->
+      <rect x="760" y="40" width="184" height="56" rx="6" fill="#17181C"/>
+      <rect x="760" y="40" width="184" height="56" rx="6" fill="none" stroke="#A8ABB3" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="852" y="64" fill="#F5F4F0" font-size="12" font-weight="600" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Escalation agent</text>
+      <text x="852" y="80" fill="#A8ABB3" font-size="9" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">optional · any ACP agent</text>
+
+      <!-- Helper -->
+      <rect x="760" y="300" width="184" height="64" rx="6" fill="#17181C"/>
+      <rect x="760" y="300" width="184" height="64" rx="6" fill="#202127" stroke="#F5F4F0" stroke-width="1"/>
+      <rect x="768" y="308" width="44" height="12" rx="2" fill="none" stroke="#f5f4f0" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="790" y="317" fill="#F5F4F0" font-size="7" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">HELPER</text>
+      <text x="852" y="340" fill="#F5F4F0" font-size="12" font-weight="600" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Shortens it</text>
+      <text x="852" y="355" fill="#A8ABB3" font-size="9" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">say "details" for the rest</text>
+
+      <!-- Speak -->
+      <rect x="448" y="300" width="192" height="64" rx="6" fill="#17181C"/>
+      <rect x="448" y="300" width="192" height="64" rx="6" fill="#202127" stroke="#F5F4F0" stroke-width="1"/>
+      <rect x="456" y="308" width="28" height="12" rx="2" fill="none" stroke="#f5f4f0" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="470" y="317" fill="#F5F4F0" font-size="7" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">TTS</text>
+      <text x="544" y="340" fill="#F5F4F0" font-size="12" font-weight="600" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Speak</text>
+      <text x="544" y="355" fill="#A8ABB3" font-size="9" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">your TTS engine · sanitized</text>
+
+      <!-- Callouts -->
+      <text x="24" y="412" fill="#A8ABB3" font-size="13" font-style="italic" font-family="Georgia, 'Iowan Old Style', 'Palatino Linotype', serif">Speech starts while the front desk is still generating.</text>
+      <text x="24" y="430" fill="#A8ABB3" font-size="13" font-style="italic" font-family="Georgia, 'Iowan Old Style', 'Palatino Linotype', serif">Heavy work runs outside the voice loop, and Cicero tells you when it lands.</text>
+
+      <!-- Legend -->
+      <line x1="24" y1="456" x2="976" y2="456" stroke="#f5f4f0" stroke-opacity="0.10" stroke-width="0.8"/>
+      <text x="24" y="472" fill="#A8ABB3" font-size="8" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" letter-spacing="0.18em">LEGEND</text>
+      <rect x="24" y="488" width="14" height="10" rx="2" fill="#cb9459" fill-opacity="0.10" stroke="#CB9459" stroke-width="1"/>
+      <text x="44" y="496" fill="#A8ABB3" font-size="8.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Your brain (pluggable)</text>
+      <rect x="184" y="488" width="14" height="10" rx="2" fill="#202127" stroke="#F5F4F0" stroke-width="1"/>
+      <text x="204" y="496" fill="#A8ABB3" font-size="8.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Voice-loop stage</text>
+      <rect x="324" y="488" width="14" height="10" rx="2" fill="none" stroke="#A8ABB3" stroke-width="1" stroke-dasharray="3,2"/>
+      <text x="344" y="496" fill="#A8ABB3" font-size="8.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Optional</text>
+      <line x1="432" y1="494" x2="460" y2="494" stroke="#CB9459" stroke-width="1.6" marker-end="url(#cicero-turn-dark-ciceroD-arrow-accent)"/>
+      <text x="468" y="496" fill="#A8ABB3" font-size="8.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Streamed reply audio</text>
+      <line x1="600" y1="494" x2="628" y2="494" stroke="#A8ABB3" stroke-width="1.2" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+      <text x="636" y="496" fill="#A8ABB3" font-size="8.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Turn flow</text>
+      <line x1="720" y1="494" x2="748" y2="494" stroke="#A8ABB3" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#cicero-turn-dark-ciceroD-arrow)"/>
+      <text x="756" y="496" fill="#A8ABB3" font-size="8.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Optional path</text>
+    </svg>
