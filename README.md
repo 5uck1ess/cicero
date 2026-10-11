@@ -52,7 +52,7 @@ conversational — ask, answer, run, interrupt.
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/turn-flow-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="assets/turn-flow-light.svg">
-  <img alt="How a turn flows: you speak into the browser or a Telegram call; Hear (your STT engine) turns it into text; the switchboard handles quick intents and transfers to optional office lanes, and passes everything else to the front desk (a model or an agent), which can hand a hard turn to an optional escalation agent. Short replies go straight to Speak (your TTS engine); long ones go through a helper that shortens them. Audio streams back to the browser sentence by sentence." src="assets/turn-flow-light.svg" width="100%">
+  <img alt="How a turn flows: you speak into the browser or a Telegram call; Hear (your STT engine) turns it into text; the switchboard handles quick intents and transfers to optional office lanes (configured by hand; not in the setup wizard yet), and passes everything else to the front desk (a model or an agent), which can hand a hard turn to an optional escalation agent. Short replies go straight to Speak (your TTS engine); long ones go through a helper that shortens them. Audio streams back to the browser sentence by sentence." src="assets/turn-flow-light.svg" width="100%">
 </picture>
 
 <details>
@@ -71,7 +71,7 @@ flowchart LR
     R -->|no| S
     HL --> S["Speak<br/>your TTS engine · sanitized text"]
     S -->|"audio, sentence by sentence"| B
-    Q -.-> L["office lanes<br/>opt-in"]
+    Q -.-> L["office lanes<br/>opt-in · wizard support planned"]
 ```
 
 </details>

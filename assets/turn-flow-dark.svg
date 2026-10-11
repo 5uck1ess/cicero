@@ -112,7 +112,7 @@
       <rect x="552" y="40" width="152" height="56" rx="6" fill="#17181C"/>
       <rect x="552" y="40" width="152" height="56" rx="6" fill="none" stroke="#A8ABB3" stroke-width="1" stroke-dasharray="4,3"/>
       <text x="628" y="64" fill="#F5F4F0" font-size="12" font-weight="600" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Office lanes</text>
-      <text x="628" y="80" fill="#A8ABB3" font-size="9" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">opt-in · own voices</text>
+      <text x="628" y="80" fill="#A8ABB3" font-size="9" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">opt-in · not in wizard yet</text>
 
       <!-- Escalation agent (optional) -->
       <rect x="760" y="40" width="184" height="56" rx="6" fill="#17181C"/>
