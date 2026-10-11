@@ -49,20 +49,11 @@ conversational — ask, answer, run, interrupt.
 
 ## How a turn flows
 
-```mermaid
-flowchart LR
-    Y((you)) -->|speech| B["browser / PWA<br/>or Telegram call"]
-    B -->|audio| H["Hear<br/>your STT engine"]
-    H -->|text| F["Front desk<br/>a model or an agent"]
-    F -.->|"'think hard …'"| E["optional escalation agent<br/>any ACP agent"]
-    E -.-> R
-    F --> R{"long reply?"}
-    R -->|yes| HL["Helper<br/>shortens it · say 'details' for the rest"]
-    R -->|no| S
-    HL --> S["Speak<br/>your TTS engine"]
-    S -->|audio| B
-    F -.-> L["office lanes<br/>opt-in · wizard support planned"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/turn-flow-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/turn-flow-light.svg">
+  <img alt="How a turn flows: you speak into the browser or a Telegram call; Hear (your STT engine) turns it into text; the switchboard handles quick intents and transfers to optional office lanes, and passes everything else to the front desk (a model or an agent), which can hand a hard turn to an optional escalation agent. Short replies go straight to Speak (your TTS engine); long ones go through a helper that shortens them. Audio streams back to the browser sentence by sentence." src="assets/turn-flow-light.svg" width="100%">
+</picture>
 
 Replies stream sentence by sentence, so speech starts while the front desk is still generating. Heavy work runs outside the voice loop, and Cicero tells you when it lands. Details are in [architecture](docs/architecture.md).
 
