@@ -1,5 +1,9 @@
 import { test, expect, afterEach } from "bun:test";
-import { PocketTtsProvider, pocketTtsServerCommand } from "../../../src/backends/tts/pocket";
+import {
+  POCKET_STARTUP_TIMEOUT_MS,
+  PocketTtsProvider,
+  pocketTtsServerCommand,
+} from "../../../src/backends/tts/pocket";
 
 const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -102,4 +106,10 @@ test("managed server allows only the configured direct reference outside the lib
     "--inference-timeout", "55",
     "--allow-voice-reference", "/clips/owner.wav",
   ]);
+});
+
+test("managed startup leaves room for a first-start weight download", () => {
+  // ~210 MB of default weights on a ~10 Mbit/s link, still a bounded deadline.
+  expect(POCKET_STARTUP_TIMEOUT_MS).toBeGreaterThanOrEqual(180_000);
+  expect(POCKET_STARTUP_TIMEOUT_MS).toBeLessThanOrEqual(600_000);
 });

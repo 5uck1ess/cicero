@@ -15,6 +15,11 @@ import {
   sidecarInferenceTimeoutSeconds,
 } from "../http-transfer";
 
+// The first start after an install or a pocket-tts default-model change
+// downloads ~210 MB of weights before the server answers; 180s covers that on
+// a ~10 Mbit/s link. A wedged start is still bounded by this deadline.
+export const POCKET_STARTUP_TIMEOUT_MS = 180_000;
+
 export function pocketTtsServerCommand(
   python: string,
   server: string,
@@ -161,7 +166,7 @@ export class PocketTtsProvider implements TTSProvider {
         sidecarInferenceTimeoutSeconds(this.timeoutMs),
       ),
       healthUrl: `${httpBase(this.host, this.port)}/v1/models`,
-      timeoutMs: 60000,
+      timeoutMs: POCKET_STARTUP_TIMEOUT_MS,
       supervise: true,
     });
   }
