@@ -62,10 +62,14 @@ const platform = requestedPlatform ?? (
 const uvPlatforms: Record<string, string | undefined> = {
   linux: "x86_64-unknown-linux-gnu",
   windows: "x86_64-pc-windows-msvc",
-  // Run natively on the macOS 14 arm64 CI runner: uv's generic Darwin target
-  // intentionally assumes macOS 13 and cannot see current macOS 14+ MLX wheels.
-  macos: undefined,
+  // uv's Darwin target assumes macOS 13 unless MACOSX_DEPLOYMENT_TARGET is
+  // set; pin it to the documented macOS 14 floor so MLX wheels resolve the
+  // same way on any host or runner image.
+  macos: "aarch64-apple-darwin",
 };
+const uvEnv = platform === "macos"
+  ? { ...process.env, MACOSX_DEPLOYMENT_TARGET: "14.0" }
+  : process.env;
 
 if (!(platform in uvPlatforms)) {
   throw new Error(`unsupported --platform '${platform}'; expected linux, windows, or macos`);
@@ -95,7 +99,7 @@ async function resolveManifest(check: ManifestCheck): Promise<string> {
   ];
 
   try {
-    const proc = Bun.spawn(command, { cwd: projectRoot, stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(command, { cwd: projectRoot, env: uvEnv, stdout: "pipe", stderr: "pipe" });
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
