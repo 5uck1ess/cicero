@@ -19,9 +19,9 @@ jobs:
             python_platform: linux
           - os: windows-latest
             python_platform: windows
-          # Current MLX wheels start at macOS 14; this native arm64 runner
-          # verifies the documented floor instead of cross-resolving as macOS 13.
-          - os: macos-14
+          # Native arm64 runner for venv discovery. The manifest check pins
+          # uv to the documented macOS 14 floor, so the runner image can move.
+          - os: macos-15
             python_platform: macos
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -30,7 +30,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.5
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version: 0.11.28
           enable-cache: true
