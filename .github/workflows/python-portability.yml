@@ -19,9 +19,9 @@ jobs:
             python_platform: linux
           - os: windows-latest
             python_platform: windows
-          # Current MLX wheels start at macOS 14; this native arm64 runner
-          # verifies the documented floor instead of cross-resolving as macOS 13.
-          - os: macos-14
+          # Native arm64 runner for venv discovery. The manifest check pins
+          # uv to the documented macOS 14 floor, so the runner image can move.
+          - os: macos-15
             python_platform: macos
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
